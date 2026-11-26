@@ -608,13 +608,6 @@ class GfsChannelService:
         ):
             return "none"
         log.info("gfs.channel: started channel %s for space %s", channel_id, space_id)
-        # The old channel's notices still waiting (a 429'd one waits out the
-        # step bound) are obsolete: the fresh channel's first notice — no
-        # step bound — must not queue behind them, or the fresh channel
-        # stays unannounced (lost with the in-memory queue on a restart) and
-        # its first notice comes from a later rotation, closing every pass
-        # of the epoch the grants carry.
-        self._retry.drop(space_id, _KIND_NOTICE)
         return "created"
 
     async def _register_all(
@@ -1323,7 +1316,11 @@ class GfsChannelService:
                 if space.owner_instance_id == self._own_instance_id:
                     result = await self.reconcile(space.id)
                     if result in ("created", "kept"):
-                        await self.announce_epoch(space.id, only=gfs_id)
+                        # A fresh channel is new on EVERY server it was
+                        # registered on, not only this one.
+                        await self.announce_epoch(
+                            space.id, only=None if result == "created" else gfs_id
+                        )
                         done += 1
                     if result == "created":
                         await self.distribute(space.id)
@@ -1358,8 +1355,11 @@ class GfsChannelService:
             ):
                 continue
             try:
-                if await self.reconcile(space.id) in ("created", "kept"):
-                    await self.announce_epoch(space.id, only=gfs_id)
+                result = await self.reconcile(space.id)
+                if result in ("created", "kept"):
+                    await self.announce_epoch(
+                        space.id, only=None if result == "created" else gfs_id
+                    )
                     await self.distribute(space.id)
             except Exception:
                 log.exception("gfs.channel: re-issue after a rebind failed")
@@ -1441,20 +1441,36 @@ class GfsChannelService:
         space = await self._spaces.get(space_id)
         if space is None or space.space_type not in CHANNEL_TIERS:
             return 0
-        if await self._channel_seed(space) is None:
+        found = await self._channel_seed(space)
+        if found is None:
             return 0
-        epoch = await self._crypto.get_current_epoch(space_id)
-        if epoch is None:
+        if await self._crypto.get_current_epoch(space_id) is None:
             return 0
+        # A notice is STATE, not an event: it names only its channel, and
+        # whenever it is sent it announces that channel's CURRENT epoch. So
+        # it never queues behind an older notice (that one announces the
+        # same state, or names a channel since replaced: nothing to send),
+        # and at most one waits per server and space (dedupe).
         item = GfsPublish(
-            space_id=space_id, event_type=_KIND_NOTICE, payload={"epoch": epoch}
+            space_id=space_id,
+            event_type=_KIND_NOTICE,
+            payload={"channel_id": found[0]},
         )
         done = 0
         for conn in await self._notice_targets(space):
             if only is not None and conn.id != only:
                 continue
-            if await self._first_attempt(conn, item):
+            outcome = await self._send(conn, item)
+            if outcome.kind == "delivered":
                 done += 1
+            elif outcome.kind == "transient" and not self._retry.enqueue(
+                conn.id, item, retry_after_s=outcome.retry_after_s
+            ):
+                log.warning(
+                    "gfs.channel: epoch notice to GFS %s is lost — the retry "
+                    "queue refused it",
+                    conn.id,
+                )
         return done
 
     async def _post_notice(
@@ -1468,9 +1484,18 @@ class GfsChannelService:
         if seed is None or found is None:
             return PublishOutcome.permanent()
         channel_id, channel_seed = found
-        # The wire epoch: content epoch + the channel's secret offset.
+        if data.get("channel_id") != channel_id:
+            # Its channel was replaced (a fresh one after a rotation or a
+            # heal): nothing left to send — the fresh channel is announced
+            # on its own.
+            return PublishOutcome.delivered()
+        content_epoch = await self._crypto.get_current_epoch(space_id)
+        if content_epoch is None:
+            return PublishOutcome.permanent()
+        # The wire epoch: the CURRENT content epoch + the channel's secret
+        # offset (a notice is state, announced as it is when sent).
         offset = derive_channel_epoch_offset(seed, space_id, channel_id)
-        epoch = int(data["epoch"]) + offset
+        epoch = int(content_epoch) + offset
         # The channel writer key is pinned on every notice: members publish
         # with it (anonymously — the one publish mode).
         wkc = issue_channel_writer_key(

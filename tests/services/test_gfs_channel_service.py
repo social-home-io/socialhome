@@ -1709,7 +1709,9 @@ async def test_the_owners_notice_stays_on_its_registered_servers(env):
 async def test_a_delegated_admins_notice_retry_to_an_unconnected_server(env):
     unconnected = await _delegated_admin(env)
     item = chan_mod.GfsPublish(
-        space_id=SPACE_ID, event_type=chan_mod._KIND_NOTICE, payload={"epoch": 3}
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_NOTICE,
+        payload={"channel_id": env.other.spaces.channels[SPACE_ID][0]},
     )
     svc, gfs = env.other.svc, env.other.gfs
     assert (await svc._retry_send(unconnected.id, item)).kind == "delivered"
@@ -1732,7 +1734,11 @@ async def test_a_refused_notice_address_is_classified(env):
         yield  # pragma: no cover
 
     env.other.gfs.anon_session = refused  # type: ignore[method-assign]
-    outcome = await env.other.svc._post_notice(unconnected, SPACE_ID, {"epoch": 3})
+    outcome = await env.other.svc._post_notice(
+        unconnected,
+        SPACE_ID,
+        {"channel_id": env.other.spaces.channels[SPACE_ID][0]},
+    )
     assert outcome.kind == "transient"
 
 
@@ -2589,23 +2595,49 @@ async def test_a_fresh_channel_is_announced_at_once_not_behind_the_old_ones_noti
 ):
     """The owner's notice for the OLD channel waits in the retry queue (the
     GFS answered 429: one epoch a minute); then the authority rotates and a
-    fresh channel starts. That stale notice must not hold back the fresh
-    channel's FIRST notice (no step bound): queued behind it, the fresh
-    channel stays unannounced for a minute — forever if the owner goes
-    away (the queue is in memory) — and the first notice then comes from a
-    later rotation, closing every pass of the epoch the grants carry."""
+    fresh channel starts. Its FIRST notice (no step bound) must land at
+    once — never queued behind the stale one: then the fresh channel stays
+    unannounced for a minute (forever if the owner goes away: the queue is
+    in memory) and its first notice comes from a later rotation, closing
+    every pass of the epoch the grants carry. The stale notice, replayed,
+    has nothing left to send (its channel was replaced)."""
     old = await _channel_ready(env)
     svc = env.owner.svc
     conn = (await svc._capable())[0]
     stale = chan_mod.GfsPublish(
-        space_id=SPACE_ID, event_type=chan_mod._KIND_NOTICE, payload={"epoch": 2}
+        space_id=SPACE_ID, event_type=chan_mod._KIND_NOTICE, payload={"channel_id": old}
     )
     assert svc._retry.enqueue(conn.id, stale, retry_after_s=60.0)
     assert await svc.reconcile(SPACE_ID, fresh=True) == "created"
     fresh = env.owner.spaces.channels[SPACE_ID][0]
     assert fresh != old
-    # The stale notice is gone; the fresh channel's first notice lands now.
-    assert not svc._retry.pending(conn.id, SPACE_ID)
     assert await svc.announce_epoch(SPACE_ID) == 1
     row = await env.app[gfs_channel_repo_key].get(fresh)
     assert row is not None and row.epoch == _wire(env, fresh)
+    # The stale notice's replay sends nothing and is done.
+    env.owner.gfs.sent = []
+    assert (await svc._retry_send(conn.id, stale)).kind == "delivered"
+    assert env.owner.gfs.sent == []
+
+
+async def test_a_waiting_notice_announces_the_current_epoch_when_sent(env, monkeypatch):
+    """A notice is state: queued at epoch N and sent after a rotation to
+    N + 1, it announces N + 1 — never an epoch the GFS has moved past."""
+    channel_id = await _channel_ready(env)
+    svc = env.owner.svc
+    conn = (await svc._capable())[0]
+    item = chan_mod.GfsPublish(
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_NOTICE,
+        payload={"channel_id": channel_id},
+    )
+    posted: list[int] = []
+
+    async def capture(self, client, url, body, conn):
+        posted.append(body["epoch"])
+        return chan_mod.PublishOutcome.delivered(), None
+
+    monkeypatch.setattr(GfsChannelService, "_post_reading", capture)
+    env.owner.keys.epoch = 4
+    assert (await svc._retry_send(conn.id, item)).kind == "delivered"
+    assert posted == [_wire(env, channel_id, epoch=4)]

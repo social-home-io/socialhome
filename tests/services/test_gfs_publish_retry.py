@@ -400,23 +400,3 @@ async def test_a_solo_kind_gives_up_alone_and_what_waited_behind_it_goes_on(
     assert sent.count("channel_subscribe") == budget
     assert sent[-1] == "space_post_public"  # it went on
     assert "giving up on channel_subscribe@sp-1" in caplog.text
-
-
-async def test_drop_removes_the_waiting_items_of_a_kind_but_never_one_being_sent():
-    queue = GfsPublishRetryQueue(_ScriptedSend([]))
-    notice = GfsPublish(space_id="sp-1", event_type="notice", payload={"epoch": 2})
-    queue.enqueue("g1", notice)
-    queue.enqueue("g1", _item(1))
-    queue.enqueue("g2", GfsPublish(space_id="sp-1", event_type="notice", payload={}))
-    queue.enqueue("g2", _item(2, space_id="sp-2"))
-    assert queue.drop("sp-1", "notice") == 2
-    assert [i.event_type for i in queue._queues[("g1", "sp-1")].items] == [
-        "space_post_public"
-    ]
-    assert not queue.pending("g2", "sp-1")
-    assert queue.pending("g2", "sp-2")
-    # A head being sent right now stays.
-    queue.enqueue("g3", notice)
-    queue._inflight.add(("g3", "sp-1"))
-    assert queue.drop("sp-1", "notice") == 0
-    assert queue.pending("g3", "sp-1")

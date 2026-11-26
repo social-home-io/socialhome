@@ -159,7 +159,6 @@ class GfsPublishRetryQueue:
     __slots__ = (
         "_conn_full_logged",
         "_full_logged",
-        "_inflight",
         "_queues",
         "_send",
         "_solo",
@@ -176,39 +175,12 @@ class GfsPublishRetryQueue:
         request that never lands must not take content down with it)."""
         self._send = send
         self._solo = solo_kinds
-        #: Keys whose head item is being sent right now (never dropped).
-        self._inflight: set[tuple[str, str]] = set()
         self._queues: dict[tuple[str, str], _ConnQueue] = {}
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._full_logged = False
         self._conn_full_logged: set[str] = set()
-
-    def drop(self, space_id: str, event_type: str) -> int:
-        """Drop every WAITING item of *event_type* for *space_id*, on every
-        connection — what a newer state made obsolete (a fresh channel's
-        notice replaces the old channel's). An item being sent right now
-        stays. Returns how many were dropped."""
-        dropped = 0
-        for key in [k for k in self._queues if k[1] == space_id]:
-            conn = self._queues[key]
-            keep_head = key in self._inflight and bool(conn.items)
-            head = [conn.items[0]] if keep_head else []
-            rest = list(conn.items)[1:] if keep_head else list(conn.items)
-            kept = [i for i in rest if i.event_type != event_type]
-            dropped += len(rest) - len(kept)
-            old_head = conn.items[0] if conn.items else None
-            conn.items = deque(head + kept)
-            if conn.items and conn.items[0] is not old_head:
-                # A new head: its own attempts, from now.
-                conn.retries_done = 0
-                conn.due_at = time.monotonic()
-            if not conn.items:
-                del self._queues[key]
-        if dropped:
-            self._wake.set()
-        return dropped
 
     def pending(self, conn_id: str, space_id: str) -> bool:
         """Whether ``conn_id`` has publishes of ``space_id`` waiting (new
@@ -347,7 +319,6 @@ class GfsPublishRetryQueue:
         conn_id = key[0]
         while conn.items and not self._stop.is_set():
             item = conn.items[0]
-            self._inflight.add(key)
             try:
                 outcome = await self._send(conn_id, item)
             except Exception:
@@ -357,8 +328,6 @@ class GfsPublishRetryQueue:
                     exc_info=True,
                 )
                 outcome = PublishOutcome.transient()
-            finally:
-                self._inflight.discard(key)
             if outcome.kind == "delivered":
                 conn.items.popleft()
                 conn.retries_done = 0
