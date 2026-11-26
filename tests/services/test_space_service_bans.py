@@ -309,3 +309,85 @@ async def test_a_ban_reason_is_capped(stack):
     )
     [row] = await stack.spaces.list_household_bans(space.id)
     assert len(row["reason"]) == 500
+
+
+# ── Only the owner lifts the owner's ban (P7b review finding 5) ──────────
+
+
+async def _with_admin(stack, space):
+    adm = await stack.provision("adm")
+    await stack.svc.add_member(
+        space.id, actor_username="owner", user_id=adm.user_id, role="admin"
+    )
+    return adm
+
+
+async def test_an_admin_cannot_lift_the_owners_ban(stack):
+    space = await _hosted(stack)
+    await _with_admin(stack, space)
+    await stack.svc.ban_household(space.id, actor_username="owner", instance_id="h-1")
+    await stack.svc.ban(space.id, actor_username="owner", user_id="u-far")
+    with pytest.raises(SpacePermissionError):
+        await stack.svc.unban_household(
+            space.id, actor_username="adm", instance_id="h-1"
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.svc.unban(space.id, actor_username="adm", user_id="u-far")
+    assert await stack.spaces.is_household_banned(space.id, "h-1")
+    assert await stack.spaces.is_banned(space.id, "u-far")
+    # The owner can.
+    await stack.svc.unban_household(space.id, actor_username="owner", instance_id="h-1")
+    await stack.svc.unban(space.id, actor_username="owner", user_id="u-far")
+    assert not await stack.spaces.is_household_banned(space.id, "h-1")
+    assert not await stack.spaces.is_banned(space.id, "u-far")
+
+
+async def test_an_admins_ban_is_lifted_by_any_admin_or_the_owner(stack):
+    space = await _hosted(stack)
+    adm = await _with_admin(stack, space)
+    await stack.svc.ban_household(space.id, actor_username="adm", instance_id="h-2")
+    [row] = await stack.spaces.list_household_bans(space.id)
+    assert row["banned_by"] == adm.user_id
+    await stack.svc.unban_household(space.id, actor_username="owner", instance_id="h-2")
+    await stack.svc.ban_household(space.id, actor_username="adm", instance_id="h-2")
+    await stack.svc.unban_household(space.id, actor_username="adm", instance_id="h-2")
+    assert not await stack.spaces.is_household_banned(space.id, "h-2")
+
+
+async def test_a_forwarded_unban_is_judged_for_the_forwarding_admin(stack):
+    """The host runs a forwarded action AS the owner — the owner's-ban rule
+    still judges the admin who forwarded it; a forwarded ban records them."""
+    space = await _hosted(stack)
+    await stack.svc.ban_household(space.id, actor_username="owner", instance_id="h-3")
+    with pytest.raises(SpacePermissionError):
+        await stack.svc._run_admin_action(
+            space,
+            "owner",
+            "unban",
+            {"instance_id": "h-3"},
+            actor_instance_id="peer-admin",
+            actor_user_id="u-remote-admin",
+        )
+    assert await stack.spaces.is_household_banned(space.id, "h-3")
+    await stack.svc._run_admin_action(
+        space,
+        "owner",
+        "ban",
+        {"instance_id": "h-4"},
+        actor_instance_id="peer-admin",
+        actor_user_id="u-remote-admin",
+    )
+    banners = {
+        r["instance_id"]: r["banned_by"]
+        for r in await stack.spaces.list_household_bans(space.id)
+    }
+    assert banners["h-4"] == "u-remote-admin"
+    # An owner-approved forwarded unban is the owner's own decision.
+    await stack.svc.apply_approved_admin_action(
+        space.id,
+        action="unban",
+        params={"instance_id": "h-3"},
+        actor_instance_id="peer-admin",
+        actor_user_id="u-remote-admin",
+    )
+    assert not await stack.spaces.is_household_banned(space.id, "h-3")

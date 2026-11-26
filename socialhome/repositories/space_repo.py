@@ -273,9 +273,21 @@ class AbstractSpaceRepo(Protocol):
     async def is_banned(self, space_id: str, user_id: str) -> bool: ...
     async def list_bans(self, space_id: str) -> list[dict]: ...
     async def ban_household(
-        self, space_id: str, instance_id: str, *, reason: str | None = None
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        reason: str | None = None,
+        banned_by: str | None = None,
     ) -> None: ...
     async def unban_household(self, space_id: str, instance_id: str) -> None: ...
+    async def ban_banned_by(
+        self,
+        space_id: str,
+        *,
+        user_id: str | None = None,
+        instance_id: str | None = None,
+    ) -> str | None: ...
     async def is_household_banned(self, space_id: str, instance_id: str) -> bool: ...
     async def list_household_bans(self, space_id: str) -> list[dict]: ...
 
@@ -2065,17 +2077,48 @@ class SqliteSpaceRepo:
     # same table (``federation_repo``); seat removal is the service's job.
 
     async def ban_household(
-        self, space_id: str, instance_id: str, *, reason: str | None = None
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        reason: str | None = None,
+        banned_by: str | None = None,
     ) -> None:
         await self._db.enqueue(
             """
-            INSERT INTO space_instance_bans(space_id, instance_id, reason)
-            VALUES(?, ?, ?)
+            INSERT INTO space_instance_bans(space_id, instance_id, reason, banned_by)
+            VALUES(?, ?, ?, ?)
             ON CONFLICT(space_id, instance_id) DO UPDATE SET
-                reason=excluded.reason
+                reason=excluded.reason,
+                banned_by=excluded.banned_by
             """,
-            (space_id, instance_id, reason),
+            (space_id, instance_id, reason, banned_by),
         )
+
+    async def ban_banned_by(
+        self,
+        space_id: str,
+        *,
+        user_id: str | None = None,
+        instance_id: str | None = None,
+    ) -> str | None:
+        """Who banned the person ``user_id`` or the household
+        ``instance_id`` (P7b: only the owner lifts the owner's ban);
+        ``None`` for no ban or an unknown banner."""
+        if user_id:
+            row = await self._db.fetchone(
+                "SELECT banned_by FROM space_bans WHERE space_id=? AND user_id=?",
+                (space_id, user_id),
+            )
+        elif instance_id:
+            row = await self._db.fetchone(
+                "SELECT banned_by FROM space_instance_bans"
+                " WHERE space_id=? AND instance_id=?",
+                (space_id, instance_id),
+            )
+        else:
+            return None
+        return str(row[0]) if row is not None and row[0] else None
 
     async def unban_household(self, space_id: str, instance_id: str) -> None:
         await self._db.enqueue(
@@ -2092,7 +2135,7 @@ class SqliteSpaceRepo:
 
     async def list_household_bans(self, space_id: str) -> list[dict]:
         rows = await self._db.fetchall(
-            "SELECT space_id, instance_id, banned_at, reason"
+            "SELECT space_id, instance_id, banned_at, reason, banned_by"
             " FROM space_instance_bans WHERE space_id=? ORDER BY banned_at",
             (space_id,),
         )

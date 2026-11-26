@@ -762,6 +762,15 @@ the space seed forwards the action to the host (`SPACE_REMOTE_ADMIN_ACTION`
 `ban` / `unban` with `{instance_id}`; a host below v_96 answers
 `HOST_TOO_OLD` up front).
 
+**Only the owner lifts the owner's ban.** Every ban records who made it
+(`space_bans.banned_by`, and since migration 0157
+`space_instance_bans.banned_by`; the signed event and the `bans` stream
+carry it). An admin may lift an admin's ban (or one whose banner is
+unknown), never the owner's: refused on the household that runs the
+unban (`403`), on a host running a forwarded unban for the forwarding
+admin (unless the owner approved it), and by every receiver of an
+`SPACE_MEMBER_UNBANNED` that is not from the owner household.
+
 **What a household ban does.** On the household that runs it (the owner, or
 a seed-holding delegated admin): each live seat of the household is told
 (`SPACE_REMOTE_MEMBER_REMOVED`), the ban row lands, then every seat ends

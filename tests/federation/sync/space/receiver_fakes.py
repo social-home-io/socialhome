@@ -173,6 +173,7 @@ class _FakeRepos:
         self.bans = []
         #: P7b household bans: (space_id, instance_id, reason).
         self.household_bans = []
+        self.household_banners = []
         self.posts = []
         #: post id → Post held here before the sync (for the tombstone skip).
         self.held_posts = {}
@@ -424,8 +425,11 @@ class _SpaceRepoStub:
     ):
         self._c.bans.append((space_id, user_id, banned_by, reason))
 
-    async def ban_household(self, space_id, instance_id, *, reason=None):
+    async def ban_household(
+        self, space_id, instance_id, *, reason=None, banned_by=None
+    ):
         self._c.household_bans.append((space_id, instance_id, reason))
+        self._c.household_banners.append(banned_by)
 
     async def get_member(self, space_id, user_id):
         return SimpleNamespace(user_id=user_id) if user_id == "u-seated" else None

@@ -107,9 +107,17 @@ async def test_household_bans(setup):
         r,
         kp,
         "bans",
-        [{"space_id": "sp-1", "instance_id": "peer-bad", "reason": "spam"}],
+        [
+            {
+                "space_id": "sp-1",
+                "instance_id": "peer-bad",
+                "reason": "spam",
+                "banned_by": "u-owner",
+            }
+        ],
     )
     assert c.household_bans == [("sp-1", "peer-bad", "spam")]
+    assert c.household_banners == ["u-owner"]
     assert c.bans == []
 
 

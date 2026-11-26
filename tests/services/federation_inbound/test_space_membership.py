@@ -55,6 +55,9 @@ class _FakeSpaceRepo:
         self.unbans = []
         self.household_bans = []
         self.household_unbans = []
+        self.household_banners = []
+        #: (space_id, user_id | instance_id) -> banner user id.
+        self.banners: dict = {}
         self.age_gates = []
         self.spaces: dict = {}
 
@@ -83,8 +86,14 @@ class _FakeSpaceRepo:
     async def unban_member(self, space_id, user_id):
         self.unbans.append((space_id, user_id))
 
-    async def ban_household(self, space_id, instance_id, *, reason=None):
+    async def ban_household(
+        self, space_id, instance_id, *, reason=None, banned_by=None
+    ):
         self.household_bans.append((space_id, instance_id, reason))
+        self.household_banners.append((space_id, instance_id, banned_by))
+
+    async def ban_banned_by(self, space_id, *, user_id=None, instance_id=None):
+        return self.banners.get((space_id, user_id or instance_id))
 
     async def unban_household(self, space_id, instance_id):
         self.household_unbans.append((space_id, instance_id))
@@ -1011,3 +1020,30 @@ async def test_space_created_never_wipes_the_owners_gfs_list(db):
     await handlers._on_created(created)
     got = await repo.get("sp-1")
     assert got is not None and got.gfs_servers == signed
+
+
+async def test_an_admin_household_cannot_lift_the_owners_ban(bus, repo):
+    """P7b finding 5: an unban from a seed holder that is not the owner is
+    refused for a ban the owner made; the owner's own unban lands, and an
+    admin's ban is lifted by an admin."""
+    space = _host_space(owner_instance_id="self-owner")
+    repo.spaces["sp-1"] = replace_features(space, delegated_admin_authority=True)
+    repo.banners = {("sp-1", "u-x"): "u-owner", ("sp-1", "peer-bad"): "u-admin"}
+    h = SpaceMembershipInboundHandlers(
+        bus=bus, space_repo=repo, seat_repo=_AdminSeats({"admin-house"})
+    )
+    h.attach_to(_FakeFederationService())
+    await h._on_unbanned(_ban(banned=False, user_id="u-x", from_instance="admin-house"))
+    assert repo.unbans == []
+    await h._on_unbanned(
+        _ban(banned=False, instance_id="peer-bad", from_instance="admin-house")
+    )
+    assert repo.household_unbans == [("sp-1", "peer-bad")]
+    await h._on_unbanned(_ban(banned=False, user_id="u-x", from_instance="self-owner"))
+    assert repo.unbans == [("sp-1", "u-x")]
+
+
+async def test_a_household_ban_stores_its_banner(repo, handlers):
+    repo.spaces["sp-1"] = _host_space(owner_instance_id="peer-a")
+    await handlers._on_banned(_ban(instance_id="peer-bad", banned_by="u-admin"))
+    assert repo.household_banners == [("sp-1", "peer-bad", "u-admin")]

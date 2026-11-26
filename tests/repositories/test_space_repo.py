@@ -2933,3 +2933,15 @@ async def test_a_household_ban_in_another_space_does_not_block(env):
         token, redeemer_user_id="uid-new", redeemer_instance_id="inst-x"
     )
     assert row is not None
+
+
+async def test_a_household_ban_records_who_banned(env):
+    await env.repo.save(_space("sp-by"))
+    await env.repo.ban_household("sp-by", "inst-x", banned_by="uid-alice")
+    [row] = await env.repo.list_household_bans("sp-by")
+    assert row["banned_by"] == "uid-alice"
+    assert await env.repo.ban_banned_by("sp-by", instance_id="inst-x") == "uid-alice"
+    await env.repo.ban_member("sp-by", "uid-bob", "uid-carol")
+    assert await env.repo.ban_banned_by("sp-by", user_id="uid-bob") == "uid-carol"
+    assert await env.repo.ban_banned_by("sp-by", user_id="uid-nobody") is None
+    assert await env.repo.ban_banned_by("sp-by") is None

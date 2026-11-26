@@ -148,10 +148,12 @@ class MembersMixin(ReceiverBase):
         ):
             return
         reason = r.get("reason")
+        banned_by = r.get("banned_by")
         await self._space_repo.ban_household(
             space_id,
             instance_id,
             reason=str(reason)[:500] if isinstance(reason, str) else None,
+            banned_by=str(banned_by) if isinstance(banned_by, str) else None,
         )
 
     async def _apply_picture_resets(
