@@ -166,12 +166,6 @@ _OWN_PEOPLE_RESOURCES: frozenset[str] = frozenset(
     {"bans", "members", "member_pictures"}
 )
 
-#: Resources only a member household (a writer seat) receives by
-#: catch-up — the members' places; the chat has its own version gate too.
-_MEMBER_ONLY_RESOURCES: frozenset[str] = frozenset(
-    {"space_zones", "space_zones_deleted"}
-)
-
 
 def _user_of(record: dict[str, Any]) -> str | None:
     return str(record.get("user_id") or "")
@@ -446,24 +440,6 @@ class _WithFileHashes:
             yield await self._add(batch)
 
 
-class _WithoutBanReasons:
-    """The ``bans`` resource for a follower household: every ban, without
-    its free-text ``reason`` (the ban list's audience is the space's member
-    households; a follower needs only the target and the banner)."""
-
-    __slots__ = ("_inner", "resource")
-
-    def __init__(self, inner: ResourceExporter) -> None:
-        self._inner = inner
-        self.resource = inner.resource
-
-    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
-        return [
-            {k: v for k, v in r.items() if k != "reason"}
-            for r in await self._inner.list_records(space_id)
-        ]
-
-
 class _OwnPeopleOnly:
     """A resource narrowed to this household's own people: a record is kept
     when its owner (``owner_of``, by default its ``user_id``) is one of them,
@@ -617,9 +593,8 @@ class SpaceSyncService:
         """v_95: the stream ends — when the requester's BEGIN ``page`` shows
         it missed a push, the page service sends it the newest page as its
         own ``SPACE_SYNC_PAGE`` event (never on the sentinel), and a seal due
-        here starts. Only to a member household (a writer seat): the page's
-        vector covers member-only resources (zones), which a follower never
-        gets."""
+        here starts. To any seated household — a follower's too (P10: a
+        follower syncs like a member, the page commits the rows it holds)."""
         if (
             self._sync_pages is None
             or self._member_gate is None
@@ -871,14 +846,11 @@ class SpaceSyncService:
         ``member`` (:class:`PreModeratorMembersExporter`).
 
         v_55: the space chat (``chat_messages``) goes only to a requester at
-        ``MIN_FOR_SPACE_CHAT`` or later that holds a writer seat in the
-        space (the chat gate) — a follower-only household, an older one, or
-        one we cannot ask gets no exporter at all.
-
-        Zones (``space_zones`` / ``space_zones_deleted``) are the members' places: only
-        a requester holding a writer seat gets them (the same gate) — a
-        follower-only household gets no exporter, as it gets no live
-        ``SPACE_ZONE_*`` either.
+        ``MIN_FOR_SPACE_CHAT`` or later that holds a seat in the space (the
+        seat gate — a follower's included, P10) — an older one, or one we
+        cannot ask, gets no exporter at all. Every other resource goes to
+        every seated household alike: a follower reads everything a member
+        does (owner 2026-11-26).
         """
         exporter = self._exporters.get(resource)
         if (
@@ -922,24 +894,6 @@ class SpaceSyncService:
                 and await self._member_gate(
                     session.space_id, session.requester_instance_id
                 )
-            )
-            return exporter if allowed else None
-        if (
-            exporter is not None
-            and resource == "bans"
-            and not (
-                self._member_gate is not None
-                and await self._member_gate(
-                    session.space_id, session.requester_instance_id
-                )
-            )
-        ):
-            # A follower household: who is banned (its authorship checks)
-            # and by whom (a person ban needs it), never why (P7b M4).
-            return _WithoutBanReasons(exporter)
-        if exporter is not None and resource in _MEMBER_ONLY_RESOURCES:
-            allowed = self._member_gate is not None and await self._member_gate(
-                session.space_id, session.requester_instance_id
             )
             return exporter if allowed else None
         if exporter is None or resource != "members":

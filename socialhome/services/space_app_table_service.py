@@ -22,8 +22,9 @@ the household of the person who opened it. This service adds the space:
   household — direct, ``SPACE_ROUTED`` (sealed end to end) across a
   relay, or the link-joined relay seat. Households that aren't paired play
   together: being in the space and pressing Join is the consent (D7).
-* **The space's rules**: only writer seats see, open or join tables
-  (followers never); never a global space, never an archived one; the app
+* **The space's rules**: every seat sees the tables (a follower too, P10:
+  it reads everything a member does); only writer seats open or join them;
+  never a global space, never an archived one; the app
   must be on the list (an app taken off it closes its waiting tables —
   games being played finish, and take nobody more: D10); the owner, admins
   and moderators may close any table (``closed_by_moderator``); the opener
@@ -123,7 +124,11 @@ from ..domain.space_app_table import (
 from ..federation.space_scope import resolve_space_id
 from .bus_publisher import BusPublisherMixin
 from .space_service import SpaceService
-from .space_writer_households import SpaceWriterHouseholds, holds_member_seat
+from .space_writer_households import (
+    SEAT_ROLES,
+    SpaceWriterHouseholds,
+    holds_member_seat,
+)
 
 if TYPE_CHECKING:
     from ..domain.apps import InstalledApp
@@ -225,8 +230,12 @@ class SpaceTableService(BusPublisherMixin):
         self._ws = ws
         self._bus = bus
         self._card_every = card_every
+        # Cards go to every seated household — followers see the tables
+        # (P10); only writer seats open or join one.
         self._writers = SpaceWriterHouseholds(
-            remote_member_repo, own_instance_id=str(federation.own_instance_id)
+            remote_member_repo,
+            own_instance_id=str(federation.own_instance_id),
+            roles=SEAT_ROLES,
         )
         #: Per hub table: the card state and seat count last sent, and when.
         self._card_last: dict[str, tuple[str, int, float]] = {}
@@ -275,6 +284,17 @@ class SpaceTableService(BusPublisherMixin):
         return lock
 
     # ─── Guards ───────────────────────────────────────────────────────
+
+    async def _reader(self, space_id: str, user_id: str) -> tuple[Space, SpaceMember]:
+        """The space and the caller's seat — any seat, a follower's
+        included (P10); no seat, or a ban, reads as no such space."""
+        space = await self._spaces.get(space_id)
+        member = await self._spaces.get_member(space_id, user_id)
+        if space is None or space.dissolved or member is None:
+            raise NotFoundError(f"space {space_id!r} not found")
+        if await self._spaces.is_banned(space_id, user_id):
+            raise NotFoundError(f"space {space_id!r} not found")
+        return space, member
 
     async def _writer(self, space_id: str, user_id: str) -> tuple[Space, SpaceMember]:
         """The space and the caller's seat — a writer seat (a follower is
@@ -364,7 +384,7 @@ class SpaceTableService(BusPublisherMixin):
         newest :data:`SPACE_TABLES_SHOWN`) whose host they don't block or
         aren't blocked by, for apps their age allows. Each with the app's
         state here (``installed`` / ``enabled``) — Join or "Ask an admin"."""
-        space, member = await self._writer(space_id, actor_user_id)
+        space, member = await self._reader(space_id, actor_user_id)
         user = await self._local_user(actor_user_id)
         allowed = set(space.features.allowed_apps)
         now = _now().isoformat()
@@ -711,6 +731,11 @@ class SpaceTableService(BusPublisherMixin):
             if m.user_id in local and m.role in _WRITER_VALUES
         ]
 
+    async def _local_seats(self, space_id: str) -> list[str]:
+        """Our people seated in the space — every role (P10: followers
+        see the tables)."""
+        return list(await self._spaces.list_local_member_user_ids(space_id))
+
     async def _push_card(self, table: GroupSession) -> None:
         """The card to each member here who may see it — as
         :meth:`list_tables` would show it to them (the app on the list,
@@ -726,7 +751,7 @@ class SpaceTableService(BusPublisherMixin):
             "table": self.card_view(table),
         }
         listed = table.app_id in space.features.allowed_apps
-        for user_id in await self._local_writers(table.space_id):
+        for user_id in await self._local_seats(table.space_id):
             user = await self._user_repo.get_by_user_id(user_id)
             if user is None:
                 continue

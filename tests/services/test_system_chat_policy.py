@@ -209,12 +209,17 @@ async def test_space_writers_read_and_write(space_env, role):
     assert await policy.can_write(_chat(SystemChatScope.SPACE), "u-anna")
 
 
-async def test_space_follower_neither_reads_nor_writes(space_env):
+async def test_space_follower_reads_but_never_writes(space_env):
+    """Owner 2026-11-26 (P10): a follower is a limited member but still a
+    member — it reads the space chat; posting (and every other chat write)
+    stays a member's."""
     spaces, policy = space_env
     spaces.members["u-anna"] = SpaceRole.SUBSCRIBER.value
-    assert not await policy.can_read(_chat(SystemChatScope.SPACE), "u-anna")
+    assert await policy.can_read(_chat(SystemChatScope.SPACE), "u-anna")
+    await policy.require(_chat(SystemChatScope.SPACE), "u-anna", write=False)
+    assert not await policy.can_write(_chat(SystemChatScope.SPACE), "u-anna")
     with pytest.raises(PermissionError):
-        await policy.require(_chat(SystemChatScope.SPACE), "u-anna", write=False)
+        await policy.require(_chat(SystemChatScope.SPACE), "u-anna", write=True)
 
 
 async def test_space_non_member_and_inactive_users_are_refused(space_env):

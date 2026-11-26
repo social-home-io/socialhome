@@ -1887,9 +1887,10 @@ async def test_a_stale_ref_is_judged_per_signer():
     assert to == "member-a" and _pushed_page(env, payload)[0] == page
 
 
-async def test_l5_a_follower_household_drops_a_pushed_page():
-    """L5: the receiving half of "no page to a follower": a household
-    holding no member seat drops a page it was sent by mistake."""
+async def test_a_follower_household_takes_a_pushed_page():
+    """P10 (owner 2026-11-26): a follower syncs like a member — its
+    household takes the page pushed to it (the old L5 "no page to a
+    follower" is gone, both halves; one checksum: the same rows)."""
     env = _Env(own=ME, seed=None)
     env.spaces.local = ["u-me"]
     env.spaces.members = [
@@ -1906,7 +1907,7 @@ async def test_l5_a_follower_household_drops_a_pushed_page():
         provider=HOST,
         payload={"page_sealed": await _sealed_for_member(page, sync_id=PAGE_PUSH_AAD)},
     )
-    assert not stored and env.held() is None
+    assert stored and env.held() is not None
 
 
 async def test_l1_a_nay_counts_only_from_a_household_we_can_ask_now():

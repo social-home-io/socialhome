@@ -115,13 +115,17 @@ class HouseholdChatAccess:
 
 
 class SpaceChatAccess:
-    """A space's chat: the space's local WRITER seats, while chat is on.
+    """A space's chat: every local seat reads it, the WRITER seats post,
+    while chat is on.
 
-    Read and write need a local ``space_members`` seat whose role is a
-    writer one (:data:`~socialhome.domain.space.WRITER_ROLES` — a follower
-    neither reads nor posts), no ban, and the space neither dissolved nor
-    unknown; then ``features.chat`` on (:class:`FeatureDisabledError`
-    otherwise). Posting also needs the space not archived
+    Reading needs a local ``space_members`` seat of any role — a follower
+    reads the chat like any member (owner 2026-11-26: a follower is a
+    limited member but still a member) — no ban, and the space neither
+    dissolved nor unknown; then ``features.chat`` on
+    (:class:`FeatureDisabledError` otherwise). Every write (a message, a
+    reaction, an edit) needs a writer role
+    (:data:`~socialhome.domain.space.WRITER_ROLES`): a follower never
+    writes to the chat. Posting also needs the space not archived
     (:class:`SpaceArchivedError`), like posts and comments; reading an
     archived space's chat stays allowed. Content authority (owner, admin,
     moderator) may delete anyone's message (:meth:`may_moderate`).
@@ -145,8 +149,9 @@ class SpaceChatAccess:
         self._spaces = space_repo
         self._remote_members = remote_members
 
-    async def _writer_role(self, conv: Conversation, user: User) -> tuple[Space, str]:
-        """``conv``'s space and the user's writer role in it; raise otherwise."""
+    async def _seat_role(self, conv: Conversation, user: User) -> tuple[Space, str]:
+        """``conv``'s space and the user's role in it (any seat, a
+        follower's included); raise otherwise."""
         if user.state != "active" or user.deleted_at is not None:
             raise PermissionError("not a member of this space chat")
         space_id = conv.space_id
@@ -154,9 +159,9 @@ class SpaceChatAccess:
         if space is None or space.dissolved:
             raise PermissionError("not a member of this space chat")
         member = await self._spaces.get_member(space.id, user.user_id)
-        role = str(member.role) if member is not None else ""
-        if role not in _WRITER_ROLE_VALUES:
+        if member is None:
             raise PermissionError("not a member of this space chat")
+        role = str(member.role)
         if await self._spaces.is_banned(space.id, user.user_id):
             raise PermissionError("not a member of this space chat")
         if not space.features.chat:
@@ -164,13 +169,16 @@ class SpaceChatAccess:
         return space, role
 
     async def check(self, conv: Conversation, user: User, *, write: bool) -> None:
-        space, _role = await self._writer_role(conv, user)
+        space, role = await self._seat_role(conv, user)
+        if write and role not in _WRITER_ROLE_VALUES:
+            # A follower reads the chat; it never writes to it.
+            raise PermissionError("followers read this space chat")
         if write and space.archived:
             raise SpaceArchivedError()
 
     async def may_moderate(self, conv: Conversation, user: User) -> bool:
         try:
-            _space, role = await self._writer_role(conv, user)
+            _space, role = await self._seat_role(conv, user)
         except PermissionError, FeatureDisabledError:
             return False
         return role in _CONTENT_ROLE_VALUES
