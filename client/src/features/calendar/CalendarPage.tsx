@@ -41,6 +41,7 @@ import { confirmDialog } from '@/components/confirm'
 import { addBase } from '@/baseUrl'
 import { toggles } from '@/components/HouseholdToggles'
 import TimetablePage from '@/features/timetable/TimetablePage'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 interface CalendarSummary {
   id: string
@@ -557,7 +558,7 @@ function CalendarAgenda({ timetable }: { timetable: boolean }) {
             <LocationLink value={e.location} class="sh-event-location" />
           </p>
         )}
-        {e.description && <p class="sh-cal-row__desc">{e.description}</p>}
+        {e.description && <p class="sh-cal-row__desc"><LinkifiedText text={e.description} /></p>}
         <div class="sh-event-times">
           <span>{t('event.starts')} {bounds.starts}</span>
           <span>{t('event.ends')} {bounds.ends}</span>

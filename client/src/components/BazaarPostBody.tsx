@@ -22,6 +22,7 @@ import type { BazaarBid, BazaarListing, BazaarOffer } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
 import { CURRENCY_FRACTION_DIGITS, formatBazaarAmount } from './bazaarFormat'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 // Re-exported so existing ``import { formatBazaarAmount } from
 // '@/components/BazaarPostBody'`` call sites keep working. The helper now lives
@@ -417,7 +418,7 @@ export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
         </div>
       )}
       {listing.description && (
-        <p class="sh-bazaar-description">{listing.description}</p>
+        <p class="sh-bazaar-description"><LinkifiedText text={listing.description} /></p>
       )}
 
       <div class="sh-bazaar-price-row">
@@ -611,7 +612,7 @@ function SellerControls({
                 {formatBazaarAmount(b.amount, listing.currency)}
               </span>
               {b.message && (
-                <span class="sh-muted">— {b.message}</span>
+                <span class="sh-muted">— <LinkifiedText text={b.message} /></span>
               )}
               <div class="sh-row" style={{ marginLeft: 'auto' }}>
                 <Button variant="secondary" loading={busy}

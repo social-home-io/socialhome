@@ -7,6 +7,8 @@
  * decides whether to *show* a card and whether to opt out).
  */
 
+import { linkHrefs, splitLinks } from '@/components/markdown'
+
 const URL_RE = /https?:\/\/[^\s<>"'()[\]{}`]+/i
 const TRAILING_PUNCT = /[.,;:!?*_~]+$/
 
@@ -39,4 +41,28 @@ export function linkDomain(raw: string | null | undefined): string {
   const href = safeWebUrl(raw)
   if (!href) return ''
   return new URL(href).hostname.replace(/^www\./i, '')
+}
+
+/** Whether the link a card was built for is a link the text shows.
+ *
+ *  The server builds the card for ``first_url`` (mirrored by
+ *  :func:`firstUrl`), which stops at ``(``; the text renderer links
+ *  balanced parentheses in full (``…/wiki/Mercury_(planet)``). Teaching
+ *  the server the same rule would change ``card_survives_edit`` on every
+ *  household (a protocol bump), so instead the card is hidden when the
+ *  text's first link is not rendered as written. It does not compare the
+ *  card's own ``url``: that is the page's canonical / final URL (after a
+ *  redirect), so it may differ on purpose; the card's domain line always
+ *  shows the host it opens. */
+export function cardFitsText(text: string | null | undefined): boolean {
+  const url = firstUrl(text)
+  if (!url || !text) return false
+  return linkHrefs(text).includes(url.replace(/\*/g, '%2A'))
+}
+
+/** The text has a ``www.`` link but no ``http(s)://`` one — it is
+ *  clickable but gets no card (the composer says how to get one). */
+export function hasOnlyWwwLinks(text: string | null | undefined): boolean {
+  if (!text || firstUrl(text)) return false
+  return splitLinks(text).some((p) => typeof p !== 'string')
 }

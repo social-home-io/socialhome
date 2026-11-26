@@ -950,5 +950,9 @@
   "space.sync.details.page_match": "Admin details. 'Page' is a signed snapshot of the space's state (numbered {n}), not a Pages document. {time} is a relative time.",
   "space.sync.details.page_differs": "Admin details. {n} = how many of the 256 parts of the space's signed state differ from this household's copy; {page} = the snapshot's number.",
   "space.post.not_sent": "Under one of your own posts in a space: no other household has it yet. Short — it sits in the post's meta line.",
-  "space.post.not_sent_detail": "The same mark, opened: {host} is the host household's name (or space.sync.host_fallback)."
+  "space.post.not_sent_detail": "The same mark, opened: {host} is the host household's name (or space.sync.host_fallback).",
+  "link_preview.open_titled": "Screen-reader name of a link preview card. {title} is the linked page's title, {site} its site name or domain. Keep the dash.",
+  "link.new_tab": "Hidden text read by screen readers after a link in user text that opens in a new browser tab. Keep the parentheses.",
+  "link_preview.www_hint": "Shown under the post composer when the text has a link that starts with \"www.\" — such a link is clickable but gets no link preview card. Keep \"https://\" as is.",
+  "post.edit.link_card_hint": "Shown under the post editor when an edit adds a new link: link previews are only built when a post is first published, never on edit."
 }

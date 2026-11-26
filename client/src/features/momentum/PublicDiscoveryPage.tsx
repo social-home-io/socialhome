@@ -50,6 +50,7 @@ import {
 } from '@/store/momentPublic'
 import { fold, type FriendsPayload, type Person } from '@/features/friends/friendsModel'
 import type { MomentPublicDirectoryUser } from '@/types'
+import { LinkifiedText } from '@/components/LinkifiedText'
 import { DiscoverFriends, discoverFriends } from './DiscoverFriends'
 import { FollowToggle, toggleFollow } from './FollowToggle'
 
@@ -392,7 +393,9 @@ function GfsSection() {
                     <bdi dir="auto">@{u.username}</bdi>
                     {followers && ` · ${followers}`}
                   </span>
-                  {u.bio && <p class="sh-momentum-discover-bio" dir="auto">{u.bio}</p>}
+                  {u.bio && (
+                    <p class="sh-momentum-discover-bio" dir="auto"><LinkifiedText text={u.bio} /></p>
+                  )}
                 </div>
                 <FollowToggle
                   name={name}

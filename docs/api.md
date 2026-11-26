@@ -530,6 +530,9 @@ the encrypted `SPACE_POST_CREATED` payload (its image as an ordinary
 `SPACE_MEDIA_BLOB`), so member households render the card without ever
 contacting the linked site. Text fields are plain text (the SPA escapes
 them); `url` is `http(s)` only; `thumbnail_url` is always local media.
+The card is for the first `http(s)://` link in the text; the SPA also
+makes every plain-text `http(s)://…` and `www.…` link in a post
+clickable (a `www.` link gets no card).
 An edit keeps the card while the post's first link stays the same and drops it when the link changes or goes (never re-fetched on edit); every household applies that rule to its own copy.
 
 The household admin switch is `allow_link_preview` on

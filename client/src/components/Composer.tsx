@@ -27,6 +27,7 @@ import {
   mentionInputAria,
 } from './MentionAutocomplete'
 import { LinkPreviewCard } from './LinkPreviewCard'
+import { hasOnlyWwwLinks } from '@/utils/linkPreview'
 import { LocationPicker, type LocationDraft } from './LocationPicker'
 import { MarkdownToolbar } from './MarkdownToolbar'
 import { MediaDropzone } from './MediaDropzone'
@@ -433,7 +434,7 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
       }
       // The server builds the card itself from the text; the composer only
       // says whether the author removed it.
-      if (postType.value === 'text' && linkPreview.dismissed) {
+      if (postType.value === 'text' && (linkPreview.dismissed || linkPreview.mismatch)) {
         extras.noLinkPreview = true
       }
       // A space post takes its poll / schedule in the create request.
@@ -619,7 +620,7 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
                   {t('link_preview.restore')}
                 </button>
               ) : linkPreview.preview ? (
-                <LinkPreviewCard preview={linkPreview.preview}
+                <LinkPreviewCard key={linkPreview.preview.url} preview={linkPreview.preview}
                                  onRemove={linkPreview.dismiss} />
               ) : linkPreview.loading ? (
                 <span class="sh-muted sh-composer-link-preview-loading">
@@ -627,6 +628,10 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
                 </span>
               ) : null}
             </div>
+          )}
+          {postType.value === 'text' && !linkPreview.off
+            && hasOnlyWwwLinks(content.value) && (
+            <p class="sh-muted sh-composer-link-hint">{t('link_preview.www_hint')}</p>
           )}
         </>
       )}

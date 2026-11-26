@@ -59,6 +59,7 @@ import { AppIcon } from '@/features/apps/AppDialogs'
 import type { GroupView } from '@/features/apps/groupBridge'
 import { SeatList } from './SeatList'
 import { refusalText } from './refusal'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 /** Start ignores taps for this long after it turns on. */
 export const START_ARM_MS = 600
@@ -275,7 +276,7 @@ export function GameLobby({ appId, sessionId, appName, onClosed }: GameLobbyProp
       <AppIcon src={entry?.icon_url ?? installed?.icon ?? null} />
       <div class="sh-game-lobby__titles">
         <h2 class="sh-game-lobby__title">{name}</h2>
-        {game?.note && <q class="sh-game-lobby__note">{game.note}</q>}
+        {game?.note && <q class="sh-game-lobby__note"><LinkifiedText text={game.note} /></q>}
       </div>
     </header>
   )

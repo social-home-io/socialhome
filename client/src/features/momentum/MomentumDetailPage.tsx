@@ -65,6 +65,7 @@ import { loadGfsNames, publicOnLabel } from './gfsNames'
 import { renderHashtagged } from './hashtags'
 import { MomentCard, relativeTime } from './MomentCard'
 import { MomentReplyField } from './MomentReplyField'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 const detail = signal<MomentDetail | null>(null)
 /** Why there is no moment to show: ``gone`` (404 — deleted, expired or
@@ -354,7 +355,7 @@ export default function MomentumDetailPage() {
           someone with no household connection. */}
       {!isAuthor && m.author?.bio && (
         <p class="sh-momentum-detail-bio" data-testid="moment-author-bio" dir="auto">
-          {m.author.bio}
+          <LinkifiedText text={m.author.bio} />
         </p>
       )}
       {ended && !isAuthor && (
