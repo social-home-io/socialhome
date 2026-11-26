@@ -4151,6 +4151,17 @@ class FederationService:
                 listed.discard(self._own_instance_id)
                 members = listed if members is None else members & listed
                 for fanout in fanouts:
+                    if not pending.waiting(space_id):
+                        # Dropped meanwhile (a bound, the backstop): a later
+                        # write went to the whole roster, so resending an
+                        # earlier one now could land after it — the rest
+                        # comes with the members' catch-up.
+                        log.info(
+                            "space %s: roster wait dropped mid-resend — the "
+                            "rest comes with the members' catch-up",
+                            space_id,
+                        )
+                        return
                     missed = members - fanout.reached
                     if not missed:
                         continue

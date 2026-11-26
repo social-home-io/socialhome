@@ -7525,3 +7525,36 @@ async def test_a_household_gained_during_the_resend_gets_no_item_without_its_par
         await svc.drain_roster_replays()
     assert [p["id"] for t, _, p in sent if t == "inst-a"] == ["p1", "p1-deleted"]
     assert [p["id"] for t, _, p in sent if t == "inst-h"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_wait_dropped_mid_resend_resends_nothing_after_a_later_write():
+    """A bound reached while the resend is parked on a send ends the wait,
+    and the write that hit it goes to the whole roster: an earlier item
+    still in the resend's hands must not follow it there."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc._pending_roster_fanout = PendingRosterFanout(max_per_space=2)
+    svc.expect_space_roster("sp-join")
+    gate = asyncio.Event()
+
+    async def _slow_send(self, *, to_instance_id, event_type, payload, **kw):
+        if to_instance_id == "inst-g" and payload == {"id": "p0"}:
+            await gate.wait()
+        return await _send(
+            self, to_instance_id=to_instance_id, event_type=event_type, payload=payload
+        )
+
+    with patch.object(FederationService, "send_with_mesh_fallback", _slow_send):
+        await _post(svc, "p0")
+        await _post(svc, "p1")
+        fed_repo.add_space_member("sp-join", "inst-g")
+        svc.space_roster_landed("sp-join")
+        await asyncio.sleep(0)
+        await _post(svc, "x1")
+        await _post(svc, "x2")
+        await _post(svc, "p1-deleted")
+        gate.set()
+        await svc.drain_roster_replays()
+    to_g = [p["id"] for t, _, p in sent if t == "inst-g"]
+    assert "p1-deleted" in to_g
+    assert "p1" not in to_g
