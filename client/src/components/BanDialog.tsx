@@ -14,7 +14,7 @@
  * (a banned person's household) and a pending join request (owner
  * decision B): a household needs no current seat to be banned.
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { api, ApiError } from '@/api'
 import { isOne, t } from '@/i18n/i18n'
 import { Button } from './Button'
@@ -35,7 +35,9 @@ export interface BanTarget {
   name?: string
   /** The household's name, when known. */
   household?: string | null
-  /** A household ban: the names of its people seated now (may be empty). */
+  /** A household ban: the names of its people seated now (may be empty);
+   *  absent when the caller can't tell (a join request, a ban row) — the
+   *  confirm then says everyone still in the space leaves. */
   people?: string[]
 }
 
@@ -54,7 +56,8 @@ function body(target: BanTarget): string {
     return t('ban.body_person', { name: target.name ?? t('person.someone') })
   }
   const household = householdLabel(target)
-  const people = target.people ?? []
+  const people = target.people
+  if (people === undefined) return t('ban.body_household_unknown', { household })
   if (people.length === 0) return t('ban.body_household', { household })
   return t(isOne(people.length) ? 'ban.body_household_people_one' : 'ban.body_household_people', {
     household,
@@ -72,8 +75,12 @@ export function BanDialog({ target, onClose, onBanned }: {
   const [reason, setReason] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // One ban per press, even two clicks within one frame.
+  const sending = useRef(false)
   // A new target starts clean.
-  useEffect(() => { setReason(''); setError(null); setBusy(false) }, [target])
+  useEffect(() => {
+    setReason(''); setError(null); setBusy(false); sending.current = false
+  }, [target])
   if (!target) return null
   const household = target.kind === 'household'
   const title = household
@@ -81,7 +88,8 @@ export function BanDialog({ target, onClose, onBanned }: {
     : t('ban.title_person', { name: target.name ?? t('person.someone') })
 
   const confirm = async () => {
-    if (busy) return
+    if (sending.current) return
+    sending.current = true
     setBusy(true)
     setError(null)
     const why = reason.trim().slice(0, BAN_REASON_MAX)
@@ -97,6 +105,7 @@ export function BanDialog({ target, onClose, onBanned }: {
     } catch (e: unknown) {
       setError(banErrorCopy(e))
     } finally {
+      sending.current = false
       setBusy(false)
     }
   }

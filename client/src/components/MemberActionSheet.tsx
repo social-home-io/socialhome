@@ -192,7 +192,7 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
           )}
           <div class="sh-member-actions-leave" role="group"
                aria-label={t('member_actions.remove_or_ban')}>
-            <span class="sh-member-actions-label">{t('member_actions.remove_or_ban')}</span>
+            {canBan && <span class="sh-member-actions-label">{t('member_actions.remove_or_ban')}</span>}
             {canBan && <p class="sh-muted sh-member-actions-hint">{t('member_actions.remove_or_ban_hint')}</p>}
             <Button variant="secondary" onClick={remove}>{t('member_actions.remove')}</Button>
             {canBan && (

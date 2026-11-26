@@ -125,6 +125,21 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
     }
   }
 
+  // After a household ban its request is declined too — the ban's toast
+  // already said it; only a failure speaks.
+  const declineQuietly = async (request: JoinRequest) => {
+    try {
+      await api.post(`/api/spaces/${spaceId}/join-requests/${request.id}/deny`, {})
+      const now = requestsBySpace.value[spaceId] ?? []
+      requestsBySpace.value = {
+        ...requestsBySpace.value,
+        [spaceId]: now.filter(x => x.id !== request.id),
+      }
+    } catch (e: unknown) {
+      showToast((e as Error).message || t('join_requests.failed'), 'error')
+    }
+  }
+
   // Anyone on a GFS can ask (v_84): a flood is declined in one go.
   const viaGfs = rows.filter(r => r.via_gfs)
   const declineAllGfs = async () => {
@@ -148,7 +163,16 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
     }
   }
 
-  if (rows.length === 0) return null
+  // The ban dialog stays while a live reload empties the list.
+  const banDialog = (
+    <BanDialog target={banning?.target ?? null} onClose={() => setBanning(null)}
+               onBanned={() => {
+                 const request = banning?.request
+                 setBanning(null)
+                 if (request) void declineQuietly(request)
+               }} />
+  )
+  if (rows.length === 0) return banning ? banDialog : null
 
   return (
     <div class="sh-join-requests sh-card" aria-label={t('join_requests.aria')}>
@@ -215,6 +239,7 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
               <Button variant="secondary" onClick={() => act(r, 'deny')}>
                 {t('join_requests.decline')}
               </Button>
+              {/* An admin elevation is a member already: banned from the member sheet. */}
               {r.remote_applicant_instance_id && r.requested_role !== 'admin' && (
                 <Button variant="secondary" data-action="ban-requesting-household"
                         onClick={() => setBanning({
@@ -223,7 +248,6 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
                             kind: 'household', spaceId,
                             instanceId: r.remote_applicant_instance_id ?? undefined,
                             household: r.unverified_household ?? null,
-                            people: [],
                           },
                         })}>
                   {t('member_actions.ban_household')}
@@ -233,12 +257,7 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
           </div>
         )
       })}
-      <BanDialog target={banning?.target ?? null} onClose={() => setBanning(null)}
-                 onBanned={() => {
-                   const request = banning?.request
-                   setBanning(null)
-                   if (request) void act(request, 'deny')
-                 }} />
+      {banDialog}
     </div>
   )
 }

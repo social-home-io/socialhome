@@ -244,6 +244,30 @@ describe('SpaceMemberList — followers in their own group (P8)', () => {
   })
 })
 
+describe('SpaceMemberList — the ban context the sheet gets (ban UX review)', () => {
+  it('a space hosted elsewhere: no Ban on the owner household people; the household lists its seats', async () => {
+    apiGet.mockImplementation(async (url: string) => url.endsWith('/members')
+      ? [
+        { user_id: 'u-host', display_name: 'Hosta', role: 'member', instance_id: 'peer-owner' },
+        { user_id: 'u-k1', display_name: 'Kay', role: 'member', instance_id: 'peer-k' },
+        { user_id: 'u-k2', display_name: 'Kim', role: 'subscriber', instance_id: 'peer-k' },
+      ]
+      : [])
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" hostedElsewhere
+                                      ownerInstanceId="peer-owner" />)
+    await waitFor(() => expect(r.container.textContent).toContain('Hosta'))
+    fireEvent.click(r.getByLabelText('Manage Hosta'))
+    await waitFor(() => expect(r.baseElement.querySelector('h2.sh-modal-title, [role=dialog] h2')).toBeTruthy())
+    expect(r.baseElement.querySelector('[data-action="ban"]')).toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.click(r.getByLabelText('Manage Kay'))
+    await waitFor(() => expect(r.baseElement.querySelector('[data-action="ban-household"]')).not.toBeNull())
+    fireEvent.click(r.baseElement.querySelector('[data-action="ban-household"]') as HTMLElement)
+    await waitFor(() => expect(r.baseElement.textContent).toContain('Kay, Kim (2 people) leave this space.'))
+  })
+})
+
 describe('SpaceMemberList — tapping a member opens their person sheet', () => {
   const rows = [
     { user_id: 'u-m', display_name: 'Mo', role: 'moderator', joined_at: '2026-01-01' },

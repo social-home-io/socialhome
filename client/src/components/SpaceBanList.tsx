@@ -138,7 +138,7 @@ export function SpaceBanList({ spaceId, viewerIsOwner, ownerInstanceId }: {
                 <Button variant="secondary" data-action="ban-their-household"
                         onClick={() => setBanning({
                           kind: 'household', spaceId, instanceId: household,
-                          household: b.household_name ?? null, people: [],
+                          household: b.household_name ?? null,
                         })}>
                   {t('bans.ban_household')}
                 </Button>

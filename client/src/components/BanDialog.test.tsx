@@ -17,11 +17,17 @@ describe('BanDialog', () => {
   })
 
   it('a household with nobody seated: what the ban blocks, no people line', () => {
-    const r = render(<BanDialog target={{ kind: 'household', spaceId: 's', instanceId: 'h', household: 'Spam Farm' }}
+    const r = render(<BanDialog target={{ kind: 'household', spaceId: 's', instanceId: 'h', household: 'Spam Farm', people: [] }}
                                 onClose={vi.fn()} onBanned={vi.fn()} />)
     expect(r.baseElement.textContent).toContain('Ban Spam Farm?')
     expect(r.baseElement.textContent).toContain('Nobody from Spam Farm can join, follow or be invited')
-    expect(r.baseElement.textContent).toContain('Only the owner and admins see it.')
+    expect(r.baseElement.textContent).toContain("Only the space's owner and admins see it.")
+  })
+
+  it('a household whose seats the caller cannot tell: everyone still in the space leaves', () => {
+    const r = render(<BanDialog target={{ kind: 'household', spaceId: 's', instanceId: 'h', household: 'Spam Farm' }}
+                                onClose={vi.fn()} onBanned={vi.fn()} />)
+    expect(r.baseElement.textContent).toContain('Everyone from Spam Farm still in this space leaves it.')
   })
 
   it('one seated person reads in the singular', () => {
