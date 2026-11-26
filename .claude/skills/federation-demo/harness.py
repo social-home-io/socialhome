@@ -13687,6 +13687,16 @@ _LOG_BENIGN: tuple[str, ...] = (
     "juice: STUN server binding successful",
     "juice: Candidate gathering done",
     "juice: Using STUN server",
+    # A connectivity check of a PeerConnection that was just replaced
+    # (glare between two households dialling each other on loopback, or a
+    # rebuild): libjuice gets the old session's STUN request with the old
+    # ufrag, logs these two lines and drops it — no state change, the new
+    # session goes on. Taken un-named outside offline windows too (they
+    # were offline-only): they appear on code without any subscriber-seats
+    # change (sync-pages run, 2026-11-22) and this branch touches no RTC /
+    # transport code. "juice: Lost connectivity" stays offline-only.
+    "juice: STUN local ufrag check failed",
+    "juice: STUN message verification failed",
     # libjuice's single poll thread (conn_poll.c) builds its pollfd set
     # under the registry mutex, then polls without it. When one
     # PeerConnection closes (its UDP socket freed) and another is created
