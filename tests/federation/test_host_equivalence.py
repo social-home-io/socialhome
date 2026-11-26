@@ -21,8 +21,10 @@ from socialhome.domain.space import (
 )
 from socialhome.federation.host_equivalence import (
     acts_as_host,
+    is_owner_ban,
     is_trusted_inviter,
     may_sign_pages,
+    owner_user_id_here,
     serves_as_host,
     touches_owner_household,
 )
@@ -289,3 +291,53 @@ async def test_page_signing_without_a_roster_or_a_space(env):
     assert await may_sign_pages(None, space, OWNER)
     assert not await may_sign_pages(seats, None, OWNER)
     assert not await may_sign_pages(seats, space, "")
+
+
+class _OwnerRepo:
+    """``list_members`` / ``get_owner_user_id`` only."""
+
+    def __init__(self, seats, recorded=None):
+        self._seats = seats
+        self._recorded = recorded
+
+    async def list_members(self, space_id):
+        return [
+            SpaceMember(space_id=space_id, user_id=u, role=r, joined_at="2026")
+            for u, r in self._seats
+        ]
+
+    async def get_owner_user_id(self, space_id):
+        return self._recorded
+
+
+async def test_owner_user_id_here_prefers_the_owner_seat():
+    assert (
+        await owner_user_id_here(_OwnerRepo([("u-o", "owner")], "u-rec"), "s") == "u-o"
+    )
+    assert (
+        await owner_user_id_here(_OwnerRepo([("u-m", "member")], "u-rec"), "s")
+        == "u-rec"
+    )
+    assert await owner_user_id_here(_OwnerRepo([]), "s") is None
+
+
+async def test_is_owner_ban_needs_the_owner_household_and_the_owner_person():
+    space = Space(
+        id="s",
+        name="S",
+        owner_instance_id="h-owner",
+        owner_username="o",
+        identity_public_key="00" * 32,
+        config_sequence=0,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    repo = _OwnerRepo([("u-o", "owner")])
+    assert await is_owner_ban(repo, space, "h-owner", "u-o") is True
+    # An admin of the owner household, another household, no banner,
+    # an unknown owner: not the owner's ban.
+    assert await is_owner_ban(repo, space, "h-owner", "u-admin") is False
+    assert await is_owner_ban(repo, space, "h-other", "u-o") is False
+    assert await is_owner_ban(repo, space, "h-owner", None) is False
+    assert await is_owner_ban(_OwnerRepo([]), space, "h-owner", "u-o") is False

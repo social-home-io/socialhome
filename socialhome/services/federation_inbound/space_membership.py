@@ -28,11 +28,12 @@ from ...domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
-    SpaceRole,
     SpaceType,
 )
 from ...federation.host_equivalence import (
+    is_owner_ban,
     may_sign_pages,
+    owner_user_id_here,
     touches_owner_household,
 )
 from ...federation.sync_manager import SYNC_REJECT_NOT_SEATED
@@ -564,7 +565,12 @@ class SpaceMembershipInboundHandlers:
         # The owner household's ban becomes the owner's even over an
         # earlier admin's (re-review I-B); anyone else's keeps the first.
         space = await self._space_repo.get(space_id)
-        owner_ban = space is not None and event.from_instance == space.owner_instance_id
+        owner_ban = space is not None and await is_owner_ban(
+            self._space_repo,
+            space,
+            event.from_instance,
+            str(banned_by) if banned_by else None,
+        )
         if instance_id:
             await self._space_repo.ban_household(
                 space_id,
@@ -631,12 +637,8 @@ class SpaceMembershipInboundHandlers:
         return True
 
     async def _owner_user_id(self, space_id: str) -> str | None:
-        """The owner's user id here: the ``owner`` seat on the host, else the
-        one the host's roster recorded on a stub."""
-        for member in await self._space_repo.list_members(space_id):
-            if member.role == SpaceRole.OWNER:
-                return str(member.user_id)
-        return await self._space_repo.get_owner_user_id(space_id)
+        """The owner's user id here (:func:`owner_user_id_here`)."""
+        return await owner_user_id_here(self._space_repo, space_id)
 
     async def _on_age_gate(self, event: FederationEvent) -> None:
         """§CP.F1 — the host set/changed the space's min_age.

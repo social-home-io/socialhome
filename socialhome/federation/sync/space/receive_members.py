@@ -15,7 +15,7 @@ from ....media.profile_picture import (
     reencode_peer_picture,
 )
 from ....services.space_service import apply_owner_statement_from_metadata
-from ...host_equivalence import touches_owner_household
+from ...host_equivalence import is_owner_ban, touches_owner_household
 from .receiver_base import ReceiverBase, _sync_event
 
 log = logging.getLogger(__name__)
@@ -108,11 +108,25 @@ class MembersMixin(ReceiverBase):
                     space_id, seat, picture_hash=local_hash, provider=provider
                 )
 
-    async def _persist_bans(self, space_id: str, records: list[dict[str, Any]]) -> None:
+    async def _persist_bans(
+        self, space_id: str, records: list[dict[str, Any]], *, provider: str
+    ) -> None:
+        space = await self._space_repo.get(space_id)
         for r in records:
+            claimed = r.get("banned_by")
+            # The owner's own ban takes over an earlier banner here too
+            # (the same rule as the live event, ``is_owner_ban``).
+            owner_ban = space is not None and await is_owner_ban(
+                self._space_repo,
+                space,
+                provider,
+                str(claimed) if isinstance(claimed, str) else None,
+            )
             household = r.get("instance_id")
             if isinstance(household, str) and household and not r.get("user_id"):
-                await self._persist_household_ban(space_id, household, r)
+                await self._persist_household_ban(
+                    space_id, household, r, owner_ban=owner_ban
+                )
                 continue
             user_id = str(r.get("user_id") or "")
             banned_by = str(r.get("banned_by") or "")
@@ -128,6 +142,7 @@ class MembersMixin(ReceiverBase):
                 user_id=user_id,
                 banned_by=banned_by,
                 reason=r.get("reason"),
+                owner_ban=owner_ban,
             )
             if seated is not None:
                 await self._bus.publish(
@@ -137,7 +152,12 @@ class MembersMixin(ReceiverBase):
                 )
 
     async def _persist_household_ban(
-        self, space_id: str, instance_id: str, r: dict[str, Any]
+        self,
+        space_id: str,
+        instance_id: str,
+        r: dict[str, Any],
+        *,
+        owner_ban: bool = False,
     ) -> None:
         """A household ban (P7b) from the acting host's catch-up stream —
         never one naming the owner household. Its seats end through the
@@ -154,6 +174,7 @@ class MembersMixin(ReceiverBase):
             instance_id,
             reason=str(reason)[:500] if isinstance(reason, str) else None,
             banned_by=str(banned_by) if isinstance(banned_by, str) else None,
+            owner_ban=owner_ban,
         )
 
     async def _apply_picture_resets(

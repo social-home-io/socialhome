@@ -773,7 +773,9 @@ admin (unless the owner approved it), and by every receiver of an
 re-ban never changes who banned (the first banner stays, on every path —
 local, forwarded, gossip, sync), so an admin can't turn the owner's ban
 into its own and then lift it; the owner's ban, though, always becomes the
-owner's, even over an earlier admin's. A `SPACE_MEMBER_BANNED` from anyone
+owner's, even over an earlier admin's — on a receiver (live event or sync
+stream) only when it comes from the owner household AND names the owner
+person as its banner (an admin of the owner household stays an admin). A `SPACE_MEMBER_BANNED` from anyone
 but the owner household that names the owner as its banner is dropped. No
 admin from another household bans or unbans a person of the owner
 household on any path: the signed event is dropped on the owner, a

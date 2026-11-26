@@ -6771,9 +6771,30 @@ class SpaceService(
         one the owner made."""
         if not banner:
             return
-        owner_user_id = await self.owner_user_id(space)
-        if banner == owner_user_id and lifter != owner_user_id:
+        if await self.ban_made_by_owner(space, banner) and lifter != banner:
             raise OwnerBanError()
+
+    async def ban_made_by_owner(self, space: Space, banned_by: str | None) -> bool:
+        """Whether a ban whose banner is ``banned_by`` is the owner's — only
+        the owner lifts it. An unknown banner (or owner) is not."""
+        if not banned_by:
+            return False
+        owner = await self.owner_user_id(space)
+        return owner is not None and banned_by == owner
+
+    async def banned_household_of(self, space_id: str, user_id: str) -> str | None:
+        """The household of a banned person, so an admin can ban that whole
+        household from the ban list (owner decision B): the seat they held
+        here (a tombstone too), else what this household knows of them;
+        ``None`` for one of our own people or someone unknown."""
+        if self._remote_members is not None:
+            seat = await self._remote_members.get_including_tombstones(
+                space_id, "", user_id
+            )
+            if seat is not None:
+                return seat.instance_id
+        remote = await self._users.get_remote(user_id)
+        return remote.instance_id if remote is not None else None
 
     async def _require_host_for_household_bans(self, space: Space) -> None:
         """A household ban forwarded to a host that predates it would be

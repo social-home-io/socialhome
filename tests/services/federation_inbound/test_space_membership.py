@@ -63,6 +63,7 @@ class _FakeSpaceRepo:
         self.archived = []
         self.instance_removes = []
         self.bans = []
+        self.owner_bans = []
         self.unbans = []
         self.household_bans = []
         self.household_unbans = []
@@ -100,6 +101,7 @@ class _FakeSpaceRepo:
         owner_ban=False,
     ):
         self.bans.append((space_id, user_id, banned_by, reason))
+        self.owner_bans.append(owner_ban)
 
     async def unban_member(self, space_id, user_id):
         self.unbans.append((space_id, user_id))
@@ -1065,6 +1067,16 @@ async def test_an_admin_household_cannot_lift_the_owners_ban(bus, repo):
     assert repo.household_unbans == [("sp-1", "peer-bad")]
     await h._on_unbanned(_ban(banned=False, user_id="u-x", from_instance="self-owner"))
     assert repo.unbans == [("sp-1", "u-x")]
+
+
+async def test_only_the_owner_persons_ban_takes_over_the_banner(repo, handlers):
+    """Final review I1: a ban from the owner household takes over an earlier
+    banner only when it names the OWNER as its banner — an admin of the
+    owner household re-banning stays an admin's ban."""
+    repo.spaces["sp-1"] = _host_space(owner_instance_id="peer-a")
+    await handlers._on_banned(_ban(user_id="u-x", banned_by="u-owner"))
+    await handlers._on_banned(_ban(user_id="u-y", banned_by="u-home-admin"))
+    assert repo.owner_bans == [True, False]
 
 
 async def test_a_household_ban_stores_its_banner(repo, handlers):
