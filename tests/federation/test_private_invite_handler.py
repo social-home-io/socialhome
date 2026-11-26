@@ -676,6 +676,50 @@ async def test_joined_gossip_registers_broadcast_target(handler):
     )
 
 
+@pytest.mark.parametrize("banned", ["person", "household"])
+async def test_joined_gossip_never_seats_a_banned_person_or_household(handler, banned):
+    """P7b — a JOINED from a seed holder that has not heard of a ban yet (or
+    a snapshot entry) does not seat a banned person, nor anyone of a banned
+    household. A LEFT still applies (below)."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-new",
+        "instance_id": "inst-new",
+        "member_version": 3,
+    }
+    if banned == "person":
+        handler.space_repo.is_banned.return_value = True
+    else:
+        handler.space_repo.is_household_banned.return_value = True
+    ev = _event("SPACE_MEMBER_JOINED", payload, from_instance="inst-admin")
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
+    ):
+        await handler.h._on_space_member_joined(ev)
+    handler.remote_members.apply_member_event.assert_not_awaited()
+    handler.space_repo.add_space_instance.assert_not_awaited()
+
+
+async def test_left_gossip_of_a_banned_household_still_applies(handler):
+    handler.space_repo.is_household_banned.return_value = True
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-bye",
+        "instance_id": "inst-bye",
+        "member_version": 4,
+    }
+    ev = _event("SPACE_MEMBER_LEFT", payload, from_instance="inst-admin")
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
+    ):
+        await handler.h._on_space_member_left(ev)
+    handler.remote_members.apply_member_event.assert_awaited_once()
+
+
 async def test_left_gossip_does_not_register_broadcast_target(handler):
     """A LEFT (tombstoned) roster-gossip event still merges the CRDT but must
     NOT add the household to space_instances (matches the not-tombstoned gate

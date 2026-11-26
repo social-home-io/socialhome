@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 #: Roster / moderation events that ride the LOCAL bus (for realtime/UI) but
 #: must NOT federate as ``SPACE_CONFIG_CHANGED``. Their roster effect federates
 #: via authority-signed roster gossip (``SPACE_MEMBER_JOINED`` / ``LEFT``) or
-#: is host-local only (unban clears a host-side ban flag the stubs never held).
+#: rides its own signed ``SPACE_MEMBER_BANNED`` / ``_UNBANNED`` (P7b).
 #: Federating them as config — now that they no longer advance
 #: ``config_sequence`` — would at best be a no-op and at worst perturb a
 #: receiver's ``config_author`` at an equal sequence (a non-deterministic LWW

@@ -655,6 +655,10 @@ def signed_roster_event(
     return event_type, payload
 
 
+#: The longest ban reason kept — the same cap a receiver applies (P7b).
+MAX_BAN_REASON_CHARS = 500
+
+
 def signed_ban_event(
     space_id: str,
     *,
@@ -6413,6 +6417,7 @@ class SpaceService(
         user_id: str,
         reason: str | None = None,
     ) -> None:
+        reason = reason[:MAX_BAN_REASON_CHARS] if reason else None
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         # Owner-offline-spaces epic (Phase 4b): a seed-holding delegated admin
@@ -6568,6 +6573,7 @@ class SpaceService(
         the §24.11 pipeline refuse the household), then the seats end the
         way a removal ends them (:meth:`_end_household_seats`, ONE rotation).
         """
+        reason = reason[:MAX_BAN_REASON_CHARS] if reason else None
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         if (
@@ -6592,10 +6598,13 @@ class SpaceService(
             if self._remote_members is not None
             else []
         )
+        # The row first: from here every seating path refuses the household
+        # (no join or follow slips in while the notices are in flight). The
+        # direct notices are not ban-filtered, so each seat is still told.
+        await self._spaces.ban_household(space_id, instance_id, reason=reason)
         if ending and self._federation is not None:
             for seat in ending:
                 await self._tell_removed_household(space_id, instance_id, seat.user_id)
-        await self._spaces.ban_household(space_id, instance_id, reason=reason)
         actor = await self._users.get(actor_username)
         await self._emit_ban(
             space,
@@ -6626,6 +6635,9 @@ class SpaceService(
         drop ``space_instances``, LEFT gossip, :class:`SpaceRemoteSeatEnded`
         — then ONE rotation (k person bans would rotate k times), retire an
         admin seat's authority on the owner, and last drop the §D2b seat."""
+        assert self._remote_members is not None
+        # Every live seat ends here, so the household is always left with
+        # none (``_end_remote_seats``' answer is always True).
         await self._end_remote_seats(space, instance_id, ending)
         for seat in ending:
             await self._bus.publish(
@@ -6634,10 +6646,14 @@ class SpaceService(
                 )
             )
         await self._rotate_and_distribute_space_key(space.id)
-        if (
-            any(seat.role == SpaceRole.ADMIN for seat in ending)
-            and space.owner_instance_id == self._own_instance_id
+        if space.owner_instance_id == self._own_instance_id and any(
+            seat.role == SpaceRole.ADMIN
+            for seat in await self._remote_members.list_for_instance(
+                space.id, instance_id, include_tombstoned=True
+            )
         ):
+            # An admin seat of the household — ending now, or one that ended
+            # earlier without a rotation — retires its authority here.
             await self._bus.publish(
                 SpaceAdminAuthorityRevoked(space_id=space.id, instance_id=instance_id)
             )
@@ -6758,8 +6774,8 @@ class SpaceService(
             return
         await self._spaces.unban_member(space_id, user_id)
         await self._emit_ban(space, banned=False, user_id=user_id)
-        # Unban clears a host-local ban flag only (the ban list never lived on
-        # member stubs, and unban re-adds no membership). It is a ROSTER /
+        # Unban re-adds no membership; it reaches every member household as
+        # a signed SPACE_MEMBER_UNBANNED (``_emit_ban``, P7b). It is a ROSTER /
         # moderation event, not a config edit — it must NOT advance
         # config_sequence, and it isn't federated as config (see
         # SpaceConfigOutbound._ROSTER_EVENT_TYPES). The local bus event still

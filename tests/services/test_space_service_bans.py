@@ -262,3 +262,49 @@ async def test_a_forwarded_ban_sends_no_ban_event(stack):
         )
         await stack.svc.ban(space.id, actor_username="owner", user_id=U_FAN)
     assert _ban_broadcasts(stack) == []
+
+
+async def test_a_seed_holding_delegated_admin_bans_a_household_locally(stack):
+    """Delegation on + the seed: the admin household runs the ban itself —
+    nothing forwarded, seats ended, one rotation; the authority retirement
+    is the owner's (it hears the LEFT gossip), not ours."""
+    space = await _hosted(stack)
+    await _seat_remote(stack, space.id, U_FAN, SpaceRole.ADMIN)
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='elsewhere' WHERE id=?", (space.id,)
+    )
+    revoked: list = []
+
+    async def _rec(e):
+        revoked.append(e)
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _rec)
+    with (
+        patch.object(
+            SpaceService,
+            "_executes_locally_as_delegated_admin",
+            AsyncMock(return_value=True),
+        ),
+        patch.object(
+            SpaceService, "_rotate_and_distribute_space_key", AsyncMock()
+        ) as rotate,
+    ):
+        await stack.svc.ban_household(
+            space.id, actor_username="owner", instance_id=PEER
+        )
+    rotate.assert_awaited_once_with(space.id)
+    assert await stack.spaces.is_household_banned(space.id, PEER)
+    assert revoked == []
+    assert not any(
+        c.kwargs.get("event_type") == FederationEventType.SPACE_REMOTE_ADMIN_ACTION
+        for c in stack.fed.send_with_mesh_fallback.await_args_list
+    )
+
+
+async def test_a_ban_reason_is_capped(stack):
+    space = await _hosted(stack)
+    await stack.svc.ban_household(
+        space.id, actor_username="owner", instance_id="x-house", reason="r" * 2000
+    )
+    [row] = await stack.spaces.list_household_bans(space.id)
+    assert len(row["reason"]) == 500

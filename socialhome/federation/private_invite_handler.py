@@ -2030,6 +2030,21 @@ class PrivateSpaceInviteHandler:
                     instance_id,
                 )
                 return
+        if not tombstoned and await banned_from_space(
+            self._space_repo, space_id, user_id=user_id, instance_id=instance_id
+        ):
+            # P7b — a seat for a banned person, or anyone of a banned
+            # household, is never taken from gossip or a snapshot: a seed
+            # holder that has not heard of the ban yet must not seat them
+            # here. A removal (LEFT) still applies.
+            log.warning(
+                "roster-gossip %s for %s would seat a banned person or "
+                "household (%s) — refused",
+                event_type,
+                space_id,
+                instance_id,
+            )
+            return
         applied = await self._remote_members.apply_member_event(
             space_id=space_id,
             user_id=user_id,
