@@ -60,6 +60,11 @@ class PeerSpaceCollectionView(BaseView):
                     "member_count": e.member_count,
                     # null = an older host that shares no follower count.
                     "follower_count": e.follower_count,
+                    # A host declares a follower count exactly when the
+                    # space takes followers (``space_listing_counts``), so
+                    # that is what offers Follow here (P9) — the paired
+                    # follow itself needs a v_96 host (else HOST_TOO_OLD).
+                    "allow_subscribers": e.follower_count is not None,
                     "join_mode": e.join_mode,
                     "min_age": e.min_age,
                     "category": normalize_category(e.category),

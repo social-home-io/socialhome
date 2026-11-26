@@ -463,13 +463,15 @@ describe('SpaceListPage — Discover', () => {
     })
     const r = await renderPage('/spaces?discover=global')
     const meta = async (name: string) =>
-      (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
-    expect(await meta('Both counts')).toBe('6 members · 12 followers · open')
-    expect(await meta('One follower')).toBe('1 member · 1 follower · open')
-    expect(await meta('Older host')).toBe('open')
-    // (No Follow and no pairing: the row says how people do get in.)
-    expect(await meta('No followers taken')).toBe('3 members · open · members can invite you with a link')
-    expect(await meta('Nobody follows yet')).toBe('3 members · 0 followers · open')
+      (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')?.textContent ?? ''
+    expect(await meta('Both counts')).toBe('6 members · 12 followers')
+    expect(await meta('One follower')).toBe('1 member · 1 follower')
+    expect(await meta('Older host')).toBe('')
+    // (No Follow and no pairing: the row says how people do get in.) P9: an
+    // unpaired host's "open" is how its members get in, not how you do —
+    // no join-mode word on a row nobody here can join from.
+    expect(await meta('No followers taken')).toBe('3 members · members can invite you with a link')
+    expect(await meta('Nobody follows yet')).toBe('3 members · 0 followers')
     expect(r.container.textContent).not.toContain('0 members')
   })
 
@@ -537,7 +539,7 @@ describe('SpaceListPage — Discover', () => {
     // An unpaired host has no name we know — the row leaves the host out
     // rather than showing its instance id.
     const meta = (await r.findByText('Global art')).closest('li')!.querySelector('.sh-spaces-row__m')!
-    expect(meta.textContent).toBe('90 members · open')
+    expect(meta.textContent).toBe('90 members')
     expect(r.getByRole('button', { name: 'Follow: Global art' })).toBeTruthy()
     r.fireEvent.click(r.getByRole('button', { name: 'Follow: Global art' }))
     await r.waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/spaces/gArt/subscribe', {}))

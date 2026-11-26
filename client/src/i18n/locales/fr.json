@@ -3708,6 +3708,8 @@
   "space.public.request_pending": "Demande en attente",
   "space.public.busy": "Cet espace est saturé pour le moment. Réessayez plus tard.",
   "space.public.following_note": "Le foyer hôte ajoute les abonnés de lui-même. S'il est hors ligne, cela se fera dès son retour.",
+  "space.public.follow_or_join": "Suivez cet espace pour le lire sans le rejoindre. Les membres voient qui le suit.",
+  "space.public.step_up": "Vous suivez cet espace. Rejoignez-le pour participer en tant que membre.",
   "space.public.join": "Rejoindre l'espace",
   "space.public.request_join": "Demander à rejoindre",
   "space.public.hosted_by": "hébergé par {host}",

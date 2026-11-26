@@ -3708,6 +3708,8 @@
   "space.public.request_pending": "Anfrage läuft",
   "space.public.busy": "Dieser Space ist gerade ausgelastet. Versuch es später noch einmal.",
   "space.public.following_note": "Der Gastgeber nimmt Follower selbst auf. Ist er offline, passiert das, sobald er wieder da ist.",
+  "space.public.follow_or_join": "Folge, um mitzulesen, ohne beizutreten. Mitglieder sehen, wer folgt.",
+  "space.public.step_up": "Du folgst diesem Space. Tritt bei, um als Mitglied mitzumachen.",
   "space.public.join": "Space beitreten",
   "space.public.request_join": "Beitritt anfragen",
   "space.public.hosted_by": "bei {host}",

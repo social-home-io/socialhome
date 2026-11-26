@@ -3735,6 +3735,8 @@
   "space.public.request_pending": "Solicitud pendiente",
   "space.public.busy": "Este espacio está saturado ahora mismo. Vuelve a intentarlo más tarde.",
   "space.public.following_note": "El anfitrión añade a los seguidores por sí solo. Si está desconectado, ocurrirá cuando vuelva.",
+  "space.public.follow_or_join": "Sigue este espacio para leerlo sin unirte. Los miembros ven quién lo sigue.",
+  "space.public.step_up": "Sigues este espacio. Únete para participar como miembro.",
   "space.public.join": "Unirme al espacio",
   "space.public.request_join": "Solicitar unirme",
   "space.public.hosted_by": "alojado por {host}",

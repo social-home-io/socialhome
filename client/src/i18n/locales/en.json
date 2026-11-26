@@ -3744,6 +3744,8 @@
   "space.public.request_pending": "Request pending",
   "space.public.busy": "This space is busy right now. Try again later.",
   "space.public.following_note": "Its host adds followers on its own. If it's offline, that happens once it's back.",
+  "space.public.follow_or_join": "Follow to read along without joining. Members see who follows.",
+  "space.public.step_up": "You follow this space. Join to take part as a member.",
   "space.public.join": "Join space",
   "space.public.request_join": "Request to join",
   "space.public.hosted_by": "hosted by {host}",

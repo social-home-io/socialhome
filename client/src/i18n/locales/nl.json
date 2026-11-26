@@ -3708,6 +3708,8 @@
   "space.public.request_pending": "Verzoek in behandeling",
   "space.public.busy": "Deze space is nu te druk. Probeer het later opnieuw.",
   "space.public.following_note": "De gastheer voegt volgers zelf toe. Is die offline, dan gebeurt dat zodra hij terug is.",
+  "space.public.follow_or_join": "Volg om mee te lezen zonder lid te worden. Leden zien wie er volgt.",
+  "space.public.step_up": "Je volgt deze space. Word lid om mee te doen.",
   "space.public.join": "Lid worden",
   "space.public.request_join": "Vragen om lid te worden",
   "space.public.hosted_by": "bij {host}",
