@@ -6626,6 +6626,84 @@ async def test_accept_remote_invite_kicks_mesh_catchup_sync(stack):
     )
 
 
+async def test_accept_remote_invite_waits_for_the_hosts_roster_before_the_accept(
+    stack,
+):
+    """The invitation's roster lacks every household seated since it was
+    built, so what we fan out before the host's snapshot lands must reach
+    the households it adds: the wait starts BEFORE the ACCEPT leaves (the
+    host answers it with the snapshot, which could otherwise win the
+    race)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+
+    host_instance = "h" * 32
+    space_id = "sp-roster-wait"
+    user = await stack.provision_user("zed")
+    await stack.space_repo.save(
+        Space(
+            id=space_id,
+            name="Remote Family",
+            owner_instance_id=host_instance,
+            owner_username="remote-owner",
+            identity_public_key="ab" * 32,
+            config_sequence=1,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    await stack.space_repo.save_remote_invitation(
+        space_id,
+        invited_by="remote-owner",
+        remote_instance_id=host_instance,
+        remote_user_id=user.user_id,
+        invite_token="tok-roster-wait",
+    )
+    order: list[str] = []
+    fed = MagicMock()
+    fed._own_instance_id = stack.iid
+    fed.expect_space_roster = MagicMock(
+        side_effect=lambda sid: order.append(f"expect:{sid}")
+    )
+
+    async def _send(**kw):
+        order.append(f"send:{kw['event_type'].value}")
+        return MagicMock(ok=True, error=None)
+
+    fed.send_with_mesh_fallback = AsyncMock(side_effect=_send)
+    fed.begin_mesh_catchup_sync = AsyncMock()
+    fed.own_identity_pk = b"\x01" * 32
+    stack.space_svc._federation = fed
+    stack.space_svc._federation_repo = MagicMock()
+    stack.space_svc._federation_repo.get_instance = AsyncMock(return_value=None)
+
+    await stack.space_svc.accept_remote_invite(
+        token="tok-roster-wait", user_id=user.user_id
+    )
+
+    assert order == [f"expect:{space_id}", "send:space_private_invite_accept"]
+    fed.cancel_space_roster_wait.assert_not_called()
+
+    # An ACCEPT the host can never see seats nobody: no roster is coming.
+    await stack.space_repo.save_remote_invitation(
+        space_id,
+        invited_by="remote-owner",
+        remote_instance_id=host_instance,
+        remote_user_id=user.user_id,
+        invite_token="tok-roster-wait-2",
+    )
+    fed.send_with_mesh_fallback = AsyncMock(
+        return_value=MagicMock(ok=False, error="not_confirmed")
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.accept_remote_invite(
+            token="tok-roster-wait-2", user_id=user.user_id
+        )
+    fed.cancel_space_roster_wait.assert_called_once_with(space_id)
+
+
 # ── GFS-discovered space on-ramp (mirror → subscribe) ─────────────────────
 
 

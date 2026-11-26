@@ -197,6 +197,7 @@ from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
 from .pending_pairing import PendingPairings
+from .pending_roster_fanout import PendingFanout, PendingRosterFanout
 from .pq_signer import PqSigner
 from .relay_event_body import (
     EVENT_BODY_SUITE_FIELD,
@@ -500,10 +501,12 @@ class FederationService:
         "_own_pq_seed",
         "_pairing",
         "_pending_pairings",
+        "_pending_roster_fanout",
         "_pending_seat_buffer",
         "_presence_service",
         "_relay_accepted_at",
         "_replay_cache",
+        "_roster_replays",
         "_route_service",
         "_routed_handler",
         "_rtc_inbound_pipeline",
@@ -658,6 +661,12 @@ class FederationService:
         #: unreferenced task can be GC'd mid-flight); it removes both entries
         #: when its queue is empty. :meth:`stop` cancels the rest.
         self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
+        #: Fan-outs to a space this household just joined, made before the
+        #: host's roster reached it (:meth:`expect_space_roster`).
+        self._pending_roster_fanout = PendingRosterFanout()
+        #: ``space_id`` → the task resending those once the roster landed
+        #: (:meth:`space_roster_landed`); :meth:`stop` ends the rest.
+        self._roster_replays: dict[str, asyncio.Task[None]] = {}
         #: See :meth:`attach_mesh_claim_answer`.
         self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
         #: Answers on their way (:meth:`_spawn_mesh_claim_answer`).
@@ -4059,6 +4068,88 @@ class FederationService:
             results=tuple(results),
         )
 
+    def expect_space_roster(self, space_id: str) -> None:
+        """This household is accepting an invitation to ``space_id``: its
+        roster is the invitation's, which lacks every household seated
+        since. Until the host's roster snapshot lands
+        (:meth:`space_roster_landed`), each fan-out to the space is
+        remembered so it can reach the households that snapshot adds
+        (:mod:`~socialhome.federation.pending_roster_fanout`)."""
+        self._pending_roster_fanout.expect(space_id)
+
+    def cancel_space_roster_wait(self, space_id: str) -> None:
+        """The join of ``space_id`` did not happen (the accept failed):
+        stop waiting for its roster and forget what was kept."""
+        self._pending_roster_fanout.end(space_id)
+
+    def space_roster_landed(self, space_id: str) -> None:
+        """The host's whole, verified roster snapshot for ``space_id`` was
+        applied. Each fan-out made while we waited for it goes once more to
+        the member households it added, in a tracked task (never holding up
+        the inbound snapshot). No-op when the space was not waiting."""
+        if (
+            self._stopping
+            or space_id in self._roster_replays
+            or not self._pending_roster_fanout.waiting(space_id)
+        ):
+            return
+        task = asyncio.create_task(
+            self._resend_after_roster(space_id), name="roster-resend"
+        )
+        self._roster_replays[space_id] = task
+        task.add_done_callback(lambda _t: self._roster_replays.pop(space_id, None))
+
+    async def drain_roster_replays(self) -> None:
+        """Wait until every resend started so far is done (tests)."""
+        await wait_tasks_done(lambda: set(self._roster_replays.values()))
+
+    async def _resend_after_roster(self, space_id: str) -> None:
+        """Resend, through :meth:`broadcast_to_space_members` (every gate
+        applies again), each fan-out kept while ``space_id`` waited for its
+        roster, to the member households now listed that it was not
+        planned for — and to no one else. The wait lasts until nothing is
+        left, so a fan-out made meanwhile is kept too (and, the roster being
+        whole now, reaches everyone already); a live broadcast to the space
+        waits for this task, so nothing overtakes an item resent here.
+        Never raises."""
+        pending = self._pending_roster_fanout
+        try:
+            while fanouts := pending.take(space_id):
+                members = set(
+                    await self._federation_repo.list_member_instance_ids(space_id)
+                )
+                members.discard(self._own_instance_id)
+                for fanout in fanouts:
+                    missed = members - fanout.reached
+                    if not missed:
+                        continue
+                    log.info(
+                        "space %s: %s sent before our roster arrived — now to "
+                        "%d member household(s) it added",
+                        space_id,
+                        fanout.event_type.value,
+                        len(missed),
+                    )
+                    await self.broadcast_to_space_members(
+                        space_id,
+                        fanout.event_type,
+                        fanout.payload,
+                        min_proto_version=fanout.min_proto_version,
+                        legacy_payload=fanout.legacy_payload,
+                        legacy_below=fanout.legacy_below,
+                        per_peer=fanout.per_peer,
+                        only_instances=missed,
+                    )
+        except Exception:
+            log.warning(
+                "space %s: resending what we sent before our roster arrived "
+                "failed — the members' catch-up brings it",
+                space_id,
+                exc_info=True,
+            )
+        finally:
+            pending.end(space_id)
+
     async def broadcast_to_space_members(
         self,
         space_id: str,
@@ -4126,6 +4217,38 @@ class FederationService:
         instance_ids = await self._federation_repo.list_member_instance_ids(
             space_id,
         )
+        replay = self._roster_replays.get(space_id)
+        if replay is not None and replay is not asyncio.current_task():
+            # Items made before our roster arrived are being resent to the
+            # households it added: never overtake them (a delete before its
+            # post). Then read the roster again — it is whole now.
+            await asyncio.wait({replay})
+            instance_ids = await self._federation_repo.list_member_instance_ids(
+                space_id
+            )
+        if only_instances is None and self._pending_roster_fanout.waiting(space_id):
+            # We just joined and our roster may lack households seated since
+            # our invitation: keep this fan-out for them
+            # (:meth:`space_roster_landed`). A narrowed one is not kept —
+            # see ``pending_roster_fanout``.
+            self._pending_roster_fanout.record(
+                space_id,
+                PendingFanout(
+                    event_type=event_type,
+                    payload=payload,
+                    reached=frozenset(instance_ids),
+                    min_proto_version=min_proto_version,
+                    legacy_payload=legacy_payload,
+                    legacy_below=legacy_below,
+                    per_peer=per_peer,
+                ),
+                size=_deferred_payload_size(payload)
+                + (
+                    _deferred_payload_size(legacy_payload)
+                    if legacy_payload is not None
+                    else 0
+                ),
+            )
         results: list[DeliveryResult] = []
         #: ``(instance_id, final payload)`` per target, in member order.
         planned: list[tuple[str, dict]] = []
@@ -4915,6 +5038,7 @@ class FederationService:
             for t in (
                 *self._deferred_mesh_tasks.values(),
                 *self._mesh_claim_answer_tasks,
+                *self._roster_replays.values(),
             )
             if not t.done()
         ]

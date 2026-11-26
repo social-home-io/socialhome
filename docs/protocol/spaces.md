@@ -616,6 +616,27 @@ member household, not only on the host:
   (the ACK's roster is taken at seat time, and the redeemer has no space row
   yet). The host signs a snapshot's entries, and the receiver verifies
   them, in a worker thread, off the event loop.
+- **What a joiner sends before its roster arrives.** A household that
+  accepts an invitation fans its writes out over the invitation's roster
+  until the seat-time snapshot lands — with several invitations sent at
+  once, that is the host alone. From the accept until the host's whole,
+  fully verified snapshot is applied (the bar the roster-version echo
+  uses; at most 5 minutes), the joiner remembers each
+  `broadcast_to_space_members` call with the households it was planned for
+  (in memory: 16 spaces, 64 calls and 8 MiB at most); then, in a
+  background task, each call goes once more, through the same gates, to
+  exactly the member households the snapshot added
+  (`federation/pending_roster_fanout.py`). A live broadcast to the space
+  waits for that task, so a delete never overtakes its post. All or
+  nothing: when a bound refuses a call, the space's wait is dropped (a post
+  kept without its later delete would bring it back). A call narrowed with
+  `only_instances` (space chat, zones, live location) is not kept — its
+  audience came from the same stale roster — and, like pictures and files
+  (the receiver asks with `SPACE_MEDIA_WANTED`), reaches the added
+  households through their catch-up. No wire change: the cost is what a
+  complete roster would have sent (≤ 64 items × added households, once per
+  join), and before this a newcomer's first post reached the other members
+  only at their next §25.6 catch-up — up to the 30-minute tick.
 - **Repair on a digest mismatch, in reply to an admitted BEGIN.** The host
   never sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
   member household (this version) sends to the space's host — direct, the

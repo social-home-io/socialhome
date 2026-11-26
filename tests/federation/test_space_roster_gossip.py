@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from socialhome.crypto import generate_space_keypair
 from socialhome.domain.events import SpaceAdminAuthorityRevoked
@@ -580,6 +580,33 @@ async def test_a_fully_applied_host_snapshot_is_noted_for_the_echo(tmp_dir):
         )
     )
     assert noted.applied == [(SPACE_ID, OWNER, 9)]
+    await db.shutdown()
+
+
+async def test_only_the_hosts_whole_verified_snapshot_ends_the_roster_wait(tmp_dir):
+    """A just-joined household's fan-outs made before its roster came go to
+    the households the host's snapshot adds — so the handler tells the
+    federation service, once the entries are merged, only for a snapshot
+    that is the host's, whole and fully verified (the same bar as the
+    roster-version echo): a forged entry, another household's snapshot or
+    a missing version must not end the wait early."""
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    landed: list[str] = []
+    h._federation = SimpleNamespace(space_roster_landed=landed.append)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    good = _entry(j, _signed_payload(j, seed=seed, member_version=4))
+    forged = _entry(
+        j, _signed_payload(j, seed=b"\x01" * 32, member_version=3, user_id="u-f")
+    )
+    await h._on_space_roster_snapshot(_snapshot([good]))
+    await h._on_space_roster_snapshot(_versioned_snapshot([good, forged], version=9))
+    await h._on_space_roster_snapshot(
+        _versioned_snapshot([good], version=9, from_instance="p-other")
+    )
+    assert landed == []
+    await h._on_space_roster_snapshot(_versioned_snapshot([good], version=9))
+    assert landed == [SPACE_ID]
+    assert await remote.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER) is not None
     await db.shutdown()
 
 
@@ -1377,6 +1404,7 @@ class _Outbox:
     def __init__(self, *, fail: bool = False) -> None:
         self.sent: list[tuple[str, object, dict, str | None]] = []
         self.broadcast_to_space_members = AsyncMock()
+        self.space_roster_landed = MagicMock()
         self.fail = fail
 
     async def send_with_mesh_fallback(

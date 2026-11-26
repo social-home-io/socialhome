@@ -2294,6 +2294,11 @@ class PrivateSpaceInviteHandler:
             await self._end_unnamed_host_seats(
                 space, named, roster_version=roster_version
             )
+        if self._federation is not None:
+            # Just joined? What we fanned out before the host's whole,
+            # verified roster came now reaches the member households it adds
+            # (``pending_roster_fanout``).
+            self._federation.space_roster_landed(space_id)
         if self._space_service is not None:
             self._space_service.note_roster_snapshot_applied(
                 space_id, event.from_instance, roster_version

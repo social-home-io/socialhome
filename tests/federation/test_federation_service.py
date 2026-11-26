@@ -79,6 +79,7 @@ from socialhome.federation.media_https_backoff import (
     MediaHttpsBackoff,
     MediaPostResult,
 )
+from socialhome.federation.pending_roster_fanout import PendingRosterFanout
 from socialhome.federation.routed_envelope import SpaceRoutedHandler
 from socialhome.federation.transport import (
     FederationTransport,
@@ -7225,3 +7226,132 @@ async def test_peer_moment_look_high_keeps_the_farthest_look_since_our_start():
     svc.note_unpaired("peer-a")
     assert svc.peer_moment_look_high("peer-a") is None
     assert svc.peer_moment_look_hops("peer-a") is None
+
+
+# ─── Fan-outs made before a just-joined household's roster landed ──────────
+
+
+def _roster_wait_service():
+    """A member household seated from a stale invitation roster: it knows
+    only the host ``inst-b`` of ``sp-join``; ``a`` and ``c`` joined meanwhile."""
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.add_space_member("sp-join", "inst-b")
+    svc, _ = _make_service(federation_repo=fed_repo)
+    sent: list[tuple[str, str, dict]] = []
+
+    async def _send(self, *, to_instance_id, event_type, payload, space_id=None, **_):
+        sent.append((to_instance_id, event_type.value, payload))
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    return svc, fed_repo, sent, _send
+
+
+async def _post(svc, post_id: str, **kw) -> None:
+    await svc.broadcast_to_space_members(
+        "sp-join", FederationEventType.SPACE_POST_CREATED, {"id": post_id}, **kw
+    )
+
+
+async def _land(svc) -> None:
+    svc.space_roster_landed("sp-join")
+    await svc.drain_roster_replays()
+
+
+@pytest.mark.asyncio
+async def test_a_post_made_before_the_roster_landed_reaches_the_members_it_adds():
+    """Regression (demo ``space-report``): d accepted, posted ~100 ms later,
+    and its fan-out reached only the host — a and c held the post only
+    after their own catch-up. Once the host's roster lands, the post goes to
+    exactly the households the roster added, once."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+        assert [t for t, _, _ in sent] == ["inst-b"]
+        fed_repo.add_space_member("sp-join", "inst-a")
+        fed_repo.add_space_member("sp-join", "inst-c")
+        await _land(svc)
+        assert sorted(t for t, _, _ in sent[1:]) == ["inst-a", "inst-c"]
+        assert all(e == "space_post_created" and p == {"id": "p1"} for _, e, p in sent)
+        # The wait is over: a later roster sends nothing again, and a new
+        # post goes the normal way, to everyone, once.
+        await _land(svc)
+        assert len(sent) == 3
+        await _post(svc, "p2")
+    assert sorted(t for t, _, p in sent if p == {"id": "p2"}) == [
+        "inst-a",
+        "inst-b",
+        "inst-c",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_fanout_is_not_kept_for_the_roster():
+    """``only_instances`` (the space chat: writer seats only) was chosen
+    from the same stale roster, so the added households are outside it —
+    such a fan-out is not kept and takes no slot."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1", only_instances={"inst-b"})
+        fed_repo.add_space_member("sp-join", "inst-a")
+        await _land(svc)
+    assert [t for t, _, _ in sent] == ["inst-b"]
+
+
+@pytest.mark.asyncio
+async def test_a_space_not_waiting_on_its_roster_keeps_nothing():
+    """A household that did not just join remembers no fan-out (a roster
+    repair later sends nothing again), nor one whose accept failed."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    svc.cancel_space_roster_wait("sp-join")
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        await _land(svc)
+    assert [t for t, _, _ in sent] == ["inst-b"]
+
+
+@pytest.mark.asyncio
+async def test_a_live_broadcast_never_overtakes_an_item_being_resent():
+    """A delete made while the post is resent to the added households must
+    reach them after the post, not before."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    gate = asyncio.Event()
+
+    async def _slow_send(self, *, to_instance_id, event_type, payload, **kw):
+        if to_instance_id == "inst-a" and payload == {"id": "p1"}:
+            await gate.wait()
+        return await _send(
+            self, to_instance_id=to_instance_id, event_type=event_type, payload=payload
+        )
+
+    with patch.object(FederationService, "send_with_mesh_fallback", _slow_send):
+        await _post(svc, "p1")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        svc.space_roster_landed("sp-join")
+        await asyncio.sleep(0)
+        delete = asyncio.create_task(_post(svc, "p1-deleted"))
+        await asyncio.sleep(0)
+        gate.set()
+        await delete
+        await svc.drain_roster_replays()
+    to_a = [p["id"] for t, _, p in sent if t == "inst-a"]
+    assert to_a == ["p1", "p1-deleted"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_fanout_drops_the_whole_wait():
+    """All or nothing: a post kept without its later delete would bring the
+    deleted post back — so a bound reached ends the space's wait."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc._pending_roster_fanout = PendingRosterFanout(max_per_space=1)
+    svc.expect_space_roster("sp-join")
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+        await _post(svc, "p1-deleted")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        await _land(svc)
+    assert [t for t, _, _ in sent] == ["inst-b", "inst-b"]
