@@ -50,7 +50,7 @@ import functools
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -135,17 +135,6 @@ log = logging.getLogger(__name__)
 #: oldest dropped first. A reader needs a handful: the items that beat one
 #: rekey to this household.
 RELAY_KEY_WAIT_MAX_FRAMES: int = 64
-
-
-@dataclass(slots=True, frozen=True)
-class _ChannelItem:
-    """One channel item as :meth:`SpacePublicInbound._on_space_item` reads
-    it: the space its channel maps to here, the content epoch and the
-    ciphertext. Service-local DTO."""
-
-    space_id: str
-    epoch: int
-    payload: str
 
 
 class SpacePublicInbound:
@@ -507,16 +496,14 @@ class SpacePublicInbound:
         :class:`SpaceItemInbound`."""
         # Built by :meth:`handle_channel_item` from a parsed channel frame
         # (``ChannelItemFrame``) and the space its channel id maps to here.
-        item = _ChannelItem(
-            space_id=str(frame["space_id"]),
-            epoch=int(frame["epoch"]),
-            payload=str(frame["payload"]),
-        )
-        space = await self._spaces.get(item.space_id)
+        space_id = str(frame["space_id"])
+        epoch = int(frame["epoch"])
+        payload = str(frame["payload"])
+        space = await self._spaces.get(space_id)
         if space is None or not space.identity_public_key:
             log.info(
                 "space_public.inbound: space_item for unknown space %s — dropped",
-                item.space_id,
+                space_id,
             )
             return
         if archive_refusal(space, "") is not None:
@@ -524,25 +511,25 @@ class SpacePublicInbound:
         if self._writer_certs is None:
             return
         try:
-            pt = await self._crypto.decrypt(item.space_id, item.epoch, item.payload)
+            pt = await self._crypto.decrypt(space_id, epoch, payload)
         except MissingEpochKey:
             log.info(
                 "space_public.inbound: no key for space %s epoch %s yet — "
                 "holding the space_item",
-                item.space_id,
-                item.epoch,
+                space_id,
+                epoch,
             )
             await self._await_key(
-                item.space_id,
-                item.epoch,
+                space_id,
+                epoch,
                 functools.partial(self._on_space_item, frame),
             )
             return
         except (RuntimeError, ValueError, InvalidTag) as exc:
             log.info(
                 "space_public.inbound: cannot decrypt space_item for %s epoch %s: %s",
-                item.space_id,
-                item.epoch,
+                space_id,
+                epoch,
                 exc,
             )
             return
@@ -552,7 +539,7 @@ class SpacePublicInbound:
             # inner carries the space authority signature (the frame has
             # none). Verified against the pin, then the host-relay checks.
             await self._on_channel_authority(
-                space, epoch=item.epoch, opened=opened, frame=frame
+                space, epoch=epoch, opened=opened, frame=frame
             )
             return
         try:
@@ -561,20 +548,20 @@ class SpacePublicInbound:
             log.warning(
                 "space_public.inbound: undecodable space_item for space %s "
                 "(%s) — dropped",
-                item.space_id,
+                space_id,
                 exc,
             )
             return
         if parsed is None:
             log.warning(
                 "space_public.inbound: unsupported space_item for space %s — dropped",
-                item.space_id,
+                space_id,
             )
             return
         item_type, inner = parsed
         verified = await self._verified_item(
             space,
-            epoch=item.epoch,
+            epoch=epoch,
             item_type=item_type,
             inner=inner,
         )
@@ -582,7 +569,7 @@ class SpacePublicInbound:
             return
         _cert, item_id, author_user_id, origin_instance_id = verified
         post_shaped = item_type in POST_SHAPED_ITEM_TYPES
-        member_household = await self._holds_writer_seat(item.space_id)
+        member_household = await self._holds_writer_seat(space_id)
         if not post_shaped:
             try:
                 await self._items.apply(
@@ -592,15 +579,15 @@ class SpacePublicInbound:
                     origin_instance_id=origin_instance_id,
                     member_household=member_household,
                     authorship=self._authorship,
-                    epoch=item.epoch,
+                    epoch=epoch,
                 )
             except AwaitingParent as wait:
                 # Re-run the whole frame when the parent lands: decrypt,
                 # writer cert, epoch, author signature and roster again.
                 self._hold_for_parent(
                     wait,
-                    space_id=item.space_id,
-                    token=_digest("item", item.payload),
+                    space_id=space_id,
+                    token=_digest("item", payload),
                     sender=origin_instance_id,
                     size=_retained_bytes(frame),
                     replay=functools.partial(self._on_space_item, frame),
@@ -615,7 +602,7 @@ class SpacePublicInbound:
             and member_household
             and not await self._authorship.item_access_admits(
                 origin_instance_id=origin_instance_id,
-                space_id=item.space_id,
+                space_id=space_id,
                 feature="posts",
                 author_user_id=author_user_id,
             )
@@ -628,11 +615,11 @@ class SpacePublicInbound:
             return
         if item_type == ITEM_TYPE_POST_EDIT:
             await self._apply_post_edit(
-                item.space_id, item_id, author_user_id, origin_instance_id, inner
+                space_id, item_id, author_user_id, origin_instance_id, inner
             )
             return
         await self._persist(
-            item.space_id, item_id, author_user_id, origin_instance_id, inner
+            space_id, item_id, author_user_id, origin_instance_id, inner
         )
 
     async def _on_channel_authority(

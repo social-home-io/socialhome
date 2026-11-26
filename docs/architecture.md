@@ -1344,7 +1344,7 @@ that rode the same hint went with the space-keyed relay in v_96.)
 **Cross-node broadcast fan-out.** A channel item (before v_96 also a
 broadcast `POST /gfs/publish` and a space-keyed member publish) reached only
 the sockets of the node that took the request — on four nodes behind a round-robin balancer about three followers in
-four missed every post (`NODE_RELAY` never had a production caller). Now the
+four missed every post (the old `NODE_RELAY` frame never had a production caller; removed in P9). Now the
 accepting node pushes to its own sockets and hands the item to
 `ClusterRelayFanOut.forward` (`global_server/cluster_relay.py`); it rides the
 next `NODE_DRAIN_HINT` as `relays:[…]`, ONE copy per peer node however many

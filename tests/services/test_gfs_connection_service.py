@@ -1838,7 +1838,7 @@ async def test_unpublish_space_raises_without_signing_key(env):
     assert len(await repo.list_publications_for_space("sp-un2")) == 1
 
 
-# ─── The signed capability block (anonymous_publish) ──────────────────────
+# ─── The signed capability block (envelope_relay) ──────────────────────
 
 
 class _RecordingSession:
@@ -1855,8 +1855,8 @@ class _RecordingSession:
         self.gets: list[str] = []
 
     def get(self, url, **_kw):
-        # ``/gfs/info`` with no ``anonymous_publish`` — i.e. a GFS predating
-        # the anonymous relay, so a test pins ``_anon_publish`` itself.
+        # ``/gfs/info`` with no signed capability block — a GFS predating
+        # the signed capabilities.
         self.gets.append(url)
         return _StubResp(200, {"server_name": "Legacy GFS"})
 
@@ -1866,7 +1866,7 @@ class _RecordingSession:
 
 
 async def _probe(svc) -> bool:
-    """Whether any active connection proves ``anonymous_publish`` under a
+    """Whether any active connection proves ``envelope_relay`` under a
     valid signed capability block — the capability machinery the household's
     anonymous channel requests ride (the space-keyed publish that once
     carried these checks is gone, v_96)."""
@@ -1946,7 +1946,7 @@ def _signed_info(
 
     The capability map travels with a signature made by the GFS identity key
     the household pinned at pair time — that signature is the ONLY thing the
-    household may act on. The top-level ``anonymous_publish`` mirror stays for
+    household may act on. The top-level ``envelope_relay`` mirror stays for
     readability and is deliberately ignored by the client.
     """
     caps = {"envelope_relay": True} if capabilities is None else capabilities
@@ -1955,7 +1955,7 @@ def _signed_info(
     )
     return {
         "server_name": server_name,
-        "anonymous_publish": bool(caps.get("anonymous_publish")),
+        "envelope_relay": bool(caps.get("envelope_relay")),
         "capabilities": caps,
         "capabilities_sig": sig,
         "capabilities_sig_suite": suite,
@@ -2051,7 +2051,7 @@ def _warnings(caplog) -> list[str]:
 
 async def test_stripped_capability_block_is_not_trusted(env, caplog):
     """THE downgrade attack: an on-path attacker strips the signed block from
-    ``/gfs/info`` while leaving the bare ``anonymous_publish: true`` flag. The
+    ``/gfs/info`` while leaving the bare ``envelope_relay: true`` flag. The
     household must NOT act on the unauthenticated flag; only the signature
     decides. Stripping now buys the attacker a denied relay, never an
     identified body."""
@@ -2114,8 +2114,8 @@ async def test_unknown_capability_suite_is_unverifiable_not_fatal(env, caplog):
 
 
 async def test_signed_block_denying_the_capability_is_not_tamper_flagged(env, caplog):
-    """A VALIDLY signed ``anonymous_publish: false`` is a GFS honestly saying
-    it can't do the anonymous relay. No publish, yes — but no tampering /
+    """A VALIDLY signed ``envelope_relay: false`` is a GFS honestly saying
+    it can't do the envelope relay. No relay, yes — but no tampering /
     missing-block warning, or the honest answer would look like an attack."""
     session = _AnonSession(info=_signed_info(capabilities={"envelope_relay": False}))
     svc, _kp = await _publish_event_svc(env, session, space_id="sp-no", gfs_ids=["g1"])
@@ -2374,10 +2374,8 @@ async def test_heal_space_pins_noops_without_publish_context(env):
 #
 # These boot an actual ``create_gfs_app`` behind an aiohttp ``TestServer``
 # plus a recording "subscriber inbox" server, and drive the real household
-# service against them: a current household + current GFS relay an
-# identity-free frame, and the LEGACY body this same sender still emits for a
-# GFS that never advertised ``anonymous_publish`` is accepted by the new GFS
-# too — so the fallback can never strand a household.
+# service against them, so the household and GFS halves of the signed
+# capability block and the push socket are checked against each other.
 
 _E2E_OWN_INSTANCE = "alpha.home"
 _E2E_SUB_INSTANCE = "sub.home"
@@ -2420,10 +2418,10 @@ async def real_gfs(tmp_path):
         yield tc
 
 
-async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
+async def test_e2e_pair_learns_envelope_relay_from_a_real_signed_block(
     tmp_dir, real_gfs
 ):
-    """Pairing against a REAL GFS learns ``anonymous_publish`` through the
+    """Pairing against a REAL GFS learns ``envelope_relay`` through the
     signed capability block, verified against the key pinned in that same
     response — and a later ``/gfs/info`` refresh keeps it.
 
@@ -2468,7 +2466,7 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
 
 async def test_envelope_relay_supported_reads_the_signed_block(env):
     """Only the SIGNED capability block grants the relay — the same rule
-    ``anonymous_publish`` follows, for the same reason."""
+    ``envelope_relay`` follows, for the same reason."""
     _db, repo = env
     conn = _make_conn("er-1", public_key=_GFS_KP.public_key.hex())
     await repo.save(conn)

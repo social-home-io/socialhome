@@ -13,10 +13,7 @@ from ..cluster import (
     NODE_DRAIN_HINT,
     NODE_HEARTBEAT,
     NODE_HELLO,
-    NODE_PARTITION_CATCHUP,
-    NODE_PARTITION_GAP,
     NODE_POLICY_PUSH,
-    NODE_RELAY,
     NODE_SYNC_CLIENT,
     NODE_SYNC_REPORT,
     NODE_SYNC_SPACE,
@@ -290,20 +287,6 @@ class ClusterSyncView(GfsBaseView):
             await svc.apply_sync_report(payload.get("report") or {})
         elif msg_type == NODE_POLICY_PUSH:
             await svc.apply_policy_push(payload)
-        elif msg_type == NODE_RELAY:
-            await svc.apply_relay(
-                str(payload.get("space_id") or ""),
-                payload.get("envelope") or {},
-            )
-        elif msg_type == NODE_PARTITION_CATCHUP:
-            session = self.request.app.get(K.gfs_http_session_key)
-            await svc.apply_partition_catchup(
-                from_node,
-                payload.get("last_relay_ts") or {},
-                session=session,
-            )
-        elif msg_type == NODE_PARTITION_GAP:
-            await svc.apply_partition_gap(payload)
         elif msg_type == NODE_DRAIN_HINT:
             await svc.apply_drain_hint(payload.get("instances"))
             if "relays" in payload:

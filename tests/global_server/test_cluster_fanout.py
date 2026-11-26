@@ -5,8 +5,8 @@ exchanges NODE_* messages over real HTTP so the full sign-verify-dispatch
 pipeline runs — including ``_broadcast``, ``_post_to_peer``,
 ``_ping_peer``, and the wire helpers.
 
-Also exercises the cheap-to-cover pure-Python paths (``apply_relay``
-dedup, ``_gc_seen``, disabled fan-out no-ops).
+Also exercises the cheap-to-cover pure-Python paths (disabled fan-out
+no-ops, last-write-wins state sync).
 """
 
 from __future__ import annotations
@@ -252,16 +252,6 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
             == "9"
         )
 
-        # Relay fan-out — fire-and-forget; we just need it to NOT raise.
-        await cluster_a.relay_to_peers(
-            "sp-xx",
-            {
-                "msg_id": "m1",
-                "event_type": "POST_PUBLISH",
-            },
-        )
-        await asyncio.sleep(0.1)
-
         # _ping_peer via ping_peer() — exercises /cluster/health GET.
         assert await cluster_a.ping_peer(url_b) is True
         assert await cluster_a.ping_peer("http://127.0.0.1:1") is False
@@ -297,8 +287,7 @@ async def test_admin_approval_converges_in_either_order(tmp_path_factory, first)
 async def test_post_to_peer_raises_on_non_2xx(
     tmp_dir, tmp_path_factory, fast_sync_retry
 ):
-    """``_broadcast`` retries once on error then logs + drops (ignore_errors
-    path via ``relay_to_peers`` + NODE_RELAY to an offline peer)."""
+    """``_broadcast`` retries once on error then logs + drops."""
     dir_a = tmp_path_factory.mktemp("gfs-solo")
     a = await _start_node(dir_a, "A")
     try:
@@ -316,11 +305,8 @@ async def test_post_to_peer_raises_on_non_2xx(
                 status="online",
             )
         )
-        # Fire-and-forget relay should swallow the connection error.
-        await cluster_a.relay_to_peers("sp", {"msg_id": "m2"})
-        await asyncio.sleep(0.1)
-        # And a non-ignore_errors path (sync_client) should still return;
-        # both primary + retry fail but the loop catches.
+        # sync_client should still return: both primary + retry fail but
+        # the loop catches.
         await cluster_a.sync_client(
             ClientInstance(
                 instance_id="x",
@@ -521,22 +507,6 @@ async def test_cluster_disabled_noops(disabled_app):
         )
     )
     await svc.sync_policy({"auto_accept_clients": "1"})
-    await svc.relay_to_peers("sp", {})
-
-
-async def test_apply_relay_dedups_and_gc(started_app):
-    """``apply_relay`` dedups on msg_id and ``_gc_seen`` prunes old entries."""
-    svc: ClusterService = started_app[gfs_cluster_key]
-    # Seed an old entry so the next _gc_seen drops it.
-    svc._seen_relays["old"] = time.monotonic() - 10_000
-    # Fresh msg_id takes the "record + gc" path (no dedup hit).
-    await svc.apply_relay("sp", {"msg_id": "abc", "event_type": "X"})
-    assert "abc" in svc._seen_relays
-    assert "old" not in svc._seen_relays
-    # Second call with the same msg_id hits the dedup fast-return.
-    await svc.apply_relay("sp", {"msg_id": "abc", "event_type": "X"})
-    # Empty-msg_id path is a silent no-op.
-    await svc.apply_relay("sp", {"event_type": "X"})
 
 
 async def test_apply_sync_client_banned_wins_lww(started_app):
