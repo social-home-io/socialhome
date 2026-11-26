@@ -1513,6 +1513,9 @@ class HostTooOldError(Exception):
       forwarded to the host, which must apply ``set_member_role`` (v_47).
     * ``"invite_link"`` — an invite link minted on a member household is
       forwarded to the host, which must mint it and answer (v_52).
+    * ``"ban"`` — a household ban (or its unban) made on a member
+      household is forwarded to the host, which must know household bans
+      (P7b, the follower-seats version).
     * ``"follow"`` — a follow is a join request for the read-only role,
       which the host must approve on its own (v_96).
     """
