@@ -1344,7 +1344,7 @@ that rode the same hint went with the space-keyed relay in v_96.)
 **Cross-node broadcast fan-out.** A channel item (before v_96 also a
 broadcast `POST /gfs/publish` and a space-keyed member publish) reached only
 the sockets of the node that took the request — on four nodes behind a round-robin balancer about three followers in
-four missed every post (`NODE_RELAY` never had a production caller). Now the
+four missed every post (the old `NODE_RELAY` frame never had a production caller; removed in P9). Now the
 accepting node pushes to its own sockets and hands the item to
 `ClusterRelayFanOut.forward` (`global_server/cluster_relay.py`); it rides the
 next `NODE_DRAIN_HINT` as `relays:[…]`, ONE copy per peer node however many
@@ -1734,7 +1734,7 @@ sequenceDiagram
     participant W as Linked site
     participant M as Member household
     C->>A: POST /api/link-preview {url}
-    A->>W: guarded GET (HTML ≤ 512 KiB, og:image ≤ 2 MiB)
+    A->>W: guarded GET (HTML up to </head>, ≤ 2 MiB; og:image ≤ 2 MiB)
     W-->>A: page + image
     A-->>C: {preview} (cached ~15 min)
     C->>A: POST /api/spaces/{id}/posts {content, no_link_preview?}
@@ -1779,7 +1779,9 @@ user typed"):
 - one 5 s deadline for the whole fetch (DNS included), 3 s connect and
   per-read timeouts, bodies read in chunks and never past the cap
   (`LinkPreviewService` shares one 5 s budget between the page and its
-  image, so a post create waits at most that long on the network);
+  image, so a post create waits at most that long on the network; a page
+  is read only up to its `</head>` — `stop_after` — and never past 2 MiB,
+  room for heads like YouTube's ~866 KB);
 - the host that is vetted is the one aiohttp connects to (`yarl`'s
   IDNA/UTS46 `raw_host`), and a host aiohttp would treat as an IP literal
   must parse as one — Unicode digit look-alikes cannot turn a "name" into

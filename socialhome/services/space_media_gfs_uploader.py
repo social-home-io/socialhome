@@ -277,12 +277,16 @@ class SpaceMediaGfsUploader:
         channel uploads under the channel scope."""
         self._channels = channels
 
-    async def can_upload(self, space_id: str) -> bool:
+    async def can_upload(
+        self, space_id: str, *, scoped: tuple[str, str] | None = None
+    ) -> bool:
         """Whether this household holds an upload authorization for
         *space_id*'s channel right now — the very one :meth:`_put` would
         sign with (the channel key or this household's grant). A link-joined
-        proposer describes a page's files only when it does."""
-        scoped = await self.scope_of(space_id)
+        proposer describes a page's files only when it does. *scoped*: the
+        :meth:`scope_of` answer when the caller read it already."""
+        if scoped is None:
+            scoped = await self.scope_of(space_id)
         if scoped is None:
             return False
         scope, scope_id = scoped
@@ -409,12 +413,13 @@ class SpaceMediaGfsUploader:
         space runs no channel here, no capable GFS needs it or no file can
         be described — nothing is sealed then."""
         names = media_names(media_urls)
-        if not names or await self.scope_of(space_id) is None:
+        scoped = await self.scope_of(space_id) if names else None
+        if scoped is None:
             return None
         conns = await self._relay_reader_conns(space_id)
         if followers:
             conns.extend(await self._gfs.space_media_follower_targets(space_id))
-        return await self._plan(space_id, names, conns, item_id)
+        return await self._plan(space_id, names, conns, item_id, scoped=scoped)
 
     async def plan_for_reader(
         self,
@@ -438,8 +443,12 @@ class SpaceMediaGfsUploader:
         names: list[str],
         conns: list[GfsConnection],
         item_id: str,
+        *,
+        scoped: tuple[str, str] | None = None,
     ) -> SpaceMediaPlan | None:
-        scoped = await self.scope_of(space_id)
+        # One read of the space's scope per plan (it was up to four).
+        if scoped is None:
+            scoped = await self.scope_of(space_id)
         if scoped is None:
             return None
         targets = await self._capable(conns, scoped[0])
@@ -448,9 +457,9 @@ class SpaceMediaGfsUploader:
         # Nothing this household could PUT is never sealed or described: a
         # descriptor naming a blob no GFS will hold only costs its readers a
         # fetch before the push lands.
-        if not await self.can_upload(space_id):
+        if not await self.can_upload(space_id, scoped=scoped):
             return None
-        refs = await self._describe_names(space_id, names, item_id)
+        refs = await self._describe_names(space_id, names, item_id, scoped=scoped)
         if not refs:
             return None
         return SpaceMediaPlan(
@@ -464,6 +473,7 @@ class SpaceMediaGfsUploader:
         item_id: str,
         *,
         cached_only: bool = False,
+        scoped: tuple[str, str] | None = None,
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
         household — the household a reader authenticates as delivering the
@@ -478,7 +488,8 @@ class SpaceMediaGfsUploader:
         if current is None:
             return []
         epoch, key = current
-        scoped = await self.scope_of(space_id)
+        if scoped is None:
+            scoped = await self.scope_of(space_id)
         if scoped is None:
             return []
         scope, scope_id = scoped

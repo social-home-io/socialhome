@@ -13,10 +13,10 @@
  * * A 403 (the household admin turned previews off) silences the hook for
  *   the rest of the session; any other failure just means "no card".
  */
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import type { LinkPreview } from '@/types'
-import { firstUrl } from '@/utils/linkPreview'
+import { cardFitsText, firstUrl } from '@/utils/linkPreview'
 
 /** Pause after the last keystroke before asking for a card. */
 export const LINK_PREVIEW_DEBOUNCE_MS = 600
@@ -35,12 +35,19 @@ export interface LinkPreviewState {
   loading: boolean
   /** The author removed the card for ``url``. */
   dismissed: boolean
+  /** Previews are off for this household (a 403 this session). */
+  off: boolean
+  /** The text has a first link, but its card would open a different
+   *  page than the link (``cardFitsText``) — the post asks for none. */
+  mismatch: boolean
   dismiss: () => void
   restore: () => void
 }
 
 export function useLinkPreview(text: string): LinkPreviewState {
-  const url = disabledForSession ? null : firstUrl(text)
+  // A link the card would get wrong (``cardFitsText``) gets no card.
+  const fits = useMemo(() => cardFitsText(text), [text])
+  const url = disabledForSession || !fits ? null : firstUrl(text)
   const [preview, setPreview] = useState<LinkPreview | null>(null)
   const [previewFor, setPreviewFor] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -83,6 +90,8 @@ export function useLinkPreview(text: string): LinkPreviewState {
     preview: current,
     loading: !!url && loading,
     dismissed: !!url && dismissedUrl === url,
+    mismatch: !fits && firstUrl(text) !== null,
+    off: disabledForSession,
     dismiss: () => setDismissedUrl(url),
     restore: () => setDismissedUrl(null),
   }

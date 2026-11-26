@@ -550,7 +550,7 @@ class FederationEventType(str, enum.Enum):
     HIGHLIGHT_FRAME_REACTED = "highlight_frame_reacted"
     HIGHLIGHT_FRAME_REACTION_REMOVED = "highlight_frame_reaction_removed"
 
-    # ── Momentum (§Momentum) — household-broadcast posts with 3-hop relay ──
+    # ── Momentum (§Momentum) — household-broadcast posts relayed up to 5 hops ──
     MOMENT_CREATED = "moment_created"
     MOMENT_DELETED = "moment_deleted"
     MOMENT_REACTED = "moment_reacted"
@@ -720,6 +720,12 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: self-certifying; neither grants a right.
         FederationEventType.SPACE_MEMBER_CARD,
         FederationEventType.SPACE_MAILBOX_DIRECTORY,
+        #: v_96 — the host's capacity refusal of our sync BEGIN
+        #: (``too_many_sessions`` / ``node_capacity`` / ``rate_limited``), so
+        #: we ask again shortly instead of at the next periodic sync. Its
+        #: handler ignores every other DIRECT_FAILED from such a household:
+        #: the pair negotiates no direct connection.
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
         # ── Content ──
         #: The space's own posts, comments and every pillar rendered
         #: inside it. This is what "joined the space" means.
@@ -835,10 +841,11 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         # ── Catch-up sync (§25.6) ──
         #: The chunked backfill that populates a fresh seat. The RTC
         #: *signalling* half of sync (``SPACE_SYNC_OFFER`` / ``_ANSWER`` /
-        #: ``_ICE`` / ``_DIRECT_READY`` / ``_DIRECT_FAILED``) is
-        #: deliberately absent: it exists to negotiate a DIRECT peer
-        #: connection, and the whole point of §D2b is that these two
-        #: households never learn each other's address.
+        #: ``_ICE`` / ``_DIRECT_READY``) is deliberately absent: it exists to
+        #: negotiate a DIRECT peer connection, and the whole point of §D2b
+        #: is that these two households never learn each other's address.
+        #: ``_DIRECT_FAILED`` is listed above only for a BEGIN's capacity
+        #: refusal (v_96); its handler ignores anything else from a seat.
         #: v_95: the signed sync page pushed to every member household —
         #: a GFS-seated one included (members equal on any path).
         FederationEventType.SPACE_SYNC_PAGE,
@@ -943,6 +950,8 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SYNC_COMPLETE,
         FederationEventType.SPACE_SYNC_REQUEST_MORE,
         FederationEventType.SPACE_SYNC_REJECTED,
+        #: v_96 — the capacity refusal of one household's BEGIN.
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
         FederationEventType.SPACE_PARTITION_GAP,
         # ── Not one space's content ──
         #: Mesh routing (an inner envelope sealed to one target) and the
@@ -1661,6 +1670,13 @@ DELIVERY_ERROR_QUEUED: str = "delivery_failed"
 #: way: that newer send delivers (or queues) the current state, so queueing
 #: this older one would only land it afterwards and roll the peer back.
 DELIVERY_ERROR_SUPERSEDED: str = "superseded"
+
+
+#: :attr:`DeliveryResult.error` value meaning "the peer's outbox is full of
+#: this household's own events, and this row we only relay (a stranger's
+#: moment create or totals, v_96) was dropped rather than evict one of
+#: them" — a terminal miss for this peer, by design.
+DELIVERY_ERROR_RELAYED_ROW_DROPPED: str = "relayed_row_dropped"
 
 
 #: :attr:`DeliveryResult.error` value meaning "queued in the mesh target's

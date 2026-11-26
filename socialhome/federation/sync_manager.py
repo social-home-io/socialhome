@@ -49,6 +49,14 @@ log = logging.getLogger(__name__)
 #: (S-6 part 1).
 SYNC_BEGIN_RATE_LIMIT_PER_HOUR: int = 5
 
+#: v_96 — a household seated from an invite link (reached through a GFS
+#: relay) is answered at most ONE capacity refusal of its sync BEGINs per
+#: space in this window; later refusals in it are silence (it asks again
+#: on its own deferral or periodic schedule). Without the bound, anyone
+#: holding an invite link turns a spent BEGIN budget into one relayed
+#: (outbox-queued) answer per BEGIN.
+SESSION_REFUSAL_ANSWER_GAP_S: float = 600.0
+
 #: Maximum concurrent active sync sessions per remote instance
 #: (S-6 part 2).
 MAX_ACTIVE_SESSIONS_PER_INSTANCE: int = 3
@@ -176,6 +184,7 @@ class SyncSessionManager:
         "_on_local_ice",
         "_owner_statement_for",
         "_rate_buckets",
+        "_refusals_answered",
         "_reject_reason",
         "_requests",
         "_sessions",
@@ -199,6 +208,9 @@ class SyncSessionManager:
         # ``deque`` is bounded by pruning entries older than 1 hour
         # before each lookup — no background cleaner needed.
         self._rate_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+        #: (peer, space) -> when an invite-link household was last answered
+        #: a capacity refusal (:meth:`may_answer_session_refusal`).
+        self._refusals_answered: dict[tuple[str, str], float] = {}
 
         # Optional injected callbacks (kept generic so the manager has
         # no hard dependency on space_repo internals).  When ``None``
@@ -440,6 +452,23 @@ class SyncSessionManager:
         if len(bucket) >= SYNC_BEGIN_RATE_LIMIT_PER_HOUR:
             return False
         bucket.append(now)
+        return True
+
+    def may_answer_session_refusal(
+        self, from_instance: str, space_id: str, *, now: float | None = None
+    ) -> bool:
+        """Whether a capacity refusal of a BEGIN from invite-link household
+        *from_instance* for *space_id* may be answered now: once per
+        :data:`SESSION_REFUSAL_ANSWER_GAP_S`; records the answer. Entries
+        older than the window are pruned on each call."""
+        now = now if now is not None else time.monotonic()
+        cutoff = now - SESSION_REFUSAL_ANSWER_GAP_S
+        for k in [k for k, t in self._refusals_answered.items() if t < cutoff]:
+            del self._refusals_answered[k]
+        key = (from_instance, space_id)
+        if key in self._refusals_answered:
+            return False
+        self._refusals_answered[key] = now
         return True
 
     # ─── S-7: ICE candidate validation ────────────────────────────────────

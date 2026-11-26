@@ -20,6 +20,7 @@ from socialhome.domain.federation import (
 from socialhome.domain.home_location import coarse_home_for_peer
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 
 @pytest.fixture
@@ -418,7 +419,7 @@ async def test_list_instances_in_space_filters_membership_status_and_bans(env):
             "INSERT INTO space_instances(space_id, instance_id) VALUES(?, ?)",
             (space_id, iid),
         )
-    await env.fed_repo.ban_instance_from_space(space_id, banned.id)
+    await SqliteSpaceRepo(env.db).ban_household(space_id, banned.id)
 
     got = await env.fed_repo.list_instances_in_space(space_id)
     got_ids = {i.id for i in got}

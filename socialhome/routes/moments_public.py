@@ -190,14 +190,19 @@ class GfsUserDirectoryProxyView(BaseView):
         svc = self.svc(moment_public_service_key)
         gfs_id = self.match("gfs_id")
         q = self.request.query.get("q") or None
+        # An unknown ``sort`` is a ValueError → 422 (``BaseView``).
+        sort = self.request.query.get("sort") or None
         try:
-            users = await svc.fetch_directory(gfs_id, q=q)
+            page = await svc.fetch_directory(
+                gfs_id, q=q, sort=sort, viewer_user_id=self.user.user_id
+            )
         except MomentPublicError as exc:
             raise web.HTTPBadGateway(text=f'{{"error":"{exc!s}"}}') from exc
+        users = [dict(row) for row in page.users]
         for row in users:
-            if isinstance(row, dict):
-                row["picture_url"] = mirrored_picture_url(gfs_id, row)
-        payload = {"users": users}
+            row["picture_url"] = mirrored_picture_url(gfs_id, row)
+        # ``sort``: the order the GFS used, when it said so — a label only.
+        payload = {"users": users, "sort": page.sort}
         # ``<img src>`` carries no bearer — sign so the avatar loads.
         signer = self.request.app.get(media_signer_key)
         if signer is not None:

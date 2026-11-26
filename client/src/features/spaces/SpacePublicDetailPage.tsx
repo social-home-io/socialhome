@@ -13,10 +13,11 @@
  *      seat in a discoverable space; the full space for a seated caller
  *      (a member opening their own space, private ones included).
  *
- * The CTA flips to match the viewer's relationship:
+ * The CTA flips to match the viewer's relationship (``aboutWays``):
  * already-member → "Open space"; pending request → disabled "Pending";
- * open → "Join"; request → "Request to join"; remote unpaired host →
- * "Pair {household} first".
+ * open → "Join"; request → "Request to join"; a space that also takes
+ * followers adds "Follow" as a second button with one line on the
+ * difference (owner 2026-11-26); a follower keeps "Join" to step up.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -37,14 +38,15 @@ import { SpaceGlyph } from './SpaceGlyph'
 import { followersLabel, followersShown } from './SpaceListRow'
 import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import {
-  approvalSeatsUs, contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
-  joinCarriesLocation, joinModeChip,
+  aboutWays, approvalSeatsUs, contentIsGated, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
+  joinCarriesLocation, joinModeChip, joinModeShown,
   sourceOf, type DiscoverAction,
 } from './discover'
 import { addBase } from '@/baseUrl'
 import { areaLabel, areaShortLabel, peerAreaLabel, radiusLabel, type AreaVerdict } from '@/utils/localArea'
 import { distanceLabel, hintLabel, hintVerdict, pinDistanceKm } from '@/utils/placePin'
 import { PIN_DOT_KM } from '@/components/LocalAreaPicker'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 type AboutAction = 'open' | Exclude<DiscoverAction, null>
 
@@ -231,7 +233,7 @@ export default function SpacePublicDetailPage() {
         ) as { subscribed?: boolean; pending?: boolean } | undefined
         if (r?.pending) {
           showToast(t('spaces.browse.follow_pending_toast', { name: entry.name }), 'success')
-          patch({ request_pending: true, request_busy: false })
+          patch({ request_pending: true, request_busy: false, follow_pending: true })
         } else {
           showToast(t('spaces.browse.followed_toast', { name: entry.name }), 'success')
           patch({ already_subscribed: true })
@@ -314,28 +316,34 @@ export default function SpacePublicDetailPage() {
   // A household space has no join mode to speak of (everyone at home is a
   // member), so it shows no join-mode chip — like its browser card.
   const radius = entryRadiusKm(entry)
-  const jmode = entry.scope === 'household' ? null : joinModeChip(entry.join_mode, radius !== null)
+  // …but not "Open to join" for a space nobody here can join that way
+  // (one you can only follow, from a host we never paired with).
+  const jmode = entry.scope === 'household' || !joinModeShown(entry)
+    ? null : joinModeChip(entry.join_mode, radius !== null)
   const joinModeLabel = jmode ? `${jmode.icon} ${jmode.label}` : null
   // How to get in, and that only members can read it, is for people
   // outside the space — a member is already in.
   const gated = !entry.already_member && contentIsGated(entry)
 
-  // The one way in from here — or none: an invite-only space, or one on a
-  // GFS whose household we never paired with (households met through a
-  // GFS never talk directly, so pairing is never suggested) and that takes
-  // no followers. Then a neutral line says how people do get in.
+  // The ways in from here: the way to join first, Follow beside it when
+  // the space takes followers too — or none: an invite-only space, or one
+  // on a GFS whose household we never paired with (households met through
+  // a GFS never talk directly, so pairing is never suggested) and that
+  // takes no followers. Then a neutral line says how people do get in.
   // A follower may still ask to become a member; Follow is never offered
   // twice.
-  const way = discoverAction(entry)
+  const ways = aboutWays(entry)
   // Our own local community: worked out against our own home with the
   // server's rule. Outside (or no home) offers no join that would be
   // refused. Another household's shows no verdict — its host decides.
   const verdict = entry.already_member ? null : entryAreaVerdict(entry, householdHome.value)
-  const areaBlocks = verdict !== null && !verdictAllowsJoin(verdict) && way !== 'pending'
-  const action: AboutAction | null = entry.already_member ? 'open'
-    : areaBlocks ? null
-    : way === 'follow' && entry.already_subscribed ? null
-    : way
+  const areaBlocks = verdict !== null && !verdictAllowsJoin(verdict) && ways.primary !== 'pending'
+  const action: AboutAction | null = areaBlocks ? null : ways.primary
+  const followBeside = areaBlocks ? null : ways.follow
+  // A request to join is out: Follow waits for its answer, and says so.
+  const followWaits = followBeside === 'follow' && ways.followDisabled
+  // A follower opens the space it follows from here too (posts, unfollow).
+  const openBeside = entry.already_subscribed === true && !entry.already_member
   const primaryLabel = action === null ? null : ABOUT_LABEL[action]()
   // A local community: its radius whoever hosts it — but the centre (and
   // so the map) only for a space this household hosts. A paired
@@ -351,6 +359,7 @@ export default function SpacePublicDetailPage() {
     : null
   const hint = entry.scope === 'global' ? hintVerdict(entry, householdHome.value) : null
   const joining = action === 'join' || action === 'request' || action === 'follow'
+    || followBeside === 'follow'
 
   return (
     <div class="sh-space-public">
@@ -400,20 +409,54 @@ export default function SpacePublicDetailPage() {
         )}
       </div>
 
-      {action && primaryLabel && (
+      {((action && primaryLabel) || openBeside) && (
         <div class="sh-space-public__cta-row">
-          <Button
-            onClick={() => void onPrimary(entry, action)}
-            disabled={action === 'pending' || action === 'joining' || action === 'following'}
-          >
-            {primaryLabel}
-          </Button>
+          {action && primaryLabel && (
+            <Button
+              onClick={() => void onPrimary(entry, action)}
+              disabled={action === 'pending' || action === 'joining' || action === 'following'}
+            >
+              {primaryLabel}
+            </Button>
+          )}
+          {followBeside && (
+            <Button
+              variant="secondary"
+              onClick={() => void onPrimary(entry, 'follow')}
+              disabled={ways.followDisabled}
+              aria-describedby={followWaits ? 'sh-about-follow-why' : undefined}
+            >
+              {ABOUT_LABEL[followBeside]()}
+            </Button>
+          )}
+          {openBeside && (
+            <Button
+              variant={action ? 'secondary' : 'primary'}
+              onClick={() => void onPrimary(entry, 'open')}
+            >
+              {ABOUT_LABEL.open()}
+            </Button>
+          )}
         </div>
       )}
-      {(action === 'request' || action === 'follow') && entry.request_busy && (
+      {followBeside === 'follow' && !followWaits && (
+        <p class="sh-muted sh-space-public__follow-note">{t('space.public.follow_or_join')}</p>
+      )}
+      {followWaits && (
+        <p id="sh-about-follow-why" class="sh-muted sh-space-public__follow-note" role="status">
+          {t('space.public.request_out')}
+        </p>
+      )}
+      {action === 'follow' && !followBeside && (
+        <p class="sh-muted sh-space-public__follow-note">{t('space.public.follow_only')}</p>
+      )}
+      {entry.already_subscribed && (action === 'join' || action === 'request') && (
+        <p class="sh-muted sh-space-public__follow-note">{t('space.public.step_up')}</p>
+      )}
+      {(action === 'request' || action === 'follow' || followBeside === 'follow') && entry.request_busy && (
         <p class="sh-muted sh-space-public__busy-note" role="status"><span aria-hidden="true">⏳</span> {t('space.public.busy')}</p>
       )}
-      {action === 'following' && (
+      {(action === 'following' || followBeside === 'following') && (
         <p class="sh-muted sh-space-public__busy-note" role="status">{t('space.public.following_note')}</p>
       )}
       {joining && entry.scope === 'global' && (
@@ -469,7 +512,7 @@ export default function SpacePublicDetailPage() {
       {entry.description && (
         <section class="sh-space-public__section">
           <h2>{t('space.public.about')}</h2>
-          <p>{entry.description}</p>
+          <p><LinkifiedText text={entry.description} /></p>
         </section>
       )}
 

@@ -43,7 +43,7 @@ from socialhome.services.realtime_service import RealtimeService
 from socialhome.services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
 )
-from tests.federation.sync.space.receiver_fakes import _send
+from tests.federation.sync.space.receiver_fakes import _send, _send_sentinel
 
 
 async def test_bans(setup):
@@ -724,3 +724,162 @@ async def test_a_reset_of_a_member_already_without_a_picture_is_not_told(stack):
     heard = await _listen(stack)
     await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
     assert heard.events == []
+
+
+async def test_a_members_record_never_reseats_a_banned_person(stack):
+    """P9 (P7b Fable M3): the ``members`` catch-up saved every record, so a
+    provider that missed a ban (or replayed an old roster) put a banned
+    person back on this household's roster. The seat is skipped, like the
+    live JOINED gossip of a banned person."""
+    await stack.spaces.ban_member(
+        space_id=SPACE_ID, user_id="u-banned", banned_by="u-admin", reason=None
+    )
+    record = {
+        "user_id": "u-banned",
+        "role": "member",
+        "joined_at": "2026-01-01T00:00:00+00:00",
+    }
+    await _persist(stack, "members", [record])
+    assert await stack.spaces.get_member(SPACE_ID, "u-banned") is None
+
+
+async def test_a_members_record_never_reseats_a_banned_households_person(stack):
+    """The same for a person of a banned household (its seat names it)."""
+    await stack.spaces.ban_household(SPACE_ID, MEMBER_HOME)
+    await stack.spaces.delete_member(SPACE_ID, MEMBER)
+    record = {
+        "user_id": MEMBER,
+        "role": "member",
+        "joined_at": "2026-01-01T00:00:00+00:00",
+    }
+    await _persist(stack, "members", [record])
+    assert await stack.spaces.get_member(SPACE_ID, MEMBER) is None
+
+
+async def test_a_person_of_no_known_household_waits_while_a_household_is_banned(
+    stack,
+):
+    """P9 review F7: a members record carries no household. While the space
+    bans a household, a person of another household with no seat row here
+    can't be placed, so the record is skipped (the roster gossip seats them
+    first). Our own people are never skipped for it."""
+    await stack.spaces.ban_household(SPACE_ID, "hh-banned")
+    for uid in ("u-unknown", LOCAL):
+        await _persist(
+            stack,
+            "members",
+            [
+                {
+                    "user_id": uid,
+                    "role": "member",
+                    "joined_at": "2026-01-01T00:00:00+00:00",
+                    "space_display_name": "Synced",
+                }
+            ],
+        )
+    assert await stack.spaces.get_member(SPACE_ID, "u-unknown") is None
+    ours = await stack.spaces.get_member(SPACE_ID, LOCAL)
+    assert ours is not None and ours.space_display_name == "Synced"
+
+
+async def test_a_user_id_seated_under_two_households_is_judged_on_both(stack):
+    """P9 review F8: a legacy user id may hold rows under two households;
+    one of them banned refuses the record, whichever row a lookup hits."""
+    await stack.remote_members.add(
+        space_id=SPACE_ID,
+        instance_id="hh-banned",
+        user_id=MEMBER,
+        user_pk=None,
+        display_name=None,
+    )
+    await stack.spaces.ban_household(SPACE_ID, "hh-banned")
+    await stack.spaces.delete_member(SPACE_ID, MEMBER)
+    await _persist(
+        stack,
+        "members",
+        [
+            {
+                "user_id": MEMBER,
+                "role": "member",
+                "joined_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
+    )
+    assert await stack.spaces.get_member(SPACE_ID, MEMBER) is None
+
+
+# ── Owner decision A (2026-11-26): the owner's bans list is authoritative ──
+
+
+async def test_the_owners_list_lifts_a_ban_this_household_missed_the_unban_of(
+    setup,
+):
+    """Sync used to only add bans: a household that missed an unban kept
+    refusing the person for good. After a clean stream from the OWNER
+    (``peer-a`` owns ``sp-1`` here), every ban its list lacks is lifted."""
+    r, c, kp = setup
+    r._peer_version = AsyncMock(return_value=96)
+    c.bans.append(("sp-1", "u-lifted", "u-owner", None))
+    c.household_bans.append(("sp-1", "hh-lifted", None))
+    await _send(
+        r,
+        kp,
+        "bans",
+        [{"space_id": "sp-1", "user_id": "u-kept", "banned_by": "u-owner"}],
+    )
+    await _send_sentinel(r, kp)
+    assert [b[1] for b in c.bans] == ["u-kept"]
+    assert c.household_bans == []
+
+
+async def test_an_empty_owner_list_lifts_every_ban(setup):
+    """ "No bans" is a statement: the owner streams an empty ``bans`` chunk."""
+    r, c, kp = setup
+    r._peer_version = AsyncMock(return_value=96)
+    c.bans.append(("sp-1", "u-lifted", "u-owner", None))
+    await _send(r, kp, "bans", [])
+    await _send_sentinel(r, kp)
+    assert c.bans == []
+
+
+async def test_no_lift_without_the_list_or_a_clean_stream(setup):
+    """A stream that never carried ``bans`` (unchanged) lifts nothing, and
+    neither does an unclean one."""
+    r, c, kp = setup
+    r._peer_version = AsyncMock(return_value=96)
+    c.bans.append(("sp-1", "u-banned", "u-owner", None))
+    await _send_sentinel(r, kp, chunk_count=0)
+    assert [b[1] for b in c.bans] == ["u-banned"]
+    await _send(r, kp, "bans", [], sync_id="sync-2")
+    r._health.failed("sync-2")
+    await _send_sentinel(r, kp, sync_id="sync-2")
+    assert [b[1] for b in c.bans] == ["u-banned"]
+
+
+async def test_a_delegated_admins_list_never_lifts_a_ban(setup, monkeypatch):
+    """A delegated admin acting as host may miss the owner's latest ban: its
+    stream adds bans, never lifts one."""
+    r, c, _kp = setup
+    r._peer_version = AsyncMock(return_value=96)
+    c.bans.append(("sp-1", "u-banned", "u-owner", None))
+    real_get = r._space_repo.get
+
+    async def owned_elsewhere(space_id):
+        space = await real_get(space_id)
+        return SimpleNamespace(**{**space.__dict__, "owner_instance_id": "the-owner"})
+
+    monkeypatch.setattr(r._space_repo, "get", owned_elsewhere)
+    await r._note_owner_bans("sync-9", "sp-1", "peer-a", [])
+    assert "sync-9" not in r._owner_bans_seen
+
+
+async def test_an_older_owners_list_never_lifts_a_ban(setup):
+    """Final review I2: an owner below v_96 never took a delegated admin's
+    ban (live ban gossip goes to v_96 households only) and streams no
+    household bans — its list must not lift those on a v_96 member."""
+    r, c, kp = setup
+    r._peer_version = AsyncMock(return_value=95)
+    c.bans.append(("sp-1", "u-admins-ban", "u-admin", None))
+    await _send(r, kp, "bans", [])
+    await _send_sentinel(r, kp)
+    assert [b[1] for b in c.bans] == ["u-admins-ban"]

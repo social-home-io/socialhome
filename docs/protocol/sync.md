@@ -1042,7 +1042,28 @@ mirrors the host's members (a host stream lands there), whose rows and
 pictures every receiver refuses from it. Its own people's `members` rows
 still go because they carry the picture resets only their household may
 make (see "Receiver side" below). The session shape changes with the
-resource set, so the first session after the upgrade is a full one. Nor does any household but the owner stream the owner
+resource set, so the first session after the upgrade is a full one.
+**The owner's `bans` list is authoritative** (owner decision A,
+2026-11-26). `bans` is streamed whole whenever it changed, and an empty list
+is a statement (one empty chunk, `EMPTY_IS_A_STATEMENT`). After a **clean**
+stream from the space's **owner** that carried the list, the receiver lifts
+every person or household ban it holds that the list lacks — an unban it
+missed (sync used to only add), and a ban / unban that crossed on the wire,
+converge at the owner's next sync. A delegated admin's stream never lifts a
+ban (it may lag the owner's latest ban). Residuals: an owner household below
+this change sends no empty list, so the last lifted ban of a space stays
+until its next ban, and only an owner at v_96 lifts at all (an older owner
+never took a delegated admin's ban nor streams household bans); a household
+whose acting host is a delegated admin is repaired only when it also syncs
+with the owner; and a delegated admin's fresh ban that has not reached the
+owner yet can be lifted on a member household by the owner's sync, then
+comes back with the admin's gossip or the owner's next list.
+A follower household (no writer seat) gets `bans` without each ban's
+free-text `reason` — who is banned (its authorship checks) and by whom
+(a person ban needs it), never why. And a receiver never saves a
+`members` record of a person the space bans, or of a person whose seat
+names a banned household (P9): a stale provider cannot put them back on
+the roster, as the live JOINED gossip cannot. Nor does any household but the owner stream the owner
 household's own member rows (the owner seat, any seat its household holds):
 a delegated admin that synced with the owner holds them too, but they may
 only come from the owner (`MembersExporter`), and a receiver drops one that
@@ -1605,12 +1626,21 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
   `_handle_space_sync_direct_failed`); the provider only owns the retry when
   it was the one that sent DIRECT_FAILED (e.g. rate-limited).
 - A provider that refuses a BEGIN from a household seated from an invite
-  link sends it **no** `SPACE_SYNC_DIRECT_FAILED` — whatever the reason:
-  that household refuses every direct-sync signalling event by design
-  (`SPACE_SESSION_ALLOWED_EVENT_TYPES`), so the event was always dropped on
-  arrival. Behaviour-neutral: the requester never acted on it and asks
-  again on its next sync; only the bounced envelope (and its WARNING) is
-  gone.
+  link for capacity (`too_many_sessions` / `node_capacity` /
+  `rate_limited`) answers it with that `SPACE_SYNC_DIRECT_FAILED` once the
+  household is at v_96 (`MIN_FOR_SESSION_SYNC_REFUSAL`), at most once per
+  space per 10 min (`SESSION_REFUSAL_ANSWER_GAP_S`; later refusals in the
+  window are silence, so an invite link buys no relayed answer per BEGIN):
+  the requester turns it into `SpaceSyncDeferred` and asks again shortly,
+  exactly as a paired member does. Any `_DIRECT_FAILED`, from any
+  household, ends or relays a session only when its sender is a party to it. Before v_96 the
+  refusal was silence and the household waited for its next periodic sync
+  (30 min) — e.g. a role change's catch-up colliding with the reconnect
+  syncs of many spaces was lost. `SPACE_SYNC_DIRECT_FAILED` is the one
+  direct-sync event in `SPACE_SESSION_ALLOWED_EVENT_TYPES`; from such a
+  household its handler takes only a capacity refusal of a BEGIN we sent
+  (no session close, no relay retry — the pair negotiates no direct
+  connection). Any other reason, or an older household, still gets nothing.
 
 **Freeing the session.** When the end-of-stream sentinel lands, the
 requester sends `SPACE_SYNC_COMPLETE {sync_id, space_id, clean}` to the provider

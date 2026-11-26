@@ -1732,6 +1732,10 @@ class AbstractGfsUserRegistrationRepo(Protocol):
     async def list_active(
         self, *, q: str | None = None, limit: int = 200
     ) -> list[GfsUserRegistration]: ...
+    async def most_followed_ids(self, *, limit: int = 200) -> list[str]: ...
+    async def list_active_by_ids(
+        self, user_ids: list[str]
+    ) -> list[GfsUserRegistration]: ...
     async def list_for_instance(
         self, instance_id: str
     ) -> list[GfsUserRegistration]: ...
@@ -1822,6 +1826,41 @@ class SqliteGfsUserRegistrationRepo:
         out = [_row_to_user_reg(_dict(r)) for r in rows]
         return [r for r in out if r is not None]
 
+    async def most_followed_ids(self, *, limit: int = 200) -> list[str]:
+        """The ids of the active authors followed by the most households
+        (ties newest first) — at most *limit*, at most 200. Households, not
+        follower ids: a follow's ``follower_user_id`` is whatever the signed
+        household says, so one household could make up followers; it counts
+        once here, and follower ids never break a tie either. One count over
+        the follow graph per call — the registry keeps the answer a while."""
+        clamped = max(1, min(int(limit), 200))
+        rows = await self._db.fetchall(
+            "SELECT r.user_id FROM gfs_user_registrations r LEFT JOIN ("
+            "  SELECT followed_user_id, COUNT(DISTINCT follower_instance_id) AS h"
+            "    FROM gfs_moment_follows GROUP BY followed_user_id"
+            ") f ON f.followed_user_id = r.user_id "
+            "WHERE r.status='active' "
+            "ORDER BY COALESCE(f.h, 0) DESC, r.registered_at DESC LIMIT ?",
+            (clamped,),
+        )
+        return [str((_dict(r) or {})["user_id"]) for r in rows]
+
+    async def list_active_by_ids(
+        self, user_ids: list[str]
+    ) -> list[GfsUserRegistration]:
+        """The active registrations among *user_ids* (≤ 200, any order)."""
+        ids = list(dict.fromkeys(user_ids))[:200]
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = await self._db.fetchall(
+            f"SELECT {_USER_REG_COLS} FROM gfs_user_registrations "
+            f"WHERE status='active' AND user_id IN ({marks})",
+            tuple(ids),
+        )
+        out = [_row_to_user_reg(_dict(r)) for r in rows]
+        return [r for r in out if r is not None]
+
     async def list_for_instance(self, instance_id: str) -> list[GfsUserRegistration]:
         rows = await self._db.fetchall(
             f"SELECT {_USER_REG_COLS} FROM gfs_user_registrations WHERE instance_id=?",
@@ -1869,6 +1908,7 @@ class AbstractGfsMomentFollowRepo(Protocol):
     async def followers_of(self, followed_user_id: str) -> list[GfsMomentFollow]: ...
     async def following_of(self, follower_user_id: str) -> list[GfsMomentFollow]: ...
     async def follower_count(self, followed_user_id: str) -> int: ...
+    async def follower_counts(self, followed_user_ids: list[str]) -> dict[str, int]: ...
     async def follower_user_ids_at(
         self, followed_user_id: str, follower_instance_id: str, *, limit: int = 50
     ) -> list[str]: ...
@@ -1945,6 +1985,24 @@ class SqliteGfsMomentFollowRepo:
         )
         d = _dict(row) or {}
         return int(d.get("c") or 0)
+
+    async def follower_counts(self, followed_user_ids: list[str]) -> dict[str, int]:
+        """Follower count per id in *followed_user_ids* (≤ 200, one indexed
+        query); an id nobody follows is absent."""
+        ids = list(dict.fromkeys(followed_user_ids))[:200]
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        rows = await self._db.fetchall(
+            "SELECT followed_user_id, COUNT(*) AS c FROM gfs_moment_follows "
+            f"WHERE followed_user_id IN ({marks}) GROUP BY followed_user_id",
+            tuple(ids),
+        )
+        out: dict[str, int] = {}
+        for raw in rows:
+            d = _dict(raw) or {}
+            out[str(d["followed_user_id"])] = int(d.get("c") or 0)
+        return out
 
     async def follower_user_ids_at(
         self, followed_user_id: str, follower_instance_id: str, *, limit: int = 50

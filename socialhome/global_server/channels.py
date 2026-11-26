@@ -309,10 +309,6 @@ class GfsChannelService:
 
     # ── Checks shared with the space media cache ─────────────────────────
 
-    async def require_channel(self, channel_id: str) -> None:
-        """:class:`PermissionError` unless *channel_id* is registered here."""
-        await self._channel(channel_id)
-
     async def require_channel_in_use(self, channel_id: str) -> None:
         """:class:`PermissionError` unless *channel_id* is registered here AND
         in use: at least one active member household holds a seat whose pass

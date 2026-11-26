@@ -2,7 +2,8 @@
 
 A *moment* is a one-shot household-broadcast post: ≤ 1 000 chars text
 plus an optional image or short (≤ 15 s) video. Moments fan out to
-every paired peer and their peers, up to 3 hops. They live 24 h by
+every paired peer and their peers, up to :data:`MOMENT_MAX_HOPS`, bounded
+by the author's signed reach (v_96). They live 24 h by
 default; if a local viewer has explicitly followed the author (directly or
 through a GFS) the moment surfaces in their inbox until its ``expires_at``
 — the author's choice, 1–30 days, 7 by default (the same row, just a
@@ -30,9 +31,35 @@ from .errors import CodedError
 MOMENT_MAX_CONTENT_LEN: int = 1_000
 MOMENT_MAX_VIDEO_MS: int = 15_000
 
-#: Federation relay: cap at 3 hops. Origin sends with hop=1; each
-#: receiver bumps and re-fans up to ``MAX_HOPS - 1``.
-MOMENT_MAX_HOPS: int = 3
+#: Federation relay: the wire cap (5 since v_96; 3 before). Origin sends
+#: with hop=1; each receiver bumps and re-fans while ``hop < min(reach,
+#: MOMENT_MAX_HOPS)`` — the signed reach bounds it further (v_96). Also the
+#: furthest a viewer may look (``moments.max_hops``, 1…5).
+MOMENT_MAX_HOPS: int = 5
+
+#: v_96 — how far a moment goes when its author chose nothing (hops).
+MOMENT_DEFAULT_REACH: int = 3
+
+#: How far a viewer looks when they chose nothing (``moments.max_hops``).
+MOMENT_DEFAULT_MAX_HOPS: int = 3
+
+#: v_96 decision C — the hops every paired household gets a relayed copy
+#: at. A hop-4 or hop-5 copy (one past this) goes only to a household that
+#: said it looks that far (``moment_look_hops``). The relay's look gate;
+#: equal to the viewer default today but a different rule.
+MOMENT_UNGATED_HOPS: int = 3
+
+#: The most a person may choose (``moments.reach``) and a household allow
+#: (``moments.reach_max``) — the wire cap itself: one global cap for reach
+#: and for how far a viewer looks (owner decision 2026-11-23). A separate
+#: name because it bounds a different setting.
+MOMENT_MAX_REACH: int = MOMENT_MAX_HOPS
+
+#: v_96 — the hop a delete tombstone records when the delete came through a
+#: GFS: above every mesh hop, so the mesh copy of the same delete arriving
+#: later still counts as closer (``MomentTombstone.CLOSER``) and is relayed
+#: on to the households holding the moment over the mesh.
+GFS_DELETE_HOP: int = MOMENT_MAX_REACH + 1
 
 #: How long people who follow an author keep the author's moments when the
 #: author chose nothing (``moments.follower_retention_days``, decision 6d).
@@ -98,6 +125,35 @@ def clamp_moment_expiry(created_at: str, expires_at: str) -> str:
     return latest.isoformat() if expires > latest else expires_at
 
 
+#: Minimum interval between two top-level moments by the same author — the
+#: posting rate limit the author's household enforces (``POST /api/moments``
+#: → 429). Replies and reactions are exempt. Relaying households hold a
+#: signed author to the same rule (:func:`moment_rate_slot`), so the two
+#: can't drift apart.
+MOMENT_RATE_WINDOW = timedelta(minutes=15)
+
+#: How far ahead of our clock a moment's signed ``occurred_at`` may be and
+#: still be relayed — one rate window: envelope skew is checked pairwise
+#: (±300 s each hop), so an origin and a relay two hops apart can differ by
+#: more than 300 s. A future-dated moment would otherwise open rate slots no
+#: honest author has; this lets a flooder borrow at most one.
+MOMENT_RELAY_FUTURE_SKEW = MOMENT_RATE_WINDOW
+
+
+def moment_rate_slot(occurred_at: object, *, now: datetime | None = None) -> int | None:
+    """Which :data:`MOMENT_RATE_WINDOW` slot a moment's signed
+    ``occurred_at`` falls in (whole windows since the epoch) — two top-level
+    moments an honest household let through are at least a window apart, so
+    never share a slot. ``None`` (not relayed) when missing, unparseable or
+    more than :data:`MOMENT_RELAY_FUTURE_SKEW` ahead of *now*."""
+    created = _parse_utc(occurred_at) if occurred_at else None
+    if created is None:
+        return None
+    if created > (now or datetime.now(UTC)) + MOMENT_RELAY_FUTURE_SKEW:
+        return None
+    return int(created.timestamp() // MOMENT_RATE_WINDOW.total_seconds())
+
+
 def moment_too_old_to_relay(
     occurred_at: object, *, now: datetime | None = None
 ) -> bool:
@@ -118,6 +174,9 @@ class MomentTombstone(enum.Enum):
     REMOVED = "removed"
     #: The moment was never held here; a content-free tombstone now is.
     RECORDED = "recorded"
+    #: A tombstone was already held, from further away: this copy came
+    #: closer (v_96), so it reaches households the first could not.
+    CLOSER = "closer"
     #: A tombstone was already held — nothing changed (a replayed delete).
     ALREADY = "already"
 
@@ -168,6 +227,18 @@ class Moment:
     #: tombstone until ``expires_at`` so a replayed or late-arriving create
     #: for the same id is refused. Ordinary reads never return tombstones.
     deleted_at: str | None = None
+    #: v_96 — how many hops the moment goes (1–5), as its origin signed it:
+    #: computed when it is written (``moments.reach``), so a later settings
+    #: change never moves where its delete or totals go. ``None``: written
+    #: before v_96 (NULL) — it went :data:`MOMENT_DEFAULT_REACH` hops, and its
+    #: delete and totals go unmarked, as they did then.
+    reach: int | None = None
+
+    @property
+    def effective_reach(self) -> int:
+        """How many hops the moment goes — :attr:`reach`, or
+        :data:`MOMENT_DEFAULT_REACH` for a row written before v_96."""
+        return MOMENT_DEFAULT_REACH if self.reach is None else self.reach
 
 
 @dataclass(slots=True, frozen=True)

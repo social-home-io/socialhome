@@ -763,9 +763,11 @@ bang.
   already stores — not a parallel allow-list/roster; reuse an existing content
   key rather than minting a per-audience variant. New persistent structure (a
   key, a table, a migration) has a high bar: reach for it only after reusing an
-  existing primitive is shown insufficient. (E.g. the GFS authorizes a space
-  relay by verifying a space-authority signature against the space pubkey it
-  already pins — no publisher-roster table, no separate subscriber key. The
+  existing primitive is shown insufficient. (E.g. the GFS authorizes a channel
+  publish by verifying the channel writer-key signature against the channel
+  key it pinned when the channel was registered — no publisher-roster table,
+  no separate subscriber key; members and followers publish with the same
+  writer key. The
   §24.11 pipeline + the §"audit before a migration" rule are the same instinct:
   prefer the existing shape.)
 - Import `aiolibdatachannel` without alias — use `import aiolibdatachannel as rtc`.

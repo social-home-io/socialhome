@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from socialhome.domain.federation_capabilities import (
+    CAPABILITY_FEATURE_KEYS,
     CAPABILITY_FEATURES,
+    HOUSEHOLD_FEATURE_KEYS,
     OURS,
     SPACE_SCOPED_MIN_VERSIONS,
     FederationCapability,
@@ -117,7 +119,9 @@ def test_features_built_from_min_for_constants():
     }
     feature_versions = {ver for ver, _ in CAPABILITY_FEATURES}
     assert feature_versions == declared
-    assert len(CAPABILITY_FEATURES) == len(declared)
+    # One label per threshold, except v_96: subscriber seats and moment
+    # reach share it.
+    assert len(CAPABILITY_FEATURES) == len(declared) + 1
 
 
 def test_features_missing_below_ours_is_empty():
@@ -155,6 +159,7 @@ def test_space_features_missing_below_v1_lists_only_space_scoped():
         label
         for ver, label in sorted(CAPABILITY_FEATURES)
         if ver in SPACE_SCOPED_MIN_VERSIONS
+        and CAPABILITY_FEATURE_KEYS[label] not in HOUSEHOLD_FEATURE_KEYS
     ]
     assert missing == expected
     # Non-space features are excluded even though a v1 peer lacks them too.

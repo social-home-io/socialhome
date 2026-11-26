@@ -11,13 +11,17 @@ from socialhome.moment_origin import (
     MAX_DELETE_CERT_FIELD_CHARS,
     MOMENT_ORIGIN_SIG_SUITE_ED25519,
     NO_RELAY_FIELD,
+    REACH_FIELD,
     SIGNED_MOMENT_EVENT_TYPES,
     SUPPORTED_MOMENT_ORIGIN_SIG_SUITES,
     UnsupportedMomentOriginSuite,
     check_relayed_moment_origin,
     delete_cert_of,
     delete_cert_refusal,
+    moment_hop_of,
     moment_origin_signing_bytes,
+    moment_reach_of,
+    reach_marks_of,
     sign_moment_origin,
     verify_moment_origin,
 )
@@ -248,6 +252,141 @@ def test_a_forged_no_relay_mark_does_not_verify():
         event_type=FET.MOMENT_CREATED,
         payload={**signed, NO_RELAY_FIELD: True},
     )
+
+
+# ── v_96 ``reach`` ──────────────────────────────────────────────────────
+
+
+def test_reach_field_name():
+    assert REACH_FIELD == "reach"
+
+
+@pytest.mark.parametrize("et", [FET.MOMENT_CREATED, FET.MOMENT_DELETED])
+@pytest.mark.parametrize("reach", [2, 4, 5])
+def test_reach_signs_the_v3_bytes(et, reach):
+    """``reach`` sits under the signature in its own ``v3`` domain: the v1
+    fields plus ``reach``."""
+    payload = _create(**{REACH_FIELD: reach})
+    bytes_ = moment_origin_signing_bytes(et, payload, sig_suite="ed25519")
+    assert bytes_.startswith(b"moment-origin:v3:")
+    assert f'"reach":{reach}'.encode() in bytes_
+    assert b"no_relay" not in bytes_
+    signed = _sign(et, payload)
+    assert verify_moment_origin(
+        identity_pk=KEY.public_key, event_type=et, payload=signed
+    )
+
+
+def test_no_reach_keeps_the_v1_bytes_byte_for_byte():
+    plain = moment_origin_signing_bytes(
+        FET.MOMENT_CREATED, _create(), sig_suite="ed25519"
+    )
+    assert plain.startswith(b"moment-origin:v1:")
+    assert b"reach" not in plain
+
+
+@pytest.mark.parametrize("et", [FET.MOMENT_CREATED, FET.MOMENT_DELETED])
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(
+            lambda p: {k: v for k, v in p.items() if k != REACH_FIELD}, id="strip"
+        ),
+        pytest.param(lambda p: {**p, REACH_FIELD: 5}, id="raise"),
+        pytest.param(lambda p: {**p, REACH_FIELD: 3}, id="lower to 3"),
+        pytest.param(lambda p: {**p, NO_RELAY_FIELD: True}, id="splice no_relay"),
+    ],
+)
+def test_a_relay_cannot_strip_or_change_reach(et, tamper):
+    signed = _sign(et, _create(**{REACH_FIELD: 2}))
+    assert not verify_moment_origin(
+        identity_pk=KEY.public_key, event_type=et, payload=tamper(signed)
+    )
+
+
+@pytest.mark.parametrize("et", [FET.MOMENT_CREATED, FET.MOMENT_DELETED])
+def test_a_relay_cannot_add_reach(et):
+    signed = _sign(et, _create())
+    assert not verify_moment_origin(
+        identity_pk=KEY.public_key,
+        event_type=et,
+        payload={**signed, REACH_FIELD: 5},
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        pytest.param({}, 3, id="none = 3"),
+        pytest.param({NO_RELAY_FIELD: True}, 1, id="no_relay = 1"),
+        pytest.param({REACH_FIELD: 2}, 2, id="2"),
+        pytest.param({REACH_FIELD: 4}, 4, id="4"),
+        pytest.param({REACH_FIELD: 5}, 5, id="5"),
+        pytest.param({REACH_FIELD: 3}, None, id="3 is never sent"),
+        pytest.param({REACH_FIELD: 1}, None, id="1 is no_relay"),
+        pytest.param({REACH_FIELD: 0}, None, id="0"),
+        pytest.param({REACH_FIELD: 6}, None, id="6"),
+        pytest.param({REACH_FIELD: -2}, None, id="negative"),
+        pytest.param({REACH_FIELD: True}, None, id="bool"),
+        pytest.param({REACH_FIELD: 2.0}, None, id="float"),
+        pytest.param({REACH_FIELD: "2"}, None, id="string"),
+        pytest.param({REACH_FIELD: None}, None, id="null"),
+        pytest.param({REACH_FIELD: 2, NO_RELAY_FIELD: True}, None, id="both"),
+    ],
+)
+def test_moment_reach_of(extra, expected):
+    assert moment_reach_of(_create(**extra)) == expected
+
+
+@pytest.mark.parametrize(
+    ("reach", "marks"),
+    [
+        (1, {NO_RELAY_FIELD: True}),
+        (2, {REACH_FIELD: 2}),
+        (3, {}),
+        (4, {REACH_FIELD: 4}),
+        (5, {REACH_FIELD: 5}),
+        (0, {NO_RELAY_FIELD: True}),
+        (9, {REACH_FIELD: 5}),
+    ],
+)
+def test_reach_marks_of_is_the_inverse_of_moment_reach_of(reach, marks):
+    assert reach_marks_of(reach) == marks
+    assert moment_reach_of(_create(**marks)) == max(1, min(reach, 5))
+
+
+@pytest.mark.parametrize(
+    ("hop", "from_origin", "expected"),
+    [
+        (1, True, 1),
+        (3, True, 3),
+        (1, False, 2),
+        (2, False, 2),
+        (4, False, 4),
+        (0, True, None),
+        (-1, False, None),
+        (None, True, None),
+        ("x", True, None),
+        ("2", False, 2),
+    ],
+)
+def test_moment_hop_of_parses_and_clamps(hop, from_origin, expected):
+    """``hop_count`` is outside the signature: a copy not sent by its origin
+    is at least 2 hops away (the relay clamp)."""
+    payload = {"hop_count": hop}
+    got = moment_hop_of(
+        payload, from_instance=ORIGIN if from_origin else "relay", origin=ORIGIN
+    )
+    assert got == expected
+
+
+def test_the_legacy_unsigned_window_refuses_reach():
+    """An unsigned relay is taken only from an origin predating signing —
+    which predates reach too: a ``reach`` on it is a relay's invention."""
+    assert _check(_create(), pinned=KEY.public_key, signs=False).accepted
+    verdict = _check(_create(**{REACH_FIELD: 5}), pinned=KEY.public_key, signs=False)
+    assert not verdict.accepted
+    assert "reach" in verdict.reason
 
 
 # ── Delete certificates (v_66) ──────────────────────────────────────────

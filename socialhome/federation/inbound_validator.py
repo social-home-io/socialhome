@@ -189,7 +189,22 @@ class InboundRateLimitedError(ValueError):
         self.retry_after_s = retry_after_s
 
 
-class UnpairedPeerRefusedError(ValueError):
+class LoggedRefusal(ValueError):
+    """A refusal the pipeline step that raised it has already logged (at
+    INFO or DEBUG, naming what it may). Every transport (the inbox route,
+    the DataChannel, the GFS WebSocket) drops it quietly — a handled drop,
+    never a WARNING with a traceback per frame."""
+
+
+class NoMemberCardError(LoggedRefusal):
+    """A frame on our GFS mailbox (or the directory-seat relay) from a
+    sender whose member card we do not hold for the envelope's space
+    (:func:`make_check_mailbox_sender`). Expected around a seating: a member
+    that just learned our card can send before the host's directory brings
+    us its card — the item reaches us again through the §25.6 catch-up."""
+
+
+class UnpairedPeerRefusedError(LoggedRefusal):
     """An envelope from a household we are unpairing or just unpaired.
 
     Raised by :func:`make_check_unpairing` (an unpair tombstone) and by
@@ -876,7 +891,7 @@ def make_check_mailbox_sender(
                 "with no card for its space",
                 ctx.envelope.get("event_type"),
             )
-            raise ValueError("no member card of this sender for this space")
+            raise NoMemberCardError("no member card of this sender for this space")
 
     return check_mailbox_sender
 
@@ -1322,7 +1337,8 @@ def make_persist_replay(*, federation_repo) -> InboundStep:
 #: Sender-side gates suppress most direct-delivery envelopes before
 #: they leave the source — this map is the receiver-side backstop for
 #: envelopes that arrive via mesh relay (``MomentFederationOutbound``
-#: 3-hop relay) where the relaying instance has no visibility into
+#: relay, up to ``MOMENT_MAX_HOPS`` bounded by the signed reach) where
+#: the relaying instance has no visibility into
 #: the originator's per-pair hide policy.
 _AUTHOR_FIELD_FOR_INBOUND: dict[str, str] = {
     # NB: ``user_updated`` is deliberately NOT in this map. It is the

@@ -8,22 +8,30 @@ is the tag the server stored.
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from socialhome.domain.events import MomentCreated, MomentDeleted
 from socialhome.domain.moment import (
     MOMENT_COUNTS_MAX_EMOJIS,
     MOMENT_COUNTS_MAX_TOTAL,
+    MOMENT_DEFAULT_MAX_HOPS,
+    MOMENT_DEFAULT_REACH,
     MOMENT_DEFAULT_RETENTION_DAYS,
     MOMENT_MAX_HASHTAG_LEN,
     MOMENT_MAX_HASHTAGS_PER_POST,
+    MOMENT_MAX_HOPS,
     MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_MAX_REACH,
     MOMENT_MIN_RETENTION_DAYS,
+    MOMENT_RATE_WINDOW,
     MOMENT_REACTION_MAX_EMOJI_BYTES,
     MOMENT_RELAY_MAX_AGE_HOURS,
     REACTION_REACH_AUTHOR,
     REACTION_REACH_HOUSEHOLD,
+    Moment,
     MomentReactionInvalidError,
     MomentReactionSummary,
     MomentTombstone,
@@ -31,6 +39,7 @@ from socialhome.domain.moment import (
     extract_hashtags,
     is_valid_moment_reaction,
     merged_reaction_view,
+    moment_rate_slot,
     moment_too_old_to_relay,
     normalize_hashtag,
     reaction_counts_valid,
@@ -143,6 +152,7 @@ def test_relay_age_cutoff_is_48_hours():
 def test_only_a_tombstone_that_changed_something_relays():
     assert MomentTombstone.REMOVED.changed
     assert MomentTombstone.RECORDED.changed
+    assert MomentTombstone.CLOSER.changed
     assert not MomentTombstone.ALREADY.changed
 
 
@@ -225,3 +235,82 @@ def test_merged_reaction_view():
         5,
         1_000,
     )
+
+
+def test_reach_defaults_and_bounds():
+    """v_96: a moment goes 3 hops unless its author chose otherwise; a
+    person may choose up to 5 — the wire cap, which is also how far a viewer
+    may look; a viewer looks 3 hops unless they chose otherwise."""
+    assert MOMENT_DEFAULT_REACH == 3
+    assert MOMENT_MAX_REACH == MOMENT_MAX_HOPS == 5
+    assert MOMENT_DEFAULT_MAX_HOPS == 3
+    moment = Moment(
+        id="m",
+        author_user_id="u",
+        content="c",
+        media_url=None,
+        media_type=None,
+        duration_ms=None,
+        parent_moment_id=None,
+        origin_instance_id="o",
+        created_at="t",
+        expires_at="t",
+    )
+    # A row written before v_96 has no reach (NULL): it went 3 hops.
+    assert moment.reach is None
+    assert moment.effective_reach == MOMENT_DEFAULT_REACH
+    assert replace(moment, reach=2).effective_reach == 2
+    created = MomentCreated(
+        moment_id="m",
+        author_user_id="u",
+        content="c",
+        media_url=None,
+        media_type=None,
+        duration_ms=None,
+        parent_moment_id=None,
+        parent_author_user_id=None,
+        origin_instance_id="o",
+        expires_at="t",
+    )
+    assert created.reach == MOMENT_DEFAULT_REACH
+    deleted = MomentDeleted(moment_id="m", author_user_id="u", origin_instance_id="o")
+    assert deleted.reach is None  # legacy row: unmarked, as before v_96
+
+
+# ── moment_rate_slot: the posting rate limit, as relays apply it ─────────
+
+
+def test_moments_a_rate_window_apart_never_share_a_slot():
+    start = datetime(2026, 11, 24, 12, 7, 30, tzinfo=UTC)
+    slots = {
+        moment_rate_slot((start + k * MOMENT_RATE_WINDOW).isoformat(), now=start)
+        for k in range(-8, 1)
+    }
+    assert len(slots) == 9
+
+
+def test_one_window_is_one_slot():
+    now = datetime(2026, 11, 24, 12, 30, tzinfo=UTC)
+    a = moment_rate_slot(datetime(2026, 11, 24, 12, 0, tzinfo=UTC).isoformat(), now=now)
+    b = moment_rate_slot(
+        datetime(2026, 11, 24, 12, 14, 59, tzinfo=UTC).isoformat(), now=now
+    )
+    c = moment_rate_slot(
+        datetime(2026, 11, 24, 12, 15, tzinfo=UTC).isoformat(), now=now
+    )
+    assert a == b != c
+
+
+@pytest.mark.parametrize("value", [None, "", "not a time"])
+def test_no_slot_without_a_time(value):
+    assert moment_rate_slot(value) is None
+
+
+def test_no_slot_for_a_moment_signed_in_the_future():
+    """Up to one rate window ahead is let in: envelope skew (±300 s) is
+    checked per hop, so it adds up between an origin and a far relay."""
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    later = now + MOMENT_RATE_WINDOW + timedelta(seconds=1)
+    assert moment_rate_slot(later.isoformat(), now=now) is None
+    edge = now + MOMENT_RATE_WINDOW
+    assert moment_rate_slot(edge.isoformat(), now=now) is not None

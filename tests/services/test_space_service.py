@@ -74,6 +74,7 @@ from socialhome.domain.space import (
     HostTooOldError,
     HostUnreachableError,
     HouseholdUpgradeRequiredError,
+    InviteOnlyError,
     JoinMode,
     OwnerStillActiveError,
     OwnerTransferFollowerError,
@@ -13296,4 +13297,181 @@ async def test_a_share_built_earlier_is_not_due_after_a_rotation_or_demotion(sta
     )
     assert not await stack.space_svc.admin_seed_share_still_due(
         prepared, instance_id="relay-peer"
+    )
+
+
+# ── P9 step up (owner 2026-11-26): a follower may become a member ──────
+
+
+async def _follower(stack, join_mode: JoinMode):
+    await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="P",
+        space_type=SpaceType.PUBLIC,
+        join_mode=join_mode,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.follow_space(fan.user_id, space.id)
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+    return fan, space
+
+
+async def test_a_follower_joins_an_open_space_we_host_as_a_member(stack):
+    """Following then Join: the follower seat becomes a member seat at
+    once, like anyone's Join of an open space (it raised AlreadyMember)."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    assert await stack.space_svc.request_join(space.id, user_id=fan.user_id) is None
+    seat = await stack.space_repo.get_member(space.id, fan.user_id)
+    assert seat is not None and seat.role == SpaceRole.MEMBER
+
+
+async def test_a_followers_request_to_join_is_approved_as_a_member(stack):
+    """Request mode: the follower's ask is filed for the admins; approving
+    it makes the follower seat a member seat."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    request_id = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    assert request_id
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+    await stack.space_svc.approve_join_request(request_id, actor_username="anna")
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.MEMBER
+    )
+
+
+async def test_a_followers_join_of_a_space_hosted_elsewhere_goes_to_its_host(
+    stack, monkeypatch
+):
+    """A follower of another household's space asks that host (paired, or
+    through the GFS that lists it) — never a request filed here, where
+    nobody may answer it."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    await _hosted_elsewhere(stack, space.id)
+    asked: list = []
+
+    async def _remote(self, space_id, **kw):
+        asked.append((space_id, kw))
+        return "rq-remote"
+
+    monkeypatch.setattr(type(stack.space_svc), "request_join_remote", _remote)
+    assert (
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id, message="hi")
+        == "rq-remote"
+    )
+    assert asked == [
+        (
+            space.id,
+            {
+                "applicant_user_id": fan.user_id,
+                "host_instance_id": "another-household",
+                "message": "hi",
+                "share_location": False,
+            },
+        )
+    ]
+
+
+async def test_a_member_still_cannot_ask_to_join_again(stack):
+    """Only a follower steps up; a member's Join stays AlreadyMember."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    with pytest.raises(AlreadyMemberError):
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+
+
+@pytest.mark.parametrize("join_mode", [JoinMode.OPEN, JoinMode.REQUEST])
+async def test_a_follower_of_a_private_space_cannot_ask_its_way_in(stack, join_mode):
+    """Step-up review I-1: a private space's follower was seated by name
+    with the read-only role; its join mode is no way in for it."""
+    await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Priv", join_mode=join_mode
+    )
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id,
+            user_id=fan.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    with pytest.raises(AlreadyMemberError):
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+
+
+async def test_approving_a_stale_request_never_overwrites_a_newer_seat(stack):
+    """Step-up review I-2: a follower with a request out is seated another
+    way meanwhile (here: an admin seat written directly — no role change
+    moves a follower seat since final-review M2); the later approval
+    changes nothing (no member written over an admin, by any admin)."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    request_id = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    held = await stack.space_repo.get_member(space.id, fan.user_id)
+    await stack.space_repo.save_member(dataclasses.replace(held, role="admin"))
+    await stack.space_svc.approve_join_request(request_id, actor_username="anna")
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == "admin"
+
+
+async def test_a_step_up_keeps_the_seats_own_name(stack):
+    """Step-up review M-1: the follower seat's per-space name survives."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    await stack.space_repo.set_member_profile(
+        space.id, fan.user_id, space_display_name="Fanny"
+    )
+    await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    seat = await stack.space_repo.get_member(space.id, fan.user_id)
+    assert seat.role == SpaceRole.MEMBER and seat.space_display_name == "Fanny"
+
+
+async def test_a_followers_ask_elsewhere_checks_what_we_know_and_asks_once(
+    stack, monkeypatch
+):
+    """Step-up review I-3: before asking another household's host, an
+    invite-only space is refused here, and a request already out answers
+    the ask again (no second request)."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    await _hosted_elsewhere(stack, space.id)
+    asked: list = []
+
+    async def _remote(self, space_id, **kw):
+        asked.append(kw)
+        return await self._spaces.save_join_request(
+            space_id,
+            kw["applicant_user_id"],
+            remote_applicant_instance_id=kw["host_instance_id"],
+        )
+
+    monkeypatch.setattr(type(stack.space_svc), "request_join_remote", _remote)
+    first = await stack.space_svc.request_join(
+        space.id, user_id=fan.user_id, share_location=True
+    )
+    again = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    assert first == again and len(asked) == 1
+    assert asked[0]["share_location"] is True
+    await stack.db.enqueue(
+        "UPDATE spaces SET join_mode='invite_only' WHERE id=?", (space.id,)
+    )
+    with pytest.raises(InviteOnlyError):
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+
+
+async def test_no_role_change_promotes_a_follower(stack):
+    """Final review M2: a follower seat moves only through that person's
+    own approved join / redeem — the owner cannot promote it."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_role(
+            space.id, actor_username="anna", user_id=fan.user_id, role="member"
+        )
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
     )

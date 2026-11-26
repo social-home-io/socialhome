@@ -491,6 +491,40 @@ content key (below); a member's own leave still does. It never ends a
 member's seat. A follow still pending is left alone (it is answered
 within seconds).
 
+### Stepping up: a follower becomes a member (owner 2026-11-26)
+
+A follower may ask to join like anyone else, on every path, and an
+approved join turns the follower seat into a member seat — never a second
+seat. One rule, the existing join paths:
+
+- **A space this household hosts:** Join of an `open` space seats the
+  follower as a member at once (`_seat_local_member`: the row, the event,
+  the v_23 JOINED gossip with the new role); in `request` mode the ask is
+  filed, and the approval seats the same way.
+- **Another household's space:** the ask goes to its host — a
+  `SPACE_JOIN_REQUEST` when paired, the v_84 GFS bootstrap otherwise
+  (`request_join` forwards a follower's ask to `request_join_remote`). The
+  approval mints the bound member token as for anyone; when the follower's
+  household redeems it, the redeem spends it and seats the person over the
+  follower seat with the token's role (`_reack_seated_redeemer` steps
+  aside for a follower redeeming a writer token). The ACK carries the
+  member writer cert and channel grant; the JOINED gossip tells every
+  household the new role. A failed ACK restores the follower seat (never
+  un-seats). An explicit member link redeemed by a follower does the same.
+
+Gates are those of any join (ban, age gate, the local-community check), and
+only where a cold request is allowed at all: a follower of a **private**
+space (seated by name with the read-only role) cannot ask its way in,
+whatever the join mode says. A follower's ask to another household's host is
+checked here first (invite only, age gate) and sent once while it waits. An
+approval never overwrites a seat that changed since the request (a
+promotion meanwhile stands), and a step up keeps the seat's per-space name
+and opt-ins. Only the approved person's own seat steps up — there is no
+admin "promote a follower" for someone who did not ask. No rotation: rights
+only grow, and the person already holds the content key. A remote member
+never steps down by redeeming a follower link (the redeem's re-ACK keeps the
+member seat). Cost: one roster gossip per step up, like a promotion.
+
 ### Keys and rotation
 
 - **Join:** the content key rides the seat ACK; joining never rotates.
@@ -809,8 +843,9 @@ the space authority seed and broadcast to every member household
 ```
 
 The free-text reason stays on the household that wrote it (followers of a
-public space are strangers); the catch-up `bans` rows still carry it, as
-they did before.
+public space are strangers); the catch-up `bans` rows carry it to member
+households only (the ban list's audience) — a follower household gets who is
+banned and by whom, never why.
 
 A receiver applies it only when the sender is a seed holder in its own view
 (the owner, or — delegation on — a household with a live `admin` seat in its
@@ -858,10 +893,14 @@ household with new people: it can come back through a link its people still
 hold, a directory join or a follow, like any stranger. Revoke links you
 shared with it; a household ban stops a household that keeps its identity.
 
-**Left out.** Ordering of a ban and its unban racing on the wire (no
-version: the replay cache and the seed-holder sender rule bound it); a
-household offline past its outbox retention during an unban keeps a stale
-row (the `bans` stream adds rows, it does not delete them).
+**Ban and unban converge on the owner's list** (owner decision A,
+2026-11-26; [sync.md](./sync.md)): after a clean `bans` stream from a v_96
+owner, a household lifts every ban the owner's list no longer names — a
+missed unban and a ban / unban that crossed on the wire both converge there.
+Residuals (stated in sync.md): an owner below v_96 lifts nothing; a household
+whose acting host is a delegated admin is repaired only by the owner's
+stream; a delegated admin's fresh ban not yet at the owner can be lifted
+until it arrives.
 
 ## Two kinds of follower (v_30)
 

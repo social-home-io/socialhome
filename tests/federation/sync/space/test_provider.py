@@ -2618,3 +2618,32 @@ async def test_a_chunk_may_ride_a_route_raw_only_to_a_requester_that_reads_it(
     calls = federation.send_with_mesh_fallback.await_args_list
     assert calls
     assert {c.kwargs["routed_raw_body"] for c in calls} == {raw}
+
+
+@pytest.mark.parametrize("member", [True, False, None])
+async def test_a_follower_gets_who_is_banned_never_why(encoder, member):
+    """P9 (P7b Fable M4): the ``bans`` catch-up shipped every ban's free-text
+    reason to follower households too. A follower needs the target (its
+    authorship checks refuse a banned person's items) and the banner (the
+    receiver drops a person ban without one), never the reason; a member
+    household keeps it (the ban list's documented audience). No gate wired
+    reads as a follower (fail closed)."""
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    row = {"space_id": "sp", "user_id": "u-x", "banned_by": "u-a", "reason": "spam"}
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={"bans": _FakeExporter("bans", [row])},
+        sig_suite="ed25519",
+    )
+    if member is not None:
+
+        async def _gate(_space_id: str, _instance_id: str) -> bool:
+            return member
+
+        svc.attach_member_gate(_gate)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    (got,) = _records(session)["bans"]
+    assert got["user_id"] == "u-x"
+    assert got["banned_by"] == "u-a"
+    assert ("reason" in got) is bool(member)

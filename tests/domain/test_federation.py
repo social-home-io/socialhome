@@ -407,6 +407,7 @@ def test_single_recipient_key_and_routing_types_never_ride_a_multi_frame():
         FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
         FederationEventType.SPACE_SESSION_CLEANUP,
         FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
         FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
         FederationEventType.BAZAAR_THREAD_MESSAGE,
     ):

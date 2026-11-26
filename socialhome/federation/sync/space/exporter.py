@@ -232,6 +232,14 @@ class ConditionalExporter(ResourceExporter, Protocol):
     async def is_active(self, space_id: str) -> bool: ...
 
 
+#: Resources whose EMPTY list is a statement, streamed as one empty chunk
+#: when the resource is sent at all (owner decision A, 2026-11-26): the
+#: owner's ``bans`` list is authoritative, so "no bans" must reach a member
+#: household that still holds a row the owner lifted (an incremental
+#: session that skips an unchanged list still sends nothing).
+EMPTY_IS_A_STATEMENT: frozenset[str] = frozenset({"bans"})
+
+
 async def record_batches(
     exporter: ResourceExporter, space_id: str, *, since: int | None = None
 ) -> AsyncGenerator[list[dict[str, Any]]]:
@@ -241,9 +249,10 @@ async def record_batches(
     ``since`` (a §25.6 incremental session's watermark): an
     :class:`IncrementalExporter` streams only the rows changed after it;
     every other exporter — a resource kept full — streams everything."""
+    keep_empty = exporter.resource in EMPTY_IS_A_STATEMENT
     if since is not None and isinstance(exporter, IncrementalExporter):
         async for batch in exporter.iter_changed(space_id, since):
-            if batch:
+            if batch or keep_empty:
                 yield batch
         return
     if isinstance(exporter, BatchedExporter):
@@ -252,7 +261,7 @@ async def record_batches(
                 yield batch
         return
     records = await exporter.list_records(space_id)
-    if records:
+    if records or keep_empty:
         yield records
 
 
@@ -346,8 +355,23 @@ class ChunkBuilder:
     ) -> AsyncIterator[dict[str, Any]]:
         """Chunk one page of records: start with the whole page, halve
         until it fits the size budget (or is a single record). Each chunk
-        takes one ``chunk_index`` from ``next_index`` (``None``: none)."""
+        takes one ``chunk_index`` from ``next_index`` (``None``: none).
+        An empty page (only of :data:`EMPTY_IS_A_STATEMENT`) is one empty
+        chunk."""
         pending = list(records)
+        if not pending:
+            yield await self._build_one(
+                resource,
+                [],
+                space_id,
+                sync_id,
+                sig_suite,
+                seq_start=cursor,
+                seq_end=cursor,
+                is_last=False,
+                chunk_index=next_index() if next_index is not None else None,
+            )
+            return
         while pending:
             index = next_index() if next_index is not None else None
             chunk_records = pending

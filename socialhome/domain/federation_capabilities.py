@@ -1628,8 +1628,47 @@ from __future__ import annotations
 #:   cert (it could not verify one: the signature covers ``reader``); a
 #:   follower household below v_96 gets no cert and no writer key. A
 #:   member household below v_96 refuses a follower's relayed comment or
-#:   reaction. Space-scoped. Labelled "Follow spaces with
-#:   one seat on every path".
+#:   reaction. Also at v_96 (``MIN_FOR_SESSION_SYNC_REFUSAL``): a
+#:   household seated from an invite link takes the host's capacity
+#:   refusal of its sync BEGIN (``SPACE_SYNC_DIRECT_FAILED``, at most one
+#:   per space per 10 min); an older one gets silence, as before.
+#:   Space-scoped. Labelled "Follow spaces with one seat on every path".
+#: * **v_96** (2026-11-23) — **moment reach** (``docs/protocol/momentum.md``,
+#:   "Reach"): a person chooses how far their moments go (1–5 hops, default
+#:   3, capped by the household's ``moments.reach_max``; a protected account
+#:   stays at 1). The reach rides inside the encrypted ``MOMENT_CREATED`` /
+#:   ``MOMENT_DELETED`` payload under the origin signature: reach 1 is the
+#:   v_38 ``no_relay`` mark (``moment-origin:v2:``), reach 2 / 4 / 5 a
+#:   ``reach: N`` field (``moment-origin:v3:`` = the v1 fields plus
+#:   ``reach``), reach 3 nothing new (v1, byte for byte). Deletes carry the
+#:   same mark (a protected account's delete is now ``no_relay``, never
+#:   relayed). Relays forward only while ``hop < reach`` (at most
+#:   ``MOMENT_MAX_HOPS`` = 5, also the viewer's ``moments.max_hops`` 1–5,
+#:   default 3; ``MAX_RETURN_TOKENS`` = 4; a relay's return token keeps its
+#:   own hop and the moment's reach, so the per-source reaction rate applies
+#:   to a last-hop neighbour and a truncated chain dies at the first relay);
+#:   a hop-4 / hop-5 copy (create, delete, totals)
+#:   goes only to a v_96 household that looks that far — the additive
+#:   ``moment_look_hops`` field of ``INSTANCE_CAPABILITIES_UPDATED`` (the
+#:   widest ``max_hops`` of its non-protected people, said as at least 3,
+#:   re-sent on change, from a directly paired household only, kept
+#:   in memory by the receiver and re-learned after its restart by asking
+#:   every v_96 peer for its capabilities, ``INSTANCE_RESYNC_REQUEST``
+#:   scope ``capabilities``; not heard = no hop-4–5 copy, decision C).
+#:   Relays clamp a relayed copy's hop to ≥ 2, relay a closer
+#:   copy at most once more (a wave toward lookers never uses up the wave
+#:   to every household), pass totals on only for a moment they relayed
+#:   or hold within its reach, and queue relayed creates / totals under an
+#:   outbox key evicted first. No new event type, no record change, no
+#:   ``SYNC_RECORD_LINES`` entry (no sync stream carries moments).
+#:   **Fallback**: a household below v_96 is never sent a reach-2 moment,
+#:   its delete or its totals, nor a relayed copy carrying ``reach``; reach
+#:   1 keeps the v_38 ``no_relay`` gate; reach 4–5 goes to every paired
+#:   household (an older one relays it verbatim up to hop 3; an older one
+#:   further away can't verify the v3 bytes and drops it); an older
+#:   household gets no hop-4–5 copy and ignores ``moment_look_hops`` (its
+#:   upgrade resync asks for it once it reaches v_96). Not space-scoped. Labelled "Choose how far
+#:   your moments go".
 OURS: int = 96
 
 
@@ -2361,11 +2400,23 @@ class FederationCapability:
     MIN_FOR_SYNC_PAGES = 95
     #: v_96 — a household at or above it can follow a space (an
     #: auto-approved join with role ``subscriber``), is sent a signed
-    #: ``reader`` writer cert / subscriber grant, and sees subscriber seats
-    #: only as the acting host or an admin household (members get a
-    #: ``follower_count``). Below it: the peer cannot follow and gets no
-    #: reader cert; a behind member keeps the federation content path.
+    #: ``reader`` writer cert / subscriber grant, and holds follower seats
+    #: like any seat (every household of the space sees who follows — the
+    #: sign-off "members know who follows"). Below it: the peer cannot
+    #: follow and gets no reader cert; a behind member keeps the federation
+    #: content path.
     MIN_FOR_SUBSCRIBER_SEATS = 96
+    #: v_96 — moment reach: a reach-2 moment (its delete, its totals) and a
+    #: relayed copy carrying a signed ``reach`` go only to a household at or
+    #: above it. Reach 1 keeps :attr:`MIN_FOR_MOMENT_NO_RELAY`; reach 4–5
+    #: from the origin goes to every peer.
+    MIN_FOR_MOMENT_REACH = 96
+    #: v_96 — a household seated from an invite link takes the host's
+    #: capacity refusal of its sync BEGIN (``SPACE_SYNC_DIRECT_FAILED`` with
+    #: ``too_many_sessions`` / ``node_capacity`` / ``rate_limited``, at most
+    #: one per space per 10 min); an older one refuses the event at its
+    #: peer-class step, so it gets nothing, as before.
+    MIN_FOR_SESSION_SYNC_REFUSAL = 96
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2732,112 +2783,211 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
         "Follow spaces with one seat on every path",
     ),
+    (
+        FederationCapability.MIN_FOR_MOMENT_REACH,
+        "Choose how far your moments go",
+    ),
 ]
 
 
 #: A stable snake_case slug for every :data:`CAPABILITY_FEATURES` entry,
-#: keyed by the same ``MIN_FOR_*`` threshold. The slugs reach the SPA next to
+#: keyed by its label (one version may bring more than one feature — v_96
+#: brought subscriber seats and moment reach — so the threshold alone does
+#: not name a feature; the comment above each slug names its threshold). The slugs reach the SPA next to
 #: the English labels (``lacking_feature_keys`` / ``lagging_feature_keys``),
 #: which translates them as ``capability.<slug>``. **They are an API contract:
 #: never rename one.** Adding a feature means one tuple in
 #: :data:`CAPABILITY_FEATURES` plus one slug here (a test pins the set, and
-#: that both cover the same versions).
-CAPABILITY_FEATURE_KEYS: dict[int, str] = {
-    FederationCapability.MIN_FOR_CALENDAR_TZ: "calendar_time_zones",
-    FederationCapability.MIN_FOR_DM_MEDIA_SYNC: "photos_in_dms",
-    FederationCapability.MIN_FOR_HOME_LOCATION_BROADCAST: "home_location_sharing",
-    FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM: "invite_links_other_households",
-    FederationCapability.MIN_FOR_SPACE_KEY_REKEY: "space_rekey_on_leave",
-    FederationCapability.MIN_FOR_REMOTE_MEMBER_ROLE: "remote_member_roles",
-    FederationCapability.MIN_FOR_REMOTE_ADMIN_KICK: "remote_member_removal",
-    FederationCapability.MIN_FOR_BAZAAR_LISTING: "bazaar_listings",
-    FederationCapability.MIN_FOR_BAZAAR_STATUS: "bazaar_sold_status",
-    FederationCapability.MIN_FOR_BAZAAR_BIDS: "bazaar_bids",
-    FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK: "sync_https_fallback",
-    FederationCapability.MIN_FOR_MEDIA_CHANNEL: "fast_media_transfer",
-    FederationCapability.MIN_FOR_REMOTE_ADMIN_ACTION: "remote_admin_actions",
-    FederationCapability.MIN_FOR_ADMIN_PROPOSALS: "admin_proposals",
-    FederationCapability.MIN_FOR_APP_CHANNEL: "cross_household_apps",
-    FederationCapability.MIN_FOR_APP_USER_ROUTING: "app_user_routing",
-    # The SPA matches this slug (``RESYNC_FEATURE_KEY`` in
-    # client/src/store/federationCompat.ts).
-    FederationCapability.MIN_FOR_INSTANCE_RESYNC: "household_resync",
-    FederationCapability.MIN_FOR_SPACE_SYNC_REJECTED: "space_sync_repair",
-    FederationCapability.MIN_FOR_AUTHENTICATED_ROUTE_DISCOVERY: "safe_route_discovery",
-    FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE: "admin_key_share",
-    FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP: "roster_gossip",
-    FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS: "admin_ops_without_owner",
-    FederationCapability.MIN_FOR_USER_IDENTITY_KEY: "user_identity_keys",
-    FederationCapability.MIN_FOR_IDENTITY_ANCHOR: "identity_anchor",
-    FederationCapability.MIN_FOR_USER_MOVE: "user_move",
-    FederationCapability.MIN_FOR_ROUTE_STALE_NACK: "route_break_notice",
-    FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM: "invite_link_bootstrap",
-    FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE: "remote_followers",
-    FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE: "routed_origin_check",
-    FederationCapability.MIN_FOR_ROSTER_SNAPSHOT: "roster_snapshot",
-    FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC: "gallery_albums",
-    FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID: "album_owner_binding",
-    FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE: "moment_origin_check",
-    FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID: "content_owner_binding",
-    FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM: "cross_household_group_chats",
-    FederationCapability.MIN_FOR_MOMENT_NO_RELAY: "moment_no_relay",
-    FederationCapability.MIN_FOR_SPACE_TIMETABLE: "space_timetables",
-    FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS: "task_priority_labels",
-    FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE: "space_moderators",
-    FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT: "admin_only_features",
-    FederationCapability.MIN_FOR_FEDERATED_MODERATION: "federated_moderation",
-    FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION: "removed_admin_lockout",
-    FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE: "space_reports",
-    FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO: "security_update_catch_up",
-    FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE: "forwarded_role_changes",
-    FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES: "shared_pages_no_lost_edits",
-    FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH: "member_publish",
-    FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH: "anonymous_gfs_posting",
-    FederationCapability.MIN_FOR_PRIVATE_CHANNELS: "private_gfs_spaces",
-    FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK: "forwarded_invite_links",
-    FederationCapability.MIN_FOR_GFS_RELAY_ROUTES: "shared_gfs_relay",
-    FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE: "gfs_fallback_later",
-    FederationCapability.MIN_FOR_SPACE_CHAT: "space_chat",
-    FederationCapability.MIN_FOR_SYNC_SERIES_ROWS: "synced_recurring_events",
-    FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH: "multi_gfs_posting",
-    FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC: "synced_picture_resets",
-    FederationCapability.MIN_FOR_LOCAL_COMMUNITY_AREA: "local_communities",
-    FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE: "follower_author_names",
-    FederationCapability.MIN_FOR_FOLLOWER_PROFILE_BUNDLE: "follower_names_on_join",
-    FederationCapability.MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS: "encrypted_public_moments",
-    FederationCapability.MIN_FOR_ENCRYPTED_MOMENT_MEDIA: "public_moment_media",
-    FederationCapability.MIN_FOR_PUBLIC_MOMENT_SENT_AT: "public_moment_sent_at",
-    FederationCapability.MIN_FOR_LONG_LIVED_MOMENTS: "follower_moment_retention",
-    FederationCapability.MIN_FOR_LATE_MOMENT_DELETES: "late_moment_deletes",
-    FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS: "routed_moment_reactions",
-    FederationCapability.MIN_FOR_GFS_MOMENT_REACTIONS: "gfs_moment_reactions",
-    FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS: "moment_reaction_counts",
-    FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE: "highlight_audience_change",
-    FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER: "remote_report_answers",
-    FederationCapability.MIN_FOR_APP_SESSION_ENDED: "app_games_end_on_uninstall",
-    FederationCapability.MIN_FOR_BAZAAR_OFFERS: "bazaar_offers",
-    FederationCapability.MIN_FOR_BAZAAR_THREAD: "bazaar_ask_the_seller",
-    FederationCapability.MIN_FOR_BAZAAR_FAQ: "bazaar_listing_faq",
-    FederationCapability.MIN_FOR_APP_GROUPS: "app_groups",
-    FederationCapability.MIN_FOR_SPACE_APP_TABLES: "space_app_tables",
-    FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
-    FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
-    FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
-    FederationCapability.MIN_FOR_MEDIA_HTTPS: "lighter_media_transfers",
-    FederationCapability.MIN_FOR_PAGE_MEDIA: "space_page_media",
-    FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND: "space_media_on_demand",
-    FederationCapability.MIN_FOR_GFS_JOIN_REQUEST: "gfs_join_requests",
-    FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
-    FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
-    FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
-    FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH: "mailbox_member_mesh",
-    FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY: "anonymous_gfs_posting_only",
-    FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
-    FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
-    FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
-    FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
-    FederationCapability.MIN_FOR_SYNC_PAGES: "sync_pages",
-    FederationCapability.MIN_FOR_SUBSCRIBER_SEATS: "subscriber_seats",
+#: that both cover the same labels).
+CAPABILITY_FEATURE_KEYS: dict[str, str] = {
+    # MIN_FOR_CALENDAR_TZ
+    "Event times in the right time zone": "calendar_time_zones",
+    # MIN_FOR_DM_MEDIA_SYNC
+    "Photos and files in direct messages": "photos_in_dms",
+    # MIN_FOR_HOME_LOCATION_BROADCAST
+    "Sharing your home location": "home_location_sharing",
+    # MIN_FOR_SPACE_INVITE_REDEEM
+    "Invite links for other households": "invite_links_other_households",
+    # MIN_FOR_SPACE_KEY_REKEY
+    "New space keys when someone leaves": "space_rekey_on_leave",
+    # MIN_FOR_REMOTE_MEMBER_ROLE
+    "Roles for members from other households": "remote_member_roles",
+    # MIN_FOR_REMOTE_ADMIN_KICK
+    "Removing members from other households": "remote_member_removal",
+    # MIN_FOR_BAZAAR_LISTING
+    "Bazaar listings": "bazaar_listings",
+    # MIN_FOR_BAZAAR_STATUS
+    "Marking bazaar items as sold": "bazaar_sold_status",
+    # MIN_FOR_BAZAAR_BIDS
+    "Bids and offers in the bazaar": "bazaar_bids",
+    # MIN_FOR_SYNC_HTTPS_FALLBACK
+    "Syncing when a direct link fails": "sync_https_fallback",
+    # MIN_FOR_MEDIA_CHANNEL
+    "Faster photo and video transfer": "fast_media_transfer",
+    # MIN_FOR_REMOTE_ADMIN_ACTION
+    "Admin actions from other households": "remote_admin_actions",
+    # MIN_FOR_ADMIN_PROPOSALS
+    "Changes that need several admins to agree": "admin_proposals",
+    # MIN_FOR_APP_CHANNEL
+    "Apps that work across households": "cross_household_apps",
+    # MIN_FOR_APP_USER_ROUTING
+    "Apps that reach the right person": "app_user_routing",
+    # MIN_FOR_INSTANCE_RESYNC
+    "Asking a household to send updates again": "household_resync",
+    # MIN_FOR_SPACE_SYNC_REJECTED
+    "Fixing spaces that got out of step": "space_sync_repair",
+    # MIN_FOR_AUTHENTICATED_ROUTE_DISCOVERY
+    "Finding a safe path through other households": "safe_route_discovery",
+    # MIN_FOR_SPACE_ADMIN_KEY_SHARE
+    "Admins running a space without the owner": "admin_key_share",
+    # MIN_FOR_SPACE_ROSTER_GOSSIP
+    "Member lists shared between households": "roster_gossip",
+    # MIN_FOR_ADMIN_AUTHORITATIVE_OPS
+    "Admins changing settings while the owner is away": "admin_ops_without_owner",
+    # MIN_FOR_USER_IDENTITY_KEY
+    "Checking each person's identity": "user_identity_keys",
+    # MIN_FOR_IDENTITY_ANCHOR
+    "Stable identity when a username changes": "identity_anchor",
+    # MIN_FOR_USER_MOVE
+    "Moving to another household": "user_move",
+    # MIN_FOR_ROUTE_STALE_NACK
+    "Noticing when a path through other households breaks": "route_break_notice",
+    # MIN_FOR_INVITE_BOOTSTRAP_REDEEM
+    "Joining by link without being connected": "invite_link_bootstrap",
+    # MIN_FOR_REMOTE_SUBSCRIBER_ROLE
+    "Followers from other households": "remote_followers",
+    # MIN_FOR_ROUTED_ORIGIN_SIGNATURE
+    "Checking who sent a passed-on message": "routed_origin_check",
+    # MIN_FOR_ROSTER_SNAPSHOT
+    "Up-to-date member lists for every household": "roster_snapshot",
+    # MIN_FOR_GALLERY_ALBUM_SYNC
+    "Shared gallery albums": "gallery_albums",
+    # MIN_FOR_OWNER_BOUND_ALBUM_ID
+    "Albums tied to their creator": "album_owner_binding",
+    # MIN_FOR_MOMENT_ORIGIN_SIGNATURE
+    "Checked moments from other households": "moment_origin_check",
+    # MIN_FOR_OWNER_BOUND_CONTENT_ID
+    "Posts tied to their creator": "content_owner_binding",
+    # MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM
+    "Cross-household group chats": "cross_household_group_chats",
+    # MIN_FOR_MOMENT_NO_RELAY
+    "Moments that are never passed on": "moment_no_relay",
+    # MIN_FOR_SPACE_TIMETABLE
+    "Space timetables": "space_timetables",
+    # MIN_FOR_TASK_PRIORITY_LABELS
+    "Task priority and labels": "task_priority_labels",
+    # MIN_FOR_SPACE_MODERATOR_ROLE
+    "Space moderators": "space_moderators",
+    # MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
+    "Admin-only space features": "admin_only_features",
+    # MIN_FOR_FEDERATED_MODERATION
+    "Reviewing posts from other households": "federated_moderation",
+    # MIN_FOR_SPACE_AUTHORITY_ROTATION
+    "Locking out removed admins": "removed_admin_lockout",
+    # MIN_FOR_SPACE_REPORT_SCOPE
+    "Space reports for moderators": "space_reports",
+    # MIN_FOR_AUTHORITY_EPOCH_ECHO
+    "Catching up on missed security updates": "security_update_catch_up",
+    # MIN_FOR_FORWARDED_ROLE_CHANGE
+    "Role changes from member households": "forwarded_role_changes",
+    # MIN_FOR_HOST_SEQUENCED_PAGES
+    "Shared pages without lost edits": "shared_pages_no_lost_edits",
+    # MIN_FOR_MEMBER_GFS_PUBLISH
+    "Members can post without the host": "member_publish",
+    # MIN_FOR_STRICT_MEMBER_PUBLISH
+    "Anonymous posting through the GFS": "anonymous_gfs_posting",
+    # MIN_FOR_PRIVATE_CHANNELS
+    "Private spaces through the GFS": "private_gfs_spaces",
+    # MIN_FOR_FORWARDED_INVITE_LINK
+    "Invite links from member households": "forwarded_invite_links",
+    # MIN_FOR_GFS_RELAY_ROUTES
+    "Reaching a paired household through a shared GFS": "shared_gfs_relay",
+    # MIN_FOR_GFS_RELAY_KEY_EXCHANGE
+    "Turning on the GFS fallback for an existing connection": "gfs_fallback_later",
+    # MIN_FOR_SPACE_CHAT
+    "Chat in spaces": "space_chat",
+    # MIN_FOR_SYNC_SERIES_ROWS
+    "Recurring events in space catch-up": "synced_recurring_events",
+    # MIN_FOR_MULTI_GFS_PUBLISH
+    "Posting to every GFS a space is listed on": "multi_gfs_posting",
+    # MIN_FOR_MEMBER_PICTURE_RESET_SYNC
+    "Removed profile pictures in space catch-up": "synced_picture_resets",
+    # MIN_FOR_LOCAL_COMMUNITY_AREA
+    "Local communities": "local_communities",
+    # MIN_FOR_SPACE_AUTHOR_PROFILE
+    "Names for a space's followers": "follower_author_names",
+    # MIN_FOR_FOLLOWER_PROFILE_BUNDLE
+    "Names for new followers right away": "follower_names_on_join",
+    # MIN_FOR_ENCRYPTED_PUBLIC_MOMENTS
+    "Public moments encrypted from the GFS": "encrypted_public_moments",
+    # MIN_FOR_ENCRYPTED_MOMENT_MEDIA
+    "Photos and videos in public moments": "public_moment_media",
+    # MIN_FOR_PUBLIC_MOMENT_SENT_AT
+    "Time-stamped public moments": "public_moment_sent_at",
+    # MIN_FOR_LONG_LIVED_MOMENTS
+    "Choose how long followers keep your moments": "follower_moment_retention",
+    # MIN_FOR_LATE_MOMENT_DELETES
+    "Deletes reach every copy of a moment": "late_moment_deletes",
+    # MIN_FOR_ROUTED_MOMENT_REACTIONS
+    "Reactions reach authors further away": "routed_moment_reactions",
+    # MIN_FOR_GFS_MOMENT_REACTIONS
+    "Reactions reach authors you follow through a GFS": "gfs_moment_reactions",
+    # MIN_FOR_MOMENT_REACTION_COUNTS
+    "Everyone sees the full reaction count": "moment_reaction_counts",
+    # MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE
+    "A highlight taken away stays away": "highlight_audience_change",
+    # MIN_FOR_REMOTE_REPORT_ANSWER
+    "Reporters in other households hear their report was reviewed": "remote_report_answers",
+    # MIN_FOR_APP_SESSION_ENDED
+    "Games end cleanly when the other household removes the app": "app_games_end_on_uninstall",
+    # MIN_FOR_BAZAAR_OFFERS
+    "Offers reach sellers in other households": "bazaar_offers",
+    # MIN_FOR_BAZAAR_THREAD
+    "Ask the seller about a listing": "bazaar_ask_the_seller",
+    # MIN_FOR_BAZAAR_FAQ
+    "Questions and answers on listings": "bazaar_listing_faq",
+    # MIN_FOR_APP_GROUPS
+    "Games for groups of players": "app_groups",
+    # MIN_FOR_SPACE_APP_TABLES
+    "Games in a space": "space_app_tables",
+    # MIN_FOR_APP_ENGINES
+    "Gift draws": "app_engines",
+    # MIN_FOR_SPACE_GALLERY_ITEM_EDIT
+    "Edit photos in a space": "space_gallery_item_edits",
+    # MIN_FOR_SPACE_MEDIA_REFS
+    "Pictures in a space for members who joined by link": "space_media_refs",
+    # MIN_FOR_MEDIA_HTTPS
+    "Lighter photo and file transfers": "lighter_media_transfers",
+    # MIN_FOR_PAGE_MEDIA
+    "Pictures in a space's pages": "space_page_media",
+    # MIN_FOR_SPACE_MEDIA_ON_DEMAND
+    "Older space pictures come back on view": "space_media_on_demand",
+    # MIN_FOR_GFS_JOIN_REQUEST
+    "Ask to join a global space through the GFS": "gfs_join_requests",
+    # MIN_FOR_CONTENT_FILE_HASHES
+    "Space pictures and files checked against their hash": "content_file_hashes",
+    # MIN_FOR_TRUSTED_FILE_FILLS
+    "Admins and moderators fill in missing space pictures": "trusted_file_fills",
+    # MIN_FOR_RELAY_MEDIA
+    "Members reached through a GFS get pictures in full-size pieces": "relay_media",
+    # MIN_FOR_MAILBOX_MEMBER_MESH
+    "Every member reaches households that reach a space through a GFS": "mailbox_member_mesh",
+    # MIN_FOR_ANON_MEMBER_PUBLISH_ONLY
+    "Posting over a GFS without naming the household": "anonymous_gfs_posting_only",
+    # MIN_FOR_MULTI_MAILBOX
+    "Space updates reach households behind a GFS in one upload": "multi_mailbox",
+    # MIN_FOR_SPACE_MEDIA_WANTED
+    "Older space pictures arrive when you open them": "space_media_wanted",
+    # MIN_FOR_SPACE_POST_REACTIONS
+    "Reactions on space posts reach every household": "space_post_reactions",
+    # MIN_FOR_ITEM_MERGE_STAMPS
+    "Poll votes count the same in every household": "poll_vote_stamps",
+    # MIN_FOR_SYNC_PAGES
+    "Space sync status, even without the host": "sync_pages",
+    # MIN_FOR_SUBSCRIBER_SEATS
+    "Follow spaces with one seat on every path": "subscriber_seats",
+    # MIN_FOR_MOMENT_REACH
+    "Choose how far your moments go": "moment_reach",
 }
 
 
@@ -2857,8 +3007,8 @@ def feature_keys_missing_below(version: int) -> list[str]:
     """The :data:`CAPABILITY_FEATURE_KEYS` slugs of
     :func:`features_missing_below`, in the same order."""
     return [
-        CAPABILITY_FEATURE_KEYS[ver]
-        for ver, _label in sorted(CAPABILITY_FEATURES)
+        CAPABILITY_FEATURE_KEYS[label]
+        for ver, label in sorted(CAPABILITY_FEATURES)
         if ver > version
     ]
 
@@ -2886,6 +3036,9 @@ def feature_keys_missing_below(version: int) -> list[str]:
 #:   spaces; a behind household only keeps its own people out of groups.
 #: * ``MIN_FOR_MOMENT_NO_RELAY`` — moments are household-broadcast posts;
 #:   a behind household only misses a protected account's moments.
+#: * ``MIN_FOR_MOMENT_REACH`` — moments are household-broadcast posts; a
+#:   behind household only misses reach-2 moments (and relays reach-4–5
+#:   ones no further than hop 3).
 #: * ``MIN_FOR_REMOTE_REPORT_ANSWER`` — a host → reporter's-household note;
 #:   a behind household only keeps its own reporters from hearing back, the
 #:   space works the same for everyone else.
@@ -2975,6 +3128,20 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
 )
 
 
+#: Slugs of household features that share their version with a
+#: shared-space feature: :data:`SPACE_SCOPED_MIN_VERSIONS` names thresholds,
+#: and v_96 brought both subscriber seats (space-scoped) and moment reach
+#: (moments are household broadcasts, see the exclusion list above).
+HOUSEHOLD_FEATURE_KEYS: frozenset[str] = frozenset({"moment_reach"})
+
+
+def _space_scoped(ver: int, label: str) -> bool:
+    return (
+        ver in SPACE_SCOPED_MIN_VERSIONS
+        and CAPABILITY_FEATURE_KEYS[label] not in HOUSEHOLD_FEATURE_KEYS
+    )
+
+
 def space_features_missing_below(version: int) -> list[str]:
     """Space-scoped feature labels a member household at ``version`` lacks.
 
@@ -2987,7 +3154,7 @@ def space_features_missing_below(version: int) -> list[str]:
     return [
         label
         for ver, label in sorted(CAPABILITY_FEATURES)
-        if ver > version and ver in SPACE_SCOPED_MIN_VERSIONS
+        if ver > version and _space_scoped(ver, label)
     ]
 
 
@@ -2995,7 +3162,7 @@ def space_feature_keys_missing_below(version: int) -> list[str]:
     """The :data:`CAPABILITY_FEATURE_KEYS` slugs of
     :func:`space_features_missing_below`, in the same order."""
     return [
-        CAPABILITY_FEATURE_KEYS[ver]
-        for ver, _label in sorted(CAPABILITY_FEATURES)
-        if ver > version and ver in SPACE_SCOPED_MIN_VERSIONS
+        CAPABILITY_FEATURE_KEYS[label]
+        for ver, label in sorted(CAPABILITY_FEATURES)
+        if ver > version and _space_scoped(ver, label)
     ]

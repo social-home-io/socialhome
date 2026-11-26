@@ -305,6 +305,10 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "non-space exclusion",
             "friends",
         ),
+        "socialhome/services/moment_public_service.py": (
+            "non-space exclusion",
+            "one Follow: a friend gets the household follow, not a GFS one",
+        ),
         "socialhome/services/online_status_service.py": (
             "non-space exclusion",
             "presence",
@@ -317,9 +321,9 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "non-space exclusion",
             "confirmed-peer broadcasts",
         ),
-        "socialhome/services/resync_on_upgrade.py": (
+        "socialhome/services/capability_resync.py": (
             "non-space exclusion",
-            "capability re-ask on upgrade",
+            "capability re-sync at startup",
         ),
     },
 }
@@ -373,7 +377,10 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/space_media_sync_service.py": 2,
     },
     "is_space_session_peer": {
-        "socialhome/federation/federation_service.py": 3,
+        # +1 (P9): _handle_space_sync_direct_failed takes from an invite-link
+        # household only a capacity refusal of a BEGIN we sent — a
+        # transport rule (no direct connection), not a member special case.
+        "socialhome/federation/federation_service.py": 4,
         "socialhome/federation/sync/space/provider.py": 1,
         "socialhome/federation/sync/space/scheduler.py": 1,
     },
@@ -411,10 +418,11 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/calendar_service.py": 1,
         "socialhome/services/dm_routing_service.py": 1,
         "socialhome/services/friends_service.py": 2,
+        "socialhome/services/moment_public_service.py": 1,
         "socialhome/services/online_status_service.py": 3,
         "socialhome/services/peer_directory_service.py": 1,
         "socialhome/services/peer_outbound.py": 1,
-        "socialhome/services/resync_on_upgrade.py": 1,
+        "socialhome/services/capability_resync.py": 1,
     },
 }
 

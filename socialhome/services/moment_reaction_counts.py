@@ -1,7 +1,7 @@
 """Everyone sees the full reaction count (v_69, owner decision 10).
 
 Since v_67 / v_68 a reaction reaches the author's household from paired,
-2–3-hop and GFS followers alike, so only that household holds a moment's
+relayed and GFS followers alike, so only that household holds a moment's
 full count; every other household holds just its own people's reactions.
 The author's household therefore re-broadcasts the **totals** — per-emoji
 counts (the 8 most used) and the total, never who — and this service plays
@@ -434,6 +434,13 @@ class MomentReactionCounts(ProtectionGateMixin):
         """Sign the totals and hand them to every v_69 peer (a peer offline
         gets them from the outbox). ``False`` when that failed — the
         checkpoint stays due and is tried again next tick."""
+        # v_96: as far as the moment went — its row's reach. A row written
+        # before v_96 (``None``) went as it did then: one hop (``no_relay``)
+        # for a protected author, else 3 hops, unmarked. Accepted edge: an
+        # author protected only after posting a legacy moment.
+        reach = moment.reach
+        if reach is None and await self._is_protected(moment.author_user_id):
+            reach = 1
         try:
             payload = sign_counts(
                 seed=self._federation.own_identity_seed,
@@ -444,12 +451,13 @@ class MomentReactionCounts(ProtectionGateMixin):
                 rev=self._next_rev(),
                 counts=counts,
                 total=total,
-                # §CP.R: a protected account's moment went to paired
-                # households only; its totals do too, never relayed.
-                no_relay=await self._is_protected(moment.author_user_id),
+                # v_96: reach 1 (a protected account's, §CP.R, written so
+                # by the service, or chosen) went to paired households only;
+                # its totals do too, never relayed.
+                no_relay=reach == 1,
             )
             await self._outbound.fan_counts(
-                payload, author_user_id=moment.author_user_id
+                payload, author_user_id=moment.author_user_id, reach=reach
             )
         except Exception as exc:  # noqa: BLE001 — retried, never kills the tick
             log.warning(
@@ -575,9 +583,16 @@ class MomentReactionCounts(ProtectionGateMixin):
                 event_type=FET.MOMENT_REACTIONS_COUNTED,
                 payload=p,
                 from_instance=event.from_instance,
-                holds_moment=held
-                and moment is not None
-                and moment.received_via == "household",
+                # v_96: a holder passes totals on only while the moment
+                # itself would still be passed on from here (hop < reach).
+                held_reach=(
+                    moment.effective_reach
+                    if held
+                    and moment is not None
+                    and moment.received_via == "household"
+                    and moment.hop_count < moment.effective_reach
+                    else None
+                ),
                 now_ms=now,
             )
         except Exception as exc:  # pragma: no cover — defensive

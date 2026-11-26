@@ -89,7 +89,7 @@ DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
 // ``Referrer-Policy: strict-origin-when-cross-origin`` the browser would
 // still send this household's origin to that third party on link
 // navigation, so every link that is not an in-app path (``/…`` / ``#…``,
-// read the way the browser reads it) gets ``rel="noopener noreferrer"``.
+// read the way the browser reads it) gets ``rel="noopener noreferrer nofollow ugc"`` (as in posts).
 // Only local pictures survive to render (``_onlyLocalImages``); they
 // still get ``referrerpolicy="no-referrer"`` + ``loading="lazy"`` — moot
 // for a same-origin fetch today, kept so a future loosening of the
@@ -104,7 +104,14 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   } else if (node.tagName === 'A') {
     const read = (node.getAttribute('href') ?? '')
       .replace(_URL_STRIPPED, '').replace(_URL_EDGE, '')
-    if (!/^[/#]/.test(read)) node.setAttribute('rel', 'noopener noreferrer')
+    if (!/^[/#]/.test(read)) {
+      node.setAttribute('rel', 'noopener noreferrer nofollow ugc')
+      // marked's GFM autolink makes ``www.x`` an ``http://`` link; open it
+      // over https like a ``www.`` link anywhere else in the app.
+      if (/^http:\/\/www\./i.test(read) && node.textContent === read.slice(7)) {
+        node.setAttribute('href', `https://${read.slice(7)}`)
+      }
+    }
   }
 })
 
@@ -196,7 +203,7 @@ function _onlyLocalImages(root: DocumentFragment): void {
     }
     const a = doc.createElement('a')
     a.setAttribute('href', src)
-    a.setAttribute('rel', 'noopener noreferrer')
+    a.setAttribute('rel', 'noopener noreferrer nofollow ugc')
     a.setAttribute('target', '_blank')
     a.textContent = alt || url.hostname
     img.replaceWith(a)

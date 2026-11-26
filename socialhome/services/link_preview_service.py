@@ -17,7 +17,8 @@ Guard rails:
 
 * every request goes through :class:`~socialhome.outbound_fetch.OutboundFetcher`
   (SSRF guard: public addresses only, pinned DNS, ≤ 3 redirects, 5 s,
-  512 KiB of HTML, 2 MiB of image);
+  the page read only up to ``</head>`` and never past 2 MiB, 2 MiB of
+  image);
 * results — including "no preview" — are cached per normalised URL for a
   short time, and concurrent requests for one URL share a single fetch;
 * fresh fetches are rate-limited per member and per household, so a member
@@ -75,8 +76,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: HTML read per page — the ``<head>`` is at the top; the rest is cut.
-HTML_MAX_BYTES: int = 512 * 1024
+#: Most HTML read per page. The read stops at ``</head>``
+#: (:data:`HTML_HEAD_END`) — the og: tags are all in the head — so a normal
+#: page costs far less; the cap is for big heads: YouTube's watch page has
+#: ~850 KB of inline script before its og: tags (``</head>`` at ~866 KB,
+#: 2026-11), which the old 512 KiB cap cut off, leaving the post no card.
+HTML_MAX_BYTES: int = 2 * 1024 * 1024
+#: Where the preview's part of a page ends; nothing after it is downloaded.
+HTML_HEAD_END: bytes = b"</head>"
 #: Largest preview image downloaded.
 IMAGE_MAX_BYTES: int = 2 * 1024 * 1024
 
@@ -284,6 +291,7 @@ class LinkPreviewService:
                 max_bytes=HTML_MAX_BYTES,
                 truncate=True,
                 timeout_s=BUILD_BUDGET_S,
+                stop_after=HTML_HEAD_END,
             )
         except OutboundFetchRefused as exc:
             log.info(

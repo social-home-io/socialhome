@@ -302,8 +302,11 @@ export interface Moment {
    *  Saved list pages on it. */
   saved_at?:          string
   /** How far away it was written: 1 = this household or a paired one,
-   *  2–3 = relayed that many hops. */
+   *  2–5 = relayed that many hops. */
   hop_count?:         number
+  /** How many hops it goes (v_96, 1–5), fixed when it was written. Read
+   *  it through ``momentReach()`` (range-checked). */
+  reach:              number
   /** ``GET /api/moments?top_level=1`` only: the newest reply the caller
    *  may read (no counts on it), or ``null``. */
   latest_reply?:      Moment | null
@@ -1136,6 +1139,9 @@ export interface DirectoryEntry {
   /** Asked through the GFS, approved, the seat still being made (v_84):
    *  "Approved, joining…" instead of "Requested". */
   request_joining?: boolean
+  /** The request out is a follow this page sent (its host seats it on its
+   *  own): "Following…" beside the way to join, not "Requested". */
+  follow_pending?: boolean
   /** Asked through the GFS lately and the host answered "busy" (no room
    *  for more requests right now), not asked again since: "Ask to join"
    *  with a "try again later" note. */

@@ -192,6 +192,11 @@ def role_change_allowed(
         return False
     if current is SpaceRole.OWNER or new is SpaceRole.OWNER:
         return False
+    # A follower seat moves only through an approved join or redeem of that
+    # person's own (step up, owner 2026-11-26) — never an admin's promote of
+    # someone who did not ask — and no role change makes a follower.
+    if current is SpaceRole.SUBSCRIBER or new is SpaceRole.SUBSCRIBER:
+        return False
     if actor is SpaceRole.OWNER:
         return new in (SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER)
     if actor is SpaceRole.ADMIN:

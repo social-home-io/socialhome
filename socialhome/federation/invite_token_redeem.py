@@ -43,7 +43,7 @@ import logging
 import secrets
 import uuid
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -351,6 +351,10 @@ class _SeatReservation:
     display_name: str | None
     seat: str
     pending_admin: bool
+    #: Owner 2026-11-26 (step up): the role of the live seat this redeem
+    #: replaced — ``subscriber`` when a follower redeemed a writer token —
+    #: so a rollback restores it instead of un-seating the household.
+    prior_role: str | None = None
     #: A grandfathered (``gfs_legacy``) link seated this household over the
     #: relay into a private space whose ``private_gfs`` is OFF: the commit
     #: turns the option ON (the owner's normal ON path).
@@ -1147,17 +1151,23 @@ class SpaceInviteTokenRedeemCoordinator:
                     and self._writer_certs is not None
                 ):
                     await self._writer_certs.accept(space_id, meta.get("writer_cert"))
-                was_member = (
-                    await self._spaces.get_member(space_id, viewer_user_id) is not None
-                )
-                member = SpaceMember(
-                    space_id=space_id,
-                    user_id=viewer_user_id,
-                    role=role_str,
-                    joined_at=datetime.now(UTC).isoformat(),
+                held = await self._spaces.get_member(space_id, viewer_user_id)
+                member = (
+                    # A step up over our follower seat keeps its per-space
+                    # name, picture, location opt-in and history window.
+                    replace(held, role=role_str)
+                    if held is not None
+                    else SpaceMember(
+                        space_id=space_id,
+                        user_id=viewer_user_id,
+                        role=role_str,
+                        joined_at=datetime.now(UTC).isoformat(),
+                    )
                 )
                 await self._spaces.save_member(member)
-                if not was_member:
+                if held is None or held.role != role_str:
+                    # A new seat, or a follower stepping up: what a new
+                    # member needs at once hangs off the joined event.
                     joined = member
                 # v_51 — our private-space channel grant for that epoch, taken
                 # only now that our person is seated: taking it subscribes at
@@ -1626,6 +1636,22 @@ class SpaceInviteTokenRedeemCoordinator:
 
         # Seat the remote redeemer + register their instance so the
         # issuer's outbound fan-outs reach them.
+        held = await self._remote_members.get(
+            space_id, redeemer_instance_id, redeemer_user_id
+        )
+        if held is not None and held.role != SpaceRole.SUBSCRIBER.value:
+            # Seated another way between the re-ACK check and here (a
+            # promotion): never overwrite it — hand the use back and answer
+            # from the seat it holds.
+            await self._release_token_use(token, space_id)
+            reack = await self._reack_seated_redeemer(
+                token,
+                redeemer_instance_id=redeemer_instance_id,
+                redeemer_user_id=redeemer_user_id,
+            )
+            ack, reason = reack if reack is not None else (None, REDEEM_DENY_REASON)
+            return ack, reason, None
+        prior_role = held.role if held is not None else None
         try:
             # The seat lands in the SAME write as the row. It used to be
             # an ``add`` (always ``member``) followed by a ``set_role``,
@@ -1667,6 +1693,7 @@ class SpaceInviteTokenRedeemCoordinator:
             display_name=redeemer_display,
             seat=seat,
             pending_admin=pending_admin,
+            prior_role=prior_role,
             unlock_private_gfs=unlock,
             via_gfs_id=(str(row["gfs_id"]) if unlock and row.get("gfs_id") else None),
         )
@@ -1853,6 +1880,14 @@ class SpaceInviteTokenRedeemCoordinator:
             role = str(seat.role or SpaceRole.MEMBER.value)
             if role not in REACKABLE_REMOTE_ROLES:
                 return None, REDEEM_DENY_REASON
+            if role == SpaceRole.SUBSCRIBER.value and (
+                await self._spaces.get_invite_token_role(space_id, token)
+            ) not in (None, SpaceRole.SUBSCRIBER.value):
+                # Step up (owner 2026-11-26): a follower redeeming a writer
+                # token — the bound member token an approval of its request
+                # minted, or a member link — spends it like any redeem and
+                # is seated with that role over its follower seat.
+                return None
             ack_body = await self._build_ack_body(
                 space_id,
                 seat=role,
@@ -1995,11 +2030,17 @@ class SpaceInviteTokenRedeemCoordinator:
             res.space_id,
         )
         try:
-            await self._remote_members.remove(
-                res.space_id,
-                res.instance_id,
-                res.user_id,
-            )
+            if res.prior_role is not None:
+                # A step up whose ACK never left: the follower seat it was.
+                await self._remote_members.set_role(
+                    res.space_id, res.instance_id, res.user_id, res.prior_role
+                )
+            else:
+                await self._remote_members.remove(
+                    res.space_id,
+                    res.instance_id,
+                    res.user_id,
+                )
         except Exception:
             log.exception(
                 "invite redeem: un-seating %s in space %s failed",

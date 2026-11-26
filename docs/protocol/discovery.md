@@ -522,11 +522,9 @@ The Social Home ↔ GFS link is split by direction:
     survives a restart). The other way round — a grant already naming the
     new id while this member has not rebound — re-reads that server's
     `/gfs/info` at once (at most once a minute per connection) before the
-    server is skipped. The household's follow seats (`gfs_space_seats`,
-    bound to server id + pinned key + address) move to the new id in the
-    same step — only seats bound to the connection's pinned key AND address
-    — and the reconnect reconcile repeats the move before reading seats, so
-    a crash in between heals.
+    server is skipped. (Before v_96 the household's GFS follow seats,
+    `gfs_space_seats`, moved to the new id in the same step; that table is
+    gone — migration 0156 — and follows are roster seats.)
   - **Key binding (`gfs_key`).** An alias such as `gfs-0` may be ANOTHER
     operator's real id, so the id alone no longer rules out replaying a
     request captured there. Every household- or channel-signed request
@@ -1081,7 +1079,7 @@ relay as every other item:
   picture changed: a name or bio change is a small item and the follower
   keeps the picture it holds for the same signed hash.
 - **The GFS sees ciphertext only** — the generic `space_item`, padded to a
-  size bucket like any item (`tests/protocol/test_gfs_member_publish_blind.py`).
+  size bucket like any item (`tests/protocol/test_gfs_global_channel_blind.py`).
   Padded, a profile without picture bytes lands in the 1 KiB or 4 KiB
   bucket; one with a picture lands in the **64 KiB** bucket (a 24 KB WebP is
   ~32 KB as base64), not ~25 KB. The bucket still tells the GFS that

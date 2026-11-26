@@ -446,6 +446,24 @@ class _WithFileHashes:
             yield await self._add(batch)
 
 
+class _WithoutBanReasons:
+    """The ``bans`` resource for a follower household: every ban, without
+    its free-text ``reason`` (the ban list's audience is the space's member
+    households; a follower needs only the target and the banner)."""
+
+    __slots__ = ("_inner", "resource")
+
+    def __init__(self, inner: ResourceExporter) -> None:
+        self._inner = inner
+        self.resource = inner.resource
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return [
+            {k: v for k, v in r.items() if k != "reason"}
+            for r in await self._inner.list_records(space_id)
+        ]
+
+
 class _OwnPeopleOnly:
     """A resource narrowed to this household's own people: a record is kept
     when its owner (``owner_of``, by default its ``user_id``) is one of them,
@@ -906,6 +924,19 @@ class SpaceSyncService:
                 )
             )
             return exporter if allowed else None
+        if (
+            exporter is not None
+            and resource == "bans"
+            and not (
+                self._member_gate is not None
+                and await self._member_gate(
+                    session.space_id, session.requester_instance_id
+                )
+            )
+        ):
+            # A follower household: who is banned (its authorship checks)
+            # and by whom (a person ban needs it), never why (P7b M4).
+            return _WithoutBanReasons(exporter)
         if exporter is not None and resource in _MEMBER_ONLY_RESOURCES:
             allowed = self._member_gate is not None and await self._member_gate(
                 session.space_id, session.requester_instance_id

@@ -10,8 +10,16 @@ import pytest
 
 from socialhome.app_keys import moment_public_service_key
 from socialhome.csp import MEDIA_CSP
-from socialhome.domain.moment_public import MomentPublicFollow, MomentPublicRegistration
-from socialhome.services.moment_public_service import MomentPublicError
+from socialhome.domain.moment_public import (
+    DIRECTORY_SORTS,
+    MomentPublicDirectoryPage,
+    MomentPublicFollow,
+    MomentPublicRegistration,
+)
+from socialhome.services.moment_public_service import (
+    MomentPublicError,
+    MomentPublicFollowAtHomeError,
+)
 
 from .conftest import _auth, client_with_stubs
 
@@ -24,6 +32,7 @@ class _StubService:
         self.unfollow_calls: list[tuple[str, str, str]] = []
         self.set_default_calls: list[tuple[str, str, bool]] = []
         self.directory_calls: list = []
+        self.directory_viewers: list = []
         self.directory_users: list[dict] = [
             {"user_id": "u-remote", "display_name": "Bob"}
         ]
@@ -38,6 +47,9 @@ class _StubService:
         self.register_defaults: list[bool | None] = []
         self.follow_raises: Exception | None = None
         self.directory_raises: Exception | None = None
+        self.directory_sorts: list = []
+        #: Whether the stubbed GFS echoes the order it was asked for.
+        self.directory_ranks = True
         self.picture_raises: Exception | None = None
         #: GFS ids that proved ``encrypted_moments`` (v_62).
         self.encrypted: set[str] = {"g1"}
@@ -94,11 +106,18 @@ class _StubService:
     async def unfollow(self, *, follower_user_id, gfs_id, followed_user_id):
         self.unfollow_calls.append((follower_user_id, gfs_id, followed_user_id))
 
-    async def fetch_directory(self, gfs_id, *, q=None):
+    async def fetch_directory(self, gfs_id, *, q=None, sort=None, viewer_user_id=None):
+        self.directory_viewers.append(viewer_user_id)
+        self.directory_sorts.append(sort)
         self.directory_calls.append((gfs_id, q) if q else gfs_id)
         if self.directory_raises:
             raise self.directory_raises
-        return self.directory_users
+        if sort is not None and sort not in DIRECTORY_SORTS:
+            raise ValueError("unknown sort")
+        return MomentPublicDirectoryPage(
+            users=tuple(self.directory_users),
+            sort=sort if self.directory_ranks else None,
+        )
 
     async def fetch_picture(self, gfs_id, user_id):
         self.picture_calls.append((gfs_id, user_id))
@@ -257,6 +276,17 @@ async def test_follow_gfs_failure_maps_to_502(client, stub):
     assert r.status == 502
 
 
+async def test_follow_of_a_friend_maps_to_409(client, stub):
+    stub.follow_raises = MomentPublicFollowAtHomeError("a friend")
+    r = await client.post(
+        "/api/moments/public/follows",
+        json={"gfs_id": "g1", "followed_user_id": "u-paired"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "FOLLOW_AT_HOME"
+
+
 async def test_list_follows_returns_caller_only(client, stub):
     await stub.follow(
         follower_user_id=client._uid, gfs_id="g1", followed_user_id="u-remote"
@@ -292,9 +322,12 @@ async def test_directory_proxy_returns_users(client, stub):
     assert r.status == 200
     body = await r.json()
     assert body == {
-        "users": [{"user_id": "u-remote", "display_name": "Bob", "picture_url": None}]
+        "users": [{"user_id": "u-remote", "display_name": "Bob", "picture_url": None}],
+        "sort": None,
     }
     assert stub.directory_calls == ["g1"]
+    # The service checks the viewer (a protected account never browses).
+    assert stub.directory_viewers and stub.directory_viewers[0]
 
 
 async def test_directory_picture_url_loads_without_a_bearer(client, stub):
@@ -350,6 +383,29 @@ async def test_directory_proxy_passes_search_query(client, stub):
     r = await client.get("/api/gfs/g1/moments/users?q=bern", headers=_auth(client._tok))
     assert r.status == 200
     assert stub.directory_calls == [("g1", "bern")]
+
+
+async def test_directory_proxy_passes_the_sort_and_says_what_it_got(client, stub):
+    r = await client.get(
+        "/api/gfs/g1/moments/users?sort=followers", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert (await r.json())["sort"] == "followers"
+    assert stub.directory_sorts == ["followers"]
+    # A GFS that doesn't rank (older): ``sort`` is null, the rows still come.
+    stub.directory_ranks = False
+    r = await client.get(
+        "/api/gfs/g1/moments/users?sort=followers", headers=_auth(client._tok)
+    )
+    body = await r.json()
+    assert body["sort"] is None and len(body["users"]) == 1
+
+
+async def test_directory_proxy_refuses_an_unknown_sort(client, stub):
+    r = await client.get(
+        "/api/gfs/g1/moments/users?sort=recent", headers=_auth(client._tok)
+    )
+    assert r.status == 422
 
 
 # ── Picture proxy ────────────────────────────────────────────────────────

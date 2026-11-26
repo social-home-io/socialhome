@@ -25,12 +25,17 @@ from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
 from ..domain.moment_public import (
+    DIRECTORY_SORT_FOLLOWERS,
+    DIRECTORY_SORTS,
+    MomentPublicDirectoryPage,
     MomentPublicFollow,
     MomentPublicRegistration,
     public_author_bio,
     public_author_name,
     public_picture_digest,
+    shown_follower_count,
 )
+from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.moment_public_repo import (
     AbstractMomentPublicFollowRepo,
@@ -48,9 +53,23 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Directory row fields the page shows and searches — kept only as text.
+_DIRECTORY_TEXT_FIELDS = ("display_name", "username", "bio")
+#: A GFS directory answer holds at most this many rows; more are dropped.
+DIRECTORY_MAX_ROWS = 200
+
 
 class MomentPublicError(Exception):
     """Raised on any GFS round-trip failure. Mapped to HTTP 502."""
+
+    __slots__ = ()
+
+
+class MomentPublicFollowAtHomeError(ValueError):
+    """A GFS follow of someone this household already knows — a local user
+    or a person of a paired household. They get the household follow, which
+    never leaves the household; a GFS follow would tell the GFS who follows
+    whom for nothing (owner decision 7, "one Follow"). Mapped to HTTP 409."""
 
     __slots__ = ()
 
@@ -61,6 +80,7 @@ class MomentPublicService(ProtectionGateMixin):
     __slots__ = (
         "_capabilities",
         "_child_protection",
+        "_federation",
         "_follows",
         "_gfs",
         "_http_client",
@@ -83,11 +103,16 @@ class MomentPublicService(ProtectionGateMixin):
         *,
         profile_picture_repo: AbstractProfilePictureRepo | None = None,
         http_client: aiohttp.ClientSession | None = None,
+        federation_repo: AbstractFederationRepo | None = None,
     ) -> None:
         self._regs = registration_repo
         self._follows = follow_repo
         self._users = user_repo
         self._gfs = gfs_repo
+        #: Which households are paired with this one — their people are
+        #: friends, never GFS-followed (:meth:`_people_at_home`). Without
+        #: it only local users count as known.
+        self._federation = federation_repo
         self._pictures = profile_picture_repo
         self._http_client = http_client
         self._signing_key: bytes | None = None
@@ -338,6 +363,11 @@ class MomentPublicService(ProtectionGateMixin):
         await self._require_unrestricted(
             follower_user_id, ProtectedCapability.PUBLIC_MOMENTS
         )
+        user_ids, _ = await self._people_at_home()
+        if followed_user_id in user_ids:
+            raise MomentPublicFollowAtHomeError(
+                "this person is a friend — follow them at home, not through a GFS"
+            )
         conn = await self._require_active_gfs(gfs_id)
         body = {
             "follower_user_id": follower_user_id,
@@ -452,20 +482,42 @@ class MomentPublicService(ProtectionGateMixin):
                     gfs_id=follow.gfs_id,
                 )
 
-    async def fetch_directory(self, gfs_id: str, *, q: str | None = None) -> list[dict]:
-        """Fetch the GFS public-user directory (anon GET).
+    async def fetch_directory(
+        self,
+        gfs_id: str,
+        *,
+        q: str | None = None,
+        sort: str | None = None,
+        viewer_user_id: str | None = None,
+    ) -> MomentPublicDirectoryPage:
+        """Fetch the GFS public-user directory (anon GET) for
+        *viewer_user_id*, without the people this household knows
+        (:meth:`_strangers`).
 
         Optional ``q`` substring filter on display_name + username; the
         server-side filter is delegated to the GFS so big directories
-        don't ship in full.
+        don't ship in full. Optional ``sort`` (one of
+        :data:`DIRECTORY_SORTS`, else ``ValueError``): the page's ``sort``
+        is set only when the GFS echoed exactly that order, and each row
+        keeps a ``follower_count`` only when it is a plausible count
+        (:func:`shown_follower_count`) — both are display data, used for
+        nothing else.
         """
+        if sort is not None and sort not in DIRECTORY_SORTS:
+            raise ValueError(f"unknown directory sort {sort!r}")
+        if q and sort == DIRECTORY_SORT_FOLLOWERS:
+            raise ValueError("a search is listed newest first, not ranked")
+        if viewer_user_id is not None:
+            # §CP.R: a protected account never browses a GFS, even with a
+            # stale client that still offers it.
+            await self._require_unrestricted(
+                viewer_user_id, ProtectedCapability.PUBLIC_MOMENTS
+            )
         conn = await self._require_active_gfs(gfs_id)
-        url = f"{conn.inbox_url}/gfs/moments/users"
-        if q:
-            url = f"{url}?q={q}"
         try:
             async with self._client().get(
-                url,
+                f"{conn.inbox_url}/gfs/moments/users",
+                params={k: v for k, v in (("q", q), ("sort", sort)) if v} or None,
                 allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -474,12 +526,74 @@ class MomentPublicService(ProtectionGateMixin):
                         f"GFS directory fetch failed: HTTP {resp.status}"
                     )
                 payload = await resp.json()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, ValueError) as exc:
+            # ValueError: a body that isn't JSON — the GFS's fault (502),
+            # not a bad request of ours.
             raise MomentPublicError(f"GFS directory request failed: {exc}") from exc
-        users = payload.get("users")
-        if not isinstance(users, list):
-            return []
-        return users
+        if not isinstance(payload, dict) or not isinstance(payload.get("users"), list):
+            return MomentPublicDirectoryPage(users=())
+        echoed = payload.get("sort")
+        rows = []
+        for raw in await self._strangers(payload["users"]):
+            row = {k: v for k, v in raw.items() if k != "follower_count"}
+            count = shown_follower_count(raw.get("follower_count"))
+            if count is not None:
+                row["follower_count"] = count
+            rows.append(row)
+        return MomentPublicDirectoryPage(
+            users=tuple(rows),
+            sort=sort if sort is not None and echoed == sort else None,
+        )
+
+    async def _strangers(self, rows: list) -> list[dict]:
+        """The directory rows worth a GFS follow: well-formed, once each, and
+        nobody this household knows. The GFS chose every field, so a row is
+        dropped by its ``user_id`` (a local user or a paired person under any
+        household it claims) and by its ``instance_id`` (our household or a
+        paired one — for a paired household that shares no people)."""
+        user_ids, instance_ids = await self._people_at_home()
+        seen: set[str] = set()
+        out: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            uid, iid = row.get("user_id"), row.get("instance_id")
+            if not isinstance(uid, str) or uid in seen or uid in user_ids:
+                continue
+            if not isinstance(iid, str) or iid in instance_ids:
+                continue
+            seen.add(uid)
+            # The text the page shows and searches is text, or nothing.
+            out.append(
+                {
+                    **row,
+                    **{
+                        k: (row[k] if isinstance(row.get(k), str) else None)
+                        for k in _DIRECTORY_TEXT_FIELDS
+                    },
+                }
+            )
+            if len(out) >= DIRECTORY_MAX_ROWS:
+                break
+        return out
+
+    async def _people_at_home(self) -> tuple[set[str], set[str]]:
+        """``(user_ids, instance_ids)`` of the people this household already
+        follows at home: its own users and household, and the people and
+        households it is socially paired with. A household met only in a
+        shared space (§D2b) is not a friend — its people stay GFS-followable,
+        as on the Friends page."""
+        user_ids = {u.user_id for u in await self._users.list_all()}
+        instance_ids = {self._own_instance_id} if self._own_instance_id else set()
+        if self._federation is not None:
+            social = {i.id for i in await self._federation.list_social_instances()}
+            instance_ids |= social
+            user_ids |= {
+                r.user_id
+                for r in await self._users.list_all_known_remote()
+                if r.instance_id in social
+            }
+        return user_ids, instance_ids
 
     async def fetch_picture(
         self, gfs_id: str, user_id: str

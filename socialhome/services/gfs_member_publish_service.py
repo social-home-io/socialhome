@@ -325,15 +325,6 @@ class GfsMemberPublishService:
         """Wait for every background publish (tests, graceful stop)."""
         await wait_tasks_done(lambda: self._tasks)
 
-    async def publish_post(
-        self,
-        space_id: str,
-        inner: dict,
-        targets: list[GfsConnection],
-    ) -> list[GfsConnection]:
-        """:meth:`publish_item` for a post."""
-        return await self.publish_item(space_id, ITEM_TYPE_POST, inner, targets)
-
     async def publish_item(
         self,
         space_id: str,

@@ -104,6 +104,7 @@ from ..services.highlight_service import (
     HighlightNotFoundError,
 )
 from ..services.map_tile_service import TileCoordinateError, TileUnavailableError
+from ..services.moment_public_service import MomentPublicFollowAtHomeError
 from ..services.moment_service import MomentNotFoundError, MomentRateLimitError
 from ..services.page_conflict_service import (
     NoActiveConflictError,
@@ -434,6 +435,10 @@ class BaseView(web.View):
             )
         except AppAlreadyInstalledError as exc:
             return error_response(409, "CONFLICT", str(exc))
+        except MomentPublicFollowAtHomeError as exc:
+            # A ValueError subclass — must precede the generic clause. A
+            # friend gets the household follow, never a GFS one.
+            return error_response(409, "FOLLOW_AT_HOME", str(exc))
         except AppIntegrityError as exc:
             # §App-integrity: bundle download/verify failure is a bad
             # request (bad app_id, tampered catalog) — 400 UNPROCESSABLE

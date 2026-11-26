@@ -505,7 +505,7 @@ describe('SpacePublicDetailPage — a global space\'s place pin', () => {
     })])
     const { getByTestId, getByText } = await renderPage()
     await waitFor(() => expect(getByTestId('place-distance').textContent).toContain('about 95 km away'))
-    expect(getByText('You’re expected to follow this space’s rules.')).toBeTruthy()
+    expect(getByText('You agree to keep to this space’s rules.')).toBeTruthy()
   })
 
   it('a radius hint: the suggestion, our verdict and the circle on a small map — a hint only', async () => {
@@ -524,7 +524,7 @@ describe('SpacePublicDetailPage — a global space\'s place pin', () => {
     expect(getByText('A hint only — nobody checks where people live when they join.')).toBeTruthy()
     // Still joinable — the rules apply, not the radius.
     expect(getByText('Request to join')).toBeTruthy()
-    expect(getByText('You’re expected to follow this space’s rules.')).toBeTruthy()
+    expect(getByText('You agree to keep to this space’s rules.')).toBeTruthy()
   })
 
   it('no pin (or no home): no distance', async () => {
@@ -686,5 +686,118 @@ describe('SpacePublicDetailPage — local community', () => {
     const { getByText, queryByTestId } = await renderPage()
     await waitFor(() => getByText('Open space'))
     expect(queryByTestId('local-area-badge')).toBeNull()
+  })
+})
+
+describe('SpacePublicDetailPage — Join and Follow side by side (owner 2026-11-26)', () => {
+  // A paired household's public space that takes followers (P9: its host
+  // declares a follower count, so the peer directory says it does).
+  const paired = (over: Partial<DirectoryEntry> = {}) => entry({
+    host_instance_id:  'peer-7',
+    host_display_name: 'Keller household',
+    host_is_paired:    true,
+    scope:             'public',
+    join_mode:         'request',
+    allow_subscribers: true,
+    ...over,
+  })
+  const buttonNamed = (c: Element, name: string) =>
+    [...c.querySelectorAll('button')].find(b => b.textContent === name) as HTMLButtonElement | undefined
+
+  it('the way to join first, Follow second, and one line on the difference', async () => {
+    cacheDirectoryEntries([paired()])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Request to join'))
+    const buttons = [...container.querySelectorAll('.sh-space-public__cta-row button')]
+      .map(b => b.textContent)
+    expect(buttons).toEqual(['Request to join', 'Follow'])
+    expect(getByText('Follow to read along without joining. Members see who follows.')).toBeTruthy()
+    fireEvent.click(getByText('Follow'))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/spaces/sp-1/subscribe', {}))
+  })
+
+  it('a follow its host has yet to seat: "Following…" beside the way to join', async () => {
+    cacheDirectoryEntries([paired()])
+    api.post.mockResolvedValue({ subscribed: false, pending: true })
+    const { container, getByText, findByText } = await renderPage()
+    await waitFor(() => getByText('Follow'))
+    fireEvent.click(getByText('Follow'))
+    await findByText('Following…')
+    expect(buttonNamed(container, 'Following…')?.disabled).toBe(true)
+    // Asking to join stays possible.
+    expect(buttonNamed(container, 'Request to join')?.disabled).toBe(false)
+  })
+
+  it('while a request to join is out, Follow is disabled', async () => {
+    cacheDirectoryEntries([paired({ request_pending: true })])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Follow'))
+    expect(buttonNamed(container, 'Follow')?.disabled).toBe(true)
+    expect(buttonNamed(container, 'Request pending')?.disabled).toBe(true)
+  })
+
+  it('after following: "Following", and the way to join is still offered (step up)', async () => {
+    cacheDirectoryEntries([paired({ already_subscribed: true })])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Request to join'))
+    expect(buttonNamed(container, 'Follow')).toBeUndefined()
+    expect(container.querySelector('.sh-subscribed-pill')?.textContent).toContain('Following')
+    expect(getByText('You follow this space. Join to take part as a member.')).toBeTruthy()
+  })
+
+  it('a space that takes no followers shows only the way to join', async () => {
+    cacheDirectoryEntries([paired({ allow_subscribers: false })])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Request to join'))
+    expect(buttonNamed(container, 'Follow')).toBeUndefined()
+    expect(container.textContent).not.toContain('Follow to read along')
+  })
+
+  it('a GFS space you can only follow never says "Open to join"', async () => {
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'remote-9', host_display_name: null, host_is_paired: false,
+      scope: 'global', join_mode: 'open', allow_subscribers: true,
+    })])
+    const { container, getByText } = await renderPage()
+    await waitFor(() => getByText('Follow'))
+    expect(container.textContent).not.toContain('Open to join')
+  })
+})
+
+describe('SpacePublicDetailPage — UX review fixes (P9)', () => {
+  const paired = (over: Partial<DirectoryEntry> = {}) => entry({
+    host_instance_id: 'peer-7', host_display_name: 'Keller household', host_is_paired: true,
+    scope: 'public', join_mode: 'request', allow_subscribers: true, ...over,
+  })
+
+  it('a waiting request says why Follow is greyed out, linked to the button', async () => {
+    cacheDirectoryEntries([paired({ request_pending: true })])
+    const { container, getByText } = await renderPage()
+    const why = await waitFor(() => getByText(
+      "Your request to join is waiting for the admins. You can follow once they've answered.",
+    ))
+    expect(why.getAttribute('id')).toBe('sh-about-follow-why')
+    const follow = [...container.querySelectorAll('button')].find(b => b.textContent === 'Follow')
+    expect(follow?.getAttribute('aria-describedby')).toBe('sh-about-follow-why')
+    expect(container.textContent).not.toContain('Follow to read along without joining')
+  })
+
+  it('a space you can only follow says how to become a member', async () => {
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'remote-9', host_display_name: null, host_is_paired: false,
+      scope: 'global', join_mode: 'open', allow_subscribers: true,
+    })])
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText(
+      'Follow to read along. To become a member, ask a member for an invite link.',
+    ))
+  })
+
+  it('a follower can open the space it follows from here', async () => {
+    cacheDirectoryEntries([paired({ already_subscribed: true })])
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText('Open space'))
+    fireEvent.click(getByText('Open space'))
+    expect(routeMock).toHaveBeenCalledWith('/spaces/sp-1')
   })
 })

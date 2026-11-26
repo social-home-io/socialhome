@@ -146,6 +146,20 @@ async def test_latest_top_level_at_none_without_recent(db, repo):
         _moment(id="m-only-reply", author="u-bob", parent_moment_id="m-other-root")
     )
     assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+    # A deleted reply keeps its parent — still not top-level.
+    await repo.delete("m-only-reply")
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+    # Nor does a reply's tombstone turn top-level when its root goes later.
+    await repo.delete("m-other-root")
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+
+
+async def test_latest_top_level_at_counts_only_moments_written_here(db, repo):
+    """A row another household or a GFS delivered never blocks a local
+    person, whatever author id or time it carries."""
+    since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    await repo.save(replace(_moment(id="m-far", author="u-bob"), received_via="gfs"))
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
 
 
 async def test_set_and_clear_reaction(db, repo):
@@ -479,11 +493,16 @@ async def test_tombstones_are_hidden_from_every_read(db, repo):
     assert [m.id for m in await repo.list_replies("m-root")] == ["m-reply"]
     engagement = await repo.count_engagement_for(["m-root"])
     assert engagement["m-root"]["reply_count"] == 1
+    root_created_at = (await repo.get("m-root")).created_at
     await repo.delete("m-root")
     assert {m.id for m in await repo.list_visible_to("u-me")} == {"m-reply"}
     assert await repo.list_public_for("u-author") == []
     assert await repo.list_top_hashtags("u-me") == []
-    assert await repo.latest_top_level_at("u-author", since_iso=_now_iso(-5)) is None
+    # A delete never gives the rate-limit slot back (owner 2026-11-24).
+    assert (
+        await repo.latest_top_level_at("u-author", since_iso=_now_iso(-5))
+        == root_created_at
+    )
     # Replies detach from a deleted parent, as the old hard delete did.
     reply = await repo.get("m-reply")
     assert reply is not None and reply.parent_moment_id is None
@@ -1572,3 +1591,73 @@ async def test_latest_replies_newest_readable_per_root(db, repo):
 
 async def test_latest_replies_empty_ids(db, repo):
     assert await repo.latest_replies([], "u-me") == {}
+
+
+# ── v_96 reach (migration 0154) ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("reach", [1, 2, 3, 4, 5])
+async def test_reach_round_trips(db, repo, reach):
+    await repo.save(replace(_moment(), reach=reach))
+    got = await repo.get("m-1")
+    assert got is not None and got.reach == reach
+
+
+async def test_a_row_without_reach_stays_legacy(db, repo):
+    """Every row written before v_96 has a NULL reach: it went 3 hops, and
+    is told apart from a v_96 reach-3 row (its delete goes unmarked)."""
+    await repo.save(replace(_moment(), reach=2))
+    await db.enqueue("UPDATE moments SET reach=NULL WHERE id='m-1'")
+    got = await repo.get("m-1")
+    assert got is not None and got.reach is None
+    assert got.effective_reach == 3
+    await repo.save(_moment(id="m-2"))  # no reach: stored NULL
+    assert (await repo.get("m-2")).reach is None
+
+
+async def _tomb(repo, hop: int, mid: str = "m-t") -> MomentTombstone:
+    return await repo.tombstone(
+        mid,
+        author_user_id="u-author",
+        origin_instance_id="self",
+        expires_at=_now_iso(7 * 24 * 60),
+        hop_count=hop,
+    )
+
+
+async def test_a_recorded_tombstone_keeps_the_hop_it_landed_at(db, repo):
+    assert await _tomb(repo, 3) is MomentTombstone.RECORDED
+    assert (await repo.get("m-t", include_deleted=True)).hop_count == 3
+
+
+async def test_a_removed_moment_takes_the_deletes_hop(db, repo):
+    """The tombstone's hop is the *delete's* hop, not the create's: a far
+    delete wiping a moment held at hop 2 leaves hop 3, so the genuine hop-2
+    delete arriving next is ``CLOSER`` and travels on."""
+    await repo.save(replace(_moment(id="m-t"), hop_count=2))
+    assert await _tomb(repo, 3) is MomentTombstone.REMOVED
+    assert (await repo.get("m-t", include_deleted=True)).hop_count == 3
+    assert await _tomb(repo, 2) is MomentTombstone.CLOSER
+    await repo.save(replace(_moment(id="m-u"), hop_count=3))
+    assert await _tomb(repo, 1, "m-u") is MomentTombstone.REMOVED
+    assert (await repo.get("m-u", include_deleted=True)).hop_count == 1
+
+
+async def test_a_closer_copy_of_a_held_delete_lowers_its_hop_once(db, repo):
+    """A far copy of a delete must not suppress the genuine closer one: it
+    is ``CLOSER`` (changed — relayed on), and the hop only ever goes down,
+    so a replay at the same or a higher hop stays ``ALREADY``."""
+    assert await _tomb(repo, 3) is MomentTombstone.RECORDED
+    closer = await _tomb(repo, 1)
+    assert closer is MomentTombstone.CLOSER and closer.changed
+    assert (await repo.get("m-t", include_deleted=True)).hop_count == 1
+    for hop in (1, 2, 3):
+        assert await _tomb(repo, hop) is MomentTombstone.ALREADY
+
+
+async def test_a_tombstone_keeps_the_reach(db, repo):
+    await repo.save(replace(_moment(), reach=2))
+    await repo.delete("m-1")
+    got = await repo.get("m-1", include_deleted=True)
+    assert got is not None and got.deleted_at is not None
+    assert got.reach == 2

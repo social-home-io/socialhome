@@ -21,6 +21,7 @@ import { loadHouseholdUsers } from '@/store/householdUsers'
 import { resolveDisplayName } from '@/utils/avatar'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { formatLocale, t } from '@/i18n/i18n'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 interface JoinRequest {
   id:            string
@@ -220,7 +221,7 @@ export function JoinRequestList({ spaceId, adminsActForOwner = false }: {
                   )}
                 </>
               ) : (
-                r.message && <p class="sh-muted">“{r.message}”</p>
+                r.message && <p class="sh-muted">“<LinkifiedText text={r.message} />”</p>
               )}
               {r.requested_at && (
                 <time

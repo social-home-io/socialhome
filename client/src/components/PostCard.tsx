@@ -3,7 +3,7 @@
  * Renders in household feed, space feeds, search results.
  */
 import type { ComponentChildren } from 'preact'
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useId, useMemo, useRef, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Avatar } from './Avatar'
 import { OnlinePill } from './OnlinePill'
@@ -16,6 +16,7 @@ import { FileRenderer, VideoRenderer, ImageRenderer } from './FileRenderer'
 import { LinkPreviewCard } from './LinkPreviewCard'
 import { LocationPostCard } from './LocationPostCard'
 import { renderMarkdown } from './markdown'
+import { cardFitsText, firstUrl } from '@/utils/linkPreview'
 import { openReport } from './ReportDialog'
 import { PollUI } from './PollUI'
 import { ReactionPicker } from './ReactionPicker'
@@ -154,6 +155,10 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
   // Menu always exists for non-deleted posts so users can report. Edit /
   // Delete are owner-only and driven by the parent passing callbacks.
   const hasMenu = post.content !== null
+  const cardFits = useMemo(
+    () => !!post.link_preview && cardFitsText(post.content),
+    [post.content, post.link_preview],
+  )
 
   const scopedSpaceId = spaceId ?? null
   const bot = isBotPost(post) ? post.bot ?? null : null
@@ -305,7 +310,10 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
               <PostBody content={post.content} spaceId={scopedSpaceId}
                 authorId={post.author} />
             )}
-            {post.link_preview && <LinkPreviewCard preview={post.link_preview} />}
+            {/* Only when the card opens the page the text links — see
+                ``cardFitsText`` (a ``…_(planet)`` link, say). */}
+            {post.link_preview && cardFits
+              && <LinkPreviewCard preview={post.link_preview} />}
             {post.type === 'file' && post.file_meta && <FileRenderer file={post.file_meta} />}
             {post.type === 'video' && post.media_url && (
               <VideoRenderer src={post.media_url} poster={post.media_thumbnail_url} mediaStatus={post.media_status} />
@@ -554,6 +562,12 @@ function PostEditForm({ draft, setDraft, original, requireText, onSave, onDone }
   }, [])
   const unchanged = draft === original
   const empty = requireText && !draft.trim()
+  // An edit that brings in a new first web link gets no card for it
+  // (cards are built once, when the post is written) — say so instead of
+  // leaving the author waiting. Only the first http(s) link ever has one.
+  const nextFirst = firstUrl(draft)
+  const addsLink = requireText && nextFirst !== null && nextFirst !== firstUrl(original)
+  const hintId = `sh-post-edit-hint-${useId()}`
   const save = async () => {
     if (busy || unchanged || empty) return
     setBusy(true)
@@ -572,6 +586,7 @@ function PostEditForm({ draft, setDraft, original, requireText, onSave, onDone }
         ref={ref}
         class="sh-post-edit-input"
         aria-label={t('post.edit.label')}
+        aria-describedby={addsLink ? hintId : undefined}
         value={draft}
         maxLength={MAX_POST_LENGTH}
         rows={Math.min(12, Math.max(3, draft.split('\n').length + 1))}
@@ -582,6 +597,9 @@ function PostEditForm({ draft, setDraft, original, requireText, onSave, onDone }
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void save() }
         }}
       />
+      {addsLink && (
+        <p id={hintId} class="sh-muted sh-post-edit-hint">{t('post.edit.link_card_hint')}</p>
+      )}
       <div class="sh-post-edit-actions">
         <Button variant="secondary" type="button" onClick={onDone} disabled={busy}>
           {t('common.cancel')}

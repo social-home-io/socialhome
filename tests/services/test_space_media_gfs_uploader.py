@@ -1216,3 +1216,23 @@ async def test_a_global_space_with_a_channel_uses_the_channel_scope(tmp_path):
     assert await on.scope_of(SPACE) == ("channel", CHANNEL_ID)
     off = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(channel=None))
     assert await off.scope_of(SPACE) is None
+
+
+async def test_a_plan_reads_the_space_scope_once(tmp_path, monkeypatch):
+    """P9 (P7 review): a plan read the space and its channel up to four
+    times (plan, _plan, can_upload, _describe_names); once is enough."""
+    _write(tmp_path, "a.webp", 1000)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _uploader(tmp_path, gfs=_Gfs([g1]), instances=[RELAY], versions={"e": V})
+    calls = 0
+    real = type(u).scope_of
+
+    async def counted(self, space_id):
+        nonlocal calls
+        calls += 1
+        return await real(self, space_id)
+
+    monkeypatch.setattr(type(u), "scope_of", counted)
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    assert plan is not None
+    assert calls == 1

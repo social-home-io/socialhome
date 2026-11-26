@@ -589,8 +589,10 @@ def test_moderator_is_mirrorable_but_owner_is_not():
 
 
 _ALLOWED: set[tuple[SpaceRole, SpaceRole, SpaceRole]] = {
-    # The owner sets admin / moderator / member on any non-owner seat.
-    *((_O, cur, new) for cur in (_A, _MOD, _M, _S) for new in (_A, _MOD, _M)),
+    # The owner sets admin / moderator / member on any non-owner writer
+    # seat. A follower seat moves only through an approved join / redeem of
+    # that person's own (step up, P9) — never a role change.
+    *((_O, cur, new) for cur in (_A, _MOD, _M) for new in (_A, _MOD, _M)),
     # An admin moves a seat only between member and moderator.
     *((_A, cur, new) for cur in (_MOD, _M) for new in (_MOD, _M)),
 }

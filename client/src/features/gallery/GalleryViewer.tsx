@@ -34,6 +34,7 @@ import { copyReferenceForItem } from '@/components/ImageLightbox'
 import { useViewerGestures } from './useViewerGestures'
 import { isZoomed, type Size } from './zoomPan'
 import { HEART_PATH } from './HeartIcon'
+import { LinkifiedText } from '@/components/LinkifiedText'
 
 export interface ViewerItem {
   id: string
@@ -593,7 +594,7 @@ export function GalleryViewer(props: GalleryViewerProps) {
 
       {item && !infoOpen && !zoomed && (item.caption || addedLine) && (
         <div class="sh-gviewer-caption">
-          {item.caption && <p class="sh-gviewer-caption-text">{item.caption}</p>}
+          {item.caption && <p class="sh-gviewer-caption-text"><LinkifiedText text={item.caption} /></p>}
           {addedLine && <p class="sh-gviewer-caption-meta">{addedLine}</p>}
         </div>
       )}

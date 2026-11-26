@@ -334,13 +334,9 @@ class InMemoryFederationRepo(SavesPendingMixin):
         self._instances[inst.id] = inst
         return True
 
-    async def ban_instance_from_space(
-        self,
-        space_id: str,
-        instance_id: str,
-        *,
-        reason: str | None = None,
-    ) -> None:
+    def ban(self, space_id: str, instance_id: str) -> None:
+        """Test helper: a ``space_instance_bans`` row (the one writer in
+        production is ``SpaceRepo.ban_household``)."""
         self._bans.add((space_id, instance_id))
 
     async def is_instance_banned_from_space(
@@ -835,6 +831,41 @@ async def test_an_outbox_key_queues_one_routed_reaction_per_person():
         )
     (row,) = outbox_repo.enqueued
     assert row["supersede_key"] == "moment-reaction:m:u1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "key", "payloads"),
+    [
+        (
+            FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+            "capabilities",
+            [{"proto_version": OURS, "moment_look_hops": n} for n in (3, 5, 4)],
+        ),
+        (
+            FederationEventType.INSTANCE_RESYNC_REQUEST,
+            "resync:capabilities",
+            [{"scope": "capabilities"}] * 3,
+        ),
+    ],
+)
+async def test_capabilities_and_their_resync_request_are_latest_only(
+    event_type, key, payloads
+):
+    """Fable #3: the keys the capabilities sender and the startup resync
+    use go through the supersede path — one queued row per peer, the newest,
+    so an older look never lands after a newer one."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for payload in payloads:
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=event_type,
+            payload=payload,
+            outbox_key=key,
+        )
+    (row,) = outbox_repo.enqueued
+    assert row["supersede_key"] == key
+    assert row["event_type"] is event_type
 
 
 @pytest.mark.asyncio
@@ -1833,7 +1864,7 @@ async def test_broadcast_to_space_members_skips_banned():
     space_id = "space-y"
     fed_repo.add_space_member(space_id, banned_inst.id)
     fed_repo.add_space_member(space_id, ok_inst.id)
-    await fed_repo.ban_instance_from_space(space_id, banned_inst.id)
+    fed_repo.ban(space_id, banned_inst.id)
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
@@ -4912,9 +4943,7 @@ async def test_a_deferred_snapshot_event_skips_a_household_banned_meanwhile(
             event_type=FederationEventType.SPACE_DISSOLVED,
             payload={"space_id": space_id},
         )
-        await svc._federation_repo.ban_instance_from_space(
-            space_id, "mesh-only-peer", reason="test"
-        )
+        svc._federation_repo.ban(space_id, "mesh-only-peer")
         await _drain_deferred(svc)
 
     assert len(calls) == 1
@@ -6819,7 +6848,7 @@ async def test_https_frame_for_an_unknown_inbox_is_refused():
 @pytest.mark.asyncio
 async def test_https_frame_from_a_banned_household_is_dropped():
     p = _paired_https()
-    await p.repo_b.ban_instance_from_space("sp1", p.a_id)
+    p.repo_b.ban("sp1", p.a_id)
     header, sealed = _make_frame(
         p,
         event_type=FederationEventType.SPACE_MEDIA_BLOB,
@@ -7282,3 +7311,42 @@ async def test_gfs_reached_followers_names_follower_only_seat_households():
         "sp", [*rows.values(), "unknown-house", svc.own_instance_id]
     )
     assert got == frozenset({rows["gfs-fan"]})
+
+
+# ─── peer moment look (v_96 decision C, in memory) ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_peer_moment_look_is_kept_in_memory_and_forgotten_on_unpair():
+    """How far a peer's people look for moments lives in memory only: not
+    heard → ``None``; set → kept per peer; an unpair forgets it, so a
+    re-paired household gets no hop-4–5 copy until it says again."""
+    svc, _ = _make_service()
+    assert svc.peer_moment_look_hops("peer-a") is None
+    svc.set_peer_moment_look_hops("peer-a", 5)
+    svc.set_peer_moment_look_hops("peer-b", 4)
+    assert svc.peer_moment_look_hops("peer-a") == 5
+    svc.note_unpaired("peer-a")
+    assert svc.peer_moment_look_hops("peer-a") is None
+    assert svc.peer_moment_look_hops("peer-b") == 4
+
+
+@pytest.mark.asyncio
+async def test_peer_moment_look_high_keeps_the_farthest_look_since_our_start():
+    """A delete must reach a peer that may still hold the moment: one whose
+    people looked further once since our start (adversarial review F1). The
+    high-water mark only goes up, is per peer, and is forgotten with the
+    look on unpair."""
+    svc, _ = _make_service()
+    assert svc.peer_moment_look_high("peer-a") is None
+    svc.set_peer_moment_look_hops("peer-a", 5)
+    svc.set_peer_moment_look_hops("peer-a", 3)
+    svc.set_peer_moment_look_hops("peer-b", 4)
+    assert svc.peer_moment_look_hops("peer-a") == 3
+    assert svc.peer_moment_look_high("peer-a") == 5
+    assert svc.peer_moment_look_high("peer-b") == 4
+    svc.set_peer_moment_look_hops("peer-b", 5)
+    assert svc.peer_moment_look_high("peer-b") == 5
+    svc.note_unpaired("peer-a")
+    assert svc.peer_moment_look_high("peer-a") is None
+    assert svc.peer_moment_look_hops("peer-a") is None

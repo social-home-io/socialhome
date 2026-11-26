@@ -259,6 +259,12 @@ class _FakeSpaceRepo:
         row = self.tokens.get(token)
         return row["space_id"] if row is not None else None
 
+    async def get_invite_token_role(self, space_id, token):
+        row = self.tokens.get(token)
+        if row is None or row["space_id"] != space_id:
+            return None
+        return row.get("role") or "member"
+
     async def add_space_instance(self, space_id, instance_id):
         self.space_instances.append((space_id, instance_id))
 
@@ -336,6 +342,9 @@ class _FakeRemoteMemberRepo:
 
     async def set_role(self, space_id, instance_id, user_id, role):
         self.roles.append((space_id, instance_id, user_id, role))
+        key = (space_id, instance_id, user_id)
+        if key in self.live:
+            self.live[key] = {**self.live[key], "role": role}
 
     async def remove(self, space_id, instance_id, user_id):
         self.removed.append((space_id, instance_id, user_id))
@@ -3932,3 +3941,151 @@ async def test_the_joiner_is_seated_before_it_takes_its_channel_grant():
         "good-token", viewer_user_id=U_LOCAL, issuer_instance_id="issuer-1"
     )
     assert seated == [True]
+
+
+# ── P9 step up: a follower redeeming a member token becomes a member ──
+
+
+async def _follower_then_member_token(env) -> tuple:
+    env.issuer_spaces.tokens["tok-1"]["role"] = SpaceRole.SUBSCRIBER.value
+    await _redeem(env)
+    key = ("space-1", env.redeemer_party.instance_id, U_LOCAL)
+    assert env.issuer_members.live[key]["role"] == SpaceRole.SUBSCRIBER.value
+    env.issuer_spaces.tokens["tok-2"] = {
+        **env.issuer_spaces.tokens["tok-1"],
+        "uses_remaining": 1,
+        "role": SpaceRole.MEMBER.value,
+    }
+    ack, reason, reservation = await env.issuer._consume_seat_and_build_ack(
+        token="tok-2",
+        redeemer_instance_id=env.redeemer_party.instance_id,
+        redeemer_user_id=U_LOCAL,
+        redeemer_identity_pk=_REDEEMER_IDENTITY.public_key,
+        redeemer_anchor="alice",
+        redeemer_pk=None,
+        redeemer_display=None,
+        bootstrap=True,
+    )
+    return key, ack, reason, reservation
+
+
+async def test_a_follower_redeeming_a_member_token_steps_up_to_member():
+    """Owner 2026-11-26 (step up): an approved join of a follower — the
+    bound member token its host minted, or any member link — makes the held
+    follower seat a member seat. Before, the redeem re-ACKed the follower
+    seat and the approval did nothing."""
+    env = _atomic_pair()
+    key, ack, reason, reservation = await _follower_then_member_token(env)
+    assert reason is None and reservation is not None
+    assert ack is not None and ack["role"] == SpaceRole.MEMBER.value
+    assert env.issuer_members.live[key]["role"] == SpaceRole.MEMBER.value
+    assert env.issuer_spaces.tokens["tok-2"]["uses_remaining"] == 0
+    assert reservation.prior_role == SpaceRole.SUBSCRIBER.value
+
+
+async def test_a_failed_step_up_ack_leaves_the_follower_seat():
+    """A step up whose ACK could not be delivered is rolled back to the
+    follower seat it was — never un-seated."""
+    env = _atomic_pair()
+    key, _ack, _reason, reservation = await _follower_then_member_token(env)
+    await env.issuer._rollback_redeem(reservation)
+    assert env.issuer_members.live[key]["role"] == SpaceRole.SUBSCRIBER.value
+    assert env.issuer_spaces.tokens["tok-2"]["uses_remaining"] == 1
+
+
+async def test_a_follower_redeeming_a_follower_link_is_answered_from_its_seat():
+    """Only a writer token steps up; a follower link again is the re-ACK."""
+    env = _atomic_pair()
+    env.issuer_spaces.tokens["tok-1"]["role"] = SpaceRole.SUBSCRIBER.value
+    await _redeem(env)
+    env.issuer_spaces.tokens["tok-2"] = {
+        **env.issuer_spaces.tokens["tok-1"],
+        "uses_remaining": 1,
+    }
+    ack, reason, reservation = await env.issuer._consume_seat_and_build_ack(
+        token="tok-2",
+        redeemer_instance_id=env.redeemer_party.instance_id,
+        redeemer_user_id=U_LOCAL,
+        redeemer_identity_pk=_REDEEMER_IDENTITY.public_key,
+        redeemer_anchor="alice",
+        redeemer_pk=None,
+        redeemer_display=None,
+        bootstrap=True,
+    )
+    assert reason is None and reservation is None
+    assert ack is not None and ack["role"] == SpaceRole.SUBSCRIBER.value
+    assert env.issuer_spaces.tokens["tok-2"]["uses_remaining"] == 1
+
+
+@pytest.mark.parametrize(
+    "token_over",
+    # (A token bound to another household is refused by the real
+    # repository's atomic UPDATE, covered in tests/repositories.)
+    [{"uses_remaining": 0}],
+)
+async def test_a_follower_replaying_a_dead_member_token_stays_a_follower(token_over):
+    """Step-up review M-5: the step up falls through to the atomic consume,
+    the only thing between a follower and a writer seat — a spent token or
+    one bound to another household is denied, and the follower seat stays."""
+    env = _atomic_pair()
+    env.issuer_spaces.tokens["tok-1"]["role"] = SpaceRole.SUBSCRIBER.value
+    await _redeem(env)
+    key = ("space-1", env.redeemer_party.instance_id, U_LOCAL)
+    env.issuer_spaces.tokens["tok-2"] = {
+        **env.issuer_spaces.tokens["tok-1"],
+        "uses_remaining": 1,
+        "role": SpaceRole.MEMBER.value,
+        **token_over,
+    }
+    ack, reason, reservation = await env.issuer._consume_seat_and_build_ack(
+        token="tok-2",
+        redeemer_instance_id=env.redeemer_party.instance_id,
+        redeemer_user_id=U_LOCAL,
+        redeemer_identity_pk=_REDEEMER_IDENTITY.public_key,
+        redeemer_anchor="alice",
+        redeemer_pk=None,
+        redeemer_display=None,
+        bootstrap=True,
+    )
+    assert ack is None and reason is not None and reservation is None
+    assert env.issuer_members.live[key]["role"] == SpaceRole.SUBSCRIBER.value
+
+
+async def test_a_step_up_ack_keeps_our_seats_own_fields_and_announces_it():
+    """Final review M1: the ACK of a follower's step up re-seats our own
+    person as a member over the follower seat — keeping its per-space name
+    and opt-ins — and publishes SpaceMemberJoined (a new writer seat)."""
+    coord = _make_coordinator()
+    spaces = coord._spaces
+    spaces.members.append(
+        SpaceMember(
+            space_id="sp-1",
+            user_id=U_LOCAL,
+            role=SpaceRole.SUBSCRIBER.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+            space_display_name="Fanny",
+            location_share_enabled=True,
+        )
+    )
+    await coord._seat_local_after_ack(
+        {
+            "space_id": "sp-1",
+            "role": SpaceRole.MEMBER.value,
+            "space_meta": {
+                "name": "Shared",
+                "owner_instance_id": "issuer-1",
+                "owner_username": "owner",
+                "identity_public_key": "aa" * 32,
+                "roster": [],
+            },
+        },
+        viewer_user_id=U_LOCAL,
+        issuer_instance_id="issuer-1",
+    )
+    saved = spaces.members[-1]
+    assert saved.role == SpaceRole.MEMBER.value
+    assert saved.space_display_name == "Fanny"
+    assert saved.location_share_enabled is True
+    assert saved.joined_at == "2026-01-01T00:00:00+00:00"
+    published = [c.args[0] for c in coord._bus.publish.await_args_list]
+    assert any(type(e).__name__ == "SpaceMemberJoined" for e in published)

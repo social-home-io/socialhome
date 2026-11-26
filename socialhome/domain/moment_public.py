@@ -1,7 +1,7 @@
 """Domain types for the public-Momentum-via-GFS pillar (§Momentum-public).
 
 The Momentum pillar (``socialhome/domain/moment.py``) federates
-moments only across paired households (3-hop relay, max). This module
+moments only across paired households (relayed up to 5 hops, bounded by reach). This module
 adds an opt-in *public* layer brokered by a GFS:
 
 * A user **registers** themself on one or more GFSes
@@ -125,6 +125,41 @@ def gfs_picture_proxy_url(gfs_id: str, user_id: str, digest: str | None) -> str 
     return (
         f"api/gfs/{gfs_id}/moments/users/{user_id}/picture?v={quote(digest, safe='')}"
     )
+
+
+#: The GFS directory's orders (``GET /gfs/moments/users?sort=``): newest
+#: registration first (the default), or most followed first. One list for
+#: the GFS and the households that ask it.
+DIRECTORY_SORT_NEW = "new"
+DIRECTORY_SORT_FOLLOWERS = "followers"
+DIRECTORY_SORTS: frozenset[str] = frozenset(
+    {DIRECTORY_SORT_NEW, DIRECTORY_SORT_FOLLOWERS}
+)
+
+#: The largest follower count shown. A GFS's counts are display data; one
+#: past this (or not a non-negative integer) is dropped, not shown.
+MAX_SHOWN_FOLLOWER_COUNT = 1_000_000_000
+
+
+def shown_follower_count(raw: object) -> int | None:
+    """*raw* as a follower count worth showing, or ``None``. Only a plain
+    non-negative integer up to :data:`MAX_SHOWN_FOLLOWER_COUNT` — a bool,
+    a string, a float or a huge number from the GFS shows nothing."""
+    if type(raw) is not int or not 0 <= raw <= MAX_SHOWN_FOLLOWER_COUNT:
+        return None
+    return raw
+
+
+@dataclass(slots=True, frozen=True)
+class MomentPublicDirectoryPage:
+    """One read of a GFS's author directory, as the household proxy hands
+    it on: the rows worth a GFS follow, and the order the GFS says it
+    used — ``None`` unless it echoed exactly the order asked for (an older
+    GFS ignores ``sort``). Both are display data from the GFS, nothing
+    more: ``sort`` labels the list, the counts label the rows."""
+
+    users: tuple[dict, ...]
+    sort: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -11,7 +11,26 @@ from socialhome.domain.moment_public import (
     public_author_bio,
     public_author_name,
     public_picture_digest,
+    shown_follower_count,
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (0, 0),
+        (1204, 1204),
+        (1_000_000_000, 1_000_000_000),
+        (1_000_000_001, None),
+        (-1, None),
+        (True, None),
+        ("5", None),
+        (2.0, None),
+        (None, None),
+    ],
+)
+def test_shown_follower_count(raw, expected):
+    assert shown_follower_count(raw) == expected
 
 
 @pytest.mark.parametrize(

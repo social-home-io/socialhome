@@ -57,9 +57,13 @@ export function isFollowing(userId: string | null | undefined): boolean {
   return followedUserIds.value.has(userId)
 }
 
-/** Test helper — reset the in-memory cache without hitting the API. */
-export function _resetFollowsForTest(): void {
+/** Forget who this person follows — on sign-out, so the next account
+ *  never sees (or acts on) the previous one's follows. */
+export function resetFollows(): void {
   _loaded = false
   followedUsers.value = []
   followedUserIds.value = new Set()
 }
+
+/** Test helper — reset the in-memory cache without hitting the API. */
+export const _resetFollowsForTest = resetFollows
