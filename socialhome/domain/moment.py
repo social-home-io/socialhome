@@ -125,6 +125,35 @@ def clamp_moment_expiry(created_at: str, expires_at: str) -> str:
     return latest.isoformat() if expires > latest else expires_at
 
 
+#: Minimum interval between two top-level moments by the same author — the
+#: posting rate limit the author's household enforces (``POST /api/moments``
+#: → 429). Replies and reactions are exempt. Relaying households hold a
+#: signed author to the same rule (:func:`moment_rate_slot`), so the two
+#: can't drift apart.
+MOMENT_RATE_WINDOW = timedelta(minutes=15)
+
+#: How far ahead of our clock a moment's signed ``occurred_at`` may be and
+#: still be relayed — one rate window: envelope skew is checked pairwise
+#: (±300 s each hop), so an origin and a relay two hops apart can differ by
+#: more than 300 s. A future-dated moment would otherwise open rate slots no
+#: honest author has; this lets a flooder borrow at most one.
+MOMENT_RELAY_FUTURE_SKEW = MOMENT_RATE_WINDOW
+
+
+def moment_rate_slot(occurred_at: object, *, now: datetime | None = None) -> int | None:
+    """Which :data:`MOMENT_RATE_WINDOW` slot a moment's signed
+    ``occurred_at`` falls in (whole windows since the epoch) — two top-level
+    moments an honest household let through are at least a window apart, so
+    never share a slot. ``None`` (not relayed) when missing, unparseable or
+    more than :data:`MOMENT_RELAY_FUTURE_SKEW` ahead of *now*."""
+    created = _parse_utc(occurred_at) if occurred_at else None
+    if created is None:
+        return None
+    if created > (now or datetime.now(UTC)) + MOMENT_RELAY_FUTURE_SKEW:
+        return None
+    return int(created.timestamp() // MOMENT_RATE_WINDOW.total_seconds())
+
+
 def moment_too_old_to_relay(
     occurred_at: object, *, now: datetime | None = None
 ) -> bool:

@@ -45,6 +45,7 @@ from ..domain.moment import (
     MOMENT_MAX_CONTENT_LEN,
     MOMENT_MAX_REACH,
     MOMENT_MAX_VIDEO_MS,
+    MOMENT_RATE_WINDOW,
     REACTION_REACH_AUTHOR,
     Moment,
     MomentOwnSaveError,
@@ -73,11 +74,6 @@ if TYPE_CHECKING:
     from ..repositories.user_repo import AbstractUserRepo
 
 log = logging.getLogger(__name__)
-
-
-#: Minimum interval between two top-level moments by the same author.
-#: Replies and reactions are exempt — see ``create_moment``.
-MOMENT_RATE_WINDOW = timedelta(minutes=15)
 
 
 #: v_96 — ``instance_config`` key holding the household's maximum reach: the

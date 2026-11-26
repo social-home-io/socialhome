@@ -21,6 +21,7 @@ from socialhome.domain.federation import (
 from socialhome.domain.federation_retention import relayed_moment_key
 from socialhome.moment_origin import NO_RELAY_FIELD, REACH_FIELD, verify_moment_origin
 from socialhome.services import moment_federation_outbound as outbound_mod
+from socialhome.services import moment_service
 from socialhome.services.moment_federation_outbound import (
     MomentFederationOutbound,
 )
@@ -664,14 +665,15 @@ async def test_the_seen_map_is_bounded(stack, monkeypatch):
     for i in range(5):
         await out.relay_inbound(
             event_type=FederationEventType.MOMENT_CREATED,
-            payload=_relayed({"moment_id": f"m-{i}"}),
+            # One author each: the per-author relay cap is not under test.
+            payload=_relayed({"moment_id": f"m-{i}", "author_user_id": f"a-{i}"}),
             from_instance="peer-sender",
         )
     assert len(out._relayed) == 3
     # The oldest fell out: a late copy of it is relayed once more.
     await out.relay_inbound(
         event_type=FederationEventType.MOMENT_CREATED,
-        payload=_relayed({"moment_id": "m-0"}),
+        payload=_relayed({"moment_id": "m-0", "author_user_id": "a-0"}),
         from_instance="peer-sender",
     )
     assert fed.send_event.await_count == 6
@@ -1549,3 +1551,338 @@ async def test_a_hop_4_5_delete_follows_the_farthest_look_since_our_start(stack)
         from_instance="peer-sender",
     )
     assert _targets(fed) == set()
+
+
+# ── Per-author relay cap (owner 2026-11-24) ──────────────────────────────
+
+
+async def _relay_create(out, n: int, sender: str = "peer-sender", **over) -> int:
+    """A reply (the hourly budget); top-level moments: :func:`_relay_top`."""
+    return await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed({"moment_id": f"m-{n}", "parent_moment_id": "p", **over}),
+        from_instance=sender,
+    )
+
+
+#: A rate-window boundary an hour ago, so slots are predictable.
+_SLOT_START = datetime.fromtimestamp(
+    (datetime.now(UTC).timestamp() // 900 - 4) * 900, UTC
+)
+
+
+async def _relay_top(out, n: int, minute: float, **over) -> int:
+    """A top-level moment signed *minute* minutes after a slot start."""
+    occurred = (_SLOT_START + timedelta(minutes=minute)).isoformat()
+    return await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=_relayed({"moment_id": f"t-{n}", "occurred_at": occurred, **over}),
+        from_instance="peer-sender",
+    )
+
+
+@pytest.fixture
+def capped(stack, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(outbound_mod, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 2)
+    out, fed, fed_repo, _user_repo = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    return out, fed, clock
+
+
+def test_the_cap_values():
+    """Top-level: the posting rate limit, one per 15 min (+1 slack) — the
+    same constant the API enforces. Replies: a lively hour, 30. Memory
+    bounded at 10 000 authors / 50 000 slots."""
+    assert outbound_mod.MOMENT_RATE_WINDOW == moment_service.MOMENT_RATE_WINDOW
+    assert outbound_mod.MOMENT_RATE_WINDOW == timedelta(minutes=15)
+    assert outbound_mod.MOMENT_RELAY_PER_RATE_WINDOW == 2
+    assert outbound_mod.RELAY_SLOT_KEYS_MAX == outbound_mod.RELAY_SEEN_MAX
+    assert outbound_mod.MOMENT_RELAY_AUTHOR_CAP == 30
+    assert outbound_mod.MOMENT_RELAY_AUTHOR_WINDOW_S == 3600
+    assert outbound_mod.RELAY_AUTHOR_KEYS_MAX == 10_000
+
+
+async def test_a_relay_forwards_at_most_the_cap_per_author(capped):
+    out, fed, _clock = capped
+    sent = [await _relay_create(out, n) for n in range(4)]
+    assert sent == [1, 1, 0, 0]
+    assert fed.send_event.await_count == 2
+
+
+async def test_the_cap_frees_up_after_the_window(capped):
+    out, _fed, clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    clock[0] += outbound_mod.MOMENT_RELAY_AUTHOR_WINDOW_S + 1
+    # The refused moment left no mark in the seen-map: a later copy goes.
+    assert await _relay_create(out, 2) == 1
+
+
+async def test_the_cap_is_per_author(capped):
+    out, _fed, _clock = capped
+    for n in range(2):
+        await _relay_create(out, n)
+    assert await _relay_create(out, 9, author_user_id="uid-other") == 1
+
+
+async def test_another_origin_naming_the_author_spends_only_its_own_budget(capped):
+    """The key is the signed (origin, author) pair: a household whose
+    author's home we don't know yet can't use up the real author's budget
+    by naming them."""
+    out, _fed, _clock = capped
+    for n in range(2):
+        await _relay_create(out, n, origin_instance_id="peer-forger")
+    assert await _relay_create(out, 5) == 1
+
+
+async def test_a_closer_copy_of_a_relayed_moment_is_not_charged(capped):
+    out, _fed, _clock = capped
+    await _relay_create(out, 0, hop_count=2)
+    await _relay_create(out, 1)
+    # Budget spent; the origin's own copy of m-0 still goes (same moment).
+    assert await _relay_create(out, 0, sender="peer-origin", hop_count=1) == 1
+    assert await _relay_create(out, 2) == 0
+
+
+async def test_a_delete_of_a_relayed_moment_always_goes(capped):
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    sent = await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"moment_id": "m-0"}),
+        from_instance="peer-sender",
+    )
+    assert sent == 1
+
+
+async def test_a_delete_of_a_moment_not_relayed_here_is_charged(capped):
+    """Deletes for made-up ids (each is new, so each is relayed on) would
+    otherwise flood past the cap."""
+    out, _fed, _clock = capped
+    sent = [
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=_relayed({"moment_id": f"made-up-{n}"}),
+            from_instance="peer-sender",
+        )
+        for n in range(3)
+    ]
+    assert sent == [1, 1, 0]
+
+
+async def test_over_the_cap_is_logged_once_per_window(capped, caplog):
+    out, _fed, clock = capped
+    caplog.set_level("INFO", logger=outbound_mod.__name__)
+
+    def _lines() -> int:
+        return sum("relay cap" in r.getMessage() for r in caplog.records)
+
+    for n in range(5):
+        await _relay_create(out, n)
+    assert _lines() == 1
+    clock[0] += outbound_mod.MOMENT_RELAY_AUTHOR_WINDOW_S + 1
+    for n in range(5, 10):
+        await _relay_create(out, n)
+    assert _lines() == 2
+
+
+async def test_the_author_budgets_are_bounded(monkeypatch):
+    """Minted authors can't grow the budget map past its bound."""
+    monkeypatch.setattr(outbound_mod, "RELAY_AUTHOR_KEYS_MAX", 3)
+    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 1)
+    fed = _federation()
+    fed_repo = MagicMock()
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    out = MomentFederationOutbound(
+        bus=MagicMock(),
+        federation_service=fed,
+        federation_repo=fed_repo,
+        user_repo=MagicMock(),
+    )
+    for n in range(10):
+        await _relay_create(out, n, author_user_id=f"minted-{n}")
+        await _relay_create(out, 100 + n, author_user_id=f"minted-{n}")
+    assert out._author_budget.key_count == 3
+    assert out._cap_logged.key_count == 3
+
+
+async def test_a_delete_of_a_moment_held_here_always_goes(capped):
+    """After the seen-map forgot the create (48 h, a restart), a delete of a
+    moment this household holds still follows it — whatever the budgets
+    (else households further on keep a deleted moment for weeks)."""
+    out, _fed, _clock = capped
+    for n in range(2):
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=_relayed({"moment_id": f"made-up-{n}"}),
+            from_instance="peer-sender",
+        )
+    sent = await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"moment_id": "held"}),
+        from_instance="peer-sender",
+        removed_here=True,
+    )
+    assert sent == 1
+
+
+async def test_posting_never_starves_deletes(capped):
+    """Deletes of moments never seen here have a budget of their own."""
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    sent = await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"moment_id": "never-seen"}),
+        from_instance="peer-sender",
+    )
+    assert sent == 1
+
+
+async def test_a_second_copy_of_a_capped_create_is_charged_again(capped):
+    """A refused create leaves no seen-map mark, so another copy of it (a
+    second neighbour, a re-send) is a first forward — charged, and refused
+    while the budget is spent."""
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    assert await _relay_create(out, 2, sender="peer-other") == 0
+
+
+async def test_a_delete_of_a_capped_create_is_charged_even_where_stored(capped):
+    """A flooder's moments stored here but capped: their deletes are not a
+    free channel to peers that never got the moments."""
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    for n in range(2):  # spend the delete budget on made-up ids
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=_relayed({"moment_id": f"made-up-{n}"}),
+            from_instance="peer-sender",
+        )
+    sent = await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"moment_id": "m-2"}),
+        from_instance="peer-sender",
+        removed_here=True,
+    )
+    assert sent == 0
+
+
+async def test_a_made_up_delete_claiming_closer_is_charged_again(capped):
+    """A refused delete leaves no mark: the same made-up id at a lower
+    claimed hop is a first forward, charged — not a free wave."""
+    out, _fed, _clock = capped
+    sent = [
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=_relayed({"moment_id": f"made-up-{n}", "hop_count": hop}),
+            from_instance=sender,
+        )
+        for n, hop, sender in (
+            (0, 2, "peer-sender"),
+            (1, 2, "peer-sender"),
+            (2, 2, "peer-sender"),
+            (2, 1, "peer-origin"),
+        )
+    ]
+    assert sent == [1, 1, 0, 0]
+
+
+async def test_top_level_moments_follow_the_posting_rate_limit(stack):
+    """One per 15-min slot of the signed time, plus one of slack: a third
+    in the same slot comes only from a household ignoring the rule."""
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    sent = [await _relay_top(out, n, minute) for n, minute in enumerate((0, 5, 10))]
+    assert sent == [1, 1, 0]
+    # The next slot opens by the signed time, not by when copies arrive: an
+    # outbox backlog delivering an hour of moments at once all goes.
+    backlog = [await _relay_top(out, 10 + k, 15 * k + 1) for k in range(1, 4)]
+    assert backlog == [1, 1, 1]
+
+
+async def test_honest_moments_15_minutes_apart_never_share_a_slot(stack):
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    sent = [await _relay_top(out, n, 7.5 + 15 * n) for n in range(4)]
+    assert sent == [1, 1, 1, 1]
+
+
+async def test_post_delete_post_as_the_api_allows_is_relayed_in_full(stack):
+    """The API counts a deleted moment too (a delete never gives the slot
+    back), so a repost after a delete is at least one window later — and
+    the relay forwards every create and delete the API let through."""
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    sent = []
+    for k in range(4):
+        sent.append(await _relay_top(out, k, 15 * k))
+        sent.append(
+            await out.relay_inbound(
+                event_type=FederationEventType.MOMENT_DELETED,
+                payload=_relayed({"moment_id": f"t-{k}"}),
+                from_instance="peer-sender",
+                removed_here=True,
+            )
+        )
+    assert sent == [1] * 8
+
+
+async def test_a_re_sent_top_level_moment_does_not_count_twice(stack):
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    assert await _relay_top(out, 0, 0) == 1
+    assert await _relay_top(out, 0, 0) == 0  # seen-map: same moment
+    assert await _relay_top(out, 1, 1) == 1  # the slot still has its slack
+
+
+async def test_top_level_and_replies_have_separate_budgets(capped):
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    assert await _relay_top(out, 0, 0) == 1
+
+
+async def test_a_top_level_moment_signed_in_the_future_is_not_relayed(stack):
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    ahead = (datetime.now(UTC) + timedelta(minutes=16)).isoformat()
+    assert await _relay_top(out, 0, 0, occurred_at=ahead) == 0
+    # Two hops of ±300 s envelope skew: still within one rate window.
+    near = (datetime.now(UTC) + timedelta(minutes=8)).isoformat()
+    assert await _relay_top(out, 1, 0, occurred_at=near) == 1
+
+
+def test_a_slot_is_remembered_as_long_as_a_moment_in_it_can_be_relayed():
+    """From the earliest it is let in (one window early) to 48 h after the
+    slot's end: a slot's two can't be taken twice."""
+    assert outbound_mod.MOMENT_RELAY_SLOT_TTL_S == (
+        outbound_mod.MOMENT_RELAY_MAX_AGE_HOURS * 3600 + 2 * 900
+    )
+
+
+async def test_totals_are_not_charged(stack, monkeypatch):
+    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 0)
+    out, fed, fed_repo, _ = stack
+    _versioned(fed, fed_repo, {"p96": 96})
+    assert await _relay_counts(out, held_reach=3) == 1
+
+
+async def test_the_cap_key_and_log_line_are_bounded_whatever_the_ids(capped, caplog):
+    """A peer-chosen author id (100 KB, a newline) is neither a 100 KB key
+    nor a forged log line."""
+    out, _fed, _clock = capped
+    caplog.set_level("INFO", logger=outbound_mod.__name__)
+    author = "evil\nFAKE LOG LINE " + "x" * 100_000
+    for n in range(3):
+        await _relay_create(out, n, author_user_id=author)
+    keys = list(out._author_budget._windows)
+    assert keys and all(len(k) == 32 for k in keys)
+    (line,) = [r.getMessage() for r in caplog.records if "relay cap" in r.getMessage()]
+    assert "\n" not in line
+    assert len(line) < 400

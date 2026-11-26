@@ -14,6 +14,7 @@ import fnmatch
 import ipaddress
 import math
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 
 from aiohttp import web
@@ -95,28 +96,28 @@ class RateLimiter:
     bucket — a user hammering either still hits the same quota.
     """
 
-    __slots__ = ("_monotonic", "_windows")
+    __slots__ = ("_max_keys", "_monotonic", "_windows")
 
     def __init__(
         self,
         *,
         monotonic: Callable[[], float] = time.monotonic,
+        max_keys: int | None = None,
     ) -> None:
-        self._windows: dict[str, list[float]] = {}
+        """``max_keys`` bounds a limiter keyed on identities a peer can mint
+        (e.g. author ids): past it the key touched longest ago is dropped —
+        its budget starts afresh, the only cost. A key being refused is
+        touched by every refusal, so ordinary traffic doesn't evict it (a
+        flood of ``max_keys`` new keys can). ``None``: unbounded."""
+        self._windows: OrderedDict[str, list[float]] = OrderedDict()
         self._monotonic = monotonic
+        self._max_keys = max_keys
 
     async def check(self, user_id: str, path: str, limit: int, window_s: int) -> bool:
         """Return ``True`` if the request is allowed, ``False`` if not."""
-        bucket = self.bucket_key(user_id, path)
-        now = self._monotonic()
-        cutoff = now - window_s
-        times = [t for t in self._windows.get(bucket, ()) if t > cutoff]
-        if len(times) >= limit:
-            self._windows[bucket] = times
-            return False
-        times.append(now)
-        self._windows[bucket] = times
-        return True
+        return self.is_allowed(
+            self.bucket_key(user_id, path), limit=limit, window_s=window_s
+        )
 
     def is_allowed(self, key: str, *, limit: int, window_s: int) -> bool:
         """Synchronous variant keyed on an arbitrary string.
@@ -127,12 +128,20 @@ class RateLimiter:
         now = self._monotonic()
         cutoff = now - window_s
         times = [t for t in self._windows.get(key, ()) if t > cutoff]
-        if len(times) >= limit:
-            self._windows[key] = times
-            return False
-        times.append(now)
+        allowed = len(times) < limit
+        if allowed:
+            times.append(now)
+        self._store(key, times)
+        return allowed
+
+    def _store(self, key: str, times: list[float]) -> None:
         self._windows[key] = times
-        return True
+        if self._max_keys is None:
+            return
+        # Least recently touched first.
+        self._windows.move_to_end(key)
+        while len(self._windows) > self._max_keys:
+            self._windows.popitem(last=False)
 
     def has_room(self, key: str, *, limit: int, window_s: int) -> bool:
         """Whether :meth:`is_allowed` would allow ``key`` now. Pure read:

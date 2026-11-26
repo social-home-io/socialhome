@@ -20,6 +20,7 @@ from socialhome.repositories.instance_ban_repo import (
 )
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 from socialhome.repositories.report_repo import SqliteReportRepo
+from socialhome.services import moment_federation_outbound as outbound_mod
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
 )
@@ -187,3 +188,55 @@ async def test_a_mixed_household_stores_a_far_moment_for_the_adult_only(db, env)
     assert await env["moments"].get_readable("m-pass", "u-adult") is not None
     assert await env["moments"].get_readable("m-pass", "u-self") is None
     assert env["federation"].send_event.called
+
+
+# ── Per-author relay cap: forwarding only, never storing ────────────────
+
+
+async def test_over_the_author_relay_cap_a_moment_is_still_stored(env):
+    """The cap stops this household passing a flood on; the people here
+    who look (``max_hops=1``, hop 1) still get every moment. Three top-level
+    moments signed in one 15-min window: the third is over the posting rate
+    limit (1 + 1 of slack)."""
+    # A window boundary an hour ago, so all three share a slot.
+    _slot_start = datetime.fromtimestamp(
+        (datetime.now(UTC).timestamp() // 900 - 4) * 900, UTC
+    )
+    for n in range(3):
+        ev = _moment_event(hop_count=1)
+        ev.payload["moment_id"] = f"m-{n}"
+        ev.payload["occurred_at"] = _slot_start.isoformat()
+        await env["inbound"]._on_moment_created(ev)
+    for n in range(3):
+        assert await env["moments"].get(f"m-{n}") is not None
+    relayed = {
+        c.kwargs["payload"]["moment_id"]
+        for c in env["federation"].send_event.call_args_list
+    }
+    assert relayed == {"m-0", "m-1"}
+    # A second copy of the capped (stored) moment is no free pass.
+    ev = _moment_event(hop_count=1)
+    ev.payload["moment_id"] = "m-2"
+    ev.payload["occurred_at"] = _slot_start.isoformat()
+    await env["inbound"]._on_moment_created(ev)
+    relayed = {
+        c.kwargs["payload"]["moment_id"]
+        for c in env["federation"].send_event.call_args_list
+    }
+    assert relayed == {"m-0", "m-1"}
+
+
+async def test_a_delete_of_a_held_moment_goes_on_whatever_the_cap(env, monkeypatch):
+    """The relay forgot the create (seen-map: 48 h, lost on restart) and
+    the author's budgets are spent: the delete of a moment held here still
+    goes on — else households further on keep it for weeks."""
+    await env["inbound"]._on_moment_created(_moment_event(hop_count=1))
+    assert await env["moments"].get("m-pass") is not None
+    env["outbound"]._relayed.clear()
+    monkeypatch.setattr(outbound_mod, "MOMENT_RELAY_AUTHOR_CAP", 0)
+    env["federation"].send_event.reset_mock()
+    ev = _moment_event(hop_count=1)
+    ev.event_type = FederationEventType.MOMENT_DELETED
+    await env["inbound"]._on_moment_deleted(ev)
+    sent = [c.kwargs for c in env["federation"].send_event.call_args_list]
+    assert [c["event_type"] for c in sent] == [FederationEventType.MOMENT_DELETED]

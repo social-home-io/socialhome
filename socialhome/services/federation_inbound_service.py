@@ -5104,6 +5104,9 @@ class FederationInboundService(ProtectionGateMixin):
             event_type=event.event_type,
             payload=p,
             from_instance=event.from_instance,
+            # A delete that wiped a moment stored here follows it, free of
+            # the author cap (unless its create was capped here).
+            removed_here=outcome is MomentTombstone.REMOVED,
         )
 
     async def _on_moment_reacted(self, event: FederationEvent) -> None:
@@ -5451,6 +5454,7 @@ class FederationInboundService(ProtectionGateMixin):
         event_type,
         payload: dict,
         from_instance: str,
+        removed_here: bool = False,
     ) -> None:
         if self._moment_outbound is None:
             return
@@ -5459,6 +5463,7 @@ class FederationInboundService(ProtectionGateMixin):
                 event_type=event_type,
                 payload=payload,
                 from_instance=from_instance,
+                removed_here=removed_here,
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("moment-relay failed: %s", exc, exc_info=True)

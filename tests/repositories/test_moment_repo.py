@@ -146,6 +146,20 @@ async def test_latest_top_level_at_none_without_recent(db, repo):
         _moment(id="m-only-reply", author="u-bob", parent_moment_id="m-other-root")
     )
     assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+    # A deleted reply keeps its parent — still not top-level.
+    await repo.delete("m-only-reply")
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+    # Nor does a reply's tombstone turn top-level when its root goes later.
+    await repo.delete("m-other-root")
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+
+
+async def test_latest_top_level_at_counts_only_moments_written_here(db, repo):
+    """A row another household or a GFS delivered never blocks a local
+    person, whatever author id or time it carries."""
+    since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    await repo.save(replace(_moment(id="m-far", author="u-bob"), received_via="gfs"))
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
 
 
 async def test_set_and_clear_reaction(db, repo):
@@ -479,11 +493,16 @@ async def test_tombstones_are_hidden_from_every_read(db, repo):
     assert [m.id for m in await repo.list_replies("m-root")] == ["m-reply"]
     engagement = await repo.count_engagement_for(["m-root"])
     assert engagement["m-root"]["reply_count"] == 1
+    root_created_at = (await repo.get("m-root")).created_at
     await repo.delete("m-root")
     assert {m.id for m in await repo.list_visible_to("u-me")} == {"m-reply"}
     assert await repo.list_public_for("u-author") == []
     assert await repo.list_top_hashtags("u-me") == []
-    assert await repo.latest_top_level_at("u-author", since_iso=_now_iso(-5)) is None
+    # A delete never gives the rate-limit slot back (owner 2026-11-24).
+    assert (
+        await repo.latest_top_level_at("u-author", since_iso=_now_iso(-5))
+        == root_created_at
+    )
     # Replies detach from a deleted parent, as the old hard delete did.
     reply = await repo.get("m-reply")
     assert reply is not None and reply.parent_moment_id is None

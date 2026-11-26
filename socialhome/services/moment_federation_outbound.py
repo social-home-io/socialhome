@@ -45,6 +45,17 @@ signature), sends a ``reach``-carrying copy only to v_96 households,
 relays a closer copy at most once more, and queues relayed creates and
 totals under a relayed outbox key the per-peer cap evicts first.
 
+**Per-author relay cap** (owner 2026-11-24, local policy — no protocol
+bump). A relay holds a signed author (origin + author, never the
+neighbour, so a relay can't launder a flood) to the posting rate limit: at
+most :data:`MOMENT_RELAY_PER_RATE_WINDOW` new top-level moments per
+:data:`~socialhome.domain.moment.MOMENT_RATE_WINDOW` of their signed time;
+replies at most :data:`MOMENT_RELAY_AUTHOR_CAP` an hour. Every first forward
+of a create counts; deletes of moments neither relayed nor stored here (or whose
+create was capped) count on a budget of their own; a delete of a moment
+relayed or stored here, a closer copy and totals don't. Over the cap only the forward is dropped — the inbound
+handler has already stored the moment for anyone here who looks.
+
 **Reactions further away (v_67).** A reaction is unicast to the author's
 household when it is this one or a paired one. Otherwise the
 :class:`~socialhome.services.moment_reaction_router.MomentReactionRouter`
@@ -56,6 +67,7 @@ token to every create it relays (per peer).
 from __future__ import annotations
 
 import enum
+import hashlib
 import logging
 import time
 from collections import OrderedDict
@@ -75,8 +87,11 @@ from ..domain.federation_retention import relayed_moment_key
 from ..domain.moment import (
     MOMENT_DEFAULT_REACH,
     MOMENT_MAX_HOPS,
+    MOMENT_RATE_WINDOW,
+    MOMENT_RELAY_FUTURE_SKEW,
     MOMENT_RELAY_MAX_AGE_HOURS,
     MOMENT_UNGATED_HOPS,
+    moment_rate_slot,
     moment_too_old_to_relay,
 )
 from ..infrastructure.event_bus import EventBus
@@ -90,6 +105,7 @@ from ..moment_origin import (
     reach_marks_of,
     sign_moment_origin,
 )
+from ..rate_limiter import RateLimiter
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
@@ -132,6 +148,48 @@ RELAY_SEEN_MAX: int = 50_000
 #: refuses them before any budget, :data:`~socialhome.moment_counts
 #: .MAX_COUNTS_REV_AGE_MS`).
 COUNTS_RELAY_MAX_AGE_MS: int = MAX_COUNTS_REV_AGE_MS
+
+#: Per-author relay cap (owner 2026-11-24), top-level moments: the posting
+#: rate limit (:data:`MOMENT_RATE_WINDOW`, one per person per 15 min) applied
+#: to the signed author — at most this many new top-level moments of one
+#: (origin, author) per window slot of their signed ``occurred_at``
+#: (:func:`moment_rate_slot`): 1, plus 1 of slack (an origin clock stepped
+#: back, a re-send after our restart). More comes only from a household
+#: ignoring the rule, so dropping the forward is safe.
+MOMENT_RELAY_PER_RATE_WINDOW: int = 2
+
+#: How long a slot's count is kept: as long as a moment signed in it can be
+#: relayed at all — from as early as it is let in (the future skew) to 48 h
+#: after the slot's end — so a slot can't be refilled.
+MOMENT_RELAY_SLOT_TTL_S: int = int(
+    MOMENT_RELAY_MAX_AGE_HOURS * 3600
+    + MOMENT_RATE_WINDOW.total_seconds()
+    + MOMENT_RELAY_FUTURE_SKEW.total_seconds()
+)
+
+#: Most slot counts remembered (least recently touched dropped first — a
+#: dropped slot only lets one old slot take its 2 again). Sized like the
+#: seen-map: every top-level moment relayed in 48 h, ~0.3 KB each.
+RELAY_SLOT_KEYS_MAX: int = 50_000
+
+#: Replies (the origin doesn't rate-limit them) and deletes of moments this
+#: household neither relayed nor stored: at most this many forwards per
+#: (origin, author) per :data:`MOMENT_RELAY_AUTHOR_WINDOW_S` of arrival — an
+#: hour of lively replies; each kind its own budget.
+MOMENT_RELAY_AUTHOR_CAP: int = 30
+MOMENT_RELAY_AUTHOR_WINDOW_S: int = 3600
+
+#: Most (origin, author) reply / delete budgets remembered (least recently
+#: touched dropped first — its budget starts afresh). Author ids are free to
+#: mint, so the map must be bounded; keys are fixed-size digests, so a busy
+#: key holds ≤ 30 stamps (~1 KB) whatever the ids are: ≈ 10–15 MB at worst.
+#: The once-a-window log throttle has the same bound.
+RELAY_AUTHOR_KEYS_MAX: int = 10_000
+
+
+def _budget_key(*parts: str) -> str:
+    """A fixed-size relay-cap key whatever the (peer-chosen) ids are."""
+    return hashlib.blake2b("\0".join(parts).encode(), digest_size=16).hexdigest()
 
 
 def counts_outbox_key(moment_id: str) -> str:
@@ -188,13 +246,16 @@ class MomentFederationOutbound(
     ``MOMENT_MAX_HOPS``, bounded by the signed reach."""
 
     __slots__ = (
+        "_author_budget",
         "_bus",
+        "_cap_logged",
         "_child_protection",
         "_federation",
         "_federation_repo",
         "_reaction_router",
         "_relay_policy",
         "_relayed",
+        "_slots",
         "_user_repo",
     )
 
@@ -230,6 +291,19 @@ class MomentFederationOutbound(
         #: moment id, rev); a relayed create's ``("origin", moment id,
         #: origin)`` entry keeps the moment's reach (v_96).
         self._relayed: OrderedDict[tuple[str, ...], _Relayed] = OrderedDict()
+        #: New top-level moments forwarded per (origin, author, rate slot).
+        #: Reads the module clock at each call, like the seen-map.
+        self._slots = RateLimiter(
+            monotonic=lambda: monotonic(), max_keys=RELAY_SLOT_KEYS_MAX
+        )
+        #: Replies / unknown deletes forwarded per (origin, author) an hour.
+        self._author_budget = RateLimiter(
+            monotonic=lambda: monotonic(), max_keys=RELAY_AUTHOR_KEYS_MAX
+        )
+        #: Which capped authors were logged this window (at most once each).
+        self._cap_logged = RateLimiter(
+            monotonic=lambda: monotonic(), max_keys=RELAY_AUTHOR_KEYS_MAX
+        )
 
     def attach_reaction_router(self, router: MomentReactionRouter) -> None:
         """Wire the v_67 reaction router (key-wrap key on creates, return
@@ -424,6 +498,7 @@ class MomentFederationOutbound(
         from_instance: str,
         held_reach: int | None = None,
         now_ms: int | None = None,
+        removed_here: bool = False,
     ) -> int:
         """Re-broadcast an inbound moment envelope to *our* paired peers,
         bumping ``hop_count`` and excluding both the original origin
@@ -446,6 +521,10 @@ class MomentFederationOutbound(
         copy not sent by its origin counts as at least hop 2 (the relay
         clamp); an invalid reach is never relayed; a ``reach``-carrying copy
         goes only to v_96 peers.
+
+        Per-author relay cap (owner 2026-11-24): see
+        :meth:`_author_budget_allows`; *removed_here* — this delete wiped a
+        live moment stored here (the inbound handler's tombstone outcome).
 
         Returns how many peers it was handed to (0: not relayed).
         """
@@ -524,6 +603,17 @@ class MomentFederationOutbound(
             author_user_id=str(payload.get("author_user_id") or "") or None,
             target_id=str(payload.get("moment_id") or "") or None,
         ):
+            return 0
+        if copy is _Copy.FIRST and not self._author_budget_allows(
+            event_type,
+            payload,
+            origin=origin,
+            moment_id=moment_id,
+            removed_here=removed_here,
+        ):
+            if event_type == FederationEventType.MOMENT_CREATED:
+                # Its delete is charged too, even where the moment is stored.
+                self._remember_relay(("capped", moment_id, origin), hop)
             return 0
         self._remember_relay(seen_key, hop, re_relayed=copy is _Copy.CLOSER)
         if event_type == FederationEventType.MOMENT_CREATED and origin:
@@ -610,6 +700,92 @@ class MomentFederationOutbound(
             log.debug("moment relay: totals for %s too old — not relayed", moment_id)
             return None
         return reach
+
+    def _author_budget_allows(
+        self,
+        event_type: FederationEventType,
+        payload: dict,
+        *,
+        origin: str,
+        moment_id: str,
+        removed_here: bool,
+    ) -> bool:
+        """The per-author relay cap: whether a moment's first forward from
+        here still fits its signed (origin, author)'s budget — charged when
+        it does (even if no peer turns out to take it).
+
+        A top-level create follows the posting rate limit, signed: at most
+        :data:`MOMENT_RELAY_PER_RATE_WINDOW` per :data:`MOMENT_RATE_WINDOW`
+        slot of its ``occurred_at`` (one signed further ahead than the
+        envelope skew is never relayed). Replies (not rate-limited at the
+        origin) get :data:`MOMENT_RELAY_AUTHOR_CAP` an hour of arrival.
+
+        Charged: every first forward of a create (held here or not — a
+        stored copy is no licence to forward), and — on a budget of its own,
+        so posting never starves deletes — a delete of a moment this
+        household neither relayed nor stored (one for a made-up id is new
+        everywhere, so it would otherwise travel uncapped) or whose create it
+        capped. Free: a delete of a moment whose create it relayed lately or
+        that wiped a moment stored here (*removed_here*; a delete must
+        follow its moment — a dropped one is never resent), and totals
+        (budgeted per origin by every receiver, relayed only for a moment
+        held or relayed here). Over the cap: dropped, logged once per
+        window, nothing said to the sender."""
+        if event_type == FederationEventType.MOMENT_REACTIONS_COUNTED:
+            return True
+        if event_type == FederationEventType.MOMENT_DELETED and (
+            self.relayed_create(moment_id, origin)
+            or (removed_here and not self._capped_here(moment_id, origin))
+        ):
+            return True
+        author = str(payload.get("author_user_id") or "")
+        if event_type == FederationEventType.MOMENT_DELETED:
+            kind = "deletes"
+        elif payload.get("parent_moment_id"):
+            kind = "replies"
+        else:
+            kind = "top-level moments"
+            slot = moment_rate_slot(payload.get("occurred_at"))
+            if slot is None:
+                return self._log_capped("signed-too-far-ahead", origin, author)
+            if self._slots.is_allowed(
+                _budget_key("t", origin, author, str(slot)),
+                limit=MOMENT_RELAY_PER_RATE_WINDOW,
+                window_s=MOMENT_RELAY_SLOT_TTL_S,
+            ):
+                return True
+            return self._log_capped(kind, origin, author)
+        if self._author_budget.is_allowed(
+            _budget_key(kind[0], origin, author),
+            limit=MOMENT_RELAY_AUTHOR_CAP,
+            window_s=MOMENT_RELAY_AUTHOR_WINDOW_S,
+        ):
+            return True
+        return self._log_capped(kind, origin, author)
+
+    def _log_capped(self, kind: str, origin: str, author: str) -> bool:
+        """Log a capped author at most once a window per kind; ``False``."""
+        if self._cap_logged.is_allowed(
+            _budget_key(kind, origin, author),
+            limit=1,
+            window_s=MOMENT_RELAY_AUTHOR_WINDOW_S,
+        ):
+            log.info(
+                "moment relay cap: author %r (origin %r) %s — not relaying"
+                " these for now",
+                author[:64],
+                origin[:64],
+                "signs moments too far ahead"
+                if kind == "signed-too-far-ahead"
+                else f"is over the {kind} cap",
+            )
+        return False
+
+    def _capped_here(self, moment_id: str, origin: str) -> bool:
+        """Whether this household refused to forward *moment_id*'s create
+        (the author cap) lately."""
+        held = self._relayed.get(("capped", moment_id, origin))
+        return held is not None and monotonic() - held.at <= RELAY_SEEN_TTL_S
 
     def relayed_create(self, moment_id: str, origin: str) -> bool:
         """Whether this household relayed *moment_id*'s create, as *origin*'s
