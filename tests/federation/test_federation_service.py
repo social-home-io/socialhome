@@ -334,13 +334,9 @@ class InMemoryFederationRepo(SavesPendingMixin):
         self._instances[inst.id] = inst
         return True
 
-    async def ban_instance_from_space(
-        self,
-        space_id: str,
-        instance_id: str,
-        *,
-        reason: str | None = None,
-    ) -> None:
+    def ban(self, space_id: str, instance_id: str) -> None:
+        """Test helper: a ``space_instance_bans`` row (the one writer in
+        production is ``SpaceRepo.ban_household``)."""
         self._bans.add((space_id, instance_id))
 
     async def is_instance_banned_from_space(
@@ -1868,7 +1864,7 @@ async def test_broadcast_to_space_members_skips_banned():
     space_id = "space-y"
     fed_repo.add_space_member(space_id, banned_inst.id)
     fed_repo.add_space_member(space_id, ok_inst.id)
-    await fed_repo.ban_instance_from_space(space_id, banned_inst.id)
+    fed_repo.ban(space_id, banned_inst.id)
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
@@ -4947,9 +4943,7 @@ async def test_a_deferred_snapshot_event_skips_a_household_banned_meanwhile(
             event_type=FederationEventType.SPACE_DISSOLVED,
             payload={"space_id": space_id},
         )
-        await svc._federation_repo.ban_instance_from_space(
-            space_id, "mesh-only-peer", reason="test"
-        )
+        svc._federation_repo.ban(space_id, "mesh-only-peer")
         await _drain_deferred(svc)
 
     assert len(calls) == 1
@@ -6854,7 +6848,7 @@ async def test_https_frame_for_an_unknown_inbox_is_refused():
 @pytest.mark.asyncio
 async def test_https_frame_from_a_banned_household_is_dropped():
     p = _paired_https()
-    await p.repo_b.ban_instance_from_space("sp1", p.a_id)
+    p.repo_b.ban("sp1", p.a_id)
     header, sealed = _make_frame(
         p,
         event_type=FederationEventType.SPACE_MEDIA_BLOB,

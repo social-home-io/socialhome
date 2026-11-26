@@ -672,12 +672,12 @@ async def test_a_dropped_write_is_indistinguishable_across_space_states(client, 
     banned it. Archived / unknown / live-not-a-member / banned all answer
     byte-for-byte what an accepted envelope gets — the reason stays in the
     server log only."""
-    from socialhome.app_keys import federation_repo_key
+    from socialhome.app_keys import space_repo_key
 
     await _save_space(client, "sp-archived", owner=env["own_iid"], archived=True)
     await _save_space(client, "sp-live", owner=env["own_iid"], archived=False)
     await _save_space(client, "sp-banned", owner=env["own_iid"], archived=False)
-    await client.server.app[federation_repo_key].ban_instance_from_space(
+    await client.server.app[space_repo_key].ban_household(
         "sp-banned", env["peer"].id, reason="test"
     )
 

@@ -154,13 +154,6 @@ class AbstractFederationRepo(Protocol):
     async def cleanup_expired_pairings(self) -> int: ...
 
     # Bans ----------------------------------------------------------------
-    async def ban_instance_from_space(
-        self,
-        space_id: str,
-        instance_id: str,
-        *,
-        reason: str | None = None,
-    ) -> None: ...
     async def is_instance_banned_from_space(
         self,
         space_id: str,
@@ -1102,23 +1095,6 @@ class SqliteFederationRepo:
         return int(await self._db.transact(_run))
 
     # ── Instance bans ──────────────────────────────────────────────────
-
-    async def ban_instance_from_space(
-        self,
-        space_id: str,
-        instance_id: str,
-        *,
-        reason: str | None = None,
-    ) -> None:
-        await self._db.enqueue(
-            """
-            INSERT INTO space_instance_bans(space_id, instance_id, reason)
-            VALUES(?, ?, ?)
-            ON CONFLICT(space_id, instance_id) DO UPDATE SET
-                reason=excluded.reason
-            """,
-            (space_id, instance_id, reason),
-        )
 
     async def is_instance_banned_from_space(
         self,
