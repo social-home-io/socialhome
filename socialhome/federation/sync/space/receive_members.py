@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from ....domain.events import RemoteSpaceMemberBanned, SpaceMemberProfileUpdated
@@ -14,7 +15,6 @@ from ....media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     reencode_peer_picture,
 )
-from ....services.space_member_guard import banned_from_space
 from ....services.space_service import apply_owner_statement_from_metadata
 from ...host_equivalence import is_owner_ban, touches_owner_household
 from .receiver_base import ReceiverBase, _sync_event
@@ -27,32 +27,57 @@ class MembersMixin(ReceiverBase):
 
     __slots__ = ()
 
-    async def _banned_person(self, space_id: str, user_id: str) -> bool:
-        """Whether ``space_id`` bans ``user_id`` or the household its seat
-        here (live or a tombstone) names — a ``members`` record never puts
-        such a person back on the roster (P7b Fable M3), like the live
-        JOINED gossip."""
+    async def _ban_filter(self, space_id: str) -> Callable[[str], bool]:
+        """A check ``user_id -> refused`` for one ``members`` batch (P7b
+        Fable M3; P9 review F7–F9): a record never puts a banned person
+        back on the roster, like the live JOINED gossip — neither a person
+        ban nor a person of a banned household. The bans and, only when the
+        space bans a household, every seat row (live or a tombstone; a
+        legacy user id may name several households) are read once per
+        batch. A person of another household with no seat row here cannot
+        be placed in a household, so while the space bans any household
+        that record is skipped too (the roster gossip seats them, the next
+        stream adds the row)."""
+        persons = {
+            str(b.get("user_id"))
+            for b in await self._space_repo.list_bans(space_id)
+            if b.get("user_id")
+        }
+        households = {
+            str(b.get("instance_id"))
+            for b in await self._space_repo.list_household_bans(space_id)
+            if b.get("instance_id")
+        }
+        if not households:
+            return lambda user_id: user_id in persons
         seat_repo = self._authorship.seat_repo if self._authorship else None
-        seat = (
-            await seat_repo.get_including_tombstones(space_id, "", user_id)
-            if seat_repo is not None
-            else None
-        )
-        return await banned_from_space(
-            self._space_repo,
-            space_id,
-            user_id=user_id,
-            instance_id=seat.instance_id if seat is not None else None,
-        )
+        homes: dict[str, set[str]] = {}
+        if seat_repo is not None:
+            for seat in await seat_repo.list_for_space_including_tombstones(space_id):
+                homes.setdefault(seat.user_id, set()).add(seat.instance_id)
+        ours = set(await self._space_repo.list_local_member_user_ids(space_id))
+
+        def refused(user_id: str) -> bool:
+            if user_id in persons:
+                return True
+            if user_id in ours:
+                return False
+            held = homes.get(user_id)
+            return held is None or bool(held & households)
+
+        return refused
 
     async def _persist_members(
         self, space_id: str, records: list[dict[str, Any]]
     ) -> None:
+        refused = await self._ban_filter(space_id)
         for r in records:
             user_id = str(r.get("user_id") or "")
-            if await self._banned_person(space_id, user_id):
+            if refused(user_id):
                 log.info(
-                    "space sync: a members record of a banned person in %s skipped",
+                    "space sync: a members record of a banned person (or one "
+                    "of no known household while a household is banned) in "
+                    "%s skipped",
                     space_id,
                 )
                 continue

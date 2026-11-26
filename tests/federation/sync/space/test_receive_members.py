@@ -754,3 +754,55 @@ async def test_a_members_record_never_reseats_a_banned_households_person(stack):
     }
     await _persist(stack, "members", [record])
     assert await stack.spaces.get_member(SPACE_ID, MEMBER) is None
+
+
+async def test_a_person_of_no_known_household_waits_while_a_household_is_banned(
+    stack,
+):
+    """P9 review F7: a members record carries no household. While the space
+    bans a household, a person of another household with no seat row here
+    can't be placed, so the record is skipped (the roster gossip seats them
+    first). Our own people are never skipped for it."""
+    await stack.spaces.ban_household(SPACE_ID, "hh-banned")
+    for uid in ("u-unknown", LOCAL):
+        await _persist(
+            stack,
+            "members",
+            [
+                {
+                    "user_id": uid,
+                    "role": "member",
+                    "joined_at": "2026-01-01T00:00:00+00:00",
+                    "space_display_name": "Synced",
+                }
+            ],
+        )
+    assert await stack.spaces.get_member(SPACE_ID, "u-unknown") is None
+    ours = await stack.spaces.get_member(SPACE_ID, LOCAL)
+    assert ours is not None and ours.space_display_name == "Synced"
+
+
+async def test_a_user_id_seated_under_two_households_is_judged_on_both(stack):
+    """P9 review F8: a legacy user id may hold rows under two households;
+    one of them banned refuses the record, whichever row a lookup hits."""
+    await stack.remote_members.add(
+        space_id=SPACE_ID,
+        instance_id="hh-banned",
+        user_id=MEMBER,
+        user_pk=None,
+        display_name=None,
+    )
+    await stack.spaces.ban_household(SPACE_ID, "hh-banned")
+    await stack.spaces.delete_member(SPACE_ID, MEMBER)
+    await _persist(
+        stack,
+        "members",
+        [
+            {
+                "user_id": MEMBER,
+                "role": "member",
+                "joined_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
+    )
+    assert await stack.spaces.get_member(SPACE_ID, MEMBER) is None

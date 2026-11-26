@@ -809,8 +809,9 @@ the space authority seed and broadcast to every member household
 ```
 
 The free-text reason stays on the household that wrote it (followers of a
-public space are strangers); the catch-up `bans` rows still carry it, as
-they did before.
+public space are strangers); the catch-up `bans` rows carry it to member
+households only (the ban list's audience) — a follower household gets who is
+banned and by whom, never why.
 
 A receiver applies it only when the sender is a seed holder in its own view
 (the owner, or — delegation on — a household with a live `admin` seat in its

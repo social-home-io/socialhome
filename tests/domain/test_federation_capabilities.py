@@ -1670,7 +1670,7 @@ def test_remote_subscriber_role_capability_threshold():
     of the space."""
     assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE == 30
     assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE <= fc.OURS
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Followers from other households" in labels
     assert "Followers from other households" in fc.features_missing_below(29)
     assert "Followers from other households" not in fc.features_missing_below(30)
@@ -1690,7 +1690,7 @@ def test_routed_origin_signature_capability_threshold():
     the mesh carries space content."""
     assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE == 31
     assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE <= fc.OURS
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Checking who sent a passed-on message" in labels
     assert "Checking who sent a passed-on message" in fc.features_missing_below(30)
     assert "Checking who sent a passed-on message" not in fc.features_missing_below(31)
@@ -1714,7 +1714,7 @@ def test_route_stale_nack_capability_threshold():
 
 
 def test_route_stale_nack_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Noticing when a path through other households breaks" in labels
     assert (
         "Noticing when a path through other households breaks"
@@ -1756,7 +1756,7 @@ def test_user_identity_key_capability_threshold():
 
 
 def test_user_identity_key_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Checking each person's identity" in labels
     assert "Checking each person's identity" in fc.features_missing_below(24)
     assert "Checking each person's identity" not in fc.features_missing_below(25)
@@ -1771,7 +1771,7 @@ def test_admin_authoritative_ops_capability_threshold():
 
 
 def test_admin_authoritative_ops_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Admins changing settings while the owner is away" in labels
     assert (
         "Admins changing settings while the owner is away"
@@ -1795,7 +1795,7 @@ def test_space_roster_gossip_capability_threshold():
 
 
 def test_space_roster_gossip_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Member lists shared between households" in labels
     assert "Member lists shared between households" in fc.features_missing_below(22)
     assert "Member lists shared between households" not in fc.features_missing_below(23)
@@ -1811,7 +1811,7 @@ def test_space_admin_key_share_capability_threshold():
 
 
 def test_space_admin_key_share_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Admins running a space without the owner" in labels
     assert "Admins running a space without the owner" in fc.features_missing_below(21)
     assert "Admins running a space without the owner" not in fc.features_missing_below(
@@ -1830,7 +1830,7 @@ def test_authenticated_route_discovery_capability_threshold():
 
 
 def test_authenticated_route_discovery_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Finding a safe path through other households" in labels
     assert "Finding a safe path through other households" in fc.features_missing_below(
         20
@@ -1852,7 +1852,9 @@ def test_space_sync_rejected_capability_threshold():
 
 
 def test_space_sync_rejected_feature_label():
-    assert "Fixing spaces that got out of step" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Fixing spaces that got out of step" in [
+        label for _ver, label in fc.CAPABILITY_FEATURES
+    ]
     assert "Fixing spaces that got out of step" in fc.features_missing_below(19)
     assert "Fixing spaces that got out of step" not in fc.features_missing_below(20)
 
@@ -1932,7 +1934,7 @@ def test_gallery_album_sync_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Shared gallery albums" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Shared gallery albums" in [label for _ver, label in fc.CAPABILITY_FEATURES]
 
 
 def test_owner_bound_album_id_capability_threshold():
@@ -1943,7 +1945,9 @@ def test_owner_bound_album_id_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Albums tied to their creator" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Albums tied to their creator" in [
+        label for _ver, label in fc.CAPABILITY_FEATURES
+    ]
     assert "Albums tied to their creator" in fc.features_missing_below(33)
     assert "Albums tied to their creator" not in fc.features_missing_below(34)
 

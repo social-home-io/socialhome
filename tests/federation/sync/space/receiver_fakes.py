@@ -87,6 +87,12 @@ class _FakeSpaceRepo:
     async def is_household_banned(self, space_id, instance_id):
         return False
 
+    async def list_bans(self, space_id):
+        return [{"user_id": b[1]} for b in self.bans if b[0] == space_id]
+
+    async def list_household_bans(self, space_id):
+        return []
+
 
 class _FakeSpacePostRepo:
     def __init__(self):
@@ -445,6 +451,16 @@ class _SpaceRepoStub:
         self._c.household_bans.append((space_id, instance_id, reason))
         self._c.household_banners.append(banned_by)
         self._c.owner_bans = [*getattr(self._c, "owner_bans", []), owner_ban]
+
+    async def list_bans(self, space_id):
+        return [{"user_id": b[1]} for b in self._c.bans if b[0] == space_id]
+
+    async def list_household_bans(self, space_id):
+        return [
+            {"instance_id": b[1]}
+            for b in getattr(self._c, "household_bans", [])
+            if b[0] == space_id
+        ]
 
     async def get_owner_user_id(self, space_id):
         return "u-owner"
