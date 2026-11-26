@@ -43,8 +43,8 @@ from socialhome.domain.writer_cert import WriterEntitlement
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
@@ -142,6 +142,14 @@ class _Spaces:
 
     async def get_space_seed(self, space_id):
         return self.seed
+
+    # Every household in this world holds a seat in the space (a person of
+    # ours on the roster): a household with none takes no channel seat.
+    async def list_local_member_user_ids(self, space_id):
+        return ["u-local"]
+
+    async def list_members(self, space_id):
+        return [SimpleNamespace(user_id="u-local", role="member")]
 
     async def list_all(self):
         return [self.space]
@@ -426,7 +434,7 @@ async def test_the_gfs_never_learns_the_private_space(world):
     inner2 = {"post_id": "p-1", "space_id": SPACE_ID, "content": "anon comment"}
     assert await world.b.member.publish_item(SPACE_ID, "comment", inner2, targets)
 
-    await world.app[gfs_member_publish_key].wait_idle()
+    await world.app[gfs_fan_out_key].wait_idle()
     queued = await world.app[gfs_envelope_queue_repo_key].list_for(
         world.a.h.instance_id, now=0
     )

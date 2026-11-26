@@ -1,6 +1,5 @@
-"""The space media cache's upload authorization wire shape — one header, two
-scopes (a listed space, a private space's opaque channel), the kinds each
-scope takes."""
+"""The space media cache's upload authorization wire shape — one header, one
+scope since v_96 (a space's opaque channel), the kinds it takes."""
 
 from __future__ import annotations
 
@@ -9,21 +8,16 @@ import base64
 import orjson
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_MEDIA_PUT,
-    AUTHORITY_SIG_SUITE_ED25519,
-    authority_signing_bytes,
-)
 from socialhome.canonical_json import canonical_bytes
+from socialhome.domain import gfs_space_media
 from socialhome.domain.gfs_space_media import (
     ADDR_SUITE_SM1,
-    AUTH_AUTHORITY,
     AUTH_CHANNEL,
     AUTH_KINDS_BY_SCOPE,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_PUT_PREFIX,
+    MEDIA_SCOPES,
     SCOPE_CHANNEL,
-    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_MAX_CHARS,
     SPACE_MEDIA_WRITER_PREFIX,
     SUPPORTED_ADDR_SUITES,
@@ -33,21 +27,15 @@ from socialhome.domain.gfs_space_media import (
     UnsupportedSpaceMediaAddrSuite,
     media_delete_payload,
     space_media_address,
+    valid_scope_id,
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 
 BID = "ab" * 32
 CHANNEL = "0f" * 16
+OTHER_CHANNEL = "1e" * 16
 
 CLAIM = SpaceMediaClaim(
-    scope=SCOPE_SPACE,
-    scope_id="sp-1",
-    blob_id=BID,
-    size=65_564,
-    expires_at=2_000_000,
-    ts=1_000_000,
-)
-CH_CLAIM = SpaceMediaClaim(
     scope=SCOPE_CHANNEL,
     scope_id=CHANNEL,
     blob_id=BID,
@@ -73,8 +61,8 @@ def _b64(obj: dict) -> str:
 
 def test_claim_signing_body_is_exactly_the_seven_fields():
     assert CLAIM.signing_body() == {
-        "scope": "space",
-        "scope_id": "sp-1",
+        "scope": "channel",
+        "scope_id": CHANNEL,
         "blob_id": BID,
         "addr_suite": "sm1",
         "size": 65_564,
@@ -90,32 +78,29 @@ _VECTOR_DATA = bytes(range(256)) * 4
 
 def test_the_address_binds_the_scope_test_vector():
     """``sm1``: sha256(b"sm1|" + scope_kind + b"|" + scope_id + b"|" +
-    ciphertext), lowercase hex — fixed vectors so the household side and
+    ciphertext), lowercase hex — a fixed vector so the household side and
     every GFS compute the same address."""
     assert ADDR_SUITE_SM1 in SUPPORTED_ADDR_SUITES
-    assert (
-        space_media_address(SCOPE_SPACE, "sp-1", _VECTOR_DATA)
-        == "fe35c777105b74f679173afe164a669ef5695c2e52429f0800ba17e68ed008ef"
-    )
     assert (
         space_media_address(SCOPE_CHANNEL, CHANNEL, _VECTOR_DATA)
         == "c6a7b3c167834828c3723e3cbc13baee245cc6cc558ae369e0f274fe3621e2bf"
     )
 
 
-def test_the_same_ciphertext_has_another_address_in_another_scope():
-    a = space_media_address(SCOPE_SPACE, "sp-1", _VECTOR_DATA)
-    assert a != space_media_address(SCOPE_SPACE, "sp-2", _VECTOR_DATA)
-    assert a != space_media_address(SCOPE_CHANNEL, CHANNEL, _VECTOR_DATA)
+def test_the_same_ciphertext_has_another_address_in_another_channel():
+    a = space_media_address(SCOPE_CHANNEL, CHANNEL, _VECTOR_DATA)
+    assert a != space_media_address(SCOPE_CHANNEL, OTHER_CHANNEL, _VECTOR_DATA)
 
 
 @pytest.mark.parametrize(
     ("kind", "sid", "suite"),
     [
-        ("room", "sp-1", "sm1"),
-        ("space", "a|b", "sm1"),
-        ("space", "", "sm1"),
-        ("space", "sp-1", "sm2"),
+        ("room", CHANNEL, "sm1"),
+        # v_96 — the space-keyed scope is gone (owner decision Q5).
+        ("space", "sp-1", "sm1"),
+        ("channel", "a|b", "sm1"),
+        ("channel", "", "sm1"),
+        ("channel", CHANNEL, "sm2"),
     ],
 )
 def test_an_address_needs_a_known_suite_and_an_unambiguous_scope(kind, sid, suite):
@@ -132,17 +117,9 @@ def test_an_unknown_address_suite_in_a_header_is_refused():
         )
 
 
-def test_authority_kind_signs_the_claim_under_the_put_event_type():
-    assert CLAIM.authority_signing_bytes() == authority_signing_bytes(
-        event_type=AUTHORITY_EVENT_SPACE_MEDIA_PUT,
-        space_id="sp-1",
-        payload=CLAIM.signing_body(),
-    )
-
-
 def test_channel_kind_signs_the_claim_after_its_own_prefix():
-    assert CH_CLAIM.channel_signing_bytes() == CHANNEL_MEDIA_PUT_PREFIX + (
-        canonical_bytes(CH_CLAIM.signing_body())
+    assert CLAIM.channel_signing_bytes() == CHANNEL_MEDIA_PUT_PREFIX + (
+        canonical_bytes(CLAIM.signing_body())
     )
 
 
@@ -152,39 +129,23 @@ def test_writer_bytes_bind_the_kind_epoch_and_scope():
         {**CLAIM.signing_body(), "auth": AUTH_WRITER_KEY, "epoch": 3}
     )
     assert a != CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=4)
-    assert CLAIM.writer_signing_bytes(
-        kind=AUTH_WRITER_KEY, epoch=3
-    ) != CH_CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=3)
 
 
 @pytest.mark.parametrize(
     "auth",
     [
         SpaceMediaUploadAuth(
-            claim=CLAIM,
-            kind=AUTH_AUTHORITY,
-            sig="x" * 86,
-            sig_suite=AUTHORITY_SIG_SUITE_ED25519,
+            claim=CLAIM, kind=AUTH_CHANNEL, sig="x" * 86, sig_suite="ed25519"
         ),
         SpaceMediaUploadAuth(
             claim=CLAIM,
-            kind=AUTH_WRITER_KEY,
-            sig="x" * 86,
-            sig_suite="ed25519",
-            epoch=3,
-        ),
-        SpaceMediaUploadAuth(
-            claim=CH_CLAIM, kind=AUTH_CHANNEL, sig="x" * 86, sig_suite="ed25519"
-        ),
-        SpaceMediaUploadAuth(
-            claim=CH_CLAIM,
             kind=AUTH_WRITER_KEY,
             sig="x" * 86,
             sig_suite="ed25519",
             epoch=3,
         ),
     ],
-    ids=["authority", "writer_key", "channel", "channel_writer_key"],
+    ids=["channel", "channel_writer_key"],
 )
 def test_header_round_trips(auth):
     header = auth.to_header()
@@ -192,20 +153,27 @@ def test_header_round_trips(auth):
     assert SpaceMediaUploadAuth.from_header(header) == auth
 
 
-def test_no_kind_names_a_household():
-    # v_90 — the identified writer-cert / channel-cert kinds are gone.
+def test_only_the_channel_scope_and_no_kind_names_a_household():
+    # v_90 — the identified writer-cert / channel-cert kinds are gone; v_96
+    # — so is the space scope with its authority and space writer-key kinds.
+    assert MEDIA_SCOPES == frozenset({SCOPE_CHANNEL})
     assert AUTH_KINDS_BY_SCOPE == {
-        SCOPE_SPACE: frozenset({AUTH_AUTHORITY, AUTH_WRITER_KEY}),
         SCOPE_CHANNEL: frozenset({AUTH_CHANNEL, AUTH_WRITER_KEY}),
     }
+    assert not hasattr(gfs_space_media, "SCOPE_SPACE")
+    assert not hasattr(gfs_space_media, "AUTH_AUTHORITY")
+    assert not hasattr(SpaceMediaClaim, "authority_signing_bytes")
+
+
+def test_a_space_scope_id_is_refused():
+    with pytest.raises(InvalidSpaceMediaAuth):
+        valid_scope_id("space", "sp-1")
+    assert valid_scope_id("channel", CHANNEL) == CHANNEL
 
 
 def _wire(claim=CLAIM, **over) -> dict:
     base = SpaceMediaUploadAuth(
-        claim=claim,
-        kind=AUTH_AUTHORITY if claim is CLAIM else AUTH_CHANNEL,
-        sig="x" * 86,
-        sig_suite="ed25519",
+        claim=claim, kind=AUTH_CHANNEL, sig="x" * 86, sig_suite="ed25519"
     ).to_wire()
     base.update(over)
     return {k: v for k, v in base.items() if v is not None}
@@ -219,15 +187,15 @@ def _wire(claim=CLAIM, **over) -> dict:
         base64.urlsafe_b64encode(b"[1,2]").decode(),
         _b64(_wire(blob_id="nope")),
         _b64(_wire(scope_id="")),
-        _b64(_wire(scope_id="x" * 129)),
+        _b64(_wire(scope_id="not-a-channel-id")),
         _b64(_wire(scope="room")),
-        _b64(_wire(CH_CLAIM, scope_id="not-a-channel-id")),
-        # Each scope takes only its own kinds.
-        _b64(_wire(auth=AUTH_CHANNEL)),
-        _b64(_wire(CH_CLAIM, auth=AUTH_AUTHORITY)),
+        # v_96 — a space-scope claim, under either of its retired kinds.
+        _b64(_wire(scope="space", scope_id="sp-1")),
+        _b64(_wire(scope="space", scope_id="sp-1", auth="authority")),
+        _b64(_wire(auth="authority")),
         # The identified kinds are gone (v_90).
+        _b64(_wire(auth="channel_cert", epoch=3, channel_cert={"x": 1})),
         _b64(_wire(auth="writer_cert", epoch=3, writer_cert=CERT_WIRE)),
-        _b64(_wire(CH_CLAIM, auth="channel_cert", epoch=3, channel_cert={"x": 1})),
         _b64(_wire(size=0)),
         _b64(_wire(size=MAX_BLOB_BYTES + 1)),
         _b64(_wire(size=True)),

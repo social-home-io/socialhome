@@ -306,8 +306,6 @@ class ClusterSyncView(GfsBaseView):
             await svc.apply_partition_gap(payload)
         elif msg_type == NODE_DRAIN_HINT:
             await svc.apply_drain_hint(payload.get("instances"))
-            if "notices" in payload:
-                await svc.apply_subscriber_notices(payload["notices"])
             if "relays" in payload:
                 # Broadcast items another node accepted: pushed to the sockets
                 # held here; ``held`` tells the origin whom not to queue for.

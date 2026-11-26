@@ -15,15 +15,11 @@ from __future__ import annotations
 
 import json
 import logging
+import zlib
 from datetime import UTC, datetime
 
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-    strip_authority_sig_fields,
-)
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -53,7 +49,6 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
     AuthorityRemoval,
-    zlib_item_plaintext,
 )
 from socialhome.domain.space_media_fields import SPACE_MEDIA_ITEMS, item_media_urls
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
@@ -200,7 +195,6 @@ async def _make_envelope(
     tamper_preview: dict | None = None,
     preview_suite: str = "ed25519",
     writer_cert: dict | None = None,
-    payload_suite: str | None = None,
     plaintext: bytes | None = None,
     signed_extra: dict | None = None,
     unsigned_extra: dict | None = None,
@@ -213,8 +207,7 @@ async def _make_envelope(
     ``signed_extra`` joins the inner before the author signs it,
     ``unsigned_extra`` after (like the writer cert or ``media_refs``).
 
-    ``payload_suite`` labels it (signed) and, for ``zlib1``, compresses the
-    inner; ``plaintext`` replaces the encrypted bytes outright.
+    ``plaintext`` replaces the encrypted bytes outright.
 
     By default the inner ``author_sig`` is produced by the real author's
     identity seed (``author_kp.private_key``). ``author_sign_seed`` overrides
@@ -302,19 +295,6 @@ async def test_valid_relay_decrypts_persists_and_publishes(env):
     assert post.author == env["author_user_id"]
     assert len(env["events"]) == 1
     assert env["events"][0].origin_instance_id == env["author_origin"]
-
-
-# ── payload_suite "zlib1" ────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize("suite", ["zlib1", "zlib1+dict1"])
-async def test_a_compressed_relay_is_opened_and_persisted(env, suite):
-    envelope = await _make_envelope(
-        env, payload_suite=suite, content="Grüße 漢字 😀 " * 40
-    )
-    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
-    got = await env["post_repo"].get("post-1")
-    assert got is not None and got[1].content == "Grüße 漢字 😀 " * 40
 
 
 async def test_relayed_post_resolves_mentions_against_local_member_view(env):
@@ -555,20 +535,6 @@ async def test_missing_content_key_dropped_gracefully(env):
     envelope = await _make_envelope(env)
     # Bump the epoch to one with no key.
     envelope["epoch"] = 99
-    # Re-sign so the authority check passes and we exercise the decrypt drop.
-    envelope = {
-        k: v
-        for k, v in envelope.items()
-        if k not in ("authority_sig", "authority_sig_suite")
-    }
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env["space_kp"].private_key,
-        )
-    )
     await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
@@ -956,7 +922,8 @@ async def _item_frame(
     body = {"item_type": item_type, "inner": inner}
     if plaintext is None:
         plaintext = (
-            zlib_item_plaintext(body, suite=payload_suite)
+            # What a compressing pre-P7 publisher sealed: zlib bytes.
+            zlib.compress(json.dumps(body).encode(), 9)
             if payload_suite in ("zlib1", "zlib1+dict1")
             else json.dumps(body).encode()
         )

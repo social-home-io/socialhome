@@ -38,7 +38,6 @@ from socialhome.gfs_channel import (
     verify_register,
     verify_unregister,
 )
-from socialhome.writer_key import derive_writer_seed
 
 SPACE_SEED = os.urandom(32)
 SPACE_PK = ed25519_public_key(SPACE_SEED)
@@ -66,14 +65,12 @@ def test_channel_key_is_unlinkable_to_space_and_writer_keys() -> None:
     # …distinct per channel and per space…
     assert derive_channel_seed(SPACE_SEED, SPACE_ID, new_channel_id()) != CH_SEED
     assert derive_channel_seed(SPACE_SEED, "other", CHANNEL_ID) != CH_SEED
-    # …never the space key, nor the space's (public-space) writer key, nor
-    # the channel writer key.
+    # …never the space key, nor the channel writer key.
     assert CH_SEED != SPACE_SEED
     assert CH_PK != SPACE_PK
     for epoch in (0, 1, 7):
-        assert derive_writer_seed(SPACE_SEED, SPACE_ID, epoch) != CH_SEED
         cw = derive_channel_writer_seed(SPACE_SEED, SPACE_ID, CHANNEL_ID, epoch)
-        assert cw not in (CH_SEED, derive_writer_seed(SPACE_SEED, SPACE_ID, epoch))
+        assert cw not in (CH_SEED, SPACE_SEED)
     with pytest.raises(ValueError):
         derive_channel_seed(b"short", SPACE_ID, CHANNEL_ID)
     with pytest.raises(ValueError):

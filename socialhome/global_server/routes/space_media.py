@@ -1,6 +1,6 @@
 """The space media cache routes (:mod:`..space_media`) — ONE scope-free
-path. The scope (a listed space, or a PRIVATE space's opaque v_51 channel —
-this server never learns that space) rides only inside what is signed: the
+path. The scope (a space's opaque channel — this server never learns that
+space; the ``space`` scope went in v_96) rides only inside what is signed: the
 upload's claim header and the delete's body. So neither an access log, a
 proxy nor a CDN cache key ever sees a space or channel id next to a blob
 (the v_51 rule: a channel id never in a URL path).
@@ -28,11 +28,11 @@ proxy nor a CDN cache key ever sees a space or channel id next to a blob
   ``no-store``, so a blob uploaded a moment later is not hidden behind a
   cached miss.
 * ``POST /gfs/media/{blob_id}/delete`` — the scope's seed holder withdraws
-  the blob: ``{scope, scope_id, ts, sig, sig_suite}`` (space authority /
-  channel key, over the scope, the blob and ``ts``).
+  the blob: ``{scope, scope_id, ts, sig, sig_suite}`` (the channel key, over
+  the scope, the blob and ``ts``).
 
-Every authorization failure (unknown / banned space, unknown or unused
-channel, wrong key, stale ts, bad cert, a replayed delete…) is ONE ``403``
+Every authorization failure (an unknown or unused channel, the retired
+``space`` scope, wrong key, stale ts, bad cert, a replayed delete…) is ONE ``403``
 body — no oracle — with the reason at DEBUG.
 """
 
@@ -44,7 +44,6 @@ import logging
 from aiohttp import web
 
 from ...domain.gfs_space_media import (
-    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_HEADER,
     InvalidSpaceMediaAuth,
     SpaceMediaUploadAuth,
@@ -135,23 +134,18 @@ class GfsMediaView(GfsBaseView):
             ) from exc
         claim = auth.claim
         try:
-            household = await self.svc(K.gfs_space_media_auth_key).authorize_upload(
+            await self.svc(K.gfs_space_media_auth_key).authorize_upload(
                 auth, scope_kind=claim.scope, scope_id=claim.scope_id, blob_id=blob_id
             )
         except PermissionError as exc:
             log.debug("space media upload refused: %s", exc)
             return _refused()
         size = claim.size
-        # The fairness owner: a space's owning household; a channel's blob
-        # counts against its UPLOADER's network prefix (an IPv6 /48, an IPv4
-        # /24, as a keyed hash — identity-free), never a seated member
-        # (fourth review G1) and never a /64 one /48 has 65 536 of (final
-        # check N4).
-        owner = (
-            ("household", household)
-            if claim.scope == SCOPE_SPACE
-            else ("client", store.prefix_key(self.client_ip()))
-        )
+        # The fairness owner: a channel's blob counts against its UPLOADER's
+        # network prefix (an IPv6 /48, an IPv4 /24, as a keyed hash —
+        # identity-free), never a seated member (fourth review G1) and never
+        # a /64 one /48 has 65 536 of (final check N4).
+        owner = ("client", store.prefix_key(self.client_ip()))
         try:
             # Size bucket, caps, the scope's rate slot and the address's
             # byte budget — before any body.

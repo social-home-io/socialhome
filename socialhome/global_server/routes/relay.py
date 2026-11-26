@@ -18,15 +18,7 @@ from ...domain.gfs_mailbox import (
 from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
 from ...domain.gfs_space_media_on_demand import ON_DEMAND_CAPABILITY_KEY
 from ...domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
-from ...domain.space_item import (
-    PAYLOAD_SUITE_FIELD,
-    PAYLOAD_SUITE_UNSUPPORTED_ERROR,
-    PayloadSuiteRefused,
-    UnsupportedPayloadSuite,
-    payload_suite_of,
-)
 from ...domain.space_place import PlacePin, place_pin_wire
-from ...domain.subscriber_accepts import parse_accepts
 from ...gfs_client_status import parse_status_request
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from .. import app_keys as K
@@ -34,23 +26,11 @@ from ..admin_service import verify_report_signature
 from ..federation import InstanceRegistrationRefused, SpaceNotListedError
 from ..public import (
     PAIR_TOKEN_TTL_SECONDS,
-    PUBLISH_MAX_BODY_BYTES,
     SPACE_PUBLISH_MAX_BODY_BYTES,
 )
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
-
-#: The only actions ``POST /gfs/subscribe`` accepts. Anything else is a 400 —
-#: a typo'd action must never silently fall through to a subscribe.
-_SUBSCRIBE_ACTIONS = frozenset({"subscribe", "unsubscribe"})
-
-#: Upper bound on the identifier-shaped wire fields ``/gfs/publish`` binds into
-#: SQL (``space_id``) or matches against the allow-set (``event_type``). Mirrors
-#: the household-side ``_SAFE_SPACE_ID`` guard. Without it a JSON list/dict
-#: reached the SQLite bind and produced a 500 + ERROR traceback on every
-#: unauthenticated hit — a log-volume DoS.
-_MAX_WIRE_ID_CHARS = 128
 
 #: Body cap for ``POST /gfs/proof`` — a ``{"nonce": "<43 chars>"}`` object is
 #: ~60 bytes, ~250 with a pending household's ``client`` question; anything
@@ -103,13 +83,6 @@ def public_space_dict(space) -> dict:
     return body
 
 
-def _require_short_str(value: object, field: str) -> str:
-    """Return *value* as a non-empty, bounded ``str`` or raise ``400``."""
-    if not isinstance(value, str) or not value or len(value) > _MAX_WIRE_ID_CHARS:
-        raise web.HTTPBadRequest(reason=f"Invalid field: {field}")
-    return value
-
-
 class GfsInfoView(GfsBaseView):
     """``GET /gfs/info`` — public GFS identity descriptor.
 
@@ -120,19 +93,20 @@ class GfsInfoView(GfsBaseView):
     the public key is, well, public.
 
     Also the capability channel for the GFS↔HFS leg, which has no
-    ``proto_version`` negotiation: ``anonymous_publish`` tells a household
-    that ``POST /gfs/publish`` authorizes on the space-authority signature
-    alone, so it can stop sending ``from_instance``.
+    ``proto_version`` negotiation. The capabilities ship SIGNED
+    (``capabilities`` + ``capabilities_sig`` + ``capabilities_sig_suite``,
+    see :mod:`socialhome.capabilities_sig`) with the same identity key this
+    response publishes as ``public_key`` and every paired household pinned
+    at pair time. The signature is what a household trusts — an
+    unauthenticated flag on an unauthenticated endpoint could be stripped
+    on-path, pushing a household onto a path that reveals more.
 
-    That capability ships SIGNED (``capabilities`` + ``capabilities_sig`` +
-    ``capabilities_sig_suite``, see :mod:`socialhome.capabilities_sig`) with the same
-    identity key this response publishes as ``public_key`` and every paired
-    household pinned at pair time. The signature is what a household trusts —
-    an unauthenticated flag on an unauthenticated endpoint could be stripped
-    on-path, forcing every relay back to the identified legacy body, which is
-    precisely the third-party-provable artefact the anonymous relay exists to
-    avoid. The top-level ``anonymous_publish`` stays for readability and for
-    older households, but it is INFORMATIONAL only.
+    Since v_96 the block no longer names the space-keyed relay
+    (``anonymous_publish``, ``member_publish_strict``, ``targeted_publish``,
+    ``space_key_pull``, ``space_item_followers``, ``payload_zlib1*``) nor
+    the ``space`` media scope: those routes are gone, and a space's content
+    reaches this server only through its opaque channel (apart from sealed
+    household-to-household envelopes, which name no space).
     """
 
     async def get(self) -> web.Response:
@@ -142,9 +116,8 @@ class GfsInfoView(GfsBaseView):
         server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
         # ``envelope_relay``: this GFS carries ``POST /gfs/envelope``, the
         # opaque household-to-household relay the §D2b invite bootstrap needs.
-        # It ships inside the SIGNED block for the same reason
-        # ``anonymous_publish`` does — an on-path stripper must not be able to
-        # push a household back onto a path that reveals more.
+        # It ships inside the SIGNED block — an on-path stripper must not be
+        # able to push a household back onto a path that reveals more.
         # ``invite_links``: this GFS carries the owner-signed
         # ``/gfs/spaces/{id}/invite`` mint/revoke pair and the public
         # ``GET /join/{token}`` page. Signed for the same reason as its two
@@ -162,13 +135,6 @@ class GfsInfoView(GfsBaseView):
         # unpublish, refusing one that is not its own. Signed
         # because a household only sends the field to a server that folds it
         # into the signed bytes (an older one would 403).
-        # ``member_publish_strict`` (v_50; the name is historical — since
-        # v_90 it is the ONLY member publish): this GFS carries the anonymous
-        # ``POST /gfs/member-publish-anon`` (writer-group-key-signed) and the
-        # ``POST /gfs/spaces/{id}/epoch`` notice that pins the writer key
-        # (``writer_key_cert``). Signed because a household only adds that
-        # notice field for a server that verifies it (an older one would
-        # refuse the owner's notice outright).
         # ``private_channels`` (v_51): this GFS carries the opaque
         # ``/gfs/channels/*`` routes — anonymous channel-key-signed
         # registration and epoch notices, pass-gated member seats and the
@@ -188,32 +154,21 @@ class GfsInfoView(GfsBaseView):
         # one. Signed like its siblings; a replayed OLD block without it makes
         # a household pair "unproven", never "proven".
         capabilities: dict[str, object] = {
-            "anonymous_publish": True,
             "envelope_relay": True,
             "invite_links": True,
             "authority_rotation": True,
             "withdrawn_repin": True,
-            "member_publish_strict": True,
             "private_channels": True,
             "open_signup": bool(cfg.open_signup),
             # Takes the signed, optional ``gfs_key`` (the addressed server's
-            # key) on member publish, epoch notices and channel requests, and
-            # refuses one that is not its own key.
+            # key) on listing and channel requests, and refuses one that is
+            # not its own key.
             "addressee_key": True,
             # Folds a global space's optional ``place: {lat, lon}`` into the
             # signed publish bytes and lists it. Signed: a household sends
             # the field only to a server that proved it verifies it (an
             # older one would 403 the whole publish).
             "place_pin": True,
-            # v_61 — ``POST /gfs/publish`` takes an optional ``to`` (a
-            # subscriber of the space, as named in ``new_subscriber``) and
-            # delivers to that subscriber only. A household sends the
-            # targeted key handoff and the author-profile bundle only to a
-            # server that proved it; an older one would fan them out. The
-            # same release tags ``new_subscriber`` with ``reason`` and the
-            # subscriber's ``accepts``; a frame without them never earns a
-            # bundle, so no separate flag is needed.
-            "targeted_publish": True,
             # This server's public highlight viewer page opens the end-to-end
             # sealed stream (``stream_seal`` + ``sealed`` frames under the
             # ``#k=`` link secret) and never shows a plaintext content frame.
@@ -257,12 +212,6 @@ class GfsInfoView(GfsBaseView):
             # declaration may carry ``ops``. A household sends totals, and
             # declares ``ops``, only to a server that proved this.
             "moment_counts": True,
-            # #5b — ``POST /gfs/spaces/{id}/key_request``: a follower that
-            # misses a space's content key asks for it, and one that says
-            # so (``space_key_pull`` in its hello / subscribe ``accepts``)
-            # gets no key repair on every reconnect. A household asks only
-            # a server that proved this.
-            "space_key_pull": True,
             # v_84 — a listing carries the owner's ``join_contact`` (its keys,
             # signed by the space authority key this server pins) when the
             # owner sends one, so a household that never paired with the
@@ -278,7 +227,9 @@ class GfsInfoView(GfsBaseView):
             # space's contact only to a server that proved this. Since P3 it
             # also means: a global space's members AND followers take seats
             # on one opaque channel here (the owner registers a global
-            # space's channel only on a server proving this).
+            # space's channel only on a server proving this). It shipped
+            # after the viewer-page JSON (``/gfs/pages/*``, #1109), so a
+            # household takes it as proof of those routes too.
             "subscriber_seats": True,
             # The owner's listing publish may carry ``member_count`` and
             # ``follower_count``; this server folds them into the signed
@@ -288,25 +239,6 @@ class GfsInfoView(GfsBaseView):
             # one folds only the fields it knows, so they would break the
             # signature.
             "listing_counts": True,
-            # Step 12 — keeps each seat's ``space_item`` label and answers
-            # ``GET /gfs/spaces/{id}/subscribers?summary=1`` (counts, under the
-            # authority signature). A seed holder skips its relay copy of a
-            # member's post on a server only when that server proved this.
-            "space_item_followers": True,
-            # Takes a zlib-compressed item (``payload_suite: "zlib1"``) on
-            # ``/gfs/publish`` and both member publishes, keeps each seat's
-            # ``payload_zlib1`` label, and answers 409
-            # ``payload_suite_unsupported`` while any seat of the space lacks
-            # it. A household compresses only toward a server that proved
-            # this; an older one would relay it to followers who can't open
-            # it (``/gfs/publish``) or refuse the field (member publish).
-            "payload_zlib1": True,
-            # The same for ``payload_suite: "zlib1+dict1"`` (zlib with the
-            # preset dictionary ``domain/item_zdict.ZDICT_V1``): each seat's
-            # ``payload_zlib1_dict1`` label, 409 while any seat lacks it.
-            # A household sends it only to a server that proved this; an
-            # older one would refuse the suite (400) or relay it unchecked.
-            "payload_zlib1_dict1": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         # The encrypted, short-lived space media cache
@@ -364,7 +296,6 @@ class GfsInfoView(GfsBaseView):
             "public_key": cluster.own_public_key_hex,
             "server_name": server_name,
             "base_url": cfg.base_url,
-            "anonymous_publish": True,
             "capabilities": capabilities,
         }
         if sig:
@@ -373,8 +304,8 @@ class GfsInfoView(GfsBaseView):
         else:
             log.warning(
                 "GET /gfs/info: no cluster signing key wired — serving an "
-                "UNSIGNED capability block; paired households will not "
-                "relay space events to this server until it is signed",
+                "UNSIGNED capability block; paired households use nothing "
+                "that needs a proven capability here until it is signed",
             )
         return web.json_response(body)
 
@@ -608,199 +539,6 @@ class InstanceUpdateView(GfsBaseView):
         return web.json_response({"status": "ok", "instance_id": instance_id})
 
 
-class PublishView(GfsBaseView):
-    """``POST /gfs/publish`` — relay an event to a space's subscribers
-    **without the relaying household's identity**.
-
-    Canonical body: ``{space_id, event_type, payload}``. Authorization is the
-    space-authority signature inside the opaque ``payload`` alone (verified
-    against the space's TOFU-pinned key), so the GFS does not REQUIRE, STORE,
-    LOG or FORWARD which household relayed the event. That is the guarantee —
-    not that the operator *cannot* learn it: the same household usually holds
-    an authenticated ``/gfs/ws`` socket from the same IP, so network-level
-    correlation (source address, timing, body size) remains available to
-    whoever runs the server. See :meth:`GfsFederationService.publish_event`.
-
-    Because the caller is anonymous, instance-level moderation
-    (``client_instances.status = 'banned'``) CANNOT gate this path — a banned
-    household simply omits the legacy fields. The **space**-level ban is the
-    only moderation lever on the relay.
-
-    ``from_instance`` / ``signature`` (+ ``ts``) from an older household are
-    accepted but never trusted: the transport signature is still verified when
-    present (a bogus legacy field is a ``403``), then discarded.
-
-    The response reports only the NUMBER of subscribers reached. The authority
-    signature carries no nonce or timestamp, so a captured relay frame stays
-    valid forever and anyone who saw one can re-POST it. What bounds that is a
-    content-blind replay dedupe: this node remembers the digest of each
-    accepted payload for ``PUBLISH_REPLAY_TTL_S`` (5 minutes) and answers an
-    identical body with ``delivered_to: 0`` and no fan-out. The cache is
-    in-memory and PER NODE — a restart, or a sibling node in a cluster, forgets
-    — so it bounds the burst one captured frame can drive, and SUBSCRIBER-side
-    dedupe by the post id inside the payload stays the standing backstop (see
-    ``_authorize_authority_relay``). Returning the roster would hand an
-    anonymous replayer exactly the data ``GET /gfs/spaces/{id}/subscribers``
-    gates behind a replay-guarded authority query.
-
-    Every authorization failure returns ONE uniform ``403`` body — distinct
-    messages would let an unauthenticated caller enumerate space existence,
-    moderation status and pin status. The precise reason is logged at DEBUG.
-    """
-
-    async def post(self) -> web.Response:
-        svc = self.svc(K.gfs_federation_key)
-        # Unauthenticated until the authority signature inside the payload
-        # verifies, so the bytes are bounded BEFORE they are buffered.
-        body = await self.bounded_json(PUBLISH_MAX_BODY_BYTES)
-        try:
-            space_id = body["space_id"]
-            event_type = body["event_type"]
-            payload = body["payload"]
-        except KeyError as exc:
-            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        space_id = _require_short_str(space_id, "space_id")
-        event_type = _require_short_str(event_type, "event_type")
-        # Legacy fields — tolerated, verified, never trusted (see the service).
-        from_instance = str(body.get("from_instance") or "")
-        signature = str(body.get("signature") or "")
-        # v_61 routing target: one subscriber of the space (optional).
-        to = body.get("to")
-        to = _require_short_str(to, "to") if to is not None else ""
-        if isinstance(payload, dict):
-            try:
-                payload_suite_of(payload.get(PAYLOAD_SUITE_FIELD))
-            except UnsupportedPayloadSuite as exc:
-                raise web.HTTPBadRequest(reason="Unsupported payload_suite") from exc
-        try:
-            delivered = await svc.publish_event(
-                space_id,
-                event_type,
-                payload,
-                from_instance,
-                signature,
-                to=to,
-            )
-        except PermissionError as exc:
-            # DEBUG only, and never the legacy ``from_instance``: the caller
-            # gets one uniform body so the endpoint is not an oracle.
-            log.debug("GFS publish refused for space %s: %s", space_id, exc)
-            return web.json_response(
-                {"error": "not authorized to relay for this space"},
-                status=403,
-            )
-        except PayloadSuiteRefused:
-            # Authorized, but a follower here cannot open a compressed item:
-            # the publisher re-sends it as JSON.
-            return web.json_response(
-                {"error": PAYLOAD_SUITE_UNSUPPORTED_ERROR}, status=409
-            )
-        return web.json_response(
-            {"status": "published", "delivered_to": len(delivered)},
-        )
-
-
-class SubscribeView(GfsBaseView):
-    """``POST /gfs/subscribe`` — subscribe or unsubscribe an instance.
-
-    BOTH actions are Ed25519-signed (mandatory): body
-    ``{instance_id, space_id, ts, signature, action?}``, signed over the
-    canonical JSON of ``{action, instance_id, space_id, ts}`` — the
-    ``action`` rides inside the signed bytes (domain separation), so a
-    signature for one action can never be replayed as the other — and
-    verified against
-    the registered ``ClientInstance.public_key`` (replay-guarded ±300 s on
-    ``ts``). The signature binds the request to *instance_id* so a caller
-    can only subscribe — or unsubscribe — **itself**; an unsigned
-    unsubscribe would otherwise let anyone evict any household from any
-    space's relay fan-out. A missing ``ts`` / ``signature`` — or an
-    ``action`` outside ``{"subscribe", "unsubscribe"}`` — is a ``400``;
-    auth failures map to ``403``. A subscribe for a space whose stored
-    ``allow_subscribers`` is false is also a ``403``: such a space is listed
-    for discovery but is not publicly readable, so there is no readership to
-    join. That is the OWNER's explicit opt-in, NOT ``join_mode`` — an
-    ``invite_only`` space that allows subscribers seats them normally.
-
-    A subscribe may carry ``accepts`` (v_61): the optional relay deliveries
-    the household opens, e.g. ``["author_profiles_bundle"]``. It is NOT in
-    the signed bytes, is never stored, and only rides to the space owner in
-    the ``new_subscriber`` notify of a new seat. Malformed labels are
-    dropped (it is a hint): the subscribe never fails over it.
-    """
-
-    async def post(self) -> web.Response:
-        svc = self.svc(K.gfs_federation_key)
-        body = await self.body_or_400()
-        try:
-            instance_id = body["instance_id"]
-            space_id = body["space_id"]
-        except KeyError as exc:
-            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        action = str(body.get("action", "subscribe"))
-        if action not in _SUBSCRIBE_ACTIONS:
-            raise web.HTTPBadRequest(reason=f"Unknown action: {action}")
-        try:
-            ts = body["ts"]
-            signature = body["signature"]
-        except KeyError as exc:
-            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        if action == "unsubscribe":
-            try:
-                await svc.unsubscribe(
-                    str(instance_id),
-                    str(space_id),
-                    str(ts),
-                    str(signature),
-                )
-            except PermissionError as exc:
-                return web.json_response({"error": str(exc)}, status=403)
-            return web.json_response({"status": "unsubscribed"})
-        # v_61 — what the subscriber can open, NEXT to the signed bytes (an
-        # older GFS ignores it and still verifies). Validated, never stored.
-        accepts = parse_accepts(body.get("accepts"))
-        try:
-            await svc.subscribe(
-                str(instance_id),
-                str(space_id),
-                str(ts),
-                str(signature),
-                accepts=accepts,
-            )
-        except PermissionError as exc:
-            return web.json_response({"error": str(exc)}, status=403)
-        return web.json_response({"status": "subscribed"})
-
-
-class SpaceKeyRequestView(GfsBaseView):
-    """``POST /gfs/spaces/{space_id}/key_request`` — a follower household
-    missed the space's content key (#5b, capability ``space_key_pull``).
-
-    Body: ``{instance_id, ts, signature}``, signed by the follower over
-    ``{action: "space_key_request", instance_id, space_id, ts}`` like a
-    subscribe. The space's owner is asked to seal the key again (a
-    ``new_subscriber`` key repair). Always ``202`` once the signature
-    verifies: whether the seat is held, the owner online or the request
-    throttled is not told back. A missing field is a ``400``, a bad
-    signature a ``403``."""
-
-    async def post(self) -> web.Response:
-        svc = self.svc(K.gfs_federation_key)
-        body = await self.body_or_400()
-        try:
-            instance_id = str(body["instance_id"])
-            ts = str(body["ts"])
-            signature = str(body["signature"])
-        except KeyError as exc:
-            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        try:
-            await svc.request_space_key(
-                instance_id, self.request.match_info["space_id"], ts, signature
-            )
-        except PermissionError as exc:
-            return web.json_response({"error": str(exc)}, status=403)
-        return web.json_response({"queued": True}, status=202)
-
-
 class SpacesListView(GfsBaseView):
     """``GET /gfs/spaces`` — list active global spaces for discovery."""
 
@@ -831,70 +569,6 @@ class SpaceDetailView(GfsBaseView):
         if space is None or space.status != "active" or space.withdrawn:
             raise web.HTTPNotFound(reason="Space not found or not published")
         return web.json_response(public_space_dict(space))
-
-
-class SpaceSubscribersView(GfsBaseView):
-    """``GET /gfs/spaces/{space_id}/subscribers`` — release the subscriber
-    list to a verified SEED-HOLDER (Phase-5b-c reconcile).
-
-    SECURITY: the subscriber list is sensitive, so the read is gated on a
-    SPACE-AUTHORITY signature proving the caller holds the space seed (the
-    owner OR a delegated admin) — the SAME pinned-pubkey trust model as the
-    authority relay path, no new roster/key. The caller passes
-    ``?ts=&authority_sig=&authority_sig_suite=`` where the signature is over
-    ``{space_id, ts}`` under ``space_subscribers_query`` and the ``ts`` is
-    replay-guarded (±300 s). Any auth failure (no/forged/stale sig, unknown
-    space, no pinned pubkey) maps to ``403`` — fail-closed.
-
-    The response exposes only each subscriber's already-GFS-registered public
-    material — its instance id, Ed25519 identity pubkey, and X25519 key-wrap
-    pubkey + self-signature — so the seed-holder can re-seal the per-space
-    content key to each (``space_subscriber_reconcile``). No inbox URL, no
-    private data.
-    """
-
-    async def get(self) -> web.Response:
-        svc = self.svc(K.gfs_federation_key)
-        space_id = self.request.match_info["space_id"]
-        q = self.request.query
-        if q.get("summary") == "1":
-            # Step 12 — counts only, under the same authority signature: how
-            # many followers here don't read ``space_item`` (a seed holder
-            # skips its relay copy of a member's post only at zero).
-            try:
-                total, without = await svc.count_subscribers_without_space_item(
-                    space_id,
-                    ts=str(q.get("ts") or ""),
-                    authority_sig=str(q.get("authority_sig") or ""),
-                    authority_sig_suite=str(q.get("authority_sig_suite") or ""),
-                )
-            except PermissionError as exc:
-                return web.json_response({"error": str(exc)}, status=403)
-            return web.json_response(
-                {"subscribers": total, "without_space_item": without}
-            )
-        try:
-            subscribers = await svc.list_subscribers_with_keys(
-                space_id,
-                ts=str(q.get("ts") or ""),
-                authority_sig=str(q.get("authority_sig") or ""),
-                authority_sig_suite=str(q.get("authority_sig_suite") or ""),
-            )
-        except PermissionError as exc:
-            return web.json_response({"error": str(exc)}, status=403)
-        return web.json_response(
-            {
-                "subscribers": [
-                    {
-                        "instance_id": s.instance_id,
-                        "identity_public_key": s.identity_public_key,
-                        "keywrap_public_key": s.keywrap_public_key,
-                        "keywrap_sig": s.keywrap_sig,
-                    }
-                    for s in subscribers
-                ]
-            }
-        )
 
 
 class SpacePublishView(GfsBaseView):
@@ -1029,7 +703,7 @@ class SpaceUnpublishView(GfsBaseView):
     a ``403``.
 
     The row is kept and only flagged ``withdrawn`` (so the GFS admin's audit
-    trail, the subscriber list and the pinned authority key survive) — the
+    trail and the pinned authority key survive) — the
     owner's next publish restores the listing. Both verbs are accepted since
     some HTTP clients struggle with DELETE bodies.
     """

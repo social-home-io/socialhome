@@ -1,30 +1,16 @@
-"""GFS federation service — instance registration, event relay, subscriptions.
+"""GFS federation service — instance registration and the space directory.
 
 Business logic only — all SQL lives in :mod:`.repositories`. Crypto
 helpers are reused from :mod:`socialhome.crypto` (no duplication).
 
-Fan-out delivery is **WebSocket-only** (spec §24.12): if a paired SH
-instance has an open ``/gfs/ws`` WebSocket, the event is pushed over that
-connection; otherwise it is not delivered and waits for the household to
-reconnect. The GFS holds no household address (migration 0018 dropped
-``inbox_url`` with the HTTPS-inbox fallback that could never succeed).
-
-**Cluster.** Each node knows only its OWN sockets, and a load balancer
-spreads a household's requests over every node. Two single-recipient
-pushes therefore reach the household's socket wherever it is:
-
-* a ``new_subscriber`` notice whose owner has no socket here is handed to
-  :meth:`ClusterService.hint_subscriber_notice` (ids only, coalesced into
-  the next ``NODE_DRAIN_HINT``); the node that holds the owner's socket
-  rebuilds the notice from the shared DB (:meth:`deliver_forwarded_notice`);
-* a targeted (``to``) relay whose target has no socket here is put in the
-  shared queue (:meth:`GfsEnvelopeRelay.queue_relay`), whose drain hint
-  makes the node holding the target's socket push it.
+Since v_96 this server keeps no space-id-keyed relay: a space's content
+reaches it only through the opaque channels of :mod:`.channels`, and the
+space rows here are the listing a household browses (``GET /gfs/spaces``),
+its pinned authority key and its invite links.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import itertools
 import logging
@@ -39,16 +25,6 @@ from ..authority_cert import (
     authority_cert_epoch,
     verify_authority_cert,
 )
-from ..authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-    AUTHORITY_RELAY_EVENT_TYPES,
-    AUTHORITY_TARGET_ONLY_EVENT_TYPES,
-    UnsupportedAuthoritySuite,
-    authority_signing_bytes,
-    strip_authority_sig_fields,
-    verify_authority_event,
-)
 from ..canonical_json import canonical_bytes
 from ..crypto import b64url_decode, derive_instance_id, verify_ed25519
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
@@ -56,19 +32,8 @@ from ..domain.space import (
     normalize_category,
     normalize_join_mode,
 )
-from ..domain.space_item import (
-    PAYLOAD_SUITE_FIELD,
-    PayloadSuiteRefused,
-    payload_suite_of,
-)
 from ..domain.space_listing_counts import parse_listing_count
 from ..domain.space_place import parse_place_pin_wire
-from ..domain.subscriber_accepts import (
-    ACCEPTS_SPACE_KEY_PULL,
-    SEAT_BIT_FOR_SUITE,
-    seat_bits,
-)
-from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from ..gfs_client_status import (
     CLIENT_STATUSES,
     StatusRequest,
@@ -76,10 +41,7 @@ from ..gfs_client_status import (
 )
 from ..space_join_contact import parse_join_contact, verify_join_contact
 from .domain import (
-    MIN_EPOCH_STEP_INTERVAL_S,
     ClientInstance,
-    GfsSubscriber,
-    GfsSubscriberWithKeys,
     GlobalSpace,
     normalize_counts_ts,
 )
@@ -87,11 +49,7 @@ from .repositories import AbstractGfsFederationRepo
 
 if TYPE_CHECKING:
     from .addressee import GfsAddressee
-    from .cluster import ClusterService
-    from .cluster_relay import ClusterRelayFanOut
-    from .envelope_relay import GfsEnvelopeRelay
-    from .repositories import AbstractGfsInviteRepo, AbstractGfsSpaceEpochRepo
-    from .ws_registry import GfsWebSocketRegistry
+    from .repositories import AbstractGfsInviteRepo
 
 log = logging.getLogger(__name__)
 
@@ -105,58 +63,18 @@ MAX_ABOUT_MARKDOWN_CHARS: int = 8000
 MAX_DISPLAY_NAME_CHARS: int = 80
 
 
-#: Max simultaneous in-flight subscriber deliveries for ONE relayed event.
-#: Sequential fan-out let a single accepted (and anonymously replayable)
-#: publish pin a request handler for the sum of every subscriber's send time;
-#: unbounded concurrency would instead let it push to every subscriber at
-#: once. 8 keeps a large space's fan-out an order of magnitude faster than
-#: sequential while capping the memory one publish can claim.
-FAN_OUT_CONCURRENCY: int = 8
-
-#: Wall-clock ceiling on ONE relay's whole fan-out (seconds). Delivery is
-#: WebSocket-only (the GFS holds no household address), and a WS push is
-#: sub-millisecond — but a socket whose peer stopped reading can stall a send
-#: until aiohttp's heartbeat evicts it, and the caller of ``/gfs/publish`` is
-#: anonymous, so an attacker who registers N instances and subscribes them with
-#: stalled sockets could hold hundreds of handlers at the per-IP publish limit.
-#: With the deadline the handler returns whatever was delivered by then and the
-#: stragglers are cancelled: the relay is at-least-once and subscribers dedupe
-#: by the post id inside the payload, so a cancelled push is indistinguishable
-#: from one that was simply lost. 8 s leaves a healthy fan-out entirely
-#: untouched.
-#:
-#: It MUST stay below the household's publish client timeout — the relay POST
-#: in ``socialhome.services.gfs_connection_service`` runs under
-#: ``aiohttp.ClientTimeout(total=10)`` — so the GFS, not the client, decides
-#: when a slow fan-out ends. Two reasons. The client otherwise gives up on a
-#: relay the server is still completing and reports a failure that did not
-#: happen. And the payload digest is recorded BEFORE the fan-out starts, so a
-#: client-side timeout would leave the sender believing it must retry while the
-#: GFS suppresses the identical bytes for :data:`PUBLISH_REPLAY_TTL_S`. No
-#: retry loop exists today and real payloads are byte-unique per send (each
-#: carries its own post id), so nothing is lost in practice — but the ordering
-#: is the invariant that keeps it that way.
-FAN_OUT_DEADLINE_SECONDS: float = 8.0
-
-#: How long a relayed payload's digest is remembered for replay suppression
-#: (seconds). Matches the ±300 s freshness window the §24.11 inbound pipeline
-#: and every other replay guard in this codebase use, so "recent" means the
-#: same thing everywhere. A capture replayed after the window fans out again —
-#: the guard bounds the amplification burst an attacker can drive from one
-#: captured frame, it is not a permanent content-id store (the GFS is
-#: content-blind and cannot see a post id).
+#: Default lifetime of a :class:`SeenPayloadCache` entry (seconds) — the
+#: ±300 s freshness window every replay guard here uses.
 PUBLISH_REPLAY_TTL_S: float = 300.0
 
-#: Hard cap on remembered payload digests. 10 000 × (32-byte key + float) is
-#: well under a megabyte and far more distinct publishes than a GFS sees in
-#: five minutes; past the cap the oldest entries are evicted, which is also the
-#: closest-to-expiring order.
+#: Default cap on remembered digests. 10 000 × (32-byte key + float) is well
+#: under a megabyte; past the cap the oldest (closest-to-expiring) entries go.
 PUBLISH_REPLAY_MAX_ENTRIES: int = 10_000
 
-#: Verify key used on the unknown-instance branch of the LEGACY transport-
-#: signature check (and of the ``/gfs/ws`` hello, :mod:`.routes.ws`) so that
-#: branch does the same Ed25519 verification work as the registered-instance
-#: branch — otherwise an unknown instance returns
+#: Verify key used on every unknown-instance branch (the ``/gfs/ws`` hello,
+#: :mod:`.routes.ws`; the approval-state answer of ``POST /gfs/proof``) so
+#: that branch does the same Ed25519 verification work as the
+#: registered-instance branch — otherwise an unknown instance returns
 #: measurably sooner and the endpoint becomes a timing oracle for "is this
 #: household registered here?". The Ed25519 public key for the all-zero seed;
 #: nothing is ever signed with it, and a signature can never verify under it.
@@ -175,53 +93,6 @@ TIMING_UNIFORM_DUMMY_SIG: bytes = bytes(64)
 #: ``ts`` further than this from now is treated as a replay and rejected —
 #: same ±300 s tolerance the §24.11 inbound pipeline uses.
 INSTANCE_UPDATE_TS_SKEW_SECONDS: int = 300
-
-#: Max space subscriptions one registered household may hold (v_49). Far
-#: above what a family follows; it bounds how many fan-out targets — and
-#: queued member items — one registration can stand for.
-MAX_SUBSCRIPTIONS_PER_INSTANCE: int = 500
-
-#: Max ``new_subscriber`` re-notifies the WS hello itself sends for a SINGLE
-#: subscriber (re)connect (Phase 5b-d). It bounds the hello's own burst. The
-#: follower then re-subscribes each held seat, and those re-takes repair the
-#: rest (deduped by :data:`RECONNECT_NOTIFY_DEDUPE_S`). So a reconnect costs
-#: at most one key handoff per held seat
-#: (≤ :data:`MAX_SUBSCRIPTIONS_PER_INSTANCE`). The Phase-5b-c reconcile, which
-#: the owner runs on ITS own reconnect, still backstops an owner that
-#: was offline.
-MAX_RECONNECT_NOTIFIES: int = 50
-
-#: ``new_subscriber.reason`` (v_61): a NEW seat — the owner may send the
-#: one-time author-profiles bundle (if the subscriber ``accepts`` it).
-NEW_SUBSCRIBER_REASON_SUBSCRIBE: str = "subscribe"
-
-#: ``new_subscriber.reason`` (v_61): the subscriber's WS came back — the
-#: owner repairs the content-key handoff only, never a bundle.
-NEW_SUBSCRIBER_REASON_RECONNECT: str = "reconnect"
-
-#: A seat re-take's ``reconnect`` notify is skipped when the same
-#: ``(subscriber, space)`` was notified this recently — the WS hello's
-#: :meth:`GfsFederationService.on_subscriber_connected` usually just did,
-#: and the follower re-subscribes every seat right after it.
-RECONNECT_NOTIFY_DEDUPE_S: float = 120.0
-
-#: A NEW seat for a ``(subscriber, space)`` that already had one this
-#: recently (an unsubscribe → subscribe loop) is notified without its
-#: ``accepts``: the owner re-seals the key but sends no second bundle.
-SEAT_CHURN_WINDOW_S: float = 3600.0
-
-#: Bound on each of the two in-memory ``(subscriber, space)`` sets above.
-SEAT_NOTIFY_CACHE_MAX: int = 100_000
-
-#: The ``new_subscriber.reason`` values a forwarded cluster notice may carry.
-NEW_SUBSCRIBER_REASONS: frozenset[str] = frozenset(
-    {NEW_SUBSCRIBER_REASON_SUBSCRIBE, NEW_SUBSCRIBER_REASON_RECONNECT}
-)
-
-
-def _seat_key(instance_id: str, space_id: str) -> bytes:
-    """The in-memory key of one ``(subscriber, space)`` seat."""
-    return SeenPayloadCache.digest([instance_id, space_id])
 
 
 def _bounded_image_uri(uri: str | None, *, space_id: str, kind: str) -> str | None:
@@ -278,35 +149,6 @@ def _served_join_contact(
         )
         return None
     return contact
-
-
-def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
-    """Do one throw-away Ed25519 verification on an early-rejection path.
-
-    ``publish_event``'s authority branch returns the SAME opaque 403 for every
-    failure, but "same body" is not "same cost": the early rejects (space not
-    published, banned, event type not in the allow-set, payload not a signed
-    dict, no pinned key, unknown suite, unparseable pinned key) do one DB read
-    and no signature verification, while a merely-invalid signature does one
-    verification. An anonymous caller could time the difference and learn which
-    spaces exist, which are banned and which carry a pinned authority key.
-
-    So each early reject burns one verification over the bytes it WOULD have
-    verified, against the same fixed dummy key the legacy branch uses
-    (:data:`TIMING_UNIFORM_DUMMY_KEY_HEX`) and a fixed full-length signature.
-    The result is discarded — the caller raises regardless.
-    """
-    bare = strip_authority_sig_fields(payload) if isinstance(payload, dict) else {}
-    message = authority_signing_bytes(
-        event_type=event_type,
-        space_id=space_id,
-        payload=bare,
-    )
-    verify_ed25519(
-        bytes.fromhex(TIMING_UNIFORM_DUMMY_KEY_HEX),
-        message,
-        TIMING_UNIFORM_DUMMY_SIG,
-    )
 
 
 def certified_authority_repin(
@@ -367,20 +209,17 @@ def certified_authority_repin(
 
 
 class SeenPayloadCache:
-    """Bounded, TTL'd set of recently-relayed payload digests.
+    """Bounded, TTL'd set of recently-seen request digests (replay guards).
 
-    The content-blind GFS cannot dedupe on a post id — that id lives inside the
-    encrypted payload. It CAN dedupe on the payload bytes it already holds:
-    hashing them leaks nothing it does not already have, and the digest is over
-    the SAME canonical JSON encoding the space-authority signature is computed
-    against, so two payloads with equal bytes have equal signing input. A
-    forged or tampered payload therefore never collides with a legitimate one
-    — mutating any field (the signature included) changes the digest.
+    The content-blind GFS cannot dedupe on an item id — that id lives inside
+    the encrypted payload. It CAN dedupe on the bytes it already holds:
+    hashing them leaks nothing it does not already have, and mutating any
+    field (the signature included) changes the digest.
 
-    In-memory and per-process on purpose: no table, no migration. A GFS restart
-    or a second cluster node simply forgets, which costs one extra fan-out of a
-    replayed frame and never correctness (the relay is at-least-once and
-    subscribers dedupe by post id).
+    In-memory and per-process on purpose: no table, no migration. A GFS
+    restart or a second cluster node simply forgets, which costs one extra
+    copy of a replayed request and never correctness (households dedupe by
+    the item id inside the ciphertext).
     """
 
     __slots__ = ("_cap", "_seen", "_ttl")
@@ -457,45 +296,26 @@ class InstanceRegistrationRefused(Exception):
 
 
 class GfsFederationService:
-    """Lightweight federation relay for the GFS process.
+    """Registration and the space directory for the GFS process.
 
     Responsible for:
     * Registering/updating client household instances.
-    * Verifying Ed25519 signatures on inbound publish requests.
-    * Fanning out events to all subscribers (WS push only).
-    * Managing space subscription lists.
-    * Listing all known global spaces.
+    * Verifying household-signed requests (:meth:`verify_signed_request`).
+    * Listing, publishing and withdrawing global spaces.
     """
 
     __slots__ = (
         "_addressee",
-        "_cluster",
-        "_epoch_repo",
-        "_fan_out_fwd",
-        "_hello_seats",
         "_invite_repo",
-        "_notified_seats",
-        "_reconnect_tasks",
-        "_relay",
         "_repo",
-        "_seat_churn",
-        "_seen_payloads",
-        "_ws_registry",
     )
 
     def __init__(
         self,
         repo: AbstractGfsFederationRepo,
-        ws_registry: GfsWebSocketRegistry | None = None,
         invite_repo: AbstractGfsInviteRepo | None = None,
-        epoch_repo: AbstractGfsSpaceEpochRepo | None = None,
     ) -> None:
         self._repo = repo
-        # Optional (v_49): when wired, the plaintext ``epoch`` of an
-        # authority-signed ``space_post_public`` relay advances the space's
-        # proven content epoch, which member publishes are checked against.
-        self._epoch_repo = epoch_repo
-        self._ws_registry = ws_registry
         # Optional: only :meth:`hide_space` touches it, to take a withdrawn
         # space's public invite pages down with the listing. ``None`` in the
         # tests / embedders that predate invite links; production always wires
@@ -505,49 +325,6 @@ class GfsFederationService:
         # binds ``gfs_key`` into its signed bytes must name exactly it.
         # Wired by ``server.py``; without it such a request is refused.
         self._addressee: GfsAddressee | None = None
-        self._seen_payloads = SeenPayloadCache()
-        # ``(subscriber, space)`` pairs notified in the last
-        # RECONNECT_NOTIFY_DEDUPE_S — a seat re-take skips its notify then.
-        self._notified_seats = SeenPayloadCache(
-            ttl_s=RECONNECT_NOTIFY_DEDUPE_S, cap=SEAT_NOTIFY_CACHE_MAX
-        )
-        # ``(subscriber, space)`` pairs a WS hello notified in the same
-        # window — the hello's own flap guard.
-        self._hello_seats = SeenPayloadCache(
-            ttl_s=RECONNECT_NOTIFY_DEDUPE_S, cap=SEAT_NOTIFY_CACHE_MAX
-        )
-        # ``(subscriber, space)`` pairs that got a NEW seat in the last
-        # SEAT_CHURN_WINDOW_S — a churned seat is notified without accepts.
-        self._seat_churn = SeenPayloadCache(
-            ttl_s=SEAT_CHURN_WINDOW_S, cap=SEAT_NOTIFY_CACHE_MAX
-        )
-        # Strong refs to in-flight reconnect-notify tasks — an asyncio task
-        # with no reference can be garbage-collected mid-await.
-        self._reconnect_tasks: set[asyncio.Task[None]] = set()
-        # Set by ``attach_cluster`` / ``attach_relay`` (each needs this
-        # service too). ``None`` on a single node built without them.
-        self._cluster: ClusterService | None = None
-        self._relay: GfsEnvelopeRelay | None = None
-        #: Set by ``attach_fan_out``: broadcasts reach the other nodes' sockets.
-        self._fan_out_fwd: ClusterRelayFanOut | None = None
-
-    def attach_cluster(self, cluster: ClusterService) -> None:
-        """Hand owner notices this node cannot deliver to the cluster."""
-        self._cluster = cluster
-
-    def attach_relay(self, relay: GfsEnvelopeRelay) -> None:
-        """Queue targeted relays whose target has no socket on this node."""
-        self._relay = relay
-
-    def attach_fan_out(self, fan_out: ClusterRelayFanOut) -> None:
-        """Forward broadcast relays to the sockets on the other cluster nodes
-        (:mod:`.cluster_relay`)."""
-        self._fan_out_fwd = fan_out
-
-    async def audience_targets(self, space_id: str) -> list[str]:
-        """The active subscribers a forwarded space item reaches (the cluster
-        audience resolver, :mod:`.cluster_relay`)."""
-        return [s.instance_id for s in await self._repo.list_subscribers(space_id)]
 
     async def client_status(
         self, nonce: str, request: StatusRequest, *, gfs_key: str
@@ -680,426 +457,6 @@ class GfsFederationService:
         )
         log.debug("GFS: registered instance %s", instance_id)
 
-    async def publish_event(
-        self,
-        space_id: str,
-        event_type: str,
-        payload: object,
-        from_instance: str = "",
-        signature: str = "",
-        *,
-        to: str = "",
-    ) -> list[str]:
-        """Relay an event to all subscribers of *space_id* — **anonymously**.
-
-        With *to* (``targeted_publish``, v_61) the event goes to that ONE
-        subscriber's socket only — the instance id this server itself named
-        in its ``new_subscriber`` notify, so it learns nothing new. A *to*
-        that is not a subscriber of the space reaches nobody. A *to* whose
-        socket is not on this node (another cluster node, or down) gets the
-        frame through the shared queue (:meth:`GfsEnvelopeRelay.queue_relay`).
-        An event type in ``AUTHORITY_TARGET_ONLY_EVENT_TYPES`` is refused
-        without *to*.
-
-        The canonical request body is ``{space_id, event_type, payload}``: the
-        relaying identity is not part of the contract, so the GFS does not
-        REQUIRE, STORE, LOG or FORWARD which household relayed a public/global
-        space event.
-
-        That is the honest scope of the guarantee — it is NOT "the GFS cannot
-        learn it". A household that relays here usually also holds an
-        authenticated ``/gfs/ws`` socket to the same server from the same
-        address, so network-level correlation (source IP, timing, body size)
-        stays available to whoever operates the GFS. Removing the identity from
-        the protocol removes it from the GFS's records and from anything the
-        GFS forwards to subscribers; it does not anonymise the TCP connection.
-
-        A second consequence of the anonymity: INSTANCE-level moderation
-        (``client_instances.status = 'banned'``) cannot gate this path at all —
-        a banned household simply omits the legacy fields and is
-        indistinguishable from any other caller. The SPACE-level ban checked
-        below is the only moderation lever on the relay path; per-IP shedding
-        (``build_publish_rate_limit``) is the only other handle.
-
-        The only authenticator is the **space-authority signature** carried
-        inside the (opaque) ``payload``, verified against the space's TOFU-pinned
-        ``identity_public_key`` — see :meth:`_authorize_authority_relay`. Any
-        seed-holder (owner OR delegated admin) can produce one, so the space
-        keeps working while the owner is offline, and the GFS stays blind to
-        the content: it verifies a signature over opaque bytes, never decrypts.
-
-        *from_instance* / *signature* are **legacy** fields an older household
-        still sends. They are TOLERATED but never trusted: when either is
-        present the household transport signature is verified exactly as before
-        (a garbage legacy field must not be a free pass), and then the value is
-        discarded — it authorizes nothing, never enters the fan-out frame, and
-        is never logged.
-
-        Returns the instance_ids successfully notified. Fails closed with
-        :class:`PermissionError` on a bad/unverifiable legacy field, an
-        unpublished or moderator-``banned`` space, an event type outside
-        ``AUTHORITY_RELAY_EVENT_TYPES``, a space with no pinned authority key,
-        or a missing / invalid / unknown-suite authority signature.
-        """
-        # Legacy transport-signature check. Verified when present so a forged
-        # legacy field is rejected rather than ignored; the identity it names
-        # is NEVER used to authorize the relay.
-        if from_instance or signature:
-            await self._verify_legacy_publish_sig(
-                space_id,
-                event_type,
-                payload,
-                from_instance,
-                signature,
-            )
-
-        # The space must already be published (no auto-mint of an ownership
-        # row from an event — mirrors subscribe).
-        existing = await self._repo.get_space(space_id)
-        if existing is None:
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError("space not published")
-        # A moderator ban is fail-closed: banned content is not relayed, and
-        # the check runs BEFORE any fan-out.
-        if existing.status == "banned":
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError("space is banned")
-        # A withdrawn space is delisted from the DIRECTORY only (see
-        # ``unpublish_space``) — households that already subscribed keep
-        # receiving the relay, so ``withdrawn`` is deliberately not a reject.
-
-        self._authorize_authority_relay(space_id, event_type, payload, existing)
-        if event_type in AUTHORITY_TARGET_ONLY_EVENT_TYPES and not to:
-            raise PermissionError(f"{event_type} is delivered to one subscriber only")
-        await self._learn_epoch(space_id, event_type, payload)
-
-        # Replay suppression — AFTER authorization, never before. Recording a
-        # rejected payload would let a forged frame mute the legitimate relay
-        # of the same bytes (e.g. one sent before the space healed its pin).
-        # A forged payload can't pre-poison a legitimate one either: any change
-        # to the payload — the signature field included — changes the digest.
-        # Identity-free fan-out frame: routing fields only. No ``from_instance``
-        # and no GFS-added target id — a subscriber learns nothing about which
-        # household relayed the event, and dedupes on the post id inside the
-        # encrypted payload.
-        # A compressed item (``payload_suite: "zlib1"``, covered by the
-        # authority signature just verified) only while every follower of
-        # the space reads it — AFTER authorization, so the 409 is no oracle.
-        await self.require_payload_suite_readers(
-            space_id,
-            payload.get(PAYLOAD_SUITE_FIELD) if isinstance(payload, dict) else None,
-        )
-        event_body = {
-            "space_id": space_id,
-            "event_type": event_type,
-            "payload": payload,
-        }
-        digest = SeenPayloadCache.digest(payload)
-        # A broadcast another cluster node took and forwarded here is
-        # remembered too, so a replay of it to THIS node is a no-op as well.
-        if self._seen_payloads.seen(digest) or (
-            not to
-            and self._fan_out_fwd is not None
-            and self._fan_out_fwd.seen_frame(event_body)
-        ):
-            log.debug(
-                "GFS: suppressing replayed %s for space %s (identical payload)",
-                event_type,
-                space_id,
-            )
-            # Idempotent no-op: the route answers 200 with ``delivered_to: 0``,
-            # so a replayer learns nothing a first publish wouldn't also show.
-            return []
-        self._seen_payloads.record(digest)
-
-        if to:
-            # One seat by primary key — never every row of the space (a
-            # reconnect / reconcile storm of targeted handoffs would read
-            # N seats N times).
-            seat = await self._repo.get_subscriber(space_id, to)
-            subscribers = [seat] if seat is not None else []
-        else:
-            subscribers = await self._repo.list_subscribers(space_id)
-
-        log.debug(
-            "GFS: relaying %s for space %s to %d subscriber(s) suite=%s",
-            event_type,
-            space_id,
-            len(subscribers),
-            payload_suite_of(
-                payload.get(PAYLOAD_SUITE_FIELD) if isinstance(payload, dict) else None
-            ),
-        )
-
-        if not to and subscribers and self._fan_out_fwd is not None:
-            # The other cluster nodes push it to the subscribers whose socket
-            # they hold — one forward per node, never one per subscriber.
-            # Forwarded before the local push so their copy is not held up
-            # by it. Nothing is queued for a broadcast (WebSocket-only).
-            self._fan_out_fwd.forward_to_space(space_id, event_body)
-        reached = await self._fan_out(subscribers, event_body)
-        # The target's socket is on another cluster node (or down): the
-        # shared queue + its drain hint reach it there, or on its next hello.
-        # One row for one seat — never the space's other seats.
-        if (
-            to
-            and subscribers
-            and not reached
-            and self._relay is not None
-            and await self._relay.queue_relay(to, event_body)
-        ):
-            reached = [to]
-        if to:
-            # Never the target's id: what to whom is the household's business.
-            log.info(
-                "GFS: relayed targeted %s for space %s to its one subscriber "
-                "(%d reached)",
-                event_type,
-                space_id,
-                len(reached),
-            )
-        return reached
-
-    async def _learn_epoch(
-        self, space_id: str, event_type: str, payload: object
-    ) -> None:
-        """Advance the space's proven content epoch from an AUTHORIZED
-        ``space_post_public`` relay — its ``epoch`` is inside the authority
-        signature that just verified, so it is the authority's own statement.
-        Seed-only, so it may raise ``current`` by +1 at most (once a minute)
-        and never the owner-confirmed epoch; a malformed or out-of-step
-        value is ignored — the relay itself proceeds."""
-        if self._epoch_repo is None or event_type != AUTHORITY_EVENT_SPACE_POST_PUBLIC:
-            return
-        epoch = payload.get("epoch") if isinstance(payload, dict) else None
-        if (
-            not isinstance(epoch, int)
-            or isinstance(epoch, bool)
-            or not 0 <= epoch <= MAX_WRITER_CERT_EPOCH
-        ):
-            return
-        # Any seed holder signs these relays — +1 at most, once a minute,
-        # never the owner-confirmed floor (``GfsSpaceEpoch``).
-        await self._epoch_repo.step(
-            space_id,
-            epoch,
-            now=int(time.time()),
-            min_interval_s=MIN_EPOCH_STEP_INTERVAL_S,
-        )
-
-    async def _verify_legacy_publish_sig(
-        self,
-        space_id: str,
-        event_type: str,
-        payload: object,
-        from_instance: str,
-        signature: str,
-    ) -> None:
-        """Verify the LEGACY household transport signature on a publish.
-
-        Older households POST ``{space_id, event_type, payload, from_instance,
-        signature}`` where *signature* is that household's Ed25519 signature
-        over the canonical JSON of the first four fields. Those requests must
-        keep working, but a present-but-bogus legacy field must not be a free
-        pass, so the signature is verified exactly as it used to be — and then
-        the identity is dropped on the floor (it authorizes nothing).
-
-        Fails closed with :class:`PermissionError` when one legacy field is
-        supplied without the other, the named instance is unregistered or
-        banned, or the signature is malformed / doesn't verify. Every failure
-        raises the SAME message and never echoes *from_instance*, so the
-        endpoint is not an instance-existence oracle by MESSAGE. It is not an
-        oracle by TIMING either: the unknown / banned-instance branch verifies
-        the supplied signature against a fixed dummy key
-        (:data:`TIMING_UNIFORM_DUMMY_KEY_HEX`) so it performs the same one DB
-        read plus one Ed25519 verification as the registered-instance branch,
-        instead of returning as soon as the lookup misses.
-        """
-        if not from_instance or not signature:
-            raise PermissionError("Invalid Ed25519 signature")
-        inst = await self._repo.get_instance(from_instance)
-        known = inst is not None and inst.status != "banned"
-        canonical = canonical_bytes(
-            {
-                "space_id": space_id,
-                "event_type": event_type,
-                "payload": payload,
-                "from_instance": from_instance,
-            }
-        )
-        key_hex = (
-            inst.public_key
-            if known and inst is not None
-            else TIMING_UNIFORM_DUMMY_KEY_HEX
-        )
-        try:
-            # A malformed stored pubkey is unverifiable — fail closed as a
-            # 403 rather than escaping the handler as a 500.
-            raw_key = bytes.fromhex(key_hex)
-            raw_sig = b64url_decode(signature)
-        except (ValueError, TypeError) as exc:
-            raise PermissionError("Invalid Ed25519 signature") from exc
-        verified = verify_ed25519(raw_key, canonical, raw_sig)
-        if not known or not verified:
-            raise PermissionError("Invalid Ed25519 signature")
-
-    def _authorize_authority_relay(
-        self,
-        space_id: str,
-        event_type: str,
-        payload: object,
-        existing: GlobalSpace,
-    ) -> None:
-        """Authorize a relay via the space-authority signature — the ONLY
-        authenticator ``publish_event`` accepts.
-
-        Raises :class:`PermissionError` unless the ``payload`` carries a valid
-        space-authority signature verifiable against the space's TOFU-pinned
-        public key. There is no owner exemption: the retired
-        ``from_instance == owning_instance`` path let an owner relay ANY event
-        type with no authority signature at all, and it also required the GFS
-        to know who was relaying. Fail-closed in every case:
-
-        * wire ``event_type`` isn't one the authority sig authorizes (the
-          ``AUTHORITY_RELAY_EVENT_TYPES`` set — ``space_post_public`` or
-          ``space_subscriber_key_handoff``) → reject;
-        * payload isn't a signed dict / no ``authority_sig`` → reject;
-        * no pinned pubkey on the space → reject (GFS can't verify authority;
-          the owner re-publishes the space metadata to heal the pin);
-        * unknown authority suite → reject (no default fallback);
-        * signature present but doesn't verify → reject.
-
-        The GFS never decrypts ``payload`` — it only verifies the Ed25519
-        authority signature over the payload bytes (with the two signature
-        fields stripped, mirroring the signer).
-
-        Replay/dedupe contract: the authority signature binds the space id +
-        payload but NO timestamp / nonce / epoch, so a captured authority-signed
-        payload stays valid forever and can be re-POSTed by anyone who saw it.
-        The GFS can't dedupe on a post id — that lives inside the encrypted
-        payload — but it CAN dedupe on the payload BYTES it already holds:
-        ``publish_event`` keeps a :class:`SeenPayloadCache` of BLAKE2b digests
-        over the same canonical JSON the authority signature is computed
-        against, and a digest seen within :data:`PUBLISH_REPLAY_TTL_S` makes the
-        relay an idempotent no-op (200, ``delivered_to: 0``, no fan-out). That
-        is what bounds the amplification a single captured frame can drive at
-        the per-IP publish limit — each replay would otherwise cost every
-        subscriber another copy of the body.
-
-        The cache is in-memory, TTL'd and capped, so it is a burst bound, not a
-        permanent content-id store: past the TTL (or after a restart, or on a
-        second cluster node) the same bytes fan out once more. The standing
-        backstop is therefore still SUBSCRIBER-side dedupe by the post id
-        carried inside the payload — enforced by the HFS
-        ``space_public_inbound`` consumer (the same way moments dedupe by
-        moment_id). The relay stays at-least-once.
-        See ``docs/protocol/discovery.md``.
-        """
-        # The authority signature authorizes only the event types in
-        # ``AUTHORITY_RELAY_EVENT_TYPES`` (``space_post_public`` and the
-        # Phase-5b ``space_subscriber_key_handoff``). Bind the caller-supplied
-        # WIRE event_type to one of those AND verify the signature under that
-        # SAME type below — a relayer holding one valid payload can't relay it
-        # under an arbitrary type (e.g. ``space_admin_action``), and a payload
-        # signed for one allowed type can't be replayed under the other (the
-        # signing bytes bind the event type).
-        if event_type not in AUTHORITY_RELAY_EVENT_TYPES:
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError(
-                "authority relay only permits the "
-                f"{sorted(AUTHORITY_RELAY_EVENT_TYPES)!r} event types",
-            )
-        if not isinstance(payload, dict) or "authority_sig" not in payload:
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError("missing space-authority signature")
-        if not existing.identity_public_key:
-            # No TOFU-pinned key → the GFS cannot verify a space-authority
-            # signature, so nothing may be relayed for this space until the
-            # owner re-publishes its metadata and pins one.
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError(
-                "no pinned authority key for this space",
-            )
-        authority_sig = payload.get("authority_sig") or ""
-        authority_sig_suite = payload.get("authority_sig_suite") or ""
-        try:
-            ok = verify_authority_event(
-                event_type=event_type,
-                space_id=space_id,
-                payload=strip_authority_sig_fields(payload),
-                authority_sig=str(authority_sig),
-                authority_sig_suite=str(authority_sig_suite),
-                space_public_key=bytes.fromhex(existing.identity_public_key),
-            )
-        except UnsupportedAuthoritySuite as exc:
-            # The suite check fires before any verification — burn one so an
-            # unknown suite costs what a bad signature costs.
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError(
-                f"unknown authority signature suite: {exc}",
-            ) from exc
-        except ValueError as exc:
-            # Malformed pinned pubkey hex — treat as unverifiable, fail-closed.
-            # ``bytes.fromhex`` raises while building the call arguments, so
-            # nothing was verified: burn one.
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError("invalid authority key") from exc
-        if not ok:
-            raise PermissionError("invalid authority signature")
-
-    async def listed_space(self, space_id: str) -> GlobalSpace:
-        """The space row when it is listed here, not moderator-banned and
-        carries a pinned authority key — what every space-authority or
-        writer check needs first. :class:`PermissionError` otherwise.
-        Readability (``allow_subscribers``) is NOT required: a listed space
-        whose members joined by invite link reads through this server too."""
-        existing = await self._repo.get_space(space_id)
-        if existing is None:
-            raise PermissionError("space not published")
-        if existing.status == "banned":
-            raise PermissionError("space is banned")
-        if not existing.identity_public_key:
-            raise PermissionError("no pinned authority key for this space")
-        return existing
-
-    async def verify_space_authority(
-        self,
-        space_id: str,
-        *,
-        event_type: str,
-        payload: dict,
-        authority_sig: str,
-        authority_sig_suite: str,
-    ) -> GlobalSpace:
-        """Verify a space-authority signature over *payload* under
-        *event_type* against the space's TOFU-pinned key — the check
-        ``publish_event`` makes for a relay, for a NON-relay request (the
-        space media cache). Fail-closed :class:`PermissionError` on an
-        unlisted / banned / unpinned space or a missing, malformed,
-        unknown-suite or failing signature. An early reject burns one dummy
-        verification, so its cost doesn't tell which spaces exist or are
-        banned. Returns the space row."""
-        try:
-            space = await self.listed_space(space_id)
-        except PermissionError:
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise
-        try:
-            ok = verify_authority_event(
-                event_type=event_type,
-                space_id=space_id,
-                payload=payload,
-                authority_sig=authority_sig,
-                authority_sig_suite=authority_sig_suite,
-                space_public_key=bytes.fromhex(space.identity_public_key),
-            )
-        except (UnsupportedAuthoritySuite, ValueError) as exc:
-            _burn_dummy_verify(event_type, space_id, payload)
-            raise PermissionError(f"authority signature refused: {exc}") from exc
-        if not ok:
-            raise PermissionError("invalid authority signature")
-        return space
-
     @staticmethod
     def _assert_fresh_ts(ts: object) -> None:
         """Raise ``PermissionError`` unless *ts* is a fresh timestamp.
@@ -1131,7 +488,8 @@ class GfsFederationService:
         """Verify a self-signed, replay-guarded request from *instance_id*.
 
         Shared by every ``{instance_id, ..., ts}``-shaped GFS request
-        (``update_instance``, ``subscribe``, ``unsubscribe``). The Ed25519
+        (``update_instance``, ``hide_space``, the channel seats, invite
+        links). The Ed25519
         *signature* is checked over the canonical JSON of *payload* against
         the instance's REGISTERED public key — because ``instance_id`` is
         part of the signed payload, a caller can only act as **itself**.
@@ -1196,567 +554,6 @@ class GfsFederationService:
             signature=signature,
         )
 
-    async def subscribe(
-        self,
-        instance_id: str,
-        space_id: str,
-        ts: str,
-        signature: str,
-        *,
-        accepts: tuple[str, ...] = (),
-    ) -> None:
-        """Add *instance_id* as a subscriber of *space_id*.
-
-        Authenticated the same way as :meth:`update_instance`: the request
-        is signed by *instance_id* over the canonical ``{action:
-        "subscribe", instance_id, space_id, ts}`` JSON and verified against
-        the instance's registered public key. The ``action`` discriminator
-        is part of the signed bytes (domain separation), so a captured
-        subscribe signature can never be replayed as an unsubscribe. Because the signature binds to the *instance_id* in the
-        body, a caller can only subscribe **itself** — it can't sign as
-        another household. The signed ``ts`` is replay-guarded (±300 s).
-
-        Rejects (``PermissionError``) an unknown instance, a missing /
-        malformed / invalid signature, a stale timestamp, and a space the
-        GFS has never seen published (no auto-creation of a pending row from
-        an unauthenticated demand signal — a subscription must target a real
-        published space).
-
-        *accepts* (v_61) — the optional relay deliveries the subscriber can
-        open (:mod:`socialhome.domain.subscriber_accepts`), already
-        validated by the route. NOT in the signed bytes (an older GFS still
-        verifies the subscribe) and never stored: it is forwarded to the
-        owner only in the ``reason: "subscribe"`` notify of a NEW seat — and
-        not even then when the same seat was new within
-        :data:`SEAT_CHURN_WINDOW_S` (an unsubscribe → subscribe loop earns
-        the key again, never a second bundle). Re-subscribing a seat already
-        held sends ``reason: "reconnect"`` (key repair only), unless that
-        seat was notified within :data:`RECONNECT_NOTIFY_DEDUPE_S` — usually
-        by the follower's WS hello (:meth:`on_subscriber_connected`), which
-        reaches at most :data:`MAX_RECONNECT_NOTIFIES` seats.
-        """
-        inst = await self._verify_signed_request(
-            instance_id,
-            {
-                "action": "subscribe",
-                "instance_id": instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            },
-            signature=signature,
-        )
-
-        # A subscription must target a space the GFS already knows about.
-        # Auto-minting a row from an (un)authenticated subscribe let any
-        # caller seed arbitrary space ids — reject unknown ids instead.
-        existing = await self._repo.get_space(space_id)
-        if existing is None:
-            raise PermissionError("space not published")
-        # A space whose owner has not opted into subscribers is LISTED for
-        # discovery but is not publicly readable: its owner relays no content
-        # and hands out no content key, so a subscription would be a seat that
-        # never receives anything and lingers in ``space_subscribers`` forever.
-        # Refuse it outright. NOTE this is NOT ``join_mode``: how a person
-        # becomes a posting member is a separate dial, and an ``invite_only``
-        # space that allows subscribers is a legitimate broadcast space.
-        if not existing.allow_subscribers:
-            raise PermissionError("space is not publicly readable")
-
-        # v_49 — one registered household holds at most
-        # MAX_SUBSCRIPTIONS_PER_INSTANCE seats: every seat is a fan-out target
-        # (and, while it stays "seen", a queued copy of each member item), so
-        # an unbounded count would let one registration multiply itself.
-        held = {
-            s.space_id for s in await self._repo.list_subscribed_spaces(instance_id)
-        }
-        if space_id not in held and len(held) >= MAX_SUBSCRIPTIONS_PER_INSTANCE:
-            raise PermissionError("subscription limit reached")
-        created = await self._repo.add_subscriber(
-            space_id=space_id,
-            instance_id=instance_id,
-        )
-        # Step 12 — kept per seat, refreshed by every subscribe (the re-take
-        # on each reconnect too): a seed holder skips its relay copy of a
-        # member's post only where no follower lacks ``space_item``.
-        await self._repo.set_seat_accepts(
-            space_id, instance_id, bits=seat_bits(accepts)
-        )
-        log.debug("GFS: %s subscribed to space %s", instance_id, space_id)
-        seat = _seat_key(instance_id, space_id)
-        if not created:
-            # A re-take (the follower re-subscribes every seat on each GFS-WS
-            # reconnect). Usually the hello's ``reason: "reconnect"`` notify
-            # just covered it; but the hello notifies at most
-            # MAX_RECONNECT_NOTIFIES seats, so a seat it did not reach gets
-            # its key repair here — once, never a bundle. A follower that
-            # asks for a key when it misses one (#5b) gets none: it pulls.
-            if (
-                existing.owning_instance == instance_id
-                or ACCEPTS_SPACE_KEY_PULL in accepts
-                or self._notified_seats.seen(seat)
-            ):
-                return
-            await self._notify_owner_new_subscriber(
-                existing.owning_instance,
-                space_id,
-                inst,
-                reason=NEW_SUBSCRIBER_REASON_RECONNECT,
-            )
-            return
-        if self._seat_churn.seen(seat):
-            # Unsubscribed and back within the window: the key again, but
-            # the one-time bundle is not re-earned by churning the seat.
-            accepts = ()
-        self._seat_churn.record(seat)
-
-        # Phase 5b-b — best-effort notify the space OWNER so a seed-holder can
-        # seal the per-space content key to this new subscriber (the GFS stays
-        # blind: it only forwards the subscriber's already-published identity +
-        # key-wrap material, never the key). Only the owner is notified here
-        # because the GFS authoritatively knows ``owning_instance``; a
-        # delegated admin catches up via the 5b-c reconcile (pulling the
-        # subscriber list). If the owner is offline (no WS), the frame is
-        # dropped — that, too, is the reconcile's job, NOT a subscribe failure.
-        await self._notify_owner_new_subscriber(
-            existing.owning_instance,
-            space_id,
-            inst,
-            reason=NEW_SUBSCRIBER_REASON_SUBSCRIBE,
-            accepts=accepts,
-        )
-
-    async def request_space_key(
-        self,
-        instance_id: str,
-        space_id: str,
-        ts: str,
-        signature: str,
-    ) -> None:
-        """A follower missed the content key of *space_id* (#5b): ask the
-        space's owner to seal it again (``new_subscriber`` with ``reason:
-        "reconnect"`` — the key repair, never a bundle).
-
-        Signed by the follower over ``{action: "space_key_request",
-        instance_id, space_id, ts}`` (:meth:`_verify_signed_request`, which
-        raises :class:`PermissionError`). Only for a seat it holds, never
-        for the owner itself, and at most once per seat per
-        :data:`RECONNECT_NOTIFY_DEDUPE_S` (shared with every other key
-        repair of that seat). Silent otherwise: an unknown space, a seat not
-        held and a throttled request all return the same."""
-        inst = await self._verify_signed_request(
-            instance_id,
-            {
-                "action": "space_key_request",
-                "instance_id": instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            },
-            signature=signature,
-        )
-        space = await self._repo.get_space(space_id)
-        if (
-            space is None
-            or not space.allow_subscribers
-            or space.owning_instance == instance_id
-        ):
-            return
-        held = {
-            s.space_id for s in await self._repo.list_subscribed_spaces(instance_id)
-        }
-        if space_id not in held:
-            return
-        if self._notified_seats.seen(_seat_key(instance_id, space_id)):
-            return
-        await self._notify_owner_new_subscriber(
-            space.owning_instance,
-            space_id,
-            inst,
-            reason=NEW_SUBSCRIBER_REASON_RECONNECT,
-        )
-
-    async def _notify_owner_new_subscriber(
-        self,
-        owning_instance: str,
-        space_id: str,
-        subscriber: ClientInstance,
-        *,
-        reason: str,
-        accepts: tuple[str, ...] = (),
-    ) -> None:
-        """Push a ``new_subscriber`` frame to the space owner's WS (best-effort).
-
-        Carries the subscriber's registered Ed25519 identity ``public_key`` +
-        its published key-wrap pubkey/suite/self-signature so the owner can
-        verify the key-wrap binding end-to-end (``verify_keywrap_binding``,
-        anti-GFS-substitution) before sealing. *reason* (v_61) is
-        ``"subscribe"`` for a NEW seat — then the subscriber's *accepts*
-        labels ride along — or ``"reconnect"`` for the key repair on the
-        subscriber's WS hello; the owner sends the one-time author-profiles
-        bundle only for ``"subscribe"``. Never raises — a missing socket or
-        a send error is logged and swallowed (the 5b-c reconcile backstops
-        an offline owner).
-
-        In a cluster the owner's socket is usually on ANOTHER node: when it
-        is not here, the notice is handed to the cluster as ids only
-        (:meth:`ClusterService.hint_subscriber_notice`) and the node holding
-        the socket rebuilds it (:meth:`deliver_forwarded_notice`)."""
-        if self._ws_registry is None:
-            return
-        # Recorded BEFORE the send, so a concurrent re-take of the same seat
-        # sees it. An owner that was offline then gets its repair from the
-        # next re-take after the window, or from its own 5b-c reconcile.
-        self._notified_seats.record(_seat_key(subscriber.instance_id, space_id))
-        if await self._send_owner_notice(
-            owning_instance, space_id, subscriber, reason=reason, accepts=accepts
-        ):
-            return
-        if self._cluster is not None:
-            self._cluster.hint_subscriber_notice(
-                owning_instance,
-                space_id,
-                subscriber.instance_id,
-                reason=reason,
-                accepts=accepts,
-            )
-
-    async def _send_owner_notice(
-        self,
-        owning_instance: str,
-        space_id: str,
-        subscriber: ClientInstance,
-        *,
-        reason: str,
-        accepts: tuple[str, ...],
-    ) -> bool:
-        """Build the ``new_subscriber`` frame and push it to the owner's
-        socket on THIS node. ``True`` iff it went out; never raises."""
-        if self._ws_registry is None:
-            return False
-        sub: dict[str, object] = {
-            "instance_id": subscriber.instance_id,
-            "identity_public_key": subscriber.public_key,
-            "keywrap_public_key": subscriber.keywrap_public_key,
-            "kem_suite": subscriber.kem_suite,
-            "keywrap_sig": subscriber.keywrap_sig,
-        }
-        if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE:
-            sub["accepts"] = list(accepts)
-        try:
-            return await self._ws_registry.send(
-                owning_instance,
-                {
-                    "type": "new_subscriber",
-                    "reason": reason,
-                    "space_id": space_id,
-                    "subscriber": sub,
-                },
-            )
-        except Exception as exc:  # defensive — never fail a subscribe on notify
-            log.warning(
-                "GFS: new_subscriber notify to owner %s for space %s failed: %s",
-                owning_instance,
-                space_id,
-                exc,
-                exc_info=True,
-            )
-            return False
-
-    async def deliver_forwarded_notice(
-        self,
-        owner: str,
-        space_id: str,
-        subscriber_id: str,
-        *,
-        reason: str,
-        accepts: tuple[str, ...] = (),
-    ) -> bool:
-        """Deliver a sibling node's owner notice to the owner's socket HERE.
-
-        The hint names ids only, so the frame is rebuilt from the shared DB —
-        and the hint is believed only as far as the DB agrees: *owner* must
-        own *space_id* and *subscriber_id* must hold an active seat in it. A
-        hint for an owner with no socket here is dropped — never forwarded
-        again (no loops; the node that holds the socket got the same hint).
-
-        This node sees every notice for the owners it holds, wherever the
-        subscribe or hello landed, so the ``reconnect`` dedupe is applied here
-        too: one key repair per seat per :data:`RECONNECT_NOTIFY_DEDUPE_S`.
-        A NEW seat (``subscribe``) is always delivered. ``True`` iff sent;
-        never raises."""
-        if self._ws_registry is None or reason not in NEW_SUBSCRIBER_REASONS:
-            return False
-        if not self._ws_registry.is_connected(owner):
-            return False
-        seat = _seat_key(subscriber_id, space_id)
-        if reason == NEW_SUBSCRIBER_REASON_RECONNECT and self._notified_seats.seen(
-            seat
-        ):
-            return False
-        try:
-            space = await self._repo.get_space(space_id)
-            if space is None or space.owning_instance != owner:
-                return False
-            if await self._repo.get_subscriber(space_id, subscriber_id) is None:
-                return False
-            subscriber = await self._repo.get_instance(subscriber_id)
-        except Exception as exc:  # defensive — a sync POST must not fail on it
-            log.warning(
-                "GFS: forwarded new_subscriber lookup for space %s failed: %s",
-                space_id,
-                exc,
-                exc_info=True,
-            )
-            return False
-        if subscriber is None:
-            return False
-        self._notified_seats.record(seat)
-        return await self._send_owner_notice(
-            owner,
-            space_id,
-            subscriber,
-            reason=reason,
-            accepts=accepts if reason == NEW_SUBSCRIBER_REASON_SUBSCRIBE else (),
-        )
-
-    def schedule_subscriber_connected(
-        self,
-        instance_id: str,
-    ) -> None:
-        """Fire-and-forget :meth:`on_subscriber_connected` for *instance_id*.
-
-        Called from the ``/gfs/ws`` handler AFTER the hello is authenticated
-        and the socket registered. Deliberately synchronous + detached: the
-        notify fan-out must never delay (or fail) the WebSocket handshake.
-        """
-        task = asyncio.create_task(self.on_subscriber_connected(instance_id))
-        self._reconnect_tasks.add(task)
-        task.add_done_callback(self._reconnect_tasks.discard)
-
-    async def on_subscriber_connected(self, instance_id: str) -> None:
-        """Re-emit the ``new_subscriber`` notify for every space *instance_id*
-        subscribes to (Phase 5b-d — subscriber-side reconnect repair).
-
-        The 5b-b handoff is relayed back to the subscriber over ITS OWN GFS
-        socket. If that socket was down when the seal was fanned out, the key
-        is simply lost: delivery is WebSocket-only (the GFS holds no household
-        address — see ``_fan_out``), nothing retries, and the 5b-c reconcile
-        only fires when a SEED-HOLDER
-        reconnects, not the subscriber. So when the subscriber's own socket
-        comes up we ask each space owner to run the exact same verified
-        seal-and-relay again — this time with the socket up to receive it.
-
-        The GFS is content-blind: it never saw the sealed payload and cannot
-        store or replay it, so asking the owner to re-seal is the only repair
-        available here. It needs no new table, event type or key, and is
-        idempotent — the subscriber's ``apply_space_content_key_from_metadata``
-        import is per-epoch idempotent, so a duplicate handoff is a no-op.
-
-        Best-effort and **never raises**: this runs on a connect path, where a
-        missing instance, a repo error, an owner with no socket or a send
-        failure must be logged and skipped, never break the handshake.
-        """
-        if self._ws_registry is None:
-            return
-        try:
-            subscriber = await self._repo.get_instance(instance_id)
-            if subscriber is None:
-                return
-            spaces = await self._repo.list_subscribed_spaces(instance_id)
-        except Exception as exc:  # defensive — connect path, never raise
-            log.warning(
-                "GFS: reconnect notify lookup for %s failed: %s",
-                instance_id,
-                exc,
-                exc_info=True,
-            )
-            return
-
-        sent = 0
-        for space in spaces:
-            # An owner needs no handoff to itself.
-            if space.owning_instance == instance_id:
-                continue
-            # A flapping socket: this seat's owner was asked by a hello
-            # moments ago. Only a HELLO counts here: a subscribe notify sent
-            # while the socket was down must still be repaired now.
-            seat = _seat_key(instance_id, space.space_id)
-            if self._hello_seats.seen(seat):
-                continue
-            if sent >= MAX_RECONNECT_NOTIFIES:
-                log.info(
-                    "GFS: reconnect notify for %s capped at %d spaces "
-                    "(the 5b-c reconcile covers the rest)",
-                    instance_id,
-                    MAX_RECONNECT_NOTIFIES,
-                )
-                break
-            # Already best-effort / never-raises (offline owner, send error).
-            await self._notify_owner_new_subscriber(
-                space.owning_instance,
-                space.space_id,
-                subscriber,
-                reason=NEW_SUBSCRIBER_REASON_RECONNECT,
-            )
-            self._hello_seats.record(seat)
-            sent += 1
-        if sent:
-            log.debug(
-                "GFS: re-notified %d space owner(s) after %s connected",
-                sent,
-                instance_id,
-            )
-
-    async def list_subscribers_with_keys(
-        self,
-        space_id: str,
-        *,
-        ts: str,
-        authority_sig: str,
-        authority_sig_suite: str,
-    ) -> list[GfsSubscriberWithKeys]:
-        """Release the subscriber list to a verified SEED-HOLDER (Phase-5b-c).
-
-        Authorization mirrors the space-authority relay path: the caller proves
-        it holds the space seed (owner OR delegated admin) by signing
-        ``{space_id, ts}`` under :data:`AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY`
-        with the seed; the GFS verifies it against the TOFU-pinned space public
-        key it already stores (``global_spaces.identity_public_key``) — no new
-        roster or key. Fail-closed (:class:`PermissionError`) on every failure:
-
-        * unknown space, or a space with no pinned authority pubkey (the GFS
-          can't verify a seed-holder, so it releases nothing);
-        * stale ``ts`` (±300 s replay guard, same window as ``subscribe``);
-        * missing / malformed / unknown-suite / non-verifying signature.
-
-        The signing bytes bind the event type AND the space id, so a query
-        signed for another space (or under the relay event type) can't be
-        replayed here. Returns the subscriber rows (instance ids + their
-        already-registered identity / key-wrap pubkeys) on success.
-        """
-        await self._verify_subscribers_query(
-            space_id,
-            ts=ts,
-            authority_sig=authority_sig,
-            authority_sig_suite=authority_sig_suite,
-        )
-        return await self._repo.list_subscribers_with_keys(space_id)
-
-    async def require_payload_suite_readers(
-        self, space_id: str, raw_suite: object
-    ) -> None:
-        """Refuse a compressed item for *space_id* while any active seat
-        lacks that suite's label — ``payload_zlib1``, or
-        ``payload_zlib1_dict1`` for the preset dictionary
-        (:class:`PayloadSuiteRefused` → HTTP 409) — so a follower that
-        cannot open it is never sent one. One fan-out reaches every
-        follower, so one such seat refuses it for all: the publisher then
-        sends the next suite it has. An unknown suite raises
-        :class:`~socialhome.domain.space_item.UnsupportedPayloadSuite`."""
-        bit = SEAT_BIT_FOR_SUITE.get(payload_suite_of(raw_suite))
-        if bit is None:
-            return
-        if await self._repo.count_subscribers_without_seat_bit(space_id, bit):
-            raise PayloadSuiteRefused(space_id)
-
-    async def count_subscribers_without_space_item(
-        self,
-        space_id: str,
-        *,
-        ts: str,
-        authority_sig: str,
-        authority_sig_suite: str,
-    ) -> tuple[int, int]:
-        """``(subscribers, those that don't read space_item)`` for a verified
-        seed holder (step 12) — the same authority-signed query as
-        :meth:`list_subscribers_with_keys`, answering counts only."""
-        await self._verify_subscribers_query(
-            space_id,
-            ts=ts,
-            authority_sig=authority_sig,
-            authority_sig_suite=authority_sig_suite,
-        )
-        return await self._repo.count_subscribers_without_space_item(space_id)
-
-    async def _verify_subscribers_query(
-        self,
-        space_id: str,
-        *,
-        ts: str,
-        authority_sig: str,
-        authority_sig_suite: str,
-    ) -> None:
-        """The seed-holder check of a subscribers query; raises
-        :class:`PermissionError` (see :meth:`list_subscribers_with_keys`)."""
-        existing = await self._repo.get_space(space_id)
-        if existing is None or not existing.identity_public_key:
-            # No row, or no pinned key → nothing verifiable → release nothing.
-            raise PermissionError("no pinned authority key for this space")
-
-        # Replay guard FIRST (cheap, and independent of the signature): a
-        # fresh, tz-aware ISO 8601 ``ts`` within ±300 s of now. Naive /
-        # unparseable timestamps are rejected (a missing offset is untrusted).
-        self._assert_fresh_ts(ts)
-
-        if not authority_sig:
-            raise PermissionError("invalid authority signature")
-        try:
-            ok = verify_authority_event(
-                event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-                space_id=space_id,
-                payload={"space_id": space_id, "ts": ts},
-                authority_sig=authority_sig,
-                authority_sig_suite=authority_sig_suite,
-                space_public_key=bytes.fromhex(existing.identity_public_key),
-            )
-        except UnsupportedAuthoritySuite as exc:
-            raise PermissionError(
-                f"unknown authority signature suite: {exc}",
-            ) from exc
-        except ValueError as exc:
-            raise PermissionError("invalid authority key") from exc
-        if not ok:
-            raise PermissionError("invalid authority signature")
-
-    async def unsubscribe(
-        self,
-        instance_id: str,
-        space_id: str,
-        ts: str,
-        signature: str,
-    ) -> None:
-        """Remove *instance_id* from the subscribers of *space_id*.
-
-        Authenticated exactly like :meth:`subscribe`: an Ed25519 signature
-        over the canonical ``{action: "unsubscribe", instance_id, space_id,
-        ts}`` JSON — the ``action`` is inside the signed bytes, so an
-        unsubscribe signature can't be replayed as a subscribe — verified
-        against the instance's registered public key and replay-guarded
-        (±300 s). The signature binds the request to *instance_id*, so a
-        caller can only unsubscribe **itself** — without this, any caller
-        could evict any household from any space's relay fan-out.
-
-        Fails closed (``PermissionError``) on an unknown instance, a
-        missing / malformed / invalid signature, or a stale / naive
-        timestamp. Unlike :meth:`subscribe` it deliberately does NOT
-        require the space to still exist: unsubscribing from an
-        already-removed space stays idempotent.
-        """
-        await self._verify_signed_request(
-            instance_id,
-            {
-                "action": "unsubscribe",
-                "instance_id": instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            },
-            signature=signature,
-        )
-        await self._repo.remove_subscriber(
-            space_id=space_id,
-            instance_id=instance_id,
-        )
-        log.debug("GFS: %s unsubscribed from space %s", instance_id, space_id)
-
     async def list_spaces(
         self,
         *,
@@ -1814,13 +611,13 @@ class GfsFederationService:
         """Withdraw a space listing at its OWNER's signed request.
 
         Drives ``POST|DELETE /gfs/spaces/{id}/unpublish``. Authenticated
-        exactly like :meth:`subscribe` / :meth:`unsubscribe`: an Ed25519
+        by :meth:`_verify_signed_request`: an Ed25519
         signature over the canonical ``{action: "unpublish", owning_instance,
         space_id, ts}`` JSON (plus ``gfs_key``, the addressed server's key,
         when the household bound it — then it must be this server's, see
         :meth:`_assert_addressed_here`), verified against *owning_instance*'s registered
         public key and replay-guarded (±300 s). The ``action`` is inside the
-        signed bytes, so a captured subscribe/unsubscribe signature can never
+        signed bytes, so a captured signature of another request can never
         be replayed as a delisting.
 
         Authentication alone is not enough: a signature only proves WHICH
@@ -1832,10 +629,9 @@ class GfsFederationService:
         Sets the reversible ``withdrawn`` flag and NEVER touches ``status``:
         ``banned`` is the GFS moderator's verdict and is deliberately sticky
         against re-publish, so writing it here permanently locked an owner out
-        of its own listing. The row itself survives (audit trail, subscriber
-        list, TOFU-pinned authority pubkey) and the owner's next signed
-        publish clears the flag. Withdrawal affects DISCOVERY only — the relay
-        and existing subscribers are untouched (``docs/protocol/discovery.md``).
+        of its own listing. The row itself survives (audit trail, TOFU-pinned
+        authority pubkey) and the owner's next signed publish clears the
+        flag. Withdrawal affects DISCOVERY only (``docs/protocol/discovery.md``).
 
         Fails closed with :class:`PermissionError` on an unknown instance, a
         missing / malformed / invalid signature, a stale ``ts``, or a caller
@@ -1958,9 +754,7 @@ class GfsFederationService:
         the listing; an empty or unknown value stores the fail-closed
         ``invite_only``. ``allow_subscribers`` is the READABILITY opt-in —
         ``None`` (an older household that sends no flag) stores the
-        fail-closed ``False``. Storing ``False`` also PURGES the space's
-        subscriber seats: a space nobody may read has no public readership, so
-        a seat taken earlier would linger forever, pulling relayed content.
+        fail-closed ``False``.
 
         ``authority_cert`` (v_44) is the owner's cert for a ROTATED space
         authority key. It rides inside the signed body, and a body carrying
@@ -1975,7 +769,7 @@ class GfsFederationService:
         owner that rotated the authority key must be able to move the pin
         here without re-listing the space — otherwise a withdrawn listing
         keeps the old pin forever, and whoever still holds the old key's seed
-        keeps relaying to the followers seated here. Signed (folded in only
+        can still sign the space's join contact here. Signed (folded in only
         when true) and it requires a fresh signed ``ts``. Such a publish
         stores NO metadata (the household sends it blank on purpose: a space
         that left the public tier must not leak its new name), never touches
@@ -2074,8 +868,8 @@ class GfsFederationService:
             signed["member_count"] = member_count
         if follower_count is not None:
             signed["follower_count"] = follower_count
-        # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
-        # subscribe/unsubscribe, ``publish_space`` has shipped production
+        # The signed ``ts`` is OPTIONAL, for backward compatibility:
+        # ``publish_space`` has shipped production
         # callers, so hard-requiring ``ts`` would 403 every older household
         # against an upgraded GFS during a mixed-version window. This is the
         # documented "first-revision payloads missing the field default to the
@@ -2168,7 +962,7 @@ class GfsFederationService:
             pinned_pubkey = existing.identity_public_key
         if withdrawn:
             # Pin-only from here on: nothing of the (blank) metadata above is
-            # stored, the status is left alone and no seat is purged. Reached
+            # stored and the status is left alone. Reached
             # only after the signature, freshness and owner checks, so an
             # unsigned caller never learns whether the space exists.
             if existing is None:
@@ -2191,9 +985,8 @@ class GfsFederationService:
         # Preserve posts_per_week / published_at from the existing row —
         # those are GFS-side bookkeeping, not the owner's to declare. Only
         # the owner's name / description / cover travel with the publish.
-        # ``subscriber_count`` (relay seats) is carried for a new row only:
-        # ``upsert_space`` never overwrites it on an existing one, so a
-        # subscribe landing between the read above and the upsert stays.
+        # ``subscriber_count`` is inert since v_96 (no relay seats; GFS
+        # migration 0033): carried as stored, never served.
         next_status = "active" if inst.auto_accept else "pending"
         if existing is not None and existing.status in ("banned", "active"):
             # A moderator's decision sticks: a ban stays a ban, and an
@@ -2322,30 +1115,6 @@ class GfsFederationService:
                         identity_public_key=stored.identity_public_key,
                         authority_cert=stored.authority_cert,
                     )
-        # Data repair, at the moment the truth arrives: a space whose owner
-        # EXPLICITLY withdrew readability has no public readership, so every
-        # seat in ``space_subscribers`` is meaningless and would otherwise keep
-        # pulling relayed content. This lives here rather than in the migration
-        # because at migration time EVERY row defaults to not-readable — a
-        # blanket purge would evict every legitimate subscriber on the server.
-        #
-        # ONLY on an explicit ``false``. An ABSENT key is an older household
-        # that does not know the field yet, which is not the same statement:
-        # the stored flag still fails closed above (so no NEW subscribe is
-        # seated), but evicting the existing readers would mass-evict everyone
-        # on a mixed-version server the moment an un-upgraded household
-        # re-published — and the reader gets no signal that it happened. The
-        # gate is reversible on the owner's next publish; the purge is not.
-        if allow_subscribers is False:
-            purged = await self._repo.purge_subscribers(space_id)
-            if purged:
-                log.info(
-                    "GFS: space %s published with subscribers disabled — "
-                    "dropped %d subscriber seat(s); such a space is listed "
-                    "for discovery but is not publicly readable",
-                    space_id,
-                    purged,
-                )
         log.info(
             "GFS: published space %s (owner=%s, status=%s, join_mode=%s, "
             "allow_subscribers=%s)",
@@ -2385,74 +1154,3 @@ class GfsFederationService:
 
         await self._repo.set_instance_display_name(instance_id, cleaned)
         log.info("GFS: instance %s renamed to %r", instance_id, cleaned)
-
-    # ── Fan-out ──────────────────────────────────────────────────────────
-
-    async def _fan_out(
-        self,
-        subscribers: list[GfsSubscriber],
-        event_body: dict,
-    ) -> list[str]:
-        """Deliver *event_body* to each subscriber over its SH↔GFS WebSocket
-        (push frame ``{type:"relay", ...}``).
-
-        That socket is the ONLY delivery path: the GFS holds no household
-        address (migration 0018 dropped ``inbox_url`` together with the
-        HTTPS-inbox fallback, which could never succeed). A subscriber with no
-        registered socket, or whose send fails, is simply not reached — the
-        frame waits for the household to reconnect, exactly as it did after
-        the fallback failed. Returns the ids actually reached, in subscriber
-        order.
-
-        Delivery is CONCURRENT but bounded by :data:`FAN_OUT_CONCURRENCY`, and
-        the whole fan-out runs under a :data:`FAN_OUT_DEADLINE_SECONDS`
-        deadline — on expiry the stragglers are cancelled and the PARTIAL list
-        of ids reached so far is returned. Cancelling an in-flight push is
-        equivalent to that delivery being lost, which the at-least-once relay
-        (plus subscriber-side dedupe by post id) already tolerates.
-        """
-        push_frame = {"type": "relay", **event_body}
-        limit = asyncio.Semaphore(FAN_OUT_CONCURRENCY)
-        # Slot-per-subscriber rather than gather()'s return value: on the
-        # deadline path gather is cancelled and yields nothing, so the results
-        # have to be recorded as they land — and by index, to keep the partial
-        # list in subscriber order.
-        reached: list[str | None] = [None] * len(subscribers)
-
-        async def _deliver(index: int, sub: GfsSubscriber) -> None:
-            async with limit:
-                reached[index] = await self._deliver_one(sub, push_frame)
-
-        tasks = [
-            asyncio.create_task(_deliver(i, sub)) for i, sub in enumerate(subscribers)
-        ]
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks),
-                timeout=FAN_OUT_DEADLINE_SECONDS,
-            )
-        except TimeoutError:
-            log.info(
-                "GFS fan-out: deadline of %.1fs hit — delivered to %d of %d "
-                "subscriber(s), cancelling the rest",
-                FAN_OUT_DEADLINE_SECONDS,
-                sum(1 for r in reached if r is not None),
-                len(subscribers),
-            )
-        finally:
-            pending = [task for task in tasks if not task.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                # Await the cancellations so no delivery outlives the handler.
-                await asyncio.gather(*pending, return_exceptions=True)
-        return [instance_id for instance_id in reached if instance_id is not None]
-
-    async def _deliver_one(self, sub: GfsSubscriber, push_frame: dict) -> str | None:
-        """Push to ONE subscriber's WebSocket; return its id iff it was reached."""
-        if self._ws_registry is not None and await self._ws_registry.send(
-            sub.instance_id,
-            push_frame,
-        ):
-            return sub.instance_id
-        return None

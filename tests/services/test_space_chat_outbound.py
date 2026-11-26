@@ -35,20 +35,20 @@ async def _chat(stack) -> str:
 
 
 async def test_writer_households_skip_followers_tombstones_and_ourselves(stack):
-    assert await stack.audience.writer_households(SP) == {HOUSE_B}
+    assert await stack.audience.households(SP) == {HOUSE_B}
     assert await stack.audience.may_receive(SP, HOUSE_B)
     assert not await stack.audience.may_receive(SP, "house-f")
     await stack.db.enqueue(
         "UPDATE space_remote_members SET tombstoned=1 WHERE instance_id=?", (HOUSE_B,)
     )
-    assert await stack.audience.writer_households(SP) == frozenset()
+    assert await stack.audience.households(SP) == frozenset()
     # Our own household is never a target, even when mirrored.
     await stack.db.enqueue(
         "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
         " VALUES(?,?,'u-self','member')",
         (SP, stack.iid),
     )
-    assert await stack.audience.writer_households(SP) == frozenset()
+    assert await stack.audience.households(SP) == frozenset()
 
 
 async def test_create_edit_react_delete_are_broadcast_to_writers(stack):

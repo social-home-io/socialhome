@@ -54,8 +54,8 @@ from socialhome.domain.space_author_profile import (
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
@@ -198,7 +198,7 @@ async def _publish(world, item_type: str, inner: dict) -> list:
     targets = await world.b.member.plan_item(SPACE_ID, AUTHOR, item_type)
     assert targets, "a global space with a channel publishes into it"
     assert await world.b.member.publish_item(SPACE_ID, item_type, inner, targets)
-    await world.app[gfs_member_publish_key].wait_idle()
+    await world.app[gfs_fan_out_key].wait_idle()
     return await world.app[gfs_envelope_queue_repo_key].list_for(
         world.a.h.instance_id, now=0
     )

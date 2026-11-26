@@ -19,7 +19,7 @@ Two fields, and the body is rebuilt here from ``to_instance_id`` +
 ``envelope["sealed"]`` rather than forwarded verbatim, so no caller can
 grow a third one by accident. There is no ``from_instance`` and no
 household transport signature — the same identity-free discipline
-``POST /gfs/publish`` follows (#677). The relay learns a recipient, a
+the anonymous channel publish follows (#677). The relay learns a recipient, a
 size and a timing; the token, the space, the users and the sender all
 live inside the ciphertext.
 

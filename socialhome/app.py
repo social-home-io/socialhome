@@ -132,7 +132,7 @@ from .federation.sync.dm_history import (
 from .federation.sync.space.file_gate import CatchUpFileGates, SpaceFileBudget
 from .federation.sync.space.host_contact import HostContact
 from .federation.sync.space.page_state import PageStateHasher
-from .federation.sync.space.pages import SyncPageService
+from .federation.sync.space.pages import PAGE_KEY_WAIT_MAX, SyncPageService
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -1138,9 +1138,6 @@ def _build_gfs_mailboxes(
     directory = SpaceMemberDirectory(
         space_repo=repos.space,
         federation_repo=repos.federation,
-        writer_households=SpaceWriterHouseholds(
-            repos.space_remote_member, own_instance_id=instance_id
-        ),
         mailboxes=mailboxes,
         instance_id=instance_id,
         identity_seed=identity.identity_seed,
@@ -1354,7 +1351,7 @@ def _wire_space_authority_rotation(
 
 #: Channel frames one channel may bring this household per minute, before
 #: any decrypt / verify. A GFS admits at most 120 items a minute into a
-#: channel (cluster-wide, ``MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE`` — this
+#: channel (cluster-wide, ``CHANNEL_PUBLISH_MAX_PER_MINUTE`` — this
 #: package does not import the server's), and a household may be seated on
 #: the same channel at every server on the space's list (at most
 #: :data:`MAX_GFS_SERVERS`), each pushing its own copy: 8 × 120. A returning
@@ -2578,6 +2575,7 @@ def _wire_federation_stack(
         federation_service=federation_service,
         host_contact=host_contact,
         own_instance_id=identity.instance_id,
+        bus=bus,
     )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
@@ -2735,6 +2733,7 @@ def _build_sync_pages(
     federation_service: FederationService,
     host_contact: HostContact,
     own_instance_id: str,
+    bus: EventBus,
 ) -> SyncPageService:
     """v_95 sync pages (``docs/protocol/sync-pages.md``): the signer pushes
     each new page (at most hourly) to every member household as
@@ -2753,6 +2752,11 @@ def _build_sync_pages(
     )
     provider.attach_sync_pages(pages)
     receiver.attach_sync_pages(pages)
+    # A page that beat its epoch's key is parked in a hold of its own: it
+    # can never evict a §25.6 sync chunk parked in the shared cache.
+    pages.attach_pending_decrypts(
+        PendingDecryptsCache(bus=bus, max_entries=PAGE_KEY_WAIT_MAX)
+    )
     scheduler.attach_sync_pages(pages.ref_for, pages.buckets_for, pages.have_for)
     status.attach_pages(pages.position)
 
@@ -2792,7 +2796,7 @@ def _build_sync_pages(
     writers = SpaceWriterHouseholds(seat_repo, own_instance_id=own_instance_id)
 
     async def _writers(space_id: str) -> set[str]:
-        return set(await writers.writer_households(space_id))
+        return set(await writers.households(space_id))
 
     pages.attach_push(sender=federation_service, writers=_writers)
     federation_service._event_registry.register(
@@ -5093,7 +5097,6 @@ def create_app(config: Config | None = None) -> web.Application:
             space_key_repo=space_key_repo,
             own_instance_id=real_instance_id,
             own_identity_pk=identity_pk,
-            key_manager=key_manager,
         )
         real_space_service.attach_writer_certs(writer_certs)
 

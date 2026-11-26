@@ -16,6 +16,11 @@ class _FakeFederationService:
     def __init__(self, own_instance_id: str = "own-inst") -> None:
         self._own_instance_id = own_instance_id
         self.sent: list[tuple[str, FederationEventType, dict, str | None]] = []
+        #: What ``channel_reached_followers`` names (v_96).
+        self.channel_reached: frozenset[str] = frozenset()
+
+    async def channel_reached_followers(self, space_id, instance_ids):
+        return frozenset(i for i in instance_ids if i in self.channel_reached)
 
     async def send_event(
         self,
@@ -147,3 +152,21 @@ async def test_a_change_applied_from_another_household_is_never_echoed(env):
         )
     )
     assert fed.sent == []
+
+
+async def test_a_follower_reached_through_its_channel_gets_no_copy(env):
+    """v_96 same path: a GFS follower a member only holds a directory seat
+    for is reached through its channel seat (and the host), like every
+    other fan-out — never one sealed copy per follower (N x M)."""
+    bus, fed = env
+    fed.channel_reached = frozenset({"peer-2"})
+    await bus.publish(
+        SpaceMemberProfileUpdated(
+            space_id="sp",
+            user_id="u1",
+            space_display_name="Alice in sp",
+            picture_hash="h1",
+            picture_webp=b"RIFF0000WEBP",
+        )
+    )
+    assert [r[0] for r in fed.sent] == ["peer-1"]

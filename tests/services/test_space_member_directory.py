@@ -11,6 +11,7 @@ import time
 from types import SimpleNamespace
 
 import orjson
+import pytest
 
 from socialhome.crypto import (
     b64url_encode,
@@ -195,6 +196,21 @@ class FakeSeats:
             return [SimpleNamespace(role=SpaceRole.ADMIN.value)]
         return []
 
+    async def list_instances_with_roles(self, space_id, roles):
+        return sorted(self.admins.get(space_id, set()))
+
+
+class _RoleSeats(FakeSeats):
+    """The roster mirror by ROLE (instance id -> the role of its live seat),
+    for the directory's own default seat set (production wiring)."""
+
+    def __init__(self, roles: dict[str, str]) -> None:
+        super().__init__()
+        self._roles = roles
+
+    async def list_instances_with_roles(self, space_id, roles):
+        return [i for i, r in self._roles.items() if r in roles]
+
 
 class FakeFederationRepo:
     def __init__(self) -> None:
@@ -222,7 +238,7 @@ class FakeWriters:
         #: (``_invitee_with`` narrows it to the ones it names).
         self.everyone = True
 
-    async def writer_households(self, space_id):
+    async def households(self, space_id):
         return frozenset(self.writers.get(space_id, set()))
 
     async def may_receive(self, space_id, instance_id):
@@ -367,7 +383,12 @@ def _event(event_type, sender, to, payload, space_id=SPACE) -> FederationEvent:
 class World:
     """One household (``me``) running the directory, with fakes around it."""
 
-    def __init__(self, *, host: dict | None = None) -> None:
+    def __init__(
+        self, *, host: dict | None = None, roles: dict[str, str] | None = None
+    ) -> None:
+        """*roles* (instance id -> role): the roster mirror answers by role
+        and the directory builds its own seat set from it, exactly as
+        production does (no ``seated_households`` passed)."""
         self.me = _hh()
         self.host = host or self.me
         self.spaces = FakeSpaceRepo()
@@ -375,13 +396,13 @@ class World:
         self.writers = FakeWriters()
         self.mailboxes = FakeMailboxes()
         self.fed = FakeFederation()
-        self.seats = FakeSeats()
+        self.seats = FakeSeats() if roles is None else _RoleSeats(roles)
         self.seated: list[str] = []
         self._seq = 0
         self.dir = SpaceMemberDirectory(
             space_repo=self.spaces,
             federation_repo=self.fed_repo,
-            writer_households=self.writers,
+            seated_households=self.writers if roles is None else None,
             mailboxes=self.mailboxes,
             instance_id=self.me["id"],
             identity_seed=self.me["seed"],
@@ -508,18 +529,64 @@ async def test_a_mailbox_less_card_is_not_a_delta_for_a_mailbox_only_recipient()
     assert _ids(delta_a) == {c["id"]}
 
 
-async def test_a_follower_household_never_receives_a_directory():
+async def test_a_household_without_a_live_seat_never_receives_a_directory():
     w = World()
+    a, rowonly = _hh(), _hh()
+    w.member(a, rowonly)
+    w.writers.writers[SPACE] = {a["id"]}  # the roster holds no seat of it
+    await w.card_from(rowonly, _card(rowonly, gfs=GFS))
+    await w.card_from(a, _card(a, gfs=GFS))
+    await w.dir.reconcile(SPACE)
+    assert w.fed.directories, "the seated household got its directory"
+    assert all(d["to"] != rowonly["id"] for d in w.fed.directories)
+    # ... and its card is not passed on to the seated households either.
+    assert all(rowonly["id"] not in _ids(d) for d in w.fed.directories)
+
+
+def _role_world():
+    """A member *a* and a follower, the roster mirror answering by role and
+    the directory wired as in production (its own seat set)."""
     a, follower = _hh(), _hh()
+    w = World(roles={a["id"]: "member", follower["id"]: "subscriber"})
     w.member(a, follower)
-    w.writers.writers[SPACE] = {a["id"]}  # the follower holds no writer seat
+    return w, a, follower
+
+
+async def test_a_follower_household_gets_the_directory_like_a_member():
+    """Same path (owner 2026-11-24): a follower's seat is a seat — it gets
+    the directory (the host's card and every seated household's) and its
+    card goes to the members, exactly like a member household."""
+    w, a, follower = _role_world()
     await w.card_from(follower, _card(follower, gfs=GFS))
     await w.card_from(a, _card(a, gfs=GFS))
     await w.dir.reconcile(SPACE)
-    assert w.fed.directories, "the writer got its directory"
-    assert all(d["to"] != follower["id"] for d in w.fed.directories)
-    # ... and the follower's card is not passed on to the writers either.
-    assert all(follower["id"] not in _ids(d) for d in w.fed.directories)
+    to_follower = [d for d in w.fed.directories if d["to"] == follower["id"]]
+    assert to_follower, "the follower got its directory"
+    # The host's card in its snapshot, the member's in the delta after it.
+    assert {w.me["id"], a["id"]} <= set().union(*(_ids(d) for d in to_follower))
+    to_member = [d for d in w.fed.directories if d["to"] == a["id"]]
+    assert any(follower["id"] in _ids(d) for d in to_member)
+
+
+async def test_the_directory_counts_every_seat_by_default():
+    """Production builds the directory without ``seated_households``: its
+    own seat set is every role (a follower's too), from the roster mirror —
+    the policy lives in the service, not at a call site."""
+    w, a, follower = _role_world()
+    assert await w.dir._seat_holders.may_receive(SPACE, follower["id"])
+    assert await w.dir._seat_holders.may_receive(SPACE, a["id"])
+    assert not await w.dir._seat_holders.may_receive(SPACE, _hh()["id"])
+    with pytest.raises(ValueError):
+        SpaceMemberDirectory(
+            space_repo=w.spaces,
+            federation_repo=w.fed_repo,
+            mailboxes=w.mailboxes,
+            instance_id=w.me["id"],
+            identity_seed=w.me["seed"],
+            identity_pk=w.me["pk"],
+            keywrap_pk=w.me["kw_pub"],
+            keywrap_sig=w.me["kw_sig"],
+        )
 
 
 async def test_a_recipient_below_v89_is_skipped():
@@ -587,7 +654,9 @@ async def test_a_card_with_a_lower_rev_does_not_replace_a_newer_one():
 
 
 async def test_snapshot_is_bounded_and_carries_mailbox_cards_first(monkeypatch):
-    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 2)
+    """Our own (the host's) card first, then mailbox cards before the
+    others."""
+    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 3)
     w = World()
     r, m1, m2, n1, n2 = (_hh() for _ in range(5))
     w.member(r, m1, m2, n1, n2)
@@ -598,7 +667,31 @@ async def test_snapshot_is_bounded_and_carries_mailbox_cards_first(monkeypatch):
     await w.dir.reconcile(SPACE, snapshot_to={r["id"]})
     (snap,) = w.fed.to(r["id"])
     assert snap["payload"]["snapshot"] is True
-    assert _ids(snap) == {m1["id"], m2["id"]}
+    assert _ids(snap) == {w.me["id"], m1["id"], m2["id"]}
+
+
+async def test_a_bounded_snapshot_keeps_the_writers_cards_before_followers(
+    monkeypatch,
+):
+    """v_96: followers are listed too, so a popular space passes
+    ``SNAPSHOT_MAX`` on followers alone. The cut never drops a writer's
+    card for a follower's: writer seats (hosts and members) go first."""
+    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 3)
+    fans = [_hh() for _ in range(4)]
+    w1, w2 = _hh(), _hh()
+    roles = {h["id"]: "subscriber" for h in fans}
+    roles |= {w1["id"]: "member", w2["id"]: "admin"}
+    w = World(roles=roles)
+    w.member(w1, w2, *fans)
+    # A paired member has no mailbox card: it still beats every follower.
+    w.spaces.put_card(SPACE, _card(w1, gfs=None))
+    for h in (w2, *fans):
+        w.spaces.put_card(SPACE, _card(h, gfs=GFS))
+    w.writers.writers[SPACE] = set(roles)  # seat_all: all told us "seated"
+    w.seat_all()
+    await w.dir.reconcile(SPACE, snapshot_to={fans[0]["id"]})
+    (snap,) = [d for d in w.fed.to(fans[0]["id"]) if d["payload"].get("cards")]
+    assert _ids(snap) == {w.me["id"], w1["id"], w2["id"]}
 
 
 async def test_a_household_that_stops_being_a_writer_is_removed_once():
@@ -1765,11 +1858,22 @@ async def test_a_seated_snapshot_and_a_joiners_delta_reach_a_member_in_order(
     assert held == host.spaces.doc(SPACE, host.me["id"])["dir_seq"]
 
 
-async def test_a_follower_or_a_space_we_left_echoes_no_directory():
+async def test_a_space_we_left_echoes_no_directory():
     w, host = _member_world()
-    w.spaces.local[SPACE] = []  # no person of ours holds a writer seat
+    w.spaces.local[SPACE] = []  # no person of ours holds a seat
     assert await w.dir.directory_seq(SPACE, host["id"]) is None
     assert await w.dir.directory_seq(SPACE, _hh()["id"]) is None  # not the host
+
+
+async def test_a_follower_echoes_its_directory_and_gives_its_card_like_a_member():
+    """Same path: a follower's §25.6 BEGIN echoes ``dir_seq`` (0 before its
+    first snapshot) so the host repairs a snapshot it never got, and it
+    gives the host its card ("seated") like a member."""
+    w, host = _member_world()
+    w.spaces.local_role = SpaceRole.SUBSCRIBER
+    assert await w.dir.directory_seq(SPACE, host["id"]) == 0
+    await w.dir.seated(SPACE, host["id"], host_proto=89)
+    assert [c["to"] for c in w.fed.cards] == [host["id"]]
 
 
 async def test_a_member_missing_its_directory_asks_the_host_at_once():
@@ -2765,15 +2869,16 @@ async def test_an_admins_frame_names_the_households_it_seated():
 # ── Review round 3 (#1361) ───────────────────────────────────────────────
 
 
-async def test_a_waiting_card_survives_a_seat_event_that_is_no_members_seat():
-    """A follower of household X goes live first (a row, no writer seat):
+async def test_a_waiting_card_survives_a_seat_event_our_roster_does_not_hold():
+    """A seat event for household X arrives before our roster holds the
+    seat (a row only):
     the waiting card stays where it is, and is taken when X's member seat
     arrives."""
     x = _hh()
     m, owner, _admin = _invitee_with()
     await m.directory({"cards": [_card(x).to_wire()]})
     assert x["id"] in m.spaces.doc(SPACE, owner["id"])["wait"]
-    m.member(x)  # the roster's row for the follower seat
+    m.member(x)  # a row, no seat in our roster yet
     await m.dir._on_seat_change(
         SpaceRemoteSeatLive(space_id=SPACE, instance_id=x["id"], user_id="bob")
     )
@@ -2783,11 +2888,11 @@ async def test_a_waiting_card_survives_a_seat_event_that_is_no_members_seat():
     assert await m.dir.card_of(SPACE, x["id"]) is not None
 
 
-async def test_a_card_waits_while_the_household_holds_only_a_followers_seat():
-    """A row alone is not a member's seat: no card on it, no lazy seat."""
+async def test_a_card_waits_while_the_household_holds_only_a_row():
+    """A row alone is not a seat: no card on it, no lazy seat."""
     x = _hh()
     m, _owner, admin = _invitee_with()
-    m.member(x)  # X only follows the space here
+    m.member(x)  # a row, no seat in our roster
     m.mailboxes.add_box(GFS)
     await m.directory({"cards": [_card(x).to_wire()]}, sender=admin["id"])
     assert "card" not in m.spaces.doc(SPACE, x["id"])
@@ -3233,7 +3338,7 @@ async def test_a_restart_keeps_our_card_where_it_moved():
     again = SpaceMemberDirectory(
         space_repo=w.spaces,
         federation_repo=w.fed_repo,
-        writer_households=w.writers,
+        seated_households=w.writers,
         mailboxes=w.mailboxes,
         instance_id=w.me["id"],
         identity_seed=w.me["seed"],

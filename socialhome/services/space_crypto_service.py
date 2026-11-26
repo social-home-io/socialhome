@@ -34,8 +34,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # on ``socialhome.crypto``) so the content-blind GFS process can import them
 # without dragging in this module's HFS crypto stack (AESGCM, KeyManager).
 from ..authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    AUTHORITY_RELAY_EVENT_TYPES,
     AUTHORITY_SIG_SUITE_ED25519,
     SUPPORTED_AUTHORITY_SIG_SUITES,
     UnsupportedAuthoritySuite,
@@ -504,7 +502,7 @@ class SpaceContentEncryption(BusPublisherMixin):
         when the AAD doesn't match."""
         key = await self._repo.get(space_id, epoch)
         if key is None:
-            raise RuntimeError(
+            raise MissingEpochKey(
                 f"SpaceContentEncryption: missing epoch {epoch} for space {space_id!r}"
             )
         raw = self._kek.decrypt(
@@ -562,8 +560,6 @@ def verify_space_config(
 # names below stay importable from ``space_crypto_service`` for back-compat.
 
 __all__ = [
-    "AUTHORITY_EVENT_SPACE_POST_PUBLIC",
-    "AUTHORITY_RELAY_EVENT_TYPES",
     "AUTHORITY_SIG_SUITE_ED25519",
     "KEY_SUITE_AESGCM_256",
     "SUPPORTED_AUTHORITY_SIG_SUITES",

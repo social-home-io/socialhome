@@ -925,7 +925,7 @@ class SpaceApprovalService(ProtectionGateMixin):
                     proposal.space_id,
                     FederationEventType.SPACE_ADMIN_PROPOSAL_UPDATED,
                     {"space_id": proposal.space_id, "view": view},
-                    only_instances=await members.writer_households(proposal.space_id),
+                    only_instances=await members.households(proposal.space_id),
                 )
             except Exception:
                 log.exception(

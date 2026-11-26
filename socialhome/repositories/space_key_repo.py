@@ -40,8 +40,6 @@ class AbstractSpaceKeyRepo(Protocol):
     ) -> bool: ...
     async def get_previous(self, space_id: str, epoch: int) -> SpaceKey | None: ...
     async def get_writer_cert(self, space_id: str, epoch: int) -> str | None: ...
-    async def set_writer_key(self, space_id: str, epoch: int, wrapped: str) -> bool: ...
-    async def get_writer_key(self, space_id: str, epoch: int) -> str | None: ...
     async def set_gfs_channel(
         self, space_id: str, epoch: int, wrapped: str
     ) -> bool: ...
@@ -227,26 +225,6 @@ class SqliteSpaceKeyRepo:
         if row is None or row["writer_cert"] is None:
             return None
         return str(row["writer_cert"])
-
-    async def set_writer_key(self, space_id: str, epoch: int, wrapped: str) -> bool:
-        """Store the KEK-wrapped writer group key grant this household holds
-        for ``(space, epoch)`` (v_50, migration 0076). Only onto an existing
-        key row — ``False`` when we hold no key for that epoch."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE space_keys SET writer_key=? WHERE space_id=? AND epoch=?",
-            (wrapped, space_id, epoch),
-        )
-        return changed > 0
-
-    async def get_writer_key(self, space_id: str, epoch: int) -> str | None:
-        """The stored KEK-wrapped writer key grant for ``(space, epoch)``."""
-        row = await self._db.fetchone(
-            "SELECT writer_key FROM space_keys WHERE space_id=? AND epoch=?",
-            (space_id, epoch),
-        )
-        if row is None or row["writer_key"] is None:
-            return None
-        return str(row["writer_key"])
 
     async def set_gfs_channel(self, space_id: str, epoch: int, wrapped: str) -> bool:
         """Store the KEK-wrapped private-space channel grant this household

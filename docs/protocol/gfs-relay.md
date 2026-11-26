@@ -1112,8 +1112,9 @@ the `TicketKeyPin` persisted; a household needs one ticket per GFS). GFS side: `
 GFS redesign PR 3 (owner decision 2026-11-09) puts the mailboxes above to
 use. A household that reaches a space through a GFS owns **one** anonymous
 mailbox at that GFS, shared by every space it reaches there. The host and
-every writer member of those spaces address the household's envelopes to
-that mailbox, never to its instance id. The v_88 per-space and per-pair
+every seated household of those spaces (members and, since v_96,
+followers: same path) address the household's envelopes to that mailbox,
+never to its instance id. The v_88 per-space and per-pair
 mailboxes (#1333) were never released and are gone, with their
 per-pair announces, daily caps and quiet window.
 
@@ -1188,8 +1189,8 @@ can withhold or drop a card, never forge or alter one.
 **Getting the card to the host.** In the sealed redeem (joiner → host) and
 ACK (host → joiner), and in every other redeem, as `card`; a card there may
 name a mailbox only at the GFS the body (or the existing seat) came
-through. Every member also gives the host of each space it holds a writer
-seat in its card once per `rev` (`SPACE_MEMBER_CARD`, right after a redeem
+through. Every seated household (a follower's too, v_96) also gives the
+host of each space it holds a seat in its card once per `rev` (`SPACE_MEMBER_CARD`, right after a redeem
 and from the sweep): it is the household's "seated". The host sends a
 household its first snapshot only after that card arrived (a snapshot sent
 when the seat went live could beat the seat at the receiver and be
@@ -1212,8 +1213,12 @@ mailbox gate refuses a frame for a space its person is not seated in yet.
 **The member directory.** The host passes the cards on as
 `SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot, part, parts, members,
 gfs_reached, via_seated, dir_seq, base_seq}`
-(routing `space_id`, everything else encrypted), only to **writer-seat**
-member households at v_89 (`only_instances`), never to followers.
+(routing `space_id`, everything else encrypted), only to **seated**
+households at v_89 (`only_instances`) — every role: since v_96 a follower
+household is listed and served exactly like a member household (owner
+2026-11-24, same path; before, the directory was writer-only and a
+follower seated over an existing pair held no card of the host, so all of
+that space's traffic went instance-addressed).
 Receivers take it only from a household that **acts as the space's host
 for them** (the §24.11 envelope is signed by it): the owner, or the
 delegated admin household that invited them — see "Who is the host" below.
@@ -1248,9 +1253,9 @@ member's card and no host hop.
   keeps or removes a seat, a `space_instances` row or a delivery target:
   - the card goes on its household's `space_instances` row, which the
     roster creates and removes (a live seat). When the roster mirror holds
-    a live writer seat but no row yet (a seat learned from the join
-    snapshot or a sync), seat + card make the row. With no member's seat
-    — a follower's row does not count — the card waits on the issuer's row
+    a live seat but no row yet (a seat learned from the join
+    snapshot or a sync), seat + card make the row. With no live seat (a
+    row alone does not count) the card waits on the issuer's row
     (`wait`, the newest 100) and is taken the moment the seat goes live
     (`SpaceRemoteSeatLive`; the sweep is the backstop). Past 100 waiting
     cards per issuer the oldest is dropped although the version moves on:
@@ -1259,14 +1264,14 @@ member's card and no host hop.
     households behind, which the roster's own catch-up repairs first);
   - whether a card may be USED — a fan-out or mailbox target, a frame
     taken from that household, the end of a host hop — is asked of the
-    roster at that moment: a live writer seat of that household
-    (`SpaceWriterHouseholds.may_receive`). A removal in the roster ends
+    roster at that moment: a live seat of that household, any role
+    (`SpaceWriterHouseholds(..., roles=SEAT_ROLES).may_receive`). A removal in the roster ends
     use at once, whoever still lists the card, and ends the lazy seat
     (the roster's handler drops the household's row before it announces
     the ended seat; the directory never drops a row). The roster check is
     skipped only for a household acting as host, and — while WE act as
-    host — for a household that gave us its card itself (a follower
-    seated by link holds no writer seat); a demoted admin stops at once;
+    host — for a household that gave us its card itself; a demoted
+    admin stops at once;
   - a `removed` (or a household missing from a whole directory) only
     withdraws THAT issuer's listing of the card: the card goes when no
     household acting as host lists it any more. So an admin that missed a
@@ -1320,16 +1325,16 @@ member's card and no host hop.
   joiner's): it stays behind, and its next sync echo gets a fresh
   snapshot.
 - **Only to a seated household.** Directory frames go only to a
-  writer-seat household that told the host it is seated — its card, or a
+  household with a live seat (any role) that told the host it is seated — its card, or a
   §25.6 `SPACE_SYNC_BEGIN` (kept as `seated` on its row): a frame sent the
   moment its seat goes live could beat its own seat and be dropped as from
   a stranger.
-- **Deltas** go to every seated writer-seat household under the new
+- **Deltas** go to every seated household under the new
   version (cardless to one whose only news was its own card, so its version
   keeps up): a
   changed card (a card without a mailbox only to households with one,
   unless it just lost its mailbox) and `removed` for a household that left
-  the directory (left, removed, or no longer a writer). Delivery is not
+  the directory (left or removed). Delivery is not
   tracked per household.
 - **Snapshots** (at most `SNAPSHOT_MAX` = 500 cards, mailbox cards first, in
   parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) end with
@@ -1339,13 +1344,19 @@ member's card and no host hop.
   `SNAPSHOT_MAX` + 1); the member tracks the indices it got, and only a
   complete snapshot moves its `dir_seq`: a lost (or repeated) part leaves
   it behind, so its next sync echo gets a fresh snapshot.
-  **Scale limit:** a directory of more than 2 900 households is sent
+  Within the bound, ours and the writer seats' cards go before
+  followers' (v_96: followers are listed too, so a popular space passes
+  500 on followers alone, and the cut never costs a member a host's or
+  another member's card). A follower whose card was cut is reached at its
+  channel seat and by the host; one that misses a writer's card takes that
+  writer's frames through the host hop. **Scale limit:** a directory of
+  more than 2 900 households (followers counted) is sent
   without `members` and then drops nobody — a lost removal is repaired
   only up to that size. The member replaces its directory
   wholesale: a carded household not in `members` loses its card, row and
   seat; one listed without a card (mailbox cards only) keeps its row. A
-  household with a mailbox gets every writer's card; one without, only the
-  cards that carry a mailbox.
+  household with a mailbox gets every seated household's card; one
+  without, only the cards that carry a mailbox.
 - **When a snapshot goes:** to a household whose card ("seated") arrives
   (at most every 10 min; a joiner's card that beats the host's seat row —
   the commit follows the ACK — is kept aside and answered at commit; no
@@ -1355,7 +1366,7 @@ member's card and no host hop.
   (an additive BEGIN field; the sync stream itself is unchanged, so no
   `SYNC_RECORD_LINES` entry); a host whose version is newer answers with one
   snapshot. A lost delta, a snapshot that raced the seat, or a joiner at 0
-  is repaired within one sync period (30 min). A writer seat with no
+  is repaired within one sync period (30 min). A seat (any role) with no
   complete directory echoes `0` even when it holds no card of the space —
   a paired joiner gets no host card, and a first snapshot lost on the way
   (the host stopped after deciding it) is otherwise never sent again. A
@@ -1549,15 +1560,17 @@ admin / moderator helpers for it. Helper and media recovery are PR 4.
 | A household in 10 spaces through one GFS | 1 socket, 1 ticket, 1 queue (2000 / 32 MiB); 10 cards (~0.7 KiB each, one per host) |
 | A paired / mesh member connected to a GFS a GFS-reached member uses | +1 claim socket and +1 ticket per household on that GFS (not per space); +1 newer card (~0.7 KiB) per space it is in there; directory frames +~35 B per GFS-reached card (`gfs_reached`) |
 | A join (global space, N = 200 writers, G = 200 GFS-only) | Redeem + ACK carry one card each; one `SPACE_MEMBER_CARD`; snapshot ≤ 200 × ~0.7 KiB ≈ 140 KiB in 2 parts to the newcomer (up to 2 snapshots when the first races the seat); a ~0.7 KiB delta to each of 199 households ≈ 140 KiB |
-| Rollout of that space | G × N cards ≈ 200 × 200 × 0.7 KiB ≈ 28 MB once (every GFS-reached household needs every writer's card) |
+| Rollout of that space | G × N cards ≈ 200 × 200 × 0.7 KiB ≈ 28 MB once (every GFS-reached household needs every seated household's card) |
+| v_96: a follower seat in that space (F followers) | Like a member's: its card to the host, one snapshot (≤ 500 cards, mailbox cards first, ≈ 350 KiB) to it, a ~0.7 KiB delta to each seated household ≈ (N + F) × 0.7 KiB per follow — at F = 10 000 ≈ 7 MB from the host per follow, the same O(F²)-over-churn shape as the roster gossip (whose batching is deferred until it is a real problem, owner 2026-11-23); a follower's later traffic rides the mailbox (no instance-addressed copy) |
 | One non-host calendar event, host offline | 199 × one ~4 KiB frame ≈ 800 KB uplink from the author, 199 GFS pushes, followers 0 — from a GFS-only member too: paired members connected to the GFS take it at their own mailbox; one not connected gets it through the host hop once the host is back (or the 30-min heal); since v_91 an author not connected to a listed GFS uploads there itself — one multi upload per GFS |
 | A removal | `removed` to 199 households, a few bytes each; no rotation |
 | Sweep | One local DB pass every ~10 min |
 
 ## Event types (v_89)
 
-`SPACE_MEMBER_CARD` (member → host) and `SPACE_MAILBOX_DIRECTORY` (host →
-writer-seat members). Both are in `SPACE_SESSION_ALLOWED_EVENT_TYPES` and
+`SPACE_MEMBER_CARD` (seated household → host) and
+`SPACE_MAILBOX_DIRECTORY` (host → seated households, followers included
+since v_96). Both are in `SPACE_SESSION_ALLOWED_EVENT_TYPES` and
 `SPACE_READER_EVENT_TYPES` (transport machinery: neither grants a right).
 `SPACE_ROUTED` is in `SPACE_SESSION_ALLOWED_EVENT_TYPES` for the host hop
 only.
@@ -1575,7 +1588,7 @@ sequenceDiagram
     A->>G: POST /gfs/envelope {to_instance: E, sealed ACK + card A}
     G->>E: envelope
     E->>G: SPACE_MEMBER_CARD to mailbox A ("seated")
-    A->>G: SPACE_MAILBOX_DIRECTORY snapshot to mailbox E (all writers' cards)
+    A->>G: SPACE_MAILBOX_DIRECTORY snapshot to mailbox E (every seated household's card)
     A->>G: SPACE_ROSTER_SNAPSHOT to mailbox E (private space: E's channel grant)
     A->>D: SPACE_MAILBOX_DIRECTORY delta (card E)
     D->>D: lazy space_session seat for E (static-static keys)
@@ -2115,9 +2128,9 @@ once per freed slot per budget.
   itself is a sealed single-recipient frame (`SPACE_ADMIN_KEY_SHARE`, v_94),
   and in a publicly readable space a household that holds the seed without
   owning the space sends the GFS what any writer household sends —
-  anonymous items, the same fan-out seat, nothing on a reconnect beyond the
-  seat re-take every writer sends — and answers nothing the GFS hands it
-  differently (a `new_subscriber` frame, a delete delivered to its seat)
+  anonymous channel items and the same channel seat as every member (the
+  space-keyed `new_subscriber` frames and seats it once had to answer like
+  a writer went in v_96)
   ([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
   What only the seed can sign still goes out for something done on that
   household itself — the notice of a rotation it runs, a removal made

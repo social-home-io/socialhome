@@ -206,8 +206,8 @@ ENVELOPE_MAX_BODY_BYTES: int = 320 * 1024
 
 #: Per-IP/minute cap on ``POST /gfs/envelope``. The endpoint is anonymous ON
 #: PURPOSE — there is no household identity on the wire to account against —
-#: so the client address is the only shedding handle, exactly as for
-#: ``/gfs/publish``.
+#: so the client address is the only shedding handle, exactly as for the
+#: anonymous channel publish.
 #:
 #: **This is not an invite-only path.** The relay started life carrying two
 #: envelopes per invite redeem, and 30/min was generous for that. It now also
@@ -376,8 +376,8 @@ def queued_relay_push(row: dict) -> dict:
     return {**row, "type": RELAY_FRAME_TYPE}
 
 
-#: Per-recipient caps for queued RELAY items (member-published space items,
-#: ``POST /gfs/member-publish-anon``). Counted separately from the envelope caps
+#: Per-recipient caps for queued RELAY items (channel items,
+#: ``POST /gfs/channels/publish-anon``, and public moments). Counted separately from the envelope caps
 #: above so a busy public space can never crowd out a household's sealed
 #: invite / link-federation envelopes. Past either cap the recipient's OWN
 #: oldest relay item is evicted (``enqueue_relay``) — only authenticated
@@ -1215,9 +1215,9 @@ class GfsEnvelopeRelay:
         audience: tuple[str, str] | None = None,
         skip: str = "",
     ) -> int:
-        """Deliver a member-published space item to *targets*.
+        """Deliver a channel item to *targets* (the channel's seats).
 
-        ``frame`` is the identity-free fan-out frame (``SpaceItemFrame``
+        ``frame`` is the identity-free fan-out frame (``CHANNEL_FRAME_KEYS``
         shape); it goes out as ``{type: "relay", **frame}``. Live sockets on
         THIS node are pushed with at most :data:`RELAY_FAN_OUT_CONCURRENCY`
         sends in flight.
@@ -1313,17 +1313,6 @@ class GfsEnvelopeRelay:
                 len(targets),
             )
         return written
-
-    async def queue_relay(self, target: str, frame: dict) -> bool:
-        """Queue one relay *frame* (``{space_id, event_type, payload}`` — the
-        relay push without its ``type``) for *target* and hint the cluster.
-
-        For a push that found no socket for *target* on THIS node: the node
-        that holds it drains the row on the ``NODE_DRAIN_HINT``, or the
-        target's next hello does. Same per-recipient RELAY caps, server-wide
-        cap and fair-share eviction as a member item. ``False`` when the
-        frame alone exceeds a cap (logged)."""
-        return await self._queue_relay_blob(target, orjson.dumps(frame).decode())
 
     async def _queue_relay_blob(
         self, target: str, blob: str, *, reaction: bool = False
@@ -1543,8 +1532,8 @@ def build_mailbox_rate_limits(
 def build_envelope_rate_limit(resolver: ClientIpResolver):
     """Per-IP rate limiter middleware for ``POST /gfs/envelope``.
 
-    The relay is anonymous by design, so — exactly as for ``/gfs/publish`` —
-    the client address is the only handle available for shedding a flood.
+    The relay is anonymous by design, so — exactly as for the anonymous
+    channel publish — the client address is the only handle available for shedding a flood.
     """
     return build_window_limiter(
         resolver,

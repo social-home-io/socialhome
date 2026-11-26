@@ -48,7 +48,7 @@ class EnvelopeRelayView(GfsBaseView):
     other's address and this server learns neither's relationship to the
     other. There is no identity on the wire to authenticate, so the per-IP
     limiter (``build_envelope_rate_limit``) is the accountability handle, as
-    it is for the equally anonymous ``/gfs/publish``.
+    it is for the equally anonymous channel publish.
 
     **Uniform response — status, body AND timing.** Every well-formed
     request gets ``202 {"status": "accepted"}`` — byte-identical whether the

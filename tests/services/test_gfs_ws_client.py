@@ -244,7 +244,7 @@ async def test_client_sends_signed_hello(fake_gfs, http_session):
         assert verify_ed25519(pub, msg, sig)
         # #5b: we ask for a space key when we miss one, so the server need
         # not have every owner re-seal on each of our reconnects.
-        assert "space_key_pull" in hello["accepts"]
+        assert "space_key_pull" not in hello["accepts"]
     finally:
         await client.stop()
 

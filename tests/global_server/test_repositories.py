@@ -17,7 +17,6 @@ from socialhome.global_server.domain import (
     GfsMomentKeyMail,
     GfsSpaceMedia,
     GfsSpaceMediaDemand,
-    GfsSubscriberWithKeys,
     GfsUserRegistration,
     GlobalSpace,
 )
@@ -30,7 +29,6 @@ from socialhome.global_server.repositories import (
     SqliteGfsInviteRepo,
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
-    SqliteGfsSpaceEpochRepo,
     SqliteGfsSpaceMediaDemandRepo,
     SqliteGfsSpaceMediaRepo,
     SqliteGfsUserRegistrationRepo,
@@ -165,64 +163,6 @@ async def test_list_spaces_for_instance(fed):
     assert {s.space_id for s in got} == {"s1", "s2"}
 
 
-async def test_remove_subscriber_updates_count(fed):
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="o",
-            display_name="O",
-            public_key="aa" * 32,
-            status="active",
-        )
-    )
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="sub",
-            display_name="S",
-            public_key="bb" * 32,
-            status="active",
-        )
-    )
-    await fed.upsert_space(
-        GlobalSpace(
-            space_id="sp",
-            owning_instance="o",
-            status="active",
-        )
-    )
-    await fed.add_subscriber(space_id="sp", instance_id="sub")
-    sp = await fed.get_space("sp")
-    assert sp.subscriber_count == 1
-    await fed.remove_subscriber(space_id="sp", instance_id="sub")
-    sp = await fed.get_space("sp")
-    assert sp.subscriber_count == 0
-
-
-async def test_purge_subscribers_drops_every_seat_and_zeroes_the_count(fed):
-    """``purge_subscribers`` is the repair the publish handler runs when a
-    space turns out to be invite-only: every seat goes, the count follows,
-    and the number removed comes back for the log line."""
-    for iid in ("po", "ps1", "ps2"):
-        await fed.upsert_instance(
-            ClientInstance(
-                instance_id=iid,
-                display_name=iid,
-                public_key="aa" * 32,
-                status="active",
-            )
-        )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sp-p", owning_instance="po", status="active")
-    )
-    await fed.add_subscriber(space_id="sp-p", instance_id="ps1")
-    await fed.add_subscriber(space_id="sp-p", instance_id="ps2")
-    assert await fed.purge_subscribers("sp-p") == 2
-    assert await fed.list_subscribers("sp-p") == []
-    sp = await fed.get_space("sp-p")
-    assert sp is not None and sp.subscriber_count == 0
-    # Idempotent: a second purge (or one on a space with no seats) is a no-op.
-    assert await fed.purge_subscribers("sp-p") == 0
-
-
 async def test_upsert_space_round_trips_join_mode(fed):
     """``join_mode`` persists, and an unknown value normalises to the
     fail-closed ``invite_only`` on the way in."""
@@ -287,108 +227,6 @@ async def test_upsert_space_round_trips_allow_subscribers(fed):
     )
     row2 = await fed.get_space("sp-rd2")
     assert row2.allow_subscribers is False and row2.join_mode == "open"
-
-
-async def test_list_subscribers_with_keys_joins_client_instances(fed):
-    """The reconcile query JOINs subscribers × client_instances so the
-    seed-holder gets each subscriber's identity + key-wrap material to seal
-    the content key to."""
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="o",
-            display_name="O",
-            public_key="aa" * 32,
-            status="active",
-        )
-    )
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="sub-kw",
-            display_name="WithKeywrap",
-            public_key="bb" * 32,
-            status="active",
-            keywrap_public_key="cc" * 32,
-            kem_suite="x25519",
-            keywrap_sig="sig-kw",
-        )
-    )
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="sub-bare",
-            display_name="NoKeywrap",
-            public_key="dd" * 32,
-            status="active",
-        )
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sp", owning_instance="o", status="active")
-    )
-    await fed.add_subscriber(space_id="sp", instance_id="sub-kw")
-    await fed.add_subscriber(space_id="sp", instance_id="sub-bare")
-
-    rows = await fed.list_subscribers_with_keys("sp")
-    assert all(isinstance(r, GfsSubscriberWithKeys) for r in rows)
-    by_id = {r.instance_id: r for r in rows}
-    assert set(by_id) == {"sub-kw", "sub-bare"}
-
-    kw = by_id["sub-kw"]
-    assert kw.identity_public_key == "bb" * 32
-    assert kw.keywrap_public_key == "cc" * 32
-    assert kw.keywrap_sig == "sig-kw"
-
-    # A subscriber that registered without a key-wrap key surfaces with empty
-    # key-wrap fields (the seed-holder skips sealing to it).
-    bare = by_id["sub-bare"]
-    assert bare.identity_public_key == "dd" * 32
-    assert bare.keywrap_public_key == ""
-    assert bare.keywrap_sig == ""
-
-
-async def test_list_subscribers_with_keys_unknown_space_is_empty(fed):
-    assert await fed.list_subscribers_with_keys("nope") == []
-
-
-async def _seat(fed, *, instance_id: str, status: str = "active") -> None:
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id=instance_id,
-            display_name=instance_id,
-            public_key="ab" * 32,
-            status=status,
-        )
-    )
-    await fed.add_subscriber(space_id="sp-get", instance_id=instance_id)
-
-
-async def test_get_subscriber_returns_one_active_seat(fed):
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="o", display_name="O", public_key="aa" * 32, status="active"
-        )
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sp-get", owning_instance="o", status="active")
-    )
-    await _seat(fed, instance_id="s-on")
-    await _seat(fed, instance_id="s-off", status="banned")
-    got = await fed.get_subscriber("sp-get", "s-on")
-    assert got is not None and got.instance_id == "s-on"
-    # Same semantics as list_subscribers: an inactive instance is no seat.
-    assert await fed.get_subscriber("sp-get", "s-off") is None
-    assert await fed.get_subscriber("sp-get", "nobody") is None
-    assert await fed.get_subscriber("other", "s-on") is None
-
-
-async def test_get_subscriber_is_a_primary_key_lookup(fed, gfs_db):
-    """The (space_id, instance_id) PRIMARY KEY covers the point lookup — no
-    scan of the space's seats, and no new index or migration."""
-    plan = await gfs_db.fetchall(
-        "EXPLAIN QUERY PLAN " + fed.GET_SUBSCRIBER_SQL, ("sp", "i")
-    )
-    details = [str(dict(r).get("detail", "")) for r in plan]
-    assert details, "no query plan"
-    assert not any(d.startswith("SCAN") for d in details), details
-    assert any("sqlite_autoindex_space_subscribers" in d for d in details), details
 
 
 # ── Admin helpers ─────────────────────────────────────────────────────
@@ -717,39 +555,6 @@ async def test_upsert_space_never_clears_a_pinned_identity_key(fed):
     assert sp.identity_public_key == "cc" * 32
 
 
-async def test_list_subscribed_spaces_returns_only_subscriptions(fed):
-    """``list_subscribed_spaces`` returns the spaces an instance SUBSCRIBES to
-    (Phase-5b-d reconnect notify), not the ones it owns."""
-    for iid in ("owner-x", "sub-x"):
-        await fed.upsert_instance(
-            ClientInstance(
-                instance_id=iid,
-                display_name=iid,
-                public_key="aa" * 32,
-                status="active",
-            )
-        )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sx1", owning_instance="owner-x", status="active")
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sx2", owning_instance="owner-x", status="active")
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sx3", owning_instance="sub-x", status="active")
-    )
-    await fed.add_subscriber(space_id="sx1", instance_id="sub-x")
-    await fed.add_subscriber(space_id="sx2", instance_id="sub-x")
-
-    got = await fed.list_subscribed_spaces("sub-x")
-    assert {s.space_id for s in got} == {"sx1", "sx2"}
-    assert all(s.owning_instance == "owner-x" for s in got)
-
-
-async def test_list_subscribed_spaces_empty_for_unknown_instance(fed):
-    assert await fed.list_subscribed_spaces("nobody") == []
-
-
 # ── Invite tokens ─────────────────────────────────────────────────────
 
 
@@ -976,159 +781,7 @@ async def test_authority_rotation_seq_is_capped_at_int64_max(gfs_db):
     assert isinstance(row.authority_rotation_seq, int)
 
 
-# ── Space content epochs (v_49, migration 0014) ──────────────────────
-
-
-async def test_space_epoch_is_none_until_one_is_learned(gfs_db):
-    repo = SqliteGfsFederationRepo(gfs_db)
-    await _owner_row(repo)
-    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
-    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
-    assert await epochs.get("sp") is None
-    assert await epochs.get("unknown") is None
-
-
-async def _epochs(gfs_db, **space_kw):
-    repo = SqliteGfsFederationRepo(gfs_db)
-    await _owner_row(repo)
-    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o", **space_kw))
-    return repo, SqliteGfsSpaceEpochRepo(gfs_db)
-
-
-async def test_owner_confirm_is_monotonic_and_keeps_the_previous(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    assert await epochs.confirm("sp", 3, now=100)
-    state = await epochs.get("sp")
-    # The first epoch confirmed gets ``epoch - 1`` as its predecessor (grace).
-    assert (state.current, state.confirmed, state.previous, state.confirmed_at) == (
-        3,
-        3,
-        2,
-        100,
-    )
-    assert await epochs.confirm("sp", 5, now=200)
-    state = await epochs.get("sp")
-    assert (state.confirmed, state.previous, state.confirmed_at) == (5, 3, 200)
-    # Equal or older never moves it (a replayed notice can't roll it back).
-    assert not await epochs.confirm("sp", 5, now=300)
-    assert not await epochs.confirm("sp", 4, now=300)
-    assert (await epochs.get("sp")).confirmed == 5
-
-
-async def test_a_step_raises_current_by_one_once_a_minute_never_the_floor(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    # Nothing to step from before the owner confirmed an epoch.
-    assert not await epochs.step("sp", 1, now=10_000, min_interval_s=60)
-    assert await epochs.get("sp") is None
-    await epochs.confirm("sp", 3, now=100)
-    assert not await epochs.step("sp", 5, now=10_000, min_interval_s=60)
-    assert not await epochs.step("sp", 4, now=150, min_interval_s=60)
-    assert await epochs.step("sp", 4, now=160, min_interval_s=60)
-    assert not await epochs.step("sp", 5, now=200, min_interval_s=60)
-    state = await epochs.get("sp")
-    assert (state.current, state.confirmed, state.previous) == (4, 3, 2)
-
-
-async def test_owner_confirm_never_lowers_current(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    await epochs.confirm("sp", 3, now=100)
-    await epochs.step("sp", 4, now=200, min_interval_s=60)
-    await epochs.confirm("sp", 4, now=300)
-    state = await epochs.get("sp")
-    assert (state.current, state.confirmed, state.previous) == (4, 4, 3)
-
-
-async def test_space_epoch_survives_a_publish_refresh(gfs_db):
-    repo, epochs = await _epochs(gfs_db)
-    await epochs.confirm("sp", 7, now=1)
-    await repo.upsert_space(
-        GlobalSpace(space_id="sp", owning_instance="o", name="renamed")
-    )
-    assert (await epochs.get("sp")).confirmed == 7
-
-
-async def test_space_epoch_is_forgotten_when_the_authority_key_is_repinned(gfs_db):
-    """A revoked seed holder must not leave an inflated epoch behind."""
-    repo, epochs = await _epochs(gfs_db, identity_public_key="aa" * 32)
-    await epochs.confirm("sp", 2**40, now=1)
-    assert await repo.set_space_authority(
-        "sp",
-        expected_pk="aa" * 32,
-        expected_cert=None,
-        new_pk="bb" * 32,
-        cert={"key_epoch": 1},
-    )
-    assert await epochs.get("sp") is None
-
-
-async def test_the_first_epoch_zero_has_predecessor_zero(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    await epochs.confirm("sp", 0, now=1)
-    assert (await epochs.get("sp")).previous == 0
-
-
 # ── Writer-key pins (migration 0015) ──────────────────────────────
-
-
-async def test_writer_keys_start_empty_and_carry_no_mode(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    keys = await epochs.get_writer_keys("sp")
-    assert keys is not None
-    assert keys.writer_pk_for(0) is None
-    # One publish mode since v_90: no mode is read or written any more.
-    assert not hasattr(keys, "publish_mode")
-    assert not hasattr(epochs, "set_publish_mode")
-    assert await epochs.get_writer_keys("unknown") is None
-
-
-async def test_writer_key_pins_keep_current_and_previous(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    assert await epochs.pin_writer_key("sp", 3, "k3", replace=False)
-    assert await epochs.pin_writer_key("sp", 4, "k4", replace=False)
-    state = await epochs.get_writer_keys("sp")
-    assert state.writer_pk_for(4) == "k4"
-    assert state.writer_pk_for(3) == "k3"
-    assert state.writer_pk_for(2) is None
-    assert await epochs.pin_writer_key("sp", 6, "k6", replace=False)
-    state = await epochs.get_writer_keys("sp")
-    assert (state.writer_key_epoch, state.writer_key_prev_epoch) == (6, 4)
-    assert state.writer_pk_for(3) is None
-
-
-async def test_writer_key_same_epoch_only_with_replace(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    await epochs.pin_writer_key("sp", 3, "k3", replace=False)
-    assert not await epochs.pin_writer_key("sp", 3, "evil", replace=False)
-    assert (await epochs.get_writer_keys("sp")).writer_pk_for(3) == "k3"
-    # Older never lands.
-    assert not await epochs.pin_writer_key("sp", 2, "old", replace=True)
-    assert await epochs.pin_writer_key("sp", 3, "owner", replace=True)
-    state = await epochs.get_writer_keys("sp")
-    assert state.writer_pk_for(3) == "owner"
-    # Replacing the same epoch keeps the previous slot untouched.
-    assert state.writer_key_prev_epoch is None
-
-
-async def test_writer_keys_are_forgotten_on_repin(gfs_db):
-    repo, epochs = await _epochs(gfs_db, identity_public_key="aa" * 32)
-    await epochs.pin_writer_key("sp", 3, "k3", replace=False)
-    assert await repo.set_space_authority(
-        "sp",
-        expected_pk="aa" * 32,
-        expected_cert=None,
-        new_pk="bb" * 32,
-        cert={"key_epoch": 1},
-    )
-    state = await epochs.get_writer_keys("sp")
-    assert state.writer_pk_for(3) is None
-
-
-async def test_upsert_keeps_the_writer_key_pins(gfs_db):
-    repo, epochs = await _epochs(gfs_db)
-    await epochs.pin_writer_key("sp", 3, "k3", replace=False)
-    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o", name="x"))
-    state = await epochs.get_writer_keys("sp")
-    assert state.writer_pk_for(3) == "k3"
 
 
 async def test_relay_bytes_sums_only_unexpired_relay_rows(gfs_db):
@@ -1143,34 +796,6 @@ async def test_relay_bytes_sums_only_unexpired_relay_rows(gfs_db):
     )
     assert await queue.relay_bytes(60) == 7
     assert await queue.relay_bytes(0) == 12
-
-
-async def test_recently_seen_subscribers_need_a_held_ws_session(gfs_db):
-    repo = SqliteGfsFederationRepo(gfs_db)
-    await _owner_row(repo)
-    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
-    for iid, status in (
-        ("seen", "active"),
-        ("never", "active"),
-        ("old", "active"),
-        ("banned", "banned"),
-    ):
-        await repo.upsert_instance(
-            ClientInstance(
-                instance_id=iid,
-                display_name=iid,
-                public_key="ab" * 32,
-                status=status,
-            )
-        )
-        await repo.add_subscriber(space_id="sp", instance_id=iid)
-    now = int(time.time())
-    for iid in ("seen", "banned"):
-        await repo.mark_relay_seen(iid, at=now)
-    await repo.mark_relay_seen("old", at=now - 2 * 86400)
-    # A bare hello (rtc_connections) earns nothing.
-    await repo.upsert_rtc_connection("never", transport="websocket")
-    assert await repo.list_recently_seen_subscribers("sp", within_s=86400) == {"seen"}
 
 
 async def test_recently_seen_follower_households_need_a_held_ws_session(gfs_db):
@@ -1780,27 +1405,6 @@ async def test_cluster_remove_stale_siblings_drops_only_stale_own_key_rows(gfs_d
     }
 
 
-async def test_add_subscriber_says_whether_it_created_the_seat(fed):
-    """The INSERT itself decides "new seat" (review M2), so two concurrent
-    subscribes for one seat can never both notify ``subscribe``."""
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="o", display_name="O", public_key="aa" * 32, status="active"
-        )
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sp-new", owning_instance="o", status="active")
-    )
-    await fed.upsert_instance(
-        ClientInstance(
-            instance_id="s", display_name="S", public_key="ab" * 32, status="active"
-        )
-    )
-    assert await fed.add_subscriber(space_id="sp-new", instance_id="s") is True
-    assert await fed.add_subscriber(space_id="sp-new", instance_id="s") is False
-    assert [s.instance_id for s in await fed.list_subscribers("sp-new")] == ["s"]
-
-
 # ── Space media cache (GFS 0025) ──────────────────────────────────────
 
 
@@ -1858,29 +1462,6 @@ async def test_space_media_totals_and_scope_bytes_are_trigger_kept(space_media):
     assert await space_media.scope_bytes("space", "s1") == 300
 
 
-async def test_space_media_servable_unless_expired_or_banned(space_media, fed):
-    await fed.upsert_instance(
-        ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="ok", owning_instance="o", status="active")
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="bad", owning_instance="o", status="banned")
-    )
-    await space_media.add_blob(_media_blob(1, space="ok"))
-    await space_media.add_blob(_media_blob(2, space="bad"))
-    await space_media.add_blob(_media_blob(3, space="ok", expires=1_500))
-    await space_media.add_blob(_media_blob(4, space="gone"))
-    # A channel whose id happens to equal a banned space id is not that space.
-    await space_media.add_blob(_media_blob(5, space="bad", kind="channel"))
-    assert await space_media.get_servable(f"{1:064x}", now=2_000) is not None
-    assert await space_media.get_servable(f"{2:064x}", now=2_000) is None
-    assert await space_media.get_servable(f"{3:064x}", now=2_000) is None
-    assert await space_media.get_servable(f"{4:064x}", now=2_000) is not None
-    assert await space_media.get_servable(f"{5:064x}", now=2_000) is not None
-
-
 async def test_space_media_a_delete_takes_only_the_scopes_blob(space_media):
     await space_media.add_blob(_media_blob(1, space="s1"))
     bid = f"{1:064x}"
@@ -1920,7 +1501,7 @@ async def test_space_media_owner_bytes_and_lru(space_media):
     assert (got.owner_kind, got.owner_id) == ("client", "k9")
 
 
-async def test_space_media_scope_lru_and_blob_ids(space_media):
+async def test_space_media_scope_lru(space_media):
     await space_media.add_blob(_media_blob(1, fetched=300))
     await space_media.add_blob(_media_blob(2, fetched=100))
     await space_media.add_blob(_media_blob(3, fetched=200, space="s2"))
@@ -1928,10 +1509,15 @@ async def test_space_media_scope_lru_and_blob_ids(space_media):
         f"{2:064x}",
         f"{1:064x}",
     ]
-    assert sorted(await space_media.scope_blob_ids("space", "s1")) == [
-        f"{1:064x}",
-        f"{2:064x}",
-    ]
+
+
+async def test_space_media_servable_unless_expired(space_media):
+    """v_96 — no space scope, so no banned-space filter: a blob is served
+    until it expires."""
+    await space_media.add_blob(_media_blob(1, kind="channel"))
+    await space_media.add_blob(_media_blob(3, kind="channel", expires=1_500))
+    assert await space_media.get_servable(f"{1:064x}", now=2_000) is not None
+    assert await space_media.get_servable(f"{3:064x}", now=2_000) is None
 
 
 async def test_space_media_touch_is_throttled(space_media):

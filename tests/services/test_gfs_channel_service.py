@@ -8,6 +8,7 @@ the code that checks them in production. Repositories are in-memory stubs.
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -44,8 +45,8 @@ from socialhome.global_server import domain as gfs_domain
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
@@ -78,9 +79,19 @@ class _Spaces:
     channels: dict[str, tuple[str, str]] = field(default_factory=dict)
     instances: dict[str, list[str]] = field(default_factory=dict)
     healed_at: dict[str, str] = field(default_factory=dict)
+    #: Spaces where no person of ours holds a seat any more (removed).
+    unseated: set[str] = field(default_factory=set)
 
     async def get(self, space_id):
         return self.spaces.get(space_id)
+
+    async def list_local_member_user_ids(self, space_id):
+        return [] if space_id in self.unseated else ["u-local"]
+
+    async def list_members(self, space_id):
+        if space_id in self.unseated:
+            return []
+        return [SimpleNamespace(user_id="u-local", role="member")]
 
     async def get_space_seed(self, space_id):
         return self.seeds.get(space_id)
@@ -459,7 +470,7 @@ async def env(tmp_dir, request):
 
 
 async def _queued(env, node: _Node) -> list:
-    await env.app[gfs_member_publish_key].wait_idle()
+    await env.app[gfs_fan_out_key].wait_idle()
     return await env.app[gfs_envelope_queue_repo_key].list_for(
         node.h.instance_id, now=0
     )
@@ -1149,7 +1160,7 @@ async def test_no_heal_after_a_delegated_rotation_while_the_owner_was_offline(
     env.owner.keys.epoch = 4
     clock[0] += chan_mod.HEAL_GRACE_S + 1
     conn = await env.owner.svc._conn_repo.get(env.owner.svc_conn_id)
-    await env.owner.svc._post_notice(conn, SPACE_ID, {"epoch": 3})
+    await env.owner.svc._post_notice(conn, SPACE_ID, {"channel_id": first, "epoch": 3})
     await env.owner.svc.announce_epoch(SPACE_ID)
     await env.owner.svc.wait_idle()
     assert env.owner.spaces.channels[SPACE_ID][0] == first
@@ -1698,7 +1709,9 @@ async def test_the_owners_notice_stays_on_its_registered_servers(env):
 async def test_a_delegated_admins_notice_retry_to_an_unconnected_server(env):
     unconnected = await _delegated_admin(env)
     item = chan_mod.GfsPublish(
-        space_id=SPACE_ID, event_type=chan_mod._KIND_NOTICE, payload={"epoch": 3}
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_NOTICE,
+        payload={"channel_id": env.other.spaces.channels[SPACE_ID][0], "epoch": 3},
     )
     svc, gfs = env.other.svc, env.other.gfs
     assert (await svc._retry_send(unconnected.id, item)).kind == "delivered"
@@ -1721,7 +1734,11 @@ async def test_a_refused_notice_address_is_classified(env):
         yield  # pragma: no cover
 
     env.other.gfs.anon_session = refused  # type: ignore[method-assign]
-    outcome = await env.other.svc._post_notice(unconnected, SPACE_ID, {"epoch": 3})
+    outcome = await env.other.svc._post_notice(
+        unconnected,
+        SPACE_ID,
+        {"channel_id": env.other.spaces.channels[SPACE_ID][0], "epoch": 3},
+    )
     assert outcome.kind == "transient"
 
 
@@ -2440,3 +2457,179 @@ async def test_a_global_config_change_does_not_resubscribe_a_seated_household(en
     await bus.publish(SpaceFeaturesApplied(space_id=SPACE_ID))
     await env.member.svc.wait_idle()
     assert not await repo.has_subscription(channel_id, env.member.h.instance_id)
+
+
+async def test_a_waiting_space_does_not_hold_back_another_spaces_first_send(
+    env, monkeypatch
+):
+    """A space's item waiting in the retry queue for a GFS (its epoch notice
+    hit the one-epoch-a-minute bound) holds back only that space's later
+    items there; another space's first send to the same GFS goes at once —
+    a new channel's first epoch notice must not wait a minute behind it."""
+    svc = env.other.svc
+    conn = svc._conn_repo.conn
+    sent: list[str] = []
+
+    async def _send(_self, c, item):
+        sent.append(item.space_id)
+        return chan_mod.PublishOutcome.delivered()
+
+    monkeypatch.setattr(type(svc), "_send", _send)
+
+    def _item(space_id):
+        return chan_mod.GfsPublish(
+            space_id=space_id, event_type=chan_mod._KIND_NOTICE, payload={"epoch": 1}
+        )
+
+    assert svc._retry.enqueue(conn.id, _item("sp-waiting"))
+    assert await svc._first_attempt(conn, _item("sp-new"))
+    assert sent == ["sp-new"]
+    # The waiting space's next item still queues behind its head.
+    assert not await svc._first_attempt(conn, _item("sp-waiting"))
+    assert sent == ["sp-new"]
+
+
+async def test_a_subscribe_the_gfs_says_not_yet_to_is_retried_until_seated(
+    env, monkeypatch
+):
+    """The owner rotated again while its notice waits out the step bound: a
+    member's subscribe with the new pass gets 429 + Retry-After (not yet).
+    It goes into the retry queue like a notice — never a 403 given up on —
+    and takes the seat when retried; a replay whose grant moved on is
+    dropped (the newer grant subscribes itself)."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    svc = env.other.svc
+    real = GfsChannelService._post
+    answers = [chan_mod.PublishOutcome.transient(30.0)]
+
+    async def not_yet(self, client, url, body, conn, **kw):
+        if url.endswith("/subscribe") and answers:
+            return answers.pop()
+        return await real(self, client, url, body, conn, **kw)
+
+    monkeypatch.setattr(GfsChannelService, "_post", not_yet)
+    conn = (await svc._capable())[0]
+    assert await svc.subscribe(SPACE_ID) == 0
+    assert svc._retry.pending(conn.id, SPACE_ID)
+    grant = await svc.current_grant(SPACE_ID)
+    item = chan_mod.GfsPublish(
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_SUBSCRIBE,
+        payload={"channel_id": grant.channel_id, "epoch": grant.epoch},
+    )
+    # The retry (what the queue sends when due) takes the seat.
+    assert (await svc._retry_send(conn.id, item)).kind == "delivered"
+    assert (SPACE_ID, grant.channel_id, grant.epoch) in svc._seated
+    # A replay for a grant that is no longer current has nothing left to
+    # send: done (no refusal WARNING), and it seats nothing.
+    svc._seated.clear()
+    stale = replace(item, payload={"channel_id": grant.channel_id, "epoch": 1})
+    assert (await svc._retry_send(conn.id, stale)).kind == "delivered"
+    assert not svc._seated
+
+
+async def test_a_household_removed_from_the_space_takes_no_seat(env, monkeypatch):
+    """Removed at a rotation (no person of ours holds a seat any more), a
+    household still holding its last grant must not keep asking the
+    channel's servers for a seat (on every reconnect): no POST at all."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    posts: list[str] = []
+    real = GfsChannelService._post
+
+    async def spy(self, client, url, body, conn, **kw):
+        posts.append(url)
+        return await real(self, client, url, body, conn, **kw)
+
+    monkeypatch.setattr(GfsChannelService, "_post", spy)
+    env.other.spaces.unseated.add(SPACE_ID)
+    assert await env.other.svc.subscribe(SPACE_ID) == 0
+    assert not [u for u in posts if u.endswith("/subscribe")]
+    conn = (await env.other.svc._capable())[0]
+    assert not env.other.svc._retry.pending(conn.id, SPACE_ID)
+
+
+async def test_a_refusal_of_a_grant_superseded_meanwhile_is_done_not_a_warning(
+    env, monkeypatch, caplog
+):
+    """The server refused the seat (its epoch closed) and by the answer our
+    grant has moved on: nothing is wrong — the newer grant subscribes
+    itself. Done, at INFO; the same refusal of a still-current grant stays
+    a WARNING (a real fault)."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    svc = env.other.svc
+    conn = (await svc._capable())[0]
+    grant = await svc.current_grant(SPACE_ID)
+    item = {"channel_id": grant.channel_id, "epoch": grant.epoch}
+    moved = replace(grant, epoch=grant.epoch + 1)
+
+    async def refused(self, client, url, body, conn, **kw):
+        return chan_mod.PublishOutcome.permanent()
+
+    real_grant = GfsChannelService.current_grant
+    calls = {"n": 0}
+
+    async def grant_seq(self, space_id):
+        calls["n"] += 1
+        return grant if calls["n"] == 1 else moved
+
+    monkeypatch.setattr(GfsChannelService, "_post", refused)
+    monkeypatch.setattr(GfsChannelService, "current_grant", grant_seq)
+    with caplog.at_level(logging.INFO):
+        outcome = await svc._post_subscribe(conn, SPACE_ID, item)
+    assert outcome.kind == "delivered"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # Still current at the answer: a permanent refusal, as before.
+    monkeypatch.setattr(GfsChannelService, "current_grant", real_grant)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert (await svc._post_subscribe(conn, SPACE_ID, item)).kind == "permanent"
+    assert "refused our seat for space" in caplog.text
+    assert [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+async def test_a_fresh_channel_is_announced_at_once_not_behind_the_old_ones_notice(
+    env,
+):
+    """The owner's notice for the OLD channel waits in the retry queue (the
+    GFS answered 429: one epoch a minute); then the authority rotates and a
+    fresh channel starts. Its FIRST notice (no step bound) must land at
+    once — not a minute behind the stale one (forever if the owner goes
+    away: the queue is in memory), or its first notice comes from a later
+    rotation, closing every pass of the epoch the grants carry. The stale
+    notice resolves with nothing sent (its channel was replaced)."""
+    old = await _channel_ready(env)
+    svc = env.owner.svc
+    conn = (await svc._capable())[0]
+    stale = chan_mod.GfsPublish(
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_NOTICE,
+        payload={"channel_id": old, "epoch": 2},
+    )
+    assert svc._retry.enqueue(conn.id, stale, retry_after_s=60.0)
+    assert await svc.reconcile(SPACE_ID, fresh=True) == "created"
+    fresh = env.owner.spaces.channels[SPACE_ID][0]
+    assert fresh != old
+    await svc.announce_epoch(SPACE_ID)  # queued behind the stale one
+    env.owner.gfs.sent = []
+    await svc._retry._run_due()  # due NOW (expedited), not in a minute
+    row = await env.app[gfs_channel_repo_key].get(fresh)
+    assert row is not None and row.epoch == _wire(env, fresh)
+    assert not svc._retry.pending(conn.id, SPACE_ID)
+
+
+async def test_a_notice_of_a_replaced_channel_sends_nothing(env):
+    old = await _channel_ready(env)
+    svc = env.owner.svc
+    conn = (await svc._capable())[0]
+    assert await svc.reconcile(SPACE_ID, fresh=True) == "created"
+    stale = chan_mod.GfsPublish(
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_NOTICE,
+        payload={"channel_id": old, "epoch": 2},
+    )
+    env.owner.gfs.sent = []
+    assert (await svc._retry_send(conn.id, stale)).kind == "delivered"
+    assert env.owner.gfs.sent == []

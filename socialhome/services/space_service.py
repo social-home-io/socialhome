@@ -351,7 +351,7 @@ from .space_member_guard import (
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
 from .space_purge import purge_space_and_media
-from .space_writer_cert_service import scope_weakened, writer_key_min_version
+from .space_writer_cert_service import scope_weakened
 
 log = logging.getLogger(__name__)
 
@@ -2382,21 +2382,6 @@ class SpaceService(
         if self._writer_certs is not None:
             if writer_cert is not None:
                 extras["writer_cert"] = writer_cert
-                # v_50 — the epoch's writer group key too (a v_90 publisher of a
-                # publicly readable space).
-                try:
-                    writer_key = await self._writer_certs.writer_key_for_peer(
-                        space.id, to_instance_id, epoch=writer_cert.get("epoch")
-                    )
-                except Exception:
-                    log.exception(
-                        "roster-snapshot: writer key for %s failed in %s",
-                        to_instance_id,
-                        space.id,
-                    )
-                    writer_key = None
-                if writer_key is not None:
-                    extras["writer_key"] = writer_key
             # v_51 — the recipient's private-space channel grant (readers
             # too, so not nested under the cert).
             grant = await self._writer_certs.channel_grant_for_peer(
@@ -3968,12 +3953,6 @@ class SpaceService(
             )
         ):
             await self._writer_certs_after_rights_change(space, updated)
-        if (
-            space.owner_instance_id == self._own_instance_id
-            and writer_key_min_version(updated) is not None
-            and writer_key_min_version(updated) != writer_key_min_version(space)
-        ):
-            await self._after_writer_key_scope_change(updated)
         if private_gfs_changed and space.owner_instance_id == self._own_instance_id:
             await self._after_private_gfs_change(updated)
         # Delegated-admin authority just flipped OFF on the space we host:
@@ -4013,24 +3992,6 @@ class SpaceService(
             actor_username=actor_username,
             features=replace(space.features, allowed_apps=apps),
         )
-
-    async def _after_writer_key_scope_change(self, space: Space) -> None:
-        """A config change gave the space we host a writer group key it
-        did not have (followers turned on, or the space entered a public
-        tier): pin the current epoch's key at every GFS listing it (the
-        owner's epoch notice) and hand it to the member households — each
-        gets its own credentials alone (:meth:`_send_credentials`) — without
-        waiting for the next rotation, or members' anonymous publishes are
-        refused until then."""
-        if self._member_gfs is not None:
-            try:
-                await self._member_gfs.announce_epoch(space.id)
-            except Exception:
-                log.exception("writer key: GFS notice failed for %s", space.id)
-        own = self._own_instance_id
-        for inst in await self._spaces.list_member_instances(space.id):
-            if inst != own:
-                await self._send_credentials(space.id, inst)
 
     async def enable_private_gfs_for_legacy_link(
         self, space_id: str, *, gfs_id: str | None = None
@@ -7582,9 +7543,13 @@ class SpaceService(
         """Owner side (v_96): re-send a seed-holding delegated admin's rekey
         to the follower households only the owner reaches. Returns how many.
 
-        The admin holds no row or mailbox card for a follower that came
-        through a GFS, and sync does not carry the key, so its rotation
-        alone leaves that follower reading nothing until the owner rotates.
+        The admin reaches a follower that came through a GFS only through
+        the follower's directory card (same path since v_96: held when the
+        follower has a mailbox and the owner's directory reached the
+        admin), and sync does not carry the key — so this is the backstop
+        for a follower without one, which the admin's rotation alone would
+        leave reading nothing until the owner rotates (a duplicate copy is
+        applied once: same key, same epoch).
         The owner, which applied the rekey (``meta`` — the admin's
         authority-signed ``space_content_key``, unchanged), sends it over the
         ordinary member rekey path (each copy with the household's own

@@ -204,7 +204,7 @@ redeemer's key-wrap key — which rode *inside* the request.
   is rebuilt from the recipient id + the sealed box rather than forwarded,
   so no caller can add a third field; there is no `from_instance` and no
   household transport signature, the same identity-free discipline
-  `POST /gfs/publish` follows. The answer is a uniform
+  `POST /gfs/channels/publish-anon` follows. The answer is a uniform
   `202 {"status":"accepted"}` for anything well-formed — a sender learns
   nothing about the recipient — with `400` / `413` / `429` for malformed,
   oversize or throttled. Every non-2xx is a transport failure, logged at
@@ -274,7 +274,8 @@ sealed ACK. Both keep the other's card on the pair's `space_instances` row,
 and later envelopes to a household whose card names a mailbox go to the
 mailbox id instead of the instance id. Once seated the redeemer also sends
 `SPACE_MEMBER_CARD`, and the host passes the cards on to the space's
-writer members in `SPACE_MAILBOX_DIRECTORY`, so every member can reach it.
+seated households (followers included, v_96) in `SPACE_MAILBOX_DIRECTORY`,
+so every member can reach it.
 An older issuer ignores the field. See [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 **The ACK always fits the relay.** A 1200 px space cover is dimension-capped,
@@ -380,7 +381,7 @@ timestamp. The GFS's own aiohttp access log writes the token segment as
 same for the owner's `DELETE /gfs/spaces/{space_id}/invite/{gfs_token}`),
 so it keeps *visitor IP → time* for "someone opened an invite link", not
 which link. That residual is the same shape of concession
-`POST /gfs/envelope` and `POST /gfs/publish` already make and has the
+`POST /gfs/envelope` and `POST /gfs/channels/publish-anon` already make and has the
 same answer: closing it needs a mix/onion egress and is out of scope. It
 is signed off in [`../principles.md`](../principles.md) alongside those.
 **Operator note:** a reverse proxy in front of the GFS keeps its own
@@ -547,7 +548,7 @@ the point of the relay is that neither household learns the other's
 address and the server learns neither's relationship to the other. There
 is no identity on the wire to authenticate, so a per-IP sliding window
 (`ENVELOPE_MAX_PER_MINUTE`, 600/min → 429) is the accountability handle,
-the same posture `POST /gfs/publish` takes.
+the same posture `POST /gfs/channels/publish-anon` takes.
 
 **Why 600 and not 30.** The first number treated this relay as a
 sideband for the redeem handshake. It is not: for a link-joined

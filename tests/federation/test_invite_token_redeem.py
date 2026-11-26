@@ -3884,3 +3884,27 @@ def test_without_a_space_service_the_seating_lock_is_per_space():
     coord = _make_coordinator()
     assert coord._seating_lock("a") is coord._seating_lock("a")
     assert coord._seating_lock("a") is not coord._seating_lock("b")
+
+
+async def test_the_joiner_is_seated_before_it_takes_its_channel_grant():
+    """Taking the grant subscribes at once, and a household with no seat in
+    the space asks for none — so the joiner's own member row is written
+    BEFORE its channel grant is taken, or its first seat is lost."""
+    sender, issuer, *_rest, issuer_repo, _im = _wire_pair(
+        {"space_id": "sp-meta", "created_by": "owner", "uses_remaining": 1},
+    )
+    issuer_repo.space_rows_for_get["sp-meta"] = _a_space("sp-meta")
+    issuer_certs, sender_certs = _FakeWriterCerts(), _FakeWriterCerts()
+    seated: list[bool] = []
+
+    async def _grant(space_id, raw):
+        seated.append(await sender._spaces.get_member(space_id, U_LOCAL) is not None)
+        return True
+
+    sender_certs.accept_channel_grant = _grant  # type: ignore[method-assign]
+    issuer.attach_writer_certs(issuer_certs)
+    sender.attach_writer_certs(sender_certs)
+    await sender.request_redeem(
+        "good-token", viewer_user_id=U_LOCAL, issuer_instance_id="issuer-1"
+    )
+    assert seated == [True]

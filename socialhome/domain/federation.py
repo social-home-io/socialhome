@@ -421,8 +421,8 @@ class FederationEventType(str, enum.Enum):
     #: key card (identity + key-wrap keys, its ONE mailbox at the space's
     #: GFS or none). Routing ``space_id``; encrypted payload ``{"card"}``.
     SPACE_MEMBER_CARD = "space_member_card"
-    #: v_89 — the host's member directory for one space, to WRITER-seat
-    #: member households only (never followers): ``{"cards": [card…],
+    #: v_89 — the host's member directory for one space, to every seated
+    #: household (followers too since v_96, same path): ``{"cards": [card…],
     #: "removed": [instance_id…], "snapshot": bool}`` in the encrypted
     #: payload; one bounded snapshot to a newcomer, deltas after that.
     #: Taken from the space's host only.

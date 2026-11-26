@@ -94,7 +94,7 @@ class SpaceZoneOutbound:
                 space_id,
                 event_type,
                 payload,
-                only_instances=await self._members.writer_households(space_id),
+                only_instances=await self._members.households(space_id),
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(

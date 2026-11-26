@@ -14,12 +14,12 @@ from .cluster import ClusterService
 from .cluster_relay import ClusterRelayFanOut
 from .config import GfsConfig
 from .envelope_relay import GfsEnvelopeRelay
+from .fan_out_workers import GfsFanOutWorkers
 from .federation import GfsFederationService
 from .highlight_publications import HighlightPublicationRegistry
 from .invites import GfsInviteService
 from .mailbox_tickets import MailboxTicketService
 from .mailboxes import GfsMailboxService
-from .member_publish import GfsMemberPublishService
 from .moment_delete_log import MomentDeleteLog
 from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
@@ -37,7 +37,6 @@ from .repositories import (
     AbstractGfsInviteRepo,
     AbstractGfsMailboxRepo,
     AbstractGfsMomentFollowRepo,
-    AbstractGfsSpaceEpochRepo,
     AbstractGfsUserPictureRepo,
     AbstractGfsUserRegistrationRepo,
 )
@@ -131,14 +130,10 @@ gfs_invite_repo_key: AppKey[AbstractGfsInviteRepo] = AppKey("gfs_invite_repo")
 #: writes nothing" rule has exactly one place it could be broken.
 gfs_invite_service_key: AppKey[GfsInviteService] = AppKey("gfs_invite_service")
 
-#: Newest proven content epoch per space (v_49 member publish).
-gfs_space_epoch_repo_key: AppKey[AbstractGfsSpaceEpochRepo] = AppKey(
-    "gfs_space_epoch_repo"
-)
-#: Trusted-mode member publish + the authority-signed epoch notice (v_49).
-gfs_member_publish_key: AppKey[GfsMemberPublishService] = AppKey("gfs_member_publish")
+#: The background fan-out workers that push accepted channel items.
+gfs_fan_out_key: AppKey[GfsFanOutWorkers] = AppKey("gfs_fan_out")
 
-#: Opaque channels for private spaces (v_51): registration, pins, epochs,
+#: Opaque channels (v_51 private, v_96 global): registration, pins, epochs,
 #: seats and relay — keyed by a random id, never by a space.
 gfs_channel_repo_key: AppKey[AbstractGfsChannelRepo] = AppKey("gfs_channel_repo")
 gfs_channel_service_key: AppKey[GfsChannelService] = AppKey("gfs_channel_service")

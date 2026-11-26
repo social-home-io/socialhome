@@ -150,7 +150,9 @@ async def test_mesh_member_gets_its_cert_sealed_end_to_end():
     )
 
 
-async def test_mesh_member_in_a_readable_space_gets_the_writer_key_too():
+async def test_mesh_member_in_a_readable_space_gets_its_cert_and_no_writer_key():
+    """v_96 — the space writer group key is retired: a readable space's
+    member gets its writer cert, never a ``writer_key``."""
     d, _b, c = _mesh_topology()
     repo = _MeshRepo(
         seated={d.instance_id},
@@ -160,7 +162,7 @@ async def test_mesh_member_in_a_readable_space_gets_the_writer_key_too():
         c.instance_id, d.instance_id, repo, space=_space(allow_subscribers=True)
     )
     out = await certs.peer_payload_hook("sp-1")(d.instance_id, {})
-    assert "writer_cert" in out and "writer_key" in out
+    assert "writer_cert" in out and "writer_key" not in out
 
 
 @pytest.mark.parametrize(

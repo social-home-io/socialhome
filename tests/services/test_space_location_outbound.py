@@ -126,10 +126,10 @@ class _MemberHouseholds:
     households of every space."""
 
     def __init__(self, households: frozenset[str] = frozenset({"house-m"})) -> None:
-        self.households = households
+        self._ids = households
 
-    async def writer_households(self, space_id: str) -> frozenset[str]:
-        return self.households
+    async def households(self, space_id: str) -> frozenset[str]:
+        return self._ids
 
 
 @pytest.fixture(autouse=True)

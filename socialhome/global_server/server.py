@@ -53,7 +53,6 @@ from .cluster_relay import (
     AUDIENCE_CHANNEL,
     AUDIENCE_COUNT_FOLLOWERS,
     AUDIENCE_FOLLOWERS,
-    AUDIENCE_SPACE,
     ClusterRelayFanOut,
 )
 from .config import (
@@ -68,13 +67,13 @@ from .envelope_relay import (
     build_envelope_rate_limit,
     build_mailbox_rate_limits,
 )
+from .fan_out_workers import GfsFanOutWorkers
 from .federation import GfsFederationService
 from .highlight_publications import HighlightPublicationRegistry
 from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
 from .mailbox_tickets import MailboxTicketService
 from .mailboxes import GfsMailboxService
 from .maintenance import GfsMaintenanceScheduler
-from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
 from .moment_delete_log import MomentDeleteLog
 from .moment_media import GfsMomentMediaStore
 from .moment_public_registry import MomentPublicRegistry
@@ -87,7 +86,6 @@ from .public import (
     build_listing_rate_limit,
     build_proof_rate_limit,
     build_public_rtc_rate_limit,
-    build_publish_rate_limit,
     build_register_rate_limit,
     build_signup_rate_limit,
     build_viewer_pages_rate_limit,
@@ -109,7 +107,6 @@ from .repositories import (
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsMomentMediaRepo,
-    SqliteGfsSpaceEpochRepo,
     SqliteGfsSpaceMediaDemandRepo,
     SqliteGfsSpaceMediaRepo,
     SqliteGfsUserPictureRepo,
@@ -235,8 +232,8 @@ def load_or_create_signing_seed(
         "0600). If this server was previously running a build that DERIVED "
         "its key from the instance id, the identity just changed: already "
         "paired households must re-pair before they can verify this server's "
-        "signed capability block, and until then they keep relaying with the "
-        "identified (legacy) publish body. Back this file up with the "
+        "signed capability block, and until then they use none of its "
+        "signed capabilities. Back this file up with the "
         "database — losing it forces a re-pair of every household.",
         path,
     )
@@ -344,7 +341,6 @@ class GfsApp:
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
             mailboxes=SqliteGfsMailboxRepo(db),
             mailbox_tickets=SqliteGfsMailboxTicketRepo(db),
-            space_epochs=SqliteGfsSpaceEpochRepo(db),
             channels=SqliteGfsChannelRepo(db),
             invites=SqliteGfsInviteRepo(db),
         )
@@ -358,12 +354,9 @@ class GfsApp:
         ws_registry = GfsWebSocketRegistry()
         federation = GfsFederationService(
             repos.federation,
-            ws_registry=ws_registry,
             # So withdrawing a listing takes its public invite pages down with
             # it rather than leaving a working side door.
             invite_repo=repos.invites,
-            # v_49: learn the content epoch from authority-signed post relays.
-            epoch_repo=repos.space_epochs,
         )
         # Owner-minted invite links (§24.8.5): a bulletin board holding an
         # opaque blob this server never parses and never counts fetches of.
@@ -469,8 +462,7 @@ class GfsApp:
             mailbox_ws_registry=mailbox_ws_registry,
             mailbox_config=config.envelope_mailbox,
         )
-        # Broadcast items (``/gfs/publish``, member publishes, channel items,
-        # public moments) ride the coalesced drain hint ONCE per peer node;
+        # Broadcast items (channel items, public moments) ride the coalesced drain hint ONCE per peer node;
         # each node pushes them to the sockets it holds (``cluster_relay``).
         cluster_fan_out = ClusterRelayFanOut(
             ws_registry=ws_registry, relay=envelope_relay
@@ -501,19 +493,10 @@ class GfsApp:
         # setters because each needs the other.
         envelope_relay.attach_cluster(cluster)
         cluster.attach_drain(_drain_hinted, holds=envelope_relay.holds)
-        # The same for the two single-recipient pushes of the federation
-        # service: an owner's ``new_subscriber`` notice rides the drain hint
-        # to the node holding the owner's socket, and a targeted ``to`` relay
-        # whose target is not on this node goes through the shared queue.
-        federation.attach_cluster(cluster)
-        federation.attach_relay(envelope_relay)
-        cluster.attach_subscriber_notice(federation.deliver_forwarded_notice)
         cluster_fan_out.attach_cluster(cluster)
         cluster.attach_forwarded_relays(cluster_fan_out.apply)
         envelope_relay.attach_fan_out(cluster_fan_out)
-        federation.attach_fan_out(cluster_fan_out)
         admin.attach_fan_out(cluster_fan_out)
-        cluster_fan_out.register_audience(AUDIENCE_SPACE, federation.audience_targets)
         cluster_fan_out.register_audience(
             AUDIENCE_FOLLOWERS,
             moment_public.audience_targets,
@@ -528,8 +511,6 @@ class GfsApp:
             seen=moment_public.counts_seen_cache,
             observe=moment_public.note_forwarded_counts,
         )
-        # Trusted-mode member publish (v_49): writer-cert-authorized items
-        # fanned out through the same push-or-queue path as envelopes.
         # What households pin from ``/gfs/info`` and sign into each request
         # as the addressee — plus the transitional aliases (accepted, never
         # served). One instance, so alias use is counted in one place.
@@ -541,20 +522,15 @@ class GfsApp:
         )
         # Listing requests that name their server are checked against it.
         federation.attach_addressee(addressee)
-        member_publish = GfsMemberPublishService(
-            federation=federation,
-            fed_repo=repos.federation,
-            epoch_repo=repos.space_epochs,
-            relay=envelope_relay,
-            gfs_instance_id=config.instance_id,
-            addressee=addressee,
-        )
-        # Opaque channels for private spaces (v_51): same fan-out workers and
-        # offline queue as member publish, keyed by a random channel id.
+        # Accepted channel items go out on background workers, through the
+        # same push-or-queue path as envelopes.
+        fan_out = GfsFanOutWorkers(relay=envelope_relay)
+        # Opaque channels (v_51 private, v_96 global), keyed by a random
+        # channel id.
         channels = GfsChannelService(
             federation=federation,
             channel_repo=repos.channels,
-            member_publish=member_publish,
+            fan_out=fan_out,
             gfs_instance_id=config.instance_id,
             addressee=addressee,
             nodes=cluster.live_node_count,
@@ -575,18 +551,13 @@ class GfsApp:
             cluster=cluster,
         )
         # Uploads to the space media cache are authorized by the same checks
-        # as ``/gfs/publish`` and the member publishes — no new key.
-        space_media_auth = GfsSpaceMediaAuth(
-            federation=federation,
-            member_publish=member_publish,
-            channels=channels,
-        )
+        # as the channel requests — no new key.
+        space_media_auth = GfsSpaceMediaAuth(channels=channels)
         # v_83 — a blob that left the cache comes back on demand: re-uploaded
         # or streamed by a holder asked over its socket (on any node).
         space_media_on_demand = GfsSpaceMediaOnDemand(
             store=space_media,
             demand=repos.space_media_demand,
-            federation=federation,
             channels=channels,
             config=config.space_media_on_demand,
             fan_out=cluster_fan_out,
@@ -631,7 +602,7 @@ class GfsApp:
             mailbox_tickets=mailbox_tickets,
             mailbox_ws_registry=mailbox_ws_registry,
             cluster_fan_out=cluster_fan_out,
-            member_publish=member_publish,
+            fan_out=fan_out,
             channels=channels,
             addressee=addressee,
             invites=invites,
@@ -655,15 +626,13 @@ class GfsApp:
             build_viewer_pages_rate_limit(self.client_ip, nodes=live_nodes),
             build_public_rtc_rate_limit(self.client_ip, nodes=live_nodes),
             build_ice_servers_rate_limit(self.client_ip, nodes=live_nodes),
-            build_publish_rate_limit(self.client_ip),
             build_signup_rate_limit(self.client_ip),
             build_register_rate_limit(self.client_ip),
             build_proof_rate_limit(self.client_ip),
             build_envelope_rate_limit(self.client_ip),
             build_envelope_multi_rate_limit(self.client_ip),
             *build_mailbox_rate_limits(self.client_ip, nodes=live_nodes),
-            build_member_publish_rate_limit(self.client_ip),
-            build_channel_rate_limit(self.client_ip),
+            build_channel_rate_limit(self.client_ip, nodes=live_nodes),
             build_space_media_rate_limit(self.client_ip, nodes=live_nodes),
             build_space_media_wanted_rate_limit(self.client_ip, nodes=live_nodes),
         ]
@@ -718,8 +687,7 @@ class GfsApp:
         a[K.gfs_mailbox_service_key] = self.services.mailboxes
         a[K.gfs_mailbox_tickets_key] = self.services.mailbox_tickets
         a[K.gfs_mailbox_ws_registry_key] = self.services.mailbox_ws_registry
-        a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
-        a[K.gfs_member_publish_key] = self.services.member_publish
+        a[K.gfs_fan_out_key] = self.services.fan_out
         a[K.gfs_channel_repo_key] = self.repos.channels
         a[K.gfs_channel_service_key] = self.services.channels
         a[K.gfs_invite_repo_key] = self.repos.invites
@@ -769,7 +737,7 @@ class GfsApp:
         # Recurring retention sweep — runs the purge again on its first tick
         # then hourly (the boot purge above stays for an immediate clean).
         await self.services.maintenance.start()
-        await self.services.member_publish.start()
+        await self.services.fan_out.start()
         # Logs the alias stragglers on a timer (and the last ones at stop).
         await self.services.addressee.start()
 
@@ -780,7 +748,7 @@ class GfsApp:
         # Delete-certificate drains move cursors in the DB (v_66).
         await self.services.moment_delete_log.close()
         await self.services.maintenance.stop()
-        await self.services.member_publish.stop()
+        await self.services.fan_out.stop()
         await self.services.addressee.stop()
         await self.services.cluster.stop()
         # After the cluster settled its unsent items (their offline copies),

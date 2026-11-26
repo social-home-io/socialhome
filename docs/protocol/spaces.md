@@ -23,7 +23,7 @@ may span any number of paired HFS instances.
 `SPACE_AGE_GATE_UPDATED`, `SPACE_MEMBER_PROFILE_UPDATED`. (A new GFS
 follower's author names travel host → follower through the GFS, not
 between households — see
-[discovery.md](./discovery.md#a-new-followers-author-names-v_61); removed in
+[discovery.md](./discovery.md#removed-in-v_96-the-space-keyed-relay); removed in
 v_96, see [Followers (v_96)](#followers-v_96).)
 
 `SPACE_MEMBER_PROFILE_UPDATED` carries a member's per-space display name
@@ -314,8 +314,8 @@ sequenceDiagram
 `SPACE_MEMBER_CARD` (v_89 — a member household hands the host its signed
 member card: its key-wrap key and its one GFS mailbox, or none) and
 `SPACE_MAILBOX_DIRECTORY` (v_89 — the host passes those cards on as
-`{cards, removed, snapshot}` to writer-seat member households only, never
-to followers); see
+`{cards, removed, snapshot}` to every seated household — a follower's
+too since v_96, same path); see
 [gfs-relay](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 `SPACE_AUTHORITY_ROTATED` is the owner's rotation of the space authority
@@ -548,9 +548,12 @@ within seconds).
 - **Rekey to followers:** the ordinary member rekey, one copy per
   household (per-peer certs and per-household passes make every copy
   unique, so a GFS multi upload cannot carry it). A seed-holding
-  delegated admin's rotation cannot reach a follower that came through a
-  GFS (it holds no row or card for it; sync does not carry the key): the
-  **owner**, on applying that authority-signed rekey, re-sends the same
+  delegated admin's rotation reaches a follower that came through a GFS
+  only through the follower's directory card (since the same-path fix the
+  admin holds one when the follower has a mailbox and the owner's directory
+  reached the admin; sync does not carry the key). As the backstop for a
+  follower without either, the **owner**, on applying that authority-signed
+  rekey, re-sends the same
   signed key meta over the ordinary member rekey path — each copy with that
   household's own cert and channel grant — to exactly the follower-only
   households it holds a `space_session` row for
@@ -596,10 +599,12 @@ within seconds).
   channels): a household not connected to a channel server, or below v_96,
   gets the others' items over federation and the §25.6 catch-up when the
   host is back. A GFS-reached follower is reached only through its own
-  channel seat (it has no mailbox card in the directory), or by the host,
-  which holds its space-session row: in a space with a channel,
+  channel seat (its card in the directory is only its mailbox address: a
+  member's lazy seat from it is no fan-out path), or by the host, which
+  holds its space-session row from the follow: in a space with a channel,
   `broadcast_to_space_members` and the picture queue skip a follower-only
-  household they hold no peer row and no mesh claim for, instead of a mesh
+  household they hold no path of their own for (no peer row or only that
+  directory seat, no mesh claim), instead of a mesh
   route discovery per event (N × M at 10 000 followers) — never for the
   content key or the roster events, and a member household never. The
   mesh-announce sweep (`SpaceSyncScheduler._tick_mesh_announce`) skips
@@ -706,10 +711,15 @@ pre-v_96 GFS followers that hold no roster). The app may group followers as
 Everyone in the space sees the same roster, followers included, with their
 role: the owner, admins, members and followers. Roster gossip
 (`SPACE_MEMBER_JOINED` / `_LEFT`), the roster snapshot and the digest treat
-a follower seat like any other seat. The mailbox directory stays a member
-surface (writer households only, the existing rule): a follower is reached
-through its own seat, not listed as a directory card. A GFS sees the
-channel's seats (identified, without the space id).
+a follower seat like any other seat — and so does the **mailbox
+directory** (v_96, same path): a follower household gives the host its
+member card, gets the host's directory (the host's card, the acting hosts'
+and every seated household's) and is listed in it like a member household,
+so its own traffic (comments, reactions, syncs) and the traffic to it ride
+the GFS mailboxes, never the instance-addressed relay. Cards are keys and
+addresses, not rights: what a follower may read or write stays the role's
+business (reader cert, inbound writer gate). A GFS sees the channel's
+seats (identified, without the space id) and mailbox ids.
 
 ### Cost (v_96)
 

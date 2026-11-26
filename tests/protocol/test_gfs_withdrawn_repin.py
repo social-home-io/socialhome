@@ -2,10 +2,11 @@
 
 End to end over a real GFS app and the real household publisher: the owner
 lists a global space (the GFS pins K1), withdraws the listing (the GFS keeps
-its row, the pin and its followers), then rotates the authority key because
+its row and the pin), then rotates the authority key because
 an admin lost the signing seed. The household's pin-only publish moves the
 pin to K2 — the listing stays withdrawn, none of the space's metadata is
-sent — and the GFS refuses a K1-signed relay from then on.
+sent — and the GFS pins K2 from then on (the join contact and listing
+checks verify against it; v_96 has no space-keyed relay to refuse).
 
 Marked ``@pytest.mark.security``.
 """
@@ -16,16 +17,12 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-)
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.global_server import create_gfs_app
-from socialhome.global_server.app_keys import gfs_fed_repo_key, gfs_federation_key
+from socialhome.global_server.app_keys import gfs_fed_repo_key
 from socialhome.global_server.domain import ClientInstance
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
@@ -36,24 +33,6 @@ pytestmark = pytest.mark.security
 
 _SPACE = "sp-withdrawn"
 _GFS = "gfs-e2e"
-
-
-def _relay(seed: bytes, *, post_id: str) -> dict:
-    payload = {
-        "space_id": _SPACE,
-        "epoch": 0,
-        "post_id": post_id,
-        "encrypted_payload": "Y2lwaGVy",
-    }
-    payload.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=_SPACE,
-            payload=payload,
-            space_seed=seed,
-        )
-    )
-    return payload
 
 
 async def _served_key(gfs) -> str:
@@ -125,16 +104,15 @@ async def world(tmp_path):
 
 async def test_a_rotation_moves_the_pin_of_a_withdrawn_listing(world):
     svc, gfs, space_repo, k1 = world
-    fed = gfs.server.app[gfs_federation_key]
     fed_repo = gfs.server.app[gfs_fed_repo_key]
 
     await svc.publish_space(_SPACE, _GFS)
     assert svc.pin_confirmed(_SPACE, _GFS)
     await svc.unpublish_space(_SPACE, _GFS)
     assert (await fed_repo.get_space(_SPACE)).withdrawn is True
-    # The withdrawn listing still relays under K1 — that is the gap.
-    await fed.publish_event(
-        _SPACE, AUTHORITY_EVENT_SPACE_POST_PUBLIC, _relay(k1.private_key, post_id="p1")
+    # The withdrawn listing still pins K1 — that is the gap.
+    assert (await fed_repo.get_space(_SPACE)).identity_public_key == (
+        k1.public_key.hex()
     )
 
     # The space goes private and is renamed, then the key rotates.
@@ -158,15 +136,7 @@ async def test_a_rotation_moves_the_pin_of_a_withdrawn_listing(world):
     assert row.identity_public_key == k2.public_key.hex()
     assert row.withdrawn is True
     assert row.name == "Listed once"  # nothing of the private space leaked
-    with pytest.raises(PermissionError):
-        await fed.publish_event(
-            _SPACE,
-            AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            _relay(k1.private_key, post_id="p2"),
-        )
-    await fed.publish_event(
-        _SPACE, AUTHORITY_EVENT_SPACE_POST_PUBLIC, _relay(k2.private_key, post_id="p3")
-    )
+    assert row.identity_public_key != k1.public_key.hex()
     assert await svc.repin_owed() == 0
 
 

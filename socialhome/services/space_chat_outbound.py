@@ -14,7 +14,7 @@ to the space's other member households:
 * **Writers only.** :meth:`FederationService.broadcast_to_space_members`
   is narrowed with ``only_instances`` to the households holding at least
   one live WRITER seat (owner / admin / moderator / member) by this
-  household's roster mirror (:meth:`SpaceWriterHouseholds.writer_households`),
+  household's roster mirror (:meth:`SpaceWriterHouseholds.households`),
   so a household whose people only follow the space receives nothing. A
   household with no live roster row yet (gossip still on its way) is left
   out too — fail closed; the §25.6 catch-up fills it in later.
@@ -173,7 +173,7 @@ class SpaceChatOutbound:
     ) -> None:
         targets = {
             iid
-            for iid in await self._audience.writer_households(space_id)
+            for iid in await self._audience.households(space_id)
             if await self._federation.space_member_supports(
                 iid, min_version=FederationCapability.MIN_FOR_SPACE_CHAT
             )

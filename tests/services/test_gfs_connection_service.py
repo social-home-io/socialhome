@@ -1872,7 +1872,7 @@ async def _probe(svc) -> bool:
     carried these checks is gone, v_96)."""
     ok = False
     for conn in await svc._repo.list_active():
-        ok = await svc._anonymous_publish_supported(conn) or ok
+        ok = await svc.envelope_relay_supported(conn) or ok
     return ok
 
 
@@ -1949,7 +1949,7 @@ def _signed_info(
     household may act on. The top-level ``anonymous_publish`` mirror stays for
     readability and is deliberately ignored by the client.
     """
-    caps = {"anonymous_publish": True} if capabilities is None else capabilities
+    caps = {"envelope_relay": True} if capabilities is None else capabilities
     sig, _real_suite = sign_capabilities(
         (kp or _GFS_KP).private_key, gfs_instance_id, caps
     )
@@ -1966,7 +1966,7 @@ def _stripped_info(server_name: str = "GFS g1") -> dict:
     """What an on-path attacker leaves behind: the unauthenticated flag still
     says ``true`` but the signed block is gone. Indistinguishable on the wire
     from an older GFS — and treated the same way (no publish + a warning)."""
-    return {"server_name": server_name, "anonymous_publish": True}
+    return {"server_name": server_name, "envelope_relay": True}
 
 
 class _AnonSession:
@@ -2117,7 +2117,7 @@ async def test_signed_block_denying_the_capability_is_not_tamper_flagged(env, ca
     """A VALIDLY signed ``anonymous_publish: false`` is a GFS honestly saying
     it can't do the anonymous relay. No publish, yes — but no tampering /
     missing-block warning, or the honest answer would look like an attack."""
-    session = _AnonSession(info=_signed_info(capabilities={"anonymous_publish": False}))
+    session = _AnonSession(info=_signed_info(capabilities={"envelope_relay": False}))
     svc, _kp = await _publish_event_svc(env, session, space_id="sp-no", gfs_ids=["g1"])
     logger = "socialhome.services.gfs_connection_service"
     with caplog.at_level(logging.WARNING, logger=logger):
@@ -2126,51 +2126,6 @@ async def test_signed_block_denying_the_capability_is_not_tamper_flagged(env, ca
     msgs = _warnings(caplog)
     assert not any("FAILED verification" in m for m in msgs)
     assert not any("no signed capability block" in m for m in msgs)
-
-
-async def test_verified_capability_cannot_be_downgraded_in_process(env, caplog):
-    """In-process ratchet: once a connection has been seen advertising
-    ``anonymous_publish`` under a VALID signature, a later fetch that lacks it
-    does NOT flip the cache back. A GFS cannot legitimately lose the
-    capability, so a mid-life downgrade is an attack (or a broken proxy) — the
-    household keeps relaying identity-free and logs the attempt."""
-    session = _AnonSession(info=_signed_info())
-    svc, _kp = await _publish_event_svc(env, session, space_id="sp-rat", gfs_ids=["g1"])
-    probed = await _probe(svc)
-    assert probed
-    # The block disappears (attacker on-path, or a proxy eating the field).
-    session.info = _stripped_info()
-    logger = "socialhome.services.gfs_connection_service"
-    with caplog.at_level(logging.WARNING, logger=logger):
-        await svc.refresh_connection_metadata("g1")
-        probed = await _probe(svc)
-    assert probed
-    assert any("downgrade ignored" in m for m in _warnings(caplog))
-
-
-async def test_the_ratchet_does_not_survive_a_restart(env):
-    """The ratchet is RAM-only: a fresh process starts from "unknown" and has
-    to learn the capability again from a signed block. (Persisting it would
-    pin a remote server's build state in this household's database.)"""
-    session = _AnonSession(info=_signed_info())
-    svc, _kp = await _publish_event_svc(
-        env, session, space_id="sp-boot", gfs_ids=["g1"]
-    )
-    probed = await _probe(svc)
-    assert probed
-
-    _db, conn_repo = env
-    session.info = _stripped_info()
-    restarted = GfsConnectionService(
-        conn_repo, http_client=session, publish_client=session
-    )
-    restarted.attach_publish_context(
-        space_repo=None,
-        own_instance_id="alpha.home",
-        own_signing_key=generate_identity_keypair().private_key,
-    )
-    # The restarted process has not seen a signed block: nothing is proven.
-    assert not await _probe(restarted)
 
 
 async def test_failed_info_probe_is_negative_cached_for_the_ttl(env, monkeypatch):
@@ -2185,14 +2140,14 @@ async def test_failed_info_probe_is_negative_cached_for_the_ttl(env, monkeypatch
     svc, _kp = await _publish_event_svc(env, session, space_id="sp-ttl", gfs_ids=["g1"])
     (conn,) = await env[1].list_gfs_for_space("sp-ttl")
 
-    assert not await svc._anonymous_publish_supported(conn)
+    assert not await svc.envelope_relay_supported(conn)
     assert svc.capability_unknown(conn)
     clock[0] += GFS_INFO_NEGATIVE_TTL_S - 0.1
-    assert not await svc._anonymous_publish_supported(conn)
-    assert not await svc._anonymous_publish_supported(conn)
+    assert not await svc.envelope_relay_supported(conn)
+    assert not await svc.envelope_relay_supported(conn)
     assert _info_probes(session) == 1
     clock[0] += 0.2
-    assert not await svc._anonymous_publish_supported(conn)
+    assert not await svc.envelope_relay_supported(conn)
     assert svc.capability_unknown(conn)
     assert _info_probes(session) == 2
 
@@ -2246,7 +2201,7 @@ async def test_pair_does_not_seed_the_capability_from_an_unsigned_flag(env):
                     "gfs_instance_id": "fresh-gfs",
                     "public_key": gfs_kp.public_key.hex(),
                     "server_name": "Fresh GFS",
-                    "anonymous_publish": True,
+                    "envelope_relay": True,
                 },
             ),
             "POST": (200, {"status": "registered"}),
@@ -2500,10 +2455,10 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
             )
             # Learned from the signed block, not the bare flag: the pinned key
             # verified the signature over {gfs_instance_id, capabilities}.
-            assert svc._anon_publish[conn.id] is True
+            assert svc._envelope_relay[conn.id] is True
             # A refresh re-verifies the same block and must not downgrade.
             await svc.refresh_connection_metadata(conn.id)
-            assert svc._anon_publish[conn.id] is True
+            assert svc._envelope_relay[conn.id] is True
     finally:
         await db.shutdown()
 
@@ -2520,7 +2475,7 @@ async def test_envelope_relay_supported_reads_the_signed_block(env):
     session = _AnonSession(
         info=_signed_info(
             gfs_instance_id=conn.gfs_instance_id,
-            capabilities={"anonymous_publish": True, "envelope_relay": True},
+            capabilities={"envelope_relay": True},
         ),
     )
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
@@ -2537,7 +2492,7 @@ async def test_envelope_relay_absent_from_the_block_is_false(env):
     session = _AnonSession(
         info=_signed_info(
             gfs_instance_id=conn.gfs_instance_id,
-            capabilities={"anonymous_publish": True},
+            capabilities={"invite_links": True},
         ),
     )
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
@@ -2577,7 +2532,7 @@ async def test_envelope_relay_known_is_warmed_by_an_info_fetch_without_probing(e
     session = _AnonSession(
         info=_signed_info(
             gfs_instance_id=conn.gfs_instance_id,
-            capabilities={"anonymous_publish": True, "envelope_relay": True},
+            capabilities={"envelope_relay": True},
         ),
     )
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
@@ -2593,7 +2548,7 @@ async def test_envelope_relay_known_is_warmed_by_an_info_fetch_without_probing(e
 def _relay_info(conn) -> dict:
     return _signed_info(
         gfs_instance_id=conn.gfs_instance_id,
-        capabilities={"anonymous_publish": True, "envelope_relay": True},
+        capabilities={"envelope_relay": True},
     )
 
 
@@ -2687,7 +2642,7 @@ class _InviteSession(_AnonSession):
 def _invite_capable_info(conn):
     return _signed_info(
         gfs_instance_id=conn.gfs_instance_id,
-        capabilities={"anonymous_publish": True, "invite_links": True},
+        capabilities={"invite_links": True},
     )
 
 
@@ -2745,7 +2700,7 @@ async def test_publish_invite_refuses_a_server_without_the_capability(env):
     session = _InviteSession(
         info=_signed_info(
             gfs_instance_id=conn.gfs_instance_id,
-            capabilities={"anonymous_publish": True},
+            capabilities={"envelope_relay": True},
         ),
     )
     svc, _conn, _pub = await _invite_svc(repo, session, "inv-2")
@@ -2991,7 +2946,7 @@ async def test_publish_body_carries_the_owner_cert_after_a_rotation(env):
     session = _AnonSession(
         info=_signed_info(
             gfs_instance_id="inst-g1",
-            capabilities={"anonymous_publish": True, "authority_rotation": True},
+            capabilities={"authority_rotation": True},
         )
     )
     svc, owner, owner_id, k2 = await _rotated_publish_svc(env, session)
@@ -3089,23 +3044,6 @@ class _HeaderResp(_StubResp):
 
 
 # ─── No identified body, ever (the legacy fallback is gone) ──────────────
-
-
-async def test_a_stale_probe_failure_does_not_make_a_known_old_gfs_unknown(env):
-    """A GFS already known to lack ``anonymous_publish`` whose later refresh
-    failed once is still a known "no" — not "unknown", which would park
-    retries forever."""
-    session = _ScriptedPublishSession([], info=_stripped_info())
-    svc, _ = await _publish_event_svc(env, session, space_id="s1", gfs_ids=["g1"])
-    (conn,) = await env[1].list_gfs_for_space("s1")
-    await svc._fetch_gfs_info(conn)
-    assert svc._anon_publish[conn.id] is False
-    session.info_down = True
-    await svc._fetch_gfs_info(conn)  # a blip on a reconnect-time refresh
-    session.info_down = False
-    # The verified "no" stands through the blip.
-    assert svc._anon_publish[conn.id] is False
-    assert not await _probe(svc)
 
 
 # ─── v_49: member publish capability + host dedupe skip ────────────────
@@ -3463,7 +3401,7 @@ def _served(
     per-node-id server that lists none), and *served_key* (default: *kp*'s)
     as ``public_key``."""
     signer = kp or _GFS_KP
-    caps: dict = {"anonymous_publish": True, "private_channels": True}
+    caps: dict = {"envelope_relay": True, "private_channels": True}
     if replaces is not None:
         caps["replaces"] = list(replaces)
     info = _signed_info(gfs_instance_id=instance_id, kp=signer, capabilities=caps)
@@ -3505,7 +3443,7 @@ async def test_a_new_id_under_the_pinned_key_is_adopted_on_reconnect(env, caplog
     assert rebound == ["g1"]
     assert any("gfs-0" in m and "gfs-shared" in m for m in _logs(caplog, logging.INFO))
     # The capability block verified under (pinned key, new id): trusted.
-    assert svc._anon_publish["g1"] is True
+    assert svc._envelope_relay["g1"] is True
     assert _logs(caplog, logging.WARNING) == []
     # The ids the server signed that it replaces (grants issued before).
     assert svc.known_instance_ids(got) == frozenset({"gfs-shared", "gfs-0", "gfs-1"})
@@ -3534,7 +3472,7 @@ async def test_a_new_id_under_another_key_is_refused_with_a_warning(env, caplog)
         await svc.refresh_connection_metadata("g1")
     assert (await repo.get("g1")).gfs_instance_id == "gfs-0"
     assert rebound == []
-    assert svc._anon_publish.get("g1") is False
+    assert svc._envelope_relay.get("g1") is not True
     key_warnings = [
         m
         for m in _logs(caplog, logging.WARNING)
@@ -3557,7 +3495,7 @@ async def test_the_pinned_key_served_beside_a_block_it_did_not_sign_is_refused(e
     await svc.refresh_connection_metadata("g1")
     assert (await repo.get("g1")).gfs_instance_id == "gfs-0"
     assert rebound == []
-    assert svc._anon_publish.get("g1") is False
+    assert svc._envelope_relay.get("g1") is not True
 
 
 async def test_an_unsigned_descriptor_with_a_new_id_is_not_adopted(env):
@@ -3633,7 +3571,7 @@ async def test_a_lateral_id_under_the_pinned_key_never_moves_the_pin(env, caplog
     assert rebound == []
     assert _logs(caplog, logging.WARNING) == []
     # The capability block still verifies (same key): publishing works.
-    assert svc._anon_publish["g1"] is True
+    assert svc._envelope_relay["g1"] is True
 
 
 async def test_a_mixed_cluster_never_flips_and_converges_on_the_shared_id(env):
@@ -3715,7 +3653,7 @@ async def test_the_addressee_key_is_bound_only_once_the_server_proves_it(env):
     assert svc.addressee_key_for(conn) is None
     info = _signed_info(
         gfs_instance_id="gfs-shared",
-        capabilities={"anonymous_publish": True, "addressee_key": True},
+        capabilities={"addressee_key": True},
     )
     info.update(gfs_instance_id="gfs-shared", public_key=_GFS_KP.public_key.hex())
     svc._http_client.info = info  # type: ignore[union-attr]
@@ -3729,7 +3667,7 @@ async def test_forget_addressee_key_until_the_next_verified_fetch(env):
     conn = await repo.get("g1")
     info = _signed_info(
         gfs_instance_id="gfs-shared",
-        capabilities={"anonymous_publish": True, "addressee_key": True},
+        capabilities={"addressee_key": True},
     )
     info.update(gfs_instance_id="gfs-shared", public_key=_GFS_KP.public_key.hex())
     svc, _rebound = _rebind_svc(repo, info)
@@ -3962,9 +3900,7 @@ class _ListingSession:
         self.info = _signed_info(
             gfs_instance_id=gid,
             kp=kp or _LISTED_KP,
-            capabilities=caps
-            if caps is not None
-            else {"anonymous_publish": True, "private_channels": True},
+            capabilities=caps if caps is not None else {"private_channels": True},
         )
         self.status = status
         self.gets: list[str] = []
@@ -4142,7 +4078,7 @@ def _proving_session(
     session = _ListingSession(
         gid,
         caps={
-            "anonymous_publish": True,
+            "envelope_relay": True,
             "private_channels": True,
             "proof_of_possession": True,
             **(extra_caps or {}),
@@ -4196,7 +4132,7 @@ async def test_a_listing_target_failing_the_proof_is_skipped(env, case, caplog):
     [target] = await svc.server_targets("sp")
     with caplog.at_level(logging.WARNING):
         assert not await svc.private_channels_supported(target)
-        assert not await svc._anonymous_publish_supported(target)
+        assert not await svc.envelope_relay_supported(target)
     assert "failed proof of possession" in caplog.text
     assert target.id not in svc._listing_proven_at
 
@@ -4266,7 +4202,7 @@ async def test_a_blip_on_re_proof_keeps_the_previous_verdict(env, monkeypatch):
     clock[0] += gfs_connection_service.LISTING_PROOF_TTL_S + 1
     session.get = lambda url, **kw: _StubResp(503, {})  # type: ignore[method-assign]
     assert await svc.private_channels_supported(target)
-    assert await svc._anonymous_publish_supported(target)
+    assert await svc.envelope_relay_supported(target)
     assert svc.capability_unknown(target)
 
 
@@ -4420,7 +4356,7 @@ async def test_a_delegating_space_lists_on_a_gfs_that_rotates(env):
     session = _AnonSession(
         info=_signed_info(
             gfs_instance_id="inst-g1",
-            capabilities={"anonymous_publish": True, "authority_rotation": True},
+            capabilities={"authority_rotation": True},
         )
     )
     svc = await _delegating_publish_svc(env, session)
@@ -4439,7 +4375,7 @@ async def test_a_space_without_delegation_still_lists_on_an_older_gfs(env):
 # (durable re-pin, withdrawn listings; owner decisions D2 / D4, 2026-11-15)
 
 _REPIN_CAPS = {
-    "anonymous_publish": True,
+    "envelope_relay": True,
     "authority_rotation": True,
     "withdrawn_repin": True,
 }
@@ -4676,7 +4612,7 @@ async def test_no_withdrawn_repin_to_a_gfs_that_never_proved_it(env, caplog):
     """An older server would not fold ``withdrawn`` into the signed bytes
     (403) — and a plain publish would list the space again. So nothing is
     sent, the re-pin stays owed and no seed goes out."""
-    session = _PinSession(caps={"anonymous_publish": True, "authority_rotation": True})
+    session = _PinSession(caps={"authority_rotation": True})
     svc, *_ = await _withdrawn_then_rotated(env, session)
     before = len(session.publishes())
     with caplog.at_level(logging.WARNING):
@@ -4819,7 +4755,7 @@ async def test_unpublish_names_the_server_it_is_for(env):
     """The withdrawal is signed for ONE server (``gfs_key`` inside the
     signed bytes), so that server cannot replay it to another GFS the space
     is listed on. An older server gets today's body."""
-    for caps, bound in ((_REPIN_CAPS, True), ({"anonymous_publish": True}, False)):
+    for caps, bound in ((_REPIN_CAPS, True), ({"envelope_relay": True}, False)):
         session = _PinSession(caps=caps)
         svc, owner, owner_id, _k2 = await _rotated_publish_svc(env, session)
         await svc._repo.publish_space("sp-rot", "g1")
@@ -4850,7 +4786,7 @@ async def test_a_listing_publish_names_the_server_it_is_for(env):
     inside the signed bytes): the server that received it cannot replay it
     to another GFS the owner is registered on and list the space there. An
     older server (no ``withdrawn_repin``) gets today's body."""
-    for caps, bound in ((_REPIN_CAPS, True), ({"anonymous_publish": True}, False)):
+    for caps, bound in ((_REPIN_CAPS, True), ({"envelope_relay": True}, False)):
         session = _PinSession(caps=caps)
         svc, owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
         svc._record_capabilities(await svc._repo.get("g1"), session.info)

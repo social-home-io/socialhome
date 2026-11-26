@@ -884,38 +884,15 @@ async def _gfs_world(gfs):
     return owner, owner_id, k1, k2, cert
 
 
-async def test_gfs_refuses_old_key_relays_handoffs_and_queries_after_rotation(gfs):
-    from socialhome.authority_sig import (
-        AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-        AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-    )
-
-    owner, owner_id, k1, k2, cert = await _gfs_world(gfs)
+async def test_gfs_pins_the_rotated_key_and_takes_no_space_keyed_request(gfs):
+    """After the owner's certified re-pin the GFS pins K2. Since v_96 (P7)
+    it takes no space-authority-signed relay, key handoff or roster query
+    at all — the paths an old key could have used are gone."""
+    owner, owner_id, _k1, k2, cert = await _gfs_world(gfs)
     await _gfs_publish(gfs, owner, owner_id, "sp-g", k2.public_key.hex(), cert)
-    for event_type in (
-        AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-    ):
-        payload = _signed(k1.private_key, event_type, "sp-g", {"blob": "x"})
-        with pytest.raises(PermissionError):
-            await gfs.publish_event("sp-g", event_type, payload)
-        ok = _signed(k2.private_key, event_type, "sp-g", {"blob": event_type})
-        assert await gfs.publish_event("sp-g", event_type, ok) == []
-    ts = datetime.now(UTC).isoformat()
-    q = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-        space_id="sp-g",
-        payload={"space_id": "sp-g", "ts": ts},
-        space_seed=k1.private_key,
-    )
-    with pytest.raises(PermissionError):
-        await gfs.list_subscribers_with_keys(
-            "sp-g",
-            ts=ts,
-            authority_sig=q["authority_sig"],
-            authority_sig_suite=q["authority_sig_suite"],
-        )
+    assert (await gfs.get_space("sp-g")).identity_public_key == k2.public_key.hex()
+    for gone in ("publish_event", "list_subscribers_with_keys", "subscribe"):
+        assert not hasattr(gfs, gone)
 
 
 @pytest.mark.parametrize(

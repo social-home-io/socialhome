@@ -4,7 +4,7 @@ The owner household publishes, inside its signed GFS listing, the keys a
 household that never paired with it needs to seal a join request to it:
 its instance id, identity key, key-wrap key and the key-wrap key's
 self-signature. The set is signed with the **space authority key** — the
-key the GFS already pins for the space (it authorizes ``/gfs/publish``) and
+key the GFS already pins for the space (TOFU on first publish) and
 that the listing serves as ``identity_public_key`` — so a GFS cannot swap
 the keys without breaking a signature it cannot make.
 

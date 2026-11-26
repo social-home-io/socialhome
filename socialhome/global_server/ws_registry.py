@@ -2,8 +2,8 @@
 
 Spec §24.12. Each paired Social Home household keeps a persistent
 WebSocket against ``GET /gfs/ws``; the registry maps ``instance_id`` to
-the live :class:`aiohttp.web.WebSocketResponse` so :class:`GfsFederationService`
-can push relay events directly to subscribers without an HTTP callback.
+the live :class:`aiohttp.web.WebSocketResponse` so the relay can push
+channel items, envelopes and moment frames to it without an HTTP callback.
 
 Single-connection-per-instance: when a new connection arrives for an
 ``instance_id`` that already has one open, the old socket is evicted with
@@ -291,8 +291,8 @@ class GfsWebSocketRegistry:
             )
         try:
             # Inside the guard on purpose: an unencodable frame used to escape
-            # ``send`` as a TypeError, past ``_deliver_one``, past the fan-out
-            # gather, and out of the relay handler as a 500. A frame we cannot
+            # ``send`` as a TypeError, past the fan-out gather, and out of
+            # the relay handler as a 500. A frame we cannot
             # serialise is simply undeliverable — report it like any other
             # failed push.
             raw = _dumps(payload)

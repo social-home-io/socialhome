@@ -1147,18 +1147,17 @@ peers   = []
 # space's pictures. A cache, not storage — size it to your disk:
 # max_bytes is all space media held here (0 turns the cache off and stops
 # advertising it); when an upload would pass it, the owner holding the most
-# bytes — a household across all its spaces, or for channel blobs the
-# uploader's network prefix — loses its own least recently fetched blobs first —
-# never one global order and never per scope, so one household can't
-# flush the others with many spaces. Blobs expire
-# after ttl_seconds (600 – 604800) whatever the uploader asks. One space (or
-# a private space's opaque channel) holds at most space_max_bytes live —
+# bytes — the uploader's network prefix — loses its own least recently
+# fetched blobs first — never one global order and never per scope, so one
+# prefix can't flush the others with many channels. Blobs expire
+# after ttl_seconds (600 – 604800) whatever the uploader asks. One space's
+# opaque channel (the only scope) holds at most space_max_bytes live —
 # past it, its own least recently fetched blobs are dropped for the new
 # one — and uploads at most space_uploads_per_hour blobs an hour (429 past
 # it). One client network prefix (IPv6 /48, IPv4 /24) uploads at most ip_bytes_per_hour
 # bytes an hour across every scope (429 past it; counted in the shared
-# database, so cluster-wide). A private space's channel takes media while
-# a member household holds a seat in it. In a cluster every node shares
+# database, so cluster-wide). A channel takes media while a member
+# household holds a seat in it. In a cluster every node shares
 # data_dir, so any node serves a blob another took. Env overrides:
 # GFS_SPACE_MEDIA_MAX_BYTES, GFS_SPACE_MEDIA_TTL_SECONDS,
 # GFS_SPACE_MEDIA_SPACE_MAX_BYTES, GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR,

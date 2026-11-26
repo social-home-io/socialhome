@@ -1,13 +1,11 @@
 """Wire shape of the GFS space media cache — upload authorization.
 
 A household uploads one encrypted space file to a GFS — ``PUT
-/gfs/media/{blob_id}``, the one scope-free path — under one of two
-**scopes**, named only inside the signed claim (never in the URL):
-
-* ``space`` — a space listed on the GFS (public / global, or private but
-  listed for invite links);
-* ``channel`` — a PRIVATE space reached through its v_51 opaque channel: the
-  GFS learns only the random channel id, never the space.
+/gfs/media/{blob_id}``, the one scope-free path — under a **scope** named
+only inside the signed claim (never in the URL). Since v_96 the one scope is
+``channel``: a space's opaque channel (v_51 private, v_96 global) — the GFS
+learns only the random channel id, never the space. (The space-keyed
+``space`` scope went with the space-keyed relay, owner decision Q5.)
 
 The raw blob is the body, so the authorization rides in ONE header,
 :data:`SPACE_MEDIA_AUTH_HEADER`: the base64url of a canonical JSON object.
@@ -18,25 +16,15 @@ Every kind carries the claim
 (``ts`` and ``expires_at`` unix seconds, ``size`` the body's byte count —
 checked against the body, which is read only after the signature verified)
 plus ``auth`` (the kind), ``sig`` and ``sig_suite``. Each kind reuses what the
-GFS already verifies for that scope — no new key, roster or registration:
+GFS already verifies for the channel (the checks ``/gfs/channels/*`` make) —
+no new key, roster or registration:
 
-* scope ``space``:
-
-  * :data:`AUTH_AUTHORITY` — a space-authority signature (any seed holder)
-    over the claim under
-    :data:`~socialhome.authority_sig.AUTHORITY_EVENT_SPACE_MEDIA_PUT`,
-    verified against the space's TOFU-pinned key. Names nobody.
-  * :data:`AUTH_WRITER_KEY` — ``epoch``; ``sig`` by the space's per-epoch
-    writer GROUP key the GFS pinned, over
-    :meth:`SpaceMediaClaim.writer_signing_bytes`. Names nobody.
-
-* scope ``channel`` (the checks ``/gfs/channels/*`` already make):
-
-  * :data:`AUTH_CHANNEL` — ``sig`` by the channel key the GFS pinned at
-    registration (what registration, epoch notices and unregister are
-    signed with) over :data:`CHANNEL_MEDIA_PUT_PREFIX` + the claim. Names
-    nobody.
-  * :data:`AUTH_WRITER_KEY` — the channel writer key pinned for ``epoch``.
+* :data:`AUTH_CHANNEL` — ``sig`` by the channel key the GFS pinned at
+  registration (what registration, epoch notices and unregister are signed
+  with) over :data:`CHANNEL_MEDIA_PUT_PREFIX` + the claim. Names nobody.
+* :data:`AUTH_WRITER_KEY` — ``epoch``; ``sig`` by the channel writer key
+  pinned for ``epoch``, over :meth:`SpaceMediaClaim.writer_signing_bytes`.
+  Names nobody.
 
 No kind names a household (the identified writer-cert kinds went with the
 identified member publish, v_90).
@@ -47,8 +35,8 @@ scope_id + "|" + ciphertext)`` — not the bare SHA-256 of the bytes, so the
 same ciphertext has a different address in every scope. The GFS recomputes
 it on upload from the claim's scope and refuses a mismatch; a reader checks
 it with the scope id it knows. So a blob belongs to exactly ONE scope:
-nobody who fetched a space's ciphertext can store it under their own scope
-at that space's address — no cross-scope claims, no first-storer
+nobody who fetched a channel's ciphertext can store it under their own scope
+at that channel's address — no cross-scope claims, no first-storer
 ownership. The construction is suite-tagged (:data:`ADDR_SUITE_SM1`, the
 claim's ``addr_suite``); receivers refuse an unknown suite.
 
@@ -64,7 +52,6 @@ from dataclasses import dataclass
 
 import orjson
 
-from ..authority_sig import AUTHORITY_EVENT_SPACE_MEDIA_PUT, authority_signing_bytes
 from ..canonical_json import canonical_bytes
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
 from .gfs_channel import InvalidChannelWire, valid_channel_id
@@ -79,22 +66,19 @@ SPACE_MEDIA_AUTH_MAX_CHARS: int = 4096
 
 #: Key of the cache's entry in the signed ``/gfs/info`` capability block:
 #: ``{"max_blob_bytes": int, "ttl_s": int, "space_max_bytes": int,
-#: "space_uploads_per_hour": int, "scopes": ["channel", "space"]}``.
+#: "space_uploads_per_hour": int, "scopes": ["channel"]}``.
 #: (The routes are registered in ``global_server/routes/__init__.py``; the
 #: fetch, ``/gfs/media/{blob_id}``, names no scope.)
 SPACE_MEDIA_CAPABILITY: str = "space_media"
 
-SCOPE_SPACE: str = "space"
 SCOPE_CHANNEL: str = "channel"
-MEDIA_SCOPES: frozenset[str] = frozenset({SCOPE_SPACE, SCOPE_CHANNEL})
+MEDIA_SCOPES: frozenset[str] = frozenset({SCOPE_CHANNEL})
 
-AUTH_AUTHORITY: str = "authority"
 AUTH_WRITER_KEY: str = "writer_key"
 AUTH_CHANNEL: str = "channel"
 
 #: Which kinds each scope takes.
 AUTH_KINDS_BY_SCOPE: dict[str, frozenset[str]] = {
-    SCOPE_SPACE: frozenset({AUTH_AUTHORITY, AUTH_WRITER_KEY}),
     SCOPE_CHANNEL: frozenset({AUTH_CHANNEL, AUTH_WRITER_KEY}),
 }
 
@@ -113,9 +97,6 @@ SPACE_MEDIA_WRITER_PREFIX: bytes = b"space-media-put:v1:"
 CHANNEL_MEDIA_PUT_PREFIX: bytes = b"gfs-channel-media-put:v1:"
 CHANNEL_MEDIA_DELETE_PREFIX: bytes = b"gfs-channel-media-delete:v1:"
 
-#: Longest space id accepted (the member-publish bound).
-MAX_SPACE_ID_CHARS: int = 128
-
 _MAX_SIG_CHARS: int = 512
 _MAX_SUITE_CHARS: int = 64
 _MAX_UNIX: int = 2**53
@@ -125,7 +106,6 @@ _CLAIM_KEYS: frozenset[str] = frozenset(
 )
 _SIGNED: frozenset[str] = _CLAIM_KEYS | {"auth", "sig", "sig_suite"}
 _KEYS_BY_KIND: dict[str, frozenset[str]] = {
-    AUTH_AUTHORITY: _SIGNED,
     AUTH_CHANNEL: _SIGNED,
     AUTH_WRITER_KEY: _SIGNED | {"epoch"},
 }
@@ -161,9 +141,8 @@ def space_media_address(
 
 
 def media_delete_payload(scope: str, scope_id: str, blob_id: str, ts: int) -> dict:
-    """What a seed holder signs to withdraw a blob — under
-    ``AUTHORITY_EVENT_SPACE_MEDIA_DELETE`` (space) or with the channel key
-    after :data:`CHANNEL_MEDIA_DELETE_PREFIX` (channel)."""
+    """What a channel key holder signs (after
+    :data:`CHANNEL_MEDIA_DELETE_PREFIX`) to withdraw a blob."""
     return {"scope": scope, "scope_id": scope_id, "blob_id": blob_id, "ts": ts}
 
 
@@ -174,19 +153,13 @@ def valid_scope_id(scope: object, scope_id: object) -> str:
             return valid_channel_id(scope_id)
         except InvalidChannelWire as exc:
             raise InvalidSpaceMediaAuth("bad scope_id") from exc
-    if scope == SCOPE_SPACE:
-        value = _short_str(scope_id, "scope_id", MAX_SPACE_ID_CHARS)
-        if "|" in value:
-            # The address construction separates fields with "|".
-            raise InvalidSpaceMediaAuth("bad scope_id")
-        return value
     raise InvalidSpaceMediaAuth("bad scope")
 
 
 @dataclass(slots=True, frozen=True)
 class SpaceMediaClaim:
-    """What every upload signs: which blob, for which space or channel, how
-    big, until when, and when it was signed."""
+    """What every upload signs: which blob, for which channel, how big,
+    until when, and when it was signed."""
 
     scope: str
     scope_id: str
@@ -209,20 +182,12 @@ class SpaceMediaClaim:
             "ts": self.ts,
         }
 
-    def authority_signing_bytes(self) -> bytes:
-        """The bytes a space seed holder signs for :data:`AUTH_AUTHORITY`."""
-        return authority_signing_bytes(
-            event_type=AUTHORITY_EVENT_SPACE_MEDIA_PUT,
-            space_id=self.scope_id,
-            payload=self.signing_body(),
-        )
-
     def channel_signing_bytes(self) -> bytes:
         """The bytes a channel key holder signs for :data:`AUTH_CHANNEL`."""
         return CHANNEL_MEDIA_PUT_PREFIX + canonical_bytes(self.signing_body())
 
     def writer_signing_bytes(self, *, kind: str, epoch: int) -> bytes:
-        """The bytes the writer group key signs for :data:`AUTH_WRITER_KEY`;
+        """The bytes the channel writer key signs for :data:`AUTH_WRITER_KEY`;
         the kind and epoch are bound in, the scope is in the claim."""
         return SPACE_MEDIA_WRITER_PREFIX + canonical_bytes(
             {**self.signing_body(), "auth": kind, "epoch": epoch}

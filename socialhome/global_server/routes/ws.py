@@ -9,21 +9,21 @@ SH)**: after the
 signed hello frame the SH never sends application frames. Heartbeat is
 WebSocket-protocol-level via aiohttp's ``heartbeat=30.0``.
 
-SH → GFS calls (pair, publish, subscribe, report, appeal) keep using
-the existing REST endpoints in :mod:`.relay` — request/response semantics
+SH → GFS calls (pair, the space directory, channels, report, appeal) keep
+using REST endpoints — request/response semantics
 fit those calls and a WS RPC envelope would only add ``request_id``
 bookkeeping for no gain.
 
 Hello frame (must arrive within 5 s of upgrade)::
 
     {"type": "hello", "instance_id": "<id>", "ts": <unix>, "sig": "<b64url>",
-     "accepts": ["space_key_pull"]}
+     "accepts": ["ws_binary1"]}
 
-``accepts`` (optional, #5b) is an unsigned hint like the subscribe's: a
-household listing ``space_key_pull`` asks for a space key when it misses
-one, so its hello triggers no key-repair notifies (Phase 5b-d).
-``ws_binary1`` in it asks for binary push frames on THIS socket
-(:mod:`socialhome.domain.ws_binary_frame`).
+``accepts`` (optional) is an unsigned, per-connection hint: ``ws_binary1``
+asks for binary push frames on THIS socket
+(:mod:`socialhome.domain.ws_binary_frame`), ``space_media_serve`` says the
+household answers ``space_media_request`` (v_83), ``envelope_media`` that it
+opens binary relay media frames (v_87). Other labels are ignored.
 
 ``sig`` is ``Ed25519(public_key, f"{instance_id}|{ts}")`` and ``ts`` must
 be within ±300 s of the GFS clock — same convention as §24.11. On
@@ -39,9 +39,10 @@ instance ids are registered here. (Households older than this release
 reported ``unknown-instance`` / ``bad-signature``; their UI treats all three
 as "re-pair needed".)
 
-Push frames (sent by :class:`GfsFederationService._fan_out`)::
+Push frames (a channel item, by :mod:`..fan_out_workers`)::
 
-    {"type": "relay", "space_id": ..., "event_type": ..., "payload": ...}
+    {"type": "relay", "channel_id": ..., "event_type": "space_item",
+     "epoch": ..., "payload": ...}
 
 Sealed household-to-household envelopes (§D2b invite bootstrap) arrive
 as::
@@ -49,7 +50,7 @@ as::
     {"type": "envelope", "sealed": {kem_suite, eph_pk, ciphertext}}
 
 Both frames are deliberately identity-free: the GFS never learns which
-household relayed a space event, nor who sealed an envelope, so it has
+household published a channel item, nor who sealed an envelope, so it has
 nothing to forward. Queued envelopes are drained in order right after
 the hello verifies.
 
@@ -66,9 +67,8 @@ import orjson
 from aiohttp import WSMsgType, web
 
 from ... import crypto
-from ...domain.subscriber_accepts import (
+from ...domain.gfs_hello_accepts import (
     ACCEPTS_ENVELOPE_MEDIA,
-    ACCEPTS_SPACE_KEY_PULL,
     ACCEPTS_SPACE_MEDIA_SERVE,
     ACCEPTS_WS_BINARY1,
     parse_accepts,
@@ -149,19 +149,6 @@ class GfsWebSocketView(web.View):
         )
         await fed_repo.upsert_rtc_connection(instance_id, transport="websocket")
 
-        # Phase 5b-d — now that this household's socket is up, ask the owner of
-        # every space it subscribes to to re-run the content-key handoff: a
-        # handoff fanned out while this socket was down was lost outright
-        # (delivery is WebSocket-only). Strictly AFTER the
-        # hello verified and the socket registered — an unauthenticated caller
-        # must never be able to trigger a fan-out. Dispatched as a background
-        # task so the handshake never waits on it, and fail-soft throughout.
-        # #5b — a household that asks for a key when it misses one
-        # (``space_key_pull`` in its hello) needs no repair pass.
-        if ACCEPTS_SPACE_KEY_PULL not in accepts:
-            self.request.app[K.gfs_federation_key].schedule_subscriber_connected(
-                instance_id
-            )
         # v_62 — sealed moment keys that went out while this household was
         # offline (the latest per followed author, only the undelivered).
         self.request.app[K.gfs_moment_public_registry_key].schedule_follower_connected(
@@ -181,7 +168,7 @@ class GfsWebSocketView(web.View):
         # no application frames of its own, so nothing is missed meanwhile.
         await self.request.app[K.gfs_envelope_relay_key].drain(instance_id)
         # v_49 — a session held long enough marks the household "seen": only
-        # seen households get member-published items queued while offline (a
+        # seen households get channel items queued while offline (a
         # bare hello must not earn disk). Marked from a timer WHILE the socket
         # is open, and refreshed hourly while it stays open, never from the
         # ``finally`` below, which aiohttp may cancel mid-way when the peer
