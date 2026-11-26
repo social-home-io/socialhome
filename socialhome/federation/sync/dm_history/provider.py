@@ -130,6 +130,18 @@ class DmHistoryProvider(VisibilityMixin):
         # Nothing is sent otherwise — not even DM_HISTORY_COMPLETE, which
         # would confirm the conversation exists.
         if not await self._dm_scope.seated(event, conversation_id):
+            if await self._conversation_repo.get(conversation_id) is None:
+                # A conversation we do not hold (any more): e.g. a person
+                # of the requester was hidden from us and its USER_REMOVED
+                # cascade dropped our copy — after the unhide the requester
+                # asks again. Nothing to give and nothing confirmed; the
+                # WARNING is for a sender asking about one we do hold.
+                log.info(
+                    "DM_HISTORY_REQUEST from %s for a conversation not held "
+                    "here — nothing sent",
+                    event.from_instance,
+                )
+                return 0
             refuse(
                 event,
                 "requester holds no seat in the conversation",
