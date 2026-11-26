@@ -7,7 +7,7 @@ import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
-import { loadSpaceMembers, setSpaceHereAllowed, spaceMembers } from '@/store/spaceMembers'
+import { loadSpaceMembers, setSpaceFollowerWrites, setSpaceHereAllowed, spaceMembers } from '@/store/spaceMembers'
 import { useTitle, useTitleGlyph } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
 import type { FeedPost, Space, SpaceGfsServer } from '@/types'
@@ -125,6 +125,9 @@ interface SpaceDetail {
     allowed_apps?: string[]
     /** The space takes followers. */
     allow_subscribers?: boolean
+    /** Followers may comment / react (only with ``allow_subscribers``). */
+    allow_subscriber_comment?: boolean
+    allow_subscriber_react?: boolean
     /** Owner opt-in: admins act for the owner while they're offline (an
      *  admin's household then holds the signing seed). Absent → off. */
     delegated_admin_authority?: boolean
@@ -237,6 +240,12 @@ async function loadSpaceHeader(spaceId: string) {
       detailFailed.value = false
       setSpaceHereAllowed(spaceId, detail.allow_here_mention === true)
       viewerRole.value = parseSpaceRole(detail.my_role)
+      // What a follower may write here: the thread and the post card read it.
+      setSpaceFollowerWrites(spaceId, {
+        role: viewerRole.value,
+        comment: detail.features?.allow_subscriber_comment === true,
+        react: detail.features?.allow_subscriber_react === true,
+      })
       setSpaceAttention(spaceId, detail.attention)
       roleKnown.value = true
     }).catch(() => {
@@ -247,8 +256,8 @@ async function loadSpaceHeader(spaceId: string) {
     }),
     api.get(`/api/spaces/${spaceId}/members`)
       .then((rows: MemberRow[]) => {
-        // Members only: followers aren't members (a follower's roster
-        // lists the members alone anyway).
+        // Members only: followers aren't members (they have their own
+        // count, ``follower_count``).
         const members = rows.filter((m) => m.role !== 'subscriber')
         memberCount.value = members.length
         memberSummary.value = {
@@ -951,6 +960,7 @@ export default function SpaceFeedPage() {
       {section === 'members' && (
         <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value}
                          adminsActForOwner={features?.delegated_admin_authority === true}
+                         takesFollowers={features?.allow_subscribers === true}
                          joinRequests={attention?.spaceId === spaceId ? attention.joinRequests : 0} />
       )}
 

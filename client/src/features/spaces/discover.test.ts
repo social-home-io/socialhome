@@ -114,6 +114,16 @@ describe('discoverAction', () => {
     expect(discoverAction(peer)).toBeNull()
     expect(approvalSeatsUs(peer)).toBe(false)
   })
+  it('a follow waiting for its host reads "Following…", not "Requested" (P8)', () => {
+    const far = entry({ scope: 'global', host_is_paired: false, allow_subscribers: true })
+    // The host approves a follow on its own: pending, then the seat being made.
+    expect(discoverAction({ ...far, request_pending: true })).toBe('following')
+    expect(discoverAction({ ...far, request_pending: true, request_joining: true })).toBe('following')
+    // A row whose way in is a request stays "Requested" / "joining".
+    const ask = { ...far, join_mode: 'request' as const, gfs_askable: true }
+    expect(discoverAction({ ...ask, request_pending: true })).toBe('pending')
+    expect(discoverAction({ ...ask, request_pending: true, request_joining: true })).toBe('joining')
+  })
   it('never suggests pairing: an unpaired host is Follow or nothing', () => {
     expect(discoverAction(entry({ host_is_paired: false }))).toBeNull()
     expect(discoverAction(entry({ scope: 'global', host_is_paired: false, join_mode: 'open', allow_subscribers: true }))).toBe('follow')

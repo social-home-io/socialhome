@@ -265,6 +265,30 @@ describe('SpacePublicDetailPage — a GFS-listed space whose household we never 
     expect(container.textContent).not.toMatch(/Connect|Connections|pair/i)
   })
 
+  it('a follow its host still has to approve reads "Following…", not "followed" (P8)', async () => {
+    cacheDirectoryEntries([far(true)])
+    api.post.mockResolvedValue({ subscribed: false, pending: true })
+    const { showToast } = (await import('@/components/Toast')) as unknown as {
+      showToast: ReturnType<typeof vi.fn>
+    }
+    showToast.mockReset()
+    const { getByText, findByText } = await renderPage()
+    await waitFor(() => getByText('Follow'))
+    fireEvent.click(getByText('Follow'))
+    const btn = (await findByText('Following…')).closest('button') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    await findByText(/Its host adds followers on its own/)
+    expect(showToast).toHaveBeenCalledWith(
+      'Asked to follow Space One. Its posts show up once its host has added you.', 'success',
+    )
+  })
+
+  it('a busy host shows its note next to Follow too', async () => {
+    cacheDirectoryEntries([{ ...far(true), request_busy: true }])
+    const { findByText } = await renderPage()
+    await findByText(/This space is busy right now\. Try again later\./)
+  })
+
   it('a host whose name we never learned is left out — never shown by its id', async () => {
     cacheDirectoryEntries([{ ...far(true), host_display_name: null }])
     const { container, getByText } = await renderPage()
@@ -615,6 +639,26 @@ describe('SpacePublicDetailPage — local community', () => {
       '/api/public_spaces/sp-1/join-request',
       { host_instance_id: 'iid-b', share_location: true },
     )
+  })
+
+  it('following one hosted elsewhere asks first too, and sends the location only on a yes (P8)', async () => {
+    home({ lat: 47.392, lon: 8.56 })
+    cacheDirectoryEntries([entry({
+      host_instance_id: 'iid-b', host_display_name: 'Keller household', local_community: LC,
+      scope: 'global', host_is_paired: false, allow_subscribers: true,
+    })])
+    api.post.mockResolvedValue({ subscribed: false, pending: true })
+    const { getByText } = await renderPage()
+    await waitFor(() => getByText('Follow'))
+    confirmMock.mockResolvedValueOnce(false)
+    fireEvent.click(getByText('Follow'))
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1))
+    expect(api.post).not.toHaveBeenCalled()
+    confirmMock.mockResolvedValueOnce(true)
+    fireEvent.click(getByText('Follow'))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+      '/api/spaces/sp-1/subscribe', { share_location: true },
+    ))
   })
 
   it('outside our own community: says so and offers no join that would be refused', async () => {

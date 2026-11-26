@@ -58,9 +58,15 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   HOST_UNREACHABLE: (body) => body.reason === 'unknown_host'
     ? t('space.host.unknown')
     : t('space.host.unreachable'),
-  HOST_TOO_OLD: (body) => body.feature === 'role_change'
-    ? t('space.member.role_host_too_old')
-    : t('moderation.error.host_too_old'),
+  HOST_TOO_OLD: (body) => {
+    switch (body.feature) {
+      case 'role_change': return t('space.member.role_host_too_old')
+      case 'follow': return t('space.follow.host_too_old')
+      case 'ban': return t('space.member.ban_host_too_old')
+      case 'invite_link': return t('invite.error.host_too_old')
+      default: return t('moderation.error.host_too_old')
+    }
+  },
   // Spaces: joining, following, writing.
   ALREADY_MEMBER: () => t('error.already_member'),
   GFS_RELAY_NOT_ALLOWED: () => t('error.gfs_relay_not_allowed'),

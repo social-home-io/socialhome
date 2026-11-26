@@ -263,6 +263,47 @@ describe('SpaceMemberList — banned households (P7b)', () => {
   })
 })
 
+describe('SpaceMemberList — followers in their own group (P8)', () => {
+  const roster = [
+    { user_id: 'u-o', display_name: 'Olivia', role: 'owner' },
+    { user_id: 'u-b', display_name: 'Bob', role: 'member' },
+    { user_id: 'u-f1', display_name: 'Fern', role: 'subscriber' },
+    { user_id: 'u-f2', display_name: 'Fred', role: 'subscriber', instance_id: 'peer-f' },
+  ]
+  const withRoster = (rows: unknown[]) => apiGet.mockImplementation(async (url: string) =>
+    url.endsWith('/members') ? rows : [])
+
+  it('members count the members only; followers have their own heading and count', async () => {
+    withRoster(roster)
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" takesFollowers />)
+    await waitFor(() => expect(r.container.textContent).toContain('Fern'))
+    const headings = [...r.container.querySelectorAll('h2.sh-settings-section-heading')].map(h => h.textContent)
+    expect(headings).toEqual(['2 members', '2 followers'])
+    const group = r.container.querySelector('.sh-member-followers')!
+    expect([...group.querySelectorAll('.sh-member-name')].map(n => n.textContent))
+      .toEqual(['Fern', 'Fred'])
+  })
+
+  it('a space that takes followers but has none says so', async () => {
+    withRoster(roster.slice(0, 2))
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="subscriber" takesFollowers />)
+    await waitFor(() => expect(r.container.textContent).toContain('Olivia'))
+    expect(r.container.textContent).toContain('0 followers')
+    expect(r.container.textContent).toContain('No followers yet.')
+  })
+
+  it('a space without followers shows the member count only', async () => {
+    withRoster(roster.slice(0, 2))
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
+    await waitFor(() => expect(r.container.textContent).toContain('Olivia'))
+    expect([...r.container.querySelectorAll('h2.sh-settings-section-heading')].map(h => h.textContent)).toEqual(['2 members'])
+    expect(r.container.querySelector('.sh-member-followers')).toBeNull()
+  })
+})
+
 describe('SpaceMemberList — tapping a member opens their person sheet', () => {
   const rows = [
     { user_id: 'u-m', display_name: 'Mo', role: 'moderator', joined_at: '2026-01-01' },

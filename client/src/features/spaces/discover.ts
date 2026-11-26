@@ -120,7 +120,7 @@ export function matchesTerm(
     || (description ?? '').toLocaleLowerCase().includes(q)
 }
 
-export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | 'joining' | null
+export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | 'joining' | 'following' | null
 
 function hostedHere(entry: DirectoryEntry): boolean {
   return entry.host_instance_id === 'local' || entry.scope === 'household'
@@ -195,11 +195,22 @@ export function canFollow(e: DirectoryEntry): boolean {
  * through the GFS that lists it; any other space whose host we aren't
  * paired with offers Follow when it takes followers and nothing otherwise —
  * members can still invite you with a link (its row opens the About page,
- * which says so).
+ * which says so). A follow waiting for its host (it approves follows on
+ * its own) is "Following…"; any other request out is "Requested".
  */
 export function discoverAction(e: DirectoryEntry): DiscoverAction {
-  if (e.request_joining) return 'joining'
-  if (e.request_pending) return 'pending'
+  const way = wayIn(e)
+  if (e.request_joining || e.request_pending) {
+    // The only thing this row ever offered was Follow: what's out is a
+    // follow, which its host approves on its own — "Following…".
+    if (way === 'follow') return 'following'
+    return e.request_joining ? 'joining' : 'pending'
+  }
+  return way
+}
+
+/** The row's way in when nothing is out yet. */
+function wayIn(e: DirectoryEntry): DiscoverAction {
   if (reachable(e)) {
     if (e.join_mode === 'open') return 'join'
     if (e.join_mode === 'request') return 'request'

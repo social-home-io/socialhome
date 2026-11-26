@@ -32,7 +32,7 @@ import {
 import { TypingIndicator, sendTyping } from './TypingIndicator'
 import { currentUser } from '@/store/auth'
 import { clearTextDraft, textDraft } from '@/store/textDrafts'
-import { spaceMentionRender, viewerSpaceRole } from '@/store/spaceMembers'
+import { spaceMentionRender, viewerMayComment, viewerSpaceRole } from '@/store/spaceMembers'
 import { MentionText } from './MentionText'
 import { PersonButton, openSpaceMention } from './PersonButton'
 import { personHint } from '@/utils/personHint'
@@ -259,9 +259,17 @@ export function CommentThread(
     }
   }
 
+  // A follower writes only while the space lets followers comment; it
+  // still reads the thread and deletes its own comments.
+  const mayComment = viewerMayComment(spaceId)
+
   // The "Add a comment…" row at the bottom, on an empty thread as on a
-  // full one.
-  const newCommentRow = (
+  // full one — or, for a follower who may not comment, why not.
+  const newCommentRow = !mayComment ? (
+    <p class="sh-comment-new sh-muted" data-testid="comments-read-only">
+      {t('comments.followers_read_only')}
+    </p>
+  ) : (
     <div class="sh-comment-new">
       <CommentField placeholder={t('comments.placeholder')} value={newDraft.text.value}
         id="sh-comment-new-input"
@@ -306,7 +314,9 @@ export function CommentThread(
         <div key={c.id} class="sh-comment">
           <CommentItem comment={c} spaceId={spaceId}
             onDelete={onDelete} onEdit={onEdit} picked={c.id === pickedId}
-            onReplyClick={() => setReplyTo(cur => (cur === c.id ? null : c.id))} />
+            onReplyClick={mayComment
+              ? () => setReplyTo(cur => (cur === c.id ? null : c.id))
+              : undefined} />
           {replies(c.id).length > 0 && (
             <div class="sh-comment-replies">
               {replies(c.id).map(r => (
@@ -315,7 +325,7 @@ export function CommentThread(
               ))}
             </div>
           )}
-          {replyTo === c.id && replyDraft && (
+          {mayComment && replyTo === c.id && replyDraft && (
             <div class="sh-comment-reply-form">
               <CommentField placeholder={t('comments.reply_placeholder', { name: c.author })}
                 id="sh-comment-reply-input"
@@ -405,7 +415,10 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent,
     ? canModerate(viewerSpaceRole(spaceId))
     : !!currentUser.value?.is_admin
   const canDelete = !!onDelete && (isMine || moderates)
-  const canEdit = !!onEdit && comment.type === 'text' && (isMine || (!!spaceId && moderates))
+  // Editing one's own comment is writing: a follower needs the comment
+  // switch (the server refuses it otherwise). Delete stays (F6).
+  const canEdit = !!onEdit && comment.type === 'text'
+    && ((isMine && viewerMayComment(spaceId)) || (!!spaceId && moderates))
 
   const authorName = resolveDisplayName(spaceId, comment.author)
   const avatarUrl = resolveAvatar(spaceId, comment.author, null)

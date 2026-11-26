@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 import { PostCard } from './PostCard'
 import type { FeedPost } from '@/types'
-import { spaceMembers } from '@/store/spaceMembers'
+import { setSpaceFollowerWrites, spaceMembers } from '@/store/spaceMembers'
 import { householdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
 
@@ -466,5 +466,34 @@ describe('PostCard — a shared highlight', () => {
     const { container } = render(<PostCard post={post} />)
     const text = container.textContent ?? ''
     expect(text.split('Unser Sonntag').length - 1).toBe(1)
+  })
+
+  it('a follower without the react switch gets no reaction control; the count stays (P8)', () => {
+    setSpaceFollowerWrites('sp-f', { role: 'subscriber', comment: false, react: false })
+    const onReact = vi.fn()
+    const { container, queryByLabelText } = render(
+      <PostCard post={mockPost} spaceId="sp-f" surface="space" onReact={onReact} />,
+    )
+    expect(queryByLabelText('Add reaction')).toBeNull()
+    const chip = container.querySelector('.sh-reaction-chip') as HTMLButtonElement
+    expect(chip.textContent).toContain('2')
+    expect(chip.disabled).toBe(true)
+    fireEvent.click(chip)
+    expect(onReact).not.toHaveBeenCalled()
+    // With the switch on the follower reacts like a member.
+    setSpaceFollowerWrites('sp-f', { role: 'subscriber', comment: false, react: true })
+    const on = render(<PostCard post={mockPost} spaceId="sp-f" surface="space" onReact={onReact} />)
+    expect(on.queryAllByLabelText('Add reaction').length).toBe(1)
+  })
+
+  it('a follower who may not comment sees no "Comment" invite on a post without comments', () => {
+    setSpaceFollowerWrites('sp-g', { role: 'subscriber', comment: false, react: false })
+    const quiet = render(
+      <PostCard post={{ ...mockPost, comment_count: 0 }} spaceId="sp-g" surface="space" onComment={vi.fn()} />,
+    )
+    expect(quiet.container.querySelector('.sh-comment-btn')).toBeNull()
+    // With comments there is something to read: the button stays.
+    const warm = render(<PostCard post={mockPost} spaceId="sp-g" surface="space" onComment={vi.fn()} />)
+    expect(warm.container.querySelector('.sh-comment-btn')).not.toBeNull()
   })
 })

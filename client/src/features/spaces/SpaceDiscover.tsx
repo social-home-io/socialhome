@@ -118,6 +118,7 @@ function actionLabel(a: Exclude<DiscoverAction, null>): string {
     case 'follow': return t('spaces.discover.follow')
     case 'pending': return t('spaces.discover.requested')
     case 'joining': return t('spaces.discover.joining')
+    case 'following': return t('spaces.discover.following')
   }
 }
 
@@ -200,10 +201,20 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
     setBusy(e.space_id)
     try {
       if (a === 'follow') {
-        await api.post(`/api/spaces/${e.space_id}/subscribe`, {})
-        showToast(t('spaces.browse.followed_toast', { name: e.name }), 'success')
-        onChanged()
-        await reload()
+        // Hosted here: followed at once. Elsewhere: the host is asked and
+        // approves on its own — "Following…" until the seat is made.
+        const r = await api.post(
+          `/api/spaces/${e.space_id}/subscribe`,
+          carries ? { share_location: true } : {},
+        ) as { subscribed?: boolean; pending?: boolean } | undefined
+        if (r?.pending) {
+          showToast(t('spaces.browse.follow_pending_toast', { name: e.name }), 'success')
+          markPending(e.space_id)
+        } else {
+          showToast(t('spaces.browse.followed_toast', { name: e.name }), 'success')
+          onChanged()
+          await reload()
+        }
       } else if (isLocal(e)) {
         // Open to join: the join-request endpoint seats you right away
         // (``joined``); otherwise the request is pending — say so in place.
@@ -381,8 +392,9 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
                 .filter(Boolean).join(' · ')
               : hint ? hintLabel(hint) : ''
             // The host had no room for our last request: say so next to
-            // "Ask to join" (asking again clears it).
-            const busyText = e.request_busy && a === 'request' ? t('spaces.discover.busy') : ''
+            // "Ask to join" / "Follow" (asking again clears it).
+            const busyText = e.request_busy && (a === 'request' || a === 'follow')
+              ? t('spaces.discover.busy') : ''
             const placeNote = radius !== null ? (
               <>
                 <span class="sh-local-area-chip">🏘️ {areaShortLabel(radius)}</span>
@@ -412,7 +424,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
                 action={a && (
                   <Button
                     variant="secondary"
-                    disabled={a === 'pending' || a === 'joining' || busy === e.space_id}
+                    disabled={a === 'pending' || a === 'joining' || a === 'following' || busy === e.space_id}
                     loading={busy === e.space_id}
                     aria-label={`${actionLabel(a)}: ${e.name}`}
                     onClick={() => { void act(e, a) }}

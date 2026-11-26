@@ -33,6 +33,18 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("Couldn't reach the server of this invite. Try again, or paste the code shown under the QR.")
   })
 
+  it('says a follow needs the host updated, not a review (HOST_TOO_OLD, P8)', () => {
+    expect(apiErrorMessage(409, '/api/spaces/s/subscribe', {
+      code: 'HOST_TOO_OLD', detail: 'x', feature: 'follow',
+    })).toBe("This space's home household needs an update before you can follow it.")
+    expect(apiErrorMessage(409, '/api/spaces/s/invite-tokens', {
+      code: 'HOST_TOO_OLD', detail: 'x', feature: 'invite_link',
+    })).toBe("The space's home household needs to update Social Home first.")
+    expect(apiErrorMessage(409, '/api/spaces/s/ban', {
+      code: 'HOST_TOO_OLD', detail: 'x', feature: 'ban',
+    })).toBe("This space's host household needs an update before a household can be banned from here.")
+  })
+
   it('names a household video length and the 5-minute limit', () => {
     expect(apiErrorMessage(422, '/api/gallery/albums/a/items', {
       code: 'VIDEO_TOO_LONG', detail: 'x', params: { duration_s: 432, max_s: 300 },
