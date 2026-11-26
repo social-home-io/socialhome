@@ -13655,6 +13655,13 @@ _LOG_BENIGN: tuple[str, ...] = (
     # surfaces.
     "outbox: ",
     " returned HTTP ",
+    # The GFS's one-address spread warning (``global_server/client_spread``:
+    # a 5-min window of >= 600 requests with one address above half). Every
+    # demo household reaches the GFS from 127.0.0.1, so a busy window of the
+    # GFS chain (invite links + member mesh + moderator parity) crosses the
+    # count by construction — the line is right for a real GFS behind one
+    # proxy and says nothing about the demo. Narrowed to its own text.
+    "GFS: one client address (127.0.0.1) made ",
     # libdatachannel native ICE state-machine status lines. The
     # harness intentionally configures STUN against an external
     # endpoint while the instances themselves talk loopback-only,
