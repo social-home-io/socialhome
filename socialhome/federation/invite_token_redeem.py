@@ -1147,14 +1147,6 @@ class SpaceInviteTokenRedeemCoordinator:
                     and self._writer_certs is not None
                 ):
                     await self._writer_certs.accept(space_id, meta.get("writer_cert"))
-                # v_51 — our private-space channel grant for that epoch.
-                if (
-                    meta.get("gfs_channel") is not None
-                    and self._writer_certs is not None
-                ):
-                    await self._writer_certs.accept_channel_grant(
-                        space_id, meta.get("gfs_channel")
-                    )
                 was_member = (
                     await self._spaces.get_member(space_id, viewer_user_id) is not None
                 )
@@ -1167,6 +1159,16 @@ class SpaceInviteTokenRedeemCoordinator:
                 await self._spaces.save_member(member)
                 if not was_member:
                     joined = member
+                # v_51 — our private-space channel grant for that epoch, taken
+                # only now that our person is seated: taking it subscribes at
+                # once, and a household with no seat asks for none.
+                if (
+                    meta.get("gfs_channel") is not None
+                    and self._writer_certs is not None
+                ):
+                    await self._writer_certs.accept_channel_grant(
+                        space_id, meta.get("gfs_channel")
+                    )
                 # A pending private invitation from another household for
                 # this space can no longer be joined (migration 0093).
                 await expire_superseded_invitations(

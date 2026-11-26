@@ -2577,4 +2577,8 @@ async def test_a_refusal_of_a_grant_superseded_meanwhile_is_done_not_a_warning(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     # Still current at the answer: a permanent refusal, as before.
     monkeypatch.setattr(GfsChannelService, "current_grant", real_grant)
-    assert (await svc._post_subscribe(conn, SPACE_ID, item)).kind == "permanent"
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert (await svc._post_subscribe(conn, SPACE_ID, item)).kind == "permanent"
+    assert "refused our seat for space" in caplog.text
+    assert [r for r in caplog.records if r.levelno == logging.WARNING]
