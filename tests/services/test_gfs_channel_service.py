@@ -1155,12 +1155,12 @@ async def test_no_heal_after_a_delegated_rotation_while_the_owner_was_offline(
     await env.owner.svc.heal(env.owner.svc_conn_id)
     await env.owner.svc.wait_idle()
     assert env.owner.spaces.channels[SPACE_ID][0] == first
-    # The rekey lands, the grace passes; a stale queued notice for epoch 3
-    # is still compared against the CURRENT epoch.
+    # The rekey lands, the grace passes; a notice queued before it is sent
+    # as state — the CURRENT epoch, compared against the server's.
     env.owner.keys.epoch = 4
     clock[0] += chan_mod.HEAL_GRACE_S + 1
     conn = await env.owner.svc._conn_repo.get(env.owner.svc_conn_id)
-    await env.owner.svc._post_notice(conn, SPACE_ID, {"epoch": 3})
+    await env.owner.svc._post_notice(conn, SPACE_ID, {"channel_id": first})
     await env.owner.svc.announce_epoch(SPACE_ID)
     await env.owner.svc.wait_idle()
     assert env.owner.spaces.channels[SPACE_ID][0] == first
