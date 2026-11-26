@@ -608,6 +608,13 @@ class GfsChannelService:
         ):
             return "none"
         log.info("gfs.channel: started channel %s for space %s", channel_id, space_id)
+        # The old channel's notices still waiting (a 429'd one waits out the
+        # step bound) are obsolete: the fresh channel's first notice — no
+        # step bound — must not queue behind them, or the fresh channel
+        # stays unannounced (lost with the in-memory queue on a restart) and
+        # its first notice comes from a later rotation, closing every pass
+        # of the epoch the grants carry.
+        self._retry.drop(space_id, _KIND_NOTICE)
         return "created"
 
     async def _register_all(

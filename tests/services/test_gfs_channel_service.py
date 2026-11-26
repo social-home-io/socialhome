@@ -2582,3 +2582,30 @@ async def test_a_refusal_of_a_grant_superseded_meanwhile_is_done_not_a_warning(
         assert (await svc._post_subscribe(conn, SPACE_ID, item)).kind == "permanent"
     assert "refused our seat for space" in caplog.text
     assert [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+async def test_a_fresh_channel_is_announced_at_once_not_behind_the_old_ones_notice(
+    env,
+):
+    """The owner's notice for the OLD channel waits in the retry queue (the
+    GFS answered 429: one epoch a minute); then the authority rotates and a
+    fresh channel starts. That stale notice must not hold back the fresh
+    channel's FIRST notice (no step bound): queued behind it, the fresh
+    channel stays unannounced for a minute — forever if the owner goes
+    away (the queue is in memory) — and the first notice then comes from a
+    later rotation, closing every pass of the epoch the grants carry."""
+    old = await _channel_ready(env)
+    svc = env.owner.svc
+    conn = (await svc._capable())[0]
+    stale = chan_mod.GfsPublish(
+        space_id=SPACE_ID, event_type=chan_mod._KIND_NOTICE, payload={"epoch": 2}
+    )
+    assert svc._retry.enqueue(conn.id, stale, retry_after_s=60.0)
+    assert await svc.reconcile(SPACE_ID, fresh=True) == "created"
+    fresh = env.owner.spaces.channels[SPACE_ID][0]
+    assert fresh != old
+    # The stale notice is gone; the fresh channel's first notice lands now.
+    assert not svc._retry.pending(conn.id, SPACE_ID)
+    assert await svc.announce_epoch(SPACE_ID) == 1
+    row = await env.app[gfs_channel_repo_key].get(fresh)
+    assert row is not None and row.epoch == _wire(env, fresh)
