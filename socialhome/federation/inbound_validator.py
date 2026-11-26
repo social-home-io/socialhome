@@ -189,7 +189,22 @@ class InboundRateLimitedError(ValueError):
         self.retry_after_s = retry_after_s
 
 
-class UnpairedPeerRefusedError(ValueError):
+class LoggedRefusal(ValueError):
+    """A refusal the pipeline step that raised it has already logged (at
+    INFO or DEBUG, naming what it may). Every transport (the inbox route,
+    the DataChannel, the GFS WebSocket) drops it quietly — a handled drop,
+    never a WARNING with a traceback per frame."""
+
+
+class NoMemberCardError(LoggedRefusal):
+    """A frame on our GFS mailbox (or the directory-seat relay) from a
+    sender whose member card we do not hold for the envelope's space
+    (:func:`make_check_mailbox_sender`). Expected around a seating: a member
+    that just learned our card can send before the host's directory brings
+    us its card — the item reaches us again through the §25.6 catch-up."""
+
+
+class UnpairedPeerRefusedError(LoggedRefusal):
     """An envelope from a household we are unpairing or just unpaired.
 
     Raised by :func:`make_check_unpairing` (an unpair tombstone) and by
@@ -876,7 +891,7 @@ def make_check_mailbox_sender(
                 "with no card for its space",
                 ctx.envelope.get("event_type"),
             )
-            raise ValueError("no member card of this sender for this space")
+            raise NoMemberCardError("no member card of this sender for this space")
 
     return check_mailbox_sender
 

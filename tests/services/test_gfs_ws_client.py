@@ -17,7 +17,10 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from socialhome.crypto import b64url_decode, b64url_encode, verify_ed25519
 from socialhome.domain.ws_binary_frame import encode_binary_frame
-from socialhome.federation.inbound_validator import UnpairedPeerRefusedError
+from socialhome.federation.inbound_validator import (
+    NoMemberCardError,
+    UnpairedPeerRefusedError,
+)
 from socialhome.services.gfs_ws_client import (
     ENVELOPE_MEDIA_FRAME,
     GfsWebSocketClient,
@@ -1210,17 +1213,25 @@ async def test_on_text_swallows_envelope_handler_exception(caplog):
     assert "secret-blob" not in caplog.text
 
 
-async def test_on_text_is_quiet_about_a_household_unpaired_moments_ago(caplog):
-    """A relayed envelope from a household whose row we dropped moments ago
-    (it sealed the frame before it learned — e.g. the host's last frames to
-    a household it just removed from their only shared space) was already
-    logged by the pipeline step that refused it. The socket must not log it
-    again at WARNING with a traceback, exactly like the inbox route and the
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [
+        (UnpairedPeerRefusedError, "No instance found for instance_id='x'"),
+        # P9 (demo audit): a member that just learned our card sends before
+        # the host's directory brings us its card — a handled drop.
+        (NoMemberCardError, "no member card of this sender for this space"),
+    ],
+)
+async def test_on_text_is_quiet_about_a_refusal_already_logged(caplog, error, text):
+    """A relayed envelope its pipeline step refused and logged (a household
+    whose row we dropped moments ago; a sender whose member card has not
+    reached us yet) is a handled drop: the socket must not log it again at
+    WARNING with a traceback, exactly like the inbox route and the
     DataChannel."""
     seed, _pub = _gen_keypair()
 
     async def refuse(_frame: dict) -> None:
-        raise UnpairedPeerRefusedError("No instance found for instance_id='x'")
+        raise error(text)
 
     client = GfsWebSocketClient(
         gfs_url="https://gfs.test",
@@ -1233,7 +1244,7 @@ async def test_on_text_is_quiet_about_a_household_unpaired_moments_ago(caplog):
     with caplog.at_level(logging.DEBUG):
         await client._on_text(json.dumps({"type": "envelope", "sealed": {}}))
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert "No instance found" in caplog.text
+    assert text in caplog.text
 
 
 async def test_a_refused_media_frame_is_still_counted(monkeypatch):
