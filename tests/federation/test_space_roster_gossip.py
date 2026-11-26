@@ -20,8 +20,9 @@ guard), so out-of-order delivery converges deterministically.
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from socialhome.crypto import generate_space_keypair
 from socialhome.domain.events import SpaceAdminAuthorityRevoked
@@ -583,30 +584,42 @@ async def test_a_fully_applied_host_snapshot_is_noted_for_the_echo(tmp_dir):
     await db.shutdown()
 
 
-async def test_only_the_hosts_whole_verified_snapshot_ends_the_roster_wait(tmp_dir):
-    """A just-joined household's fan-outs made before its roster came go to
-    the households the host's snapshot adds — so the handler tells the
-    federation service, once the entries are merged, only for a snapshot
-    that is the host's, whole and fully verified (the same bar as the
-    roster-version echo): a forged entry, another household's snapshot or
-    a missing version must not end the wait early."""
-    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
-    landed: list[str] = []
-    h._federation = SimpleNamespace(space_roster_landed=landed.append)
+class _Replays:
+    """Records the §4.4 replays the handler asks for."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def replay_space_to(self, *, space_id, instance_id, since) -> int:
+        self.calls.append((space_id, instance_id, since))
+        return 1
+
+
+async def test_a_household_the_hosts_snapshot_adds_gets_our_recent_rows(tmp_dir):
+    """Regression (demo ``space-report``): a household seated from a stale
+    invitation roster (the host alone) posted before the host's snapshot
+    landed, so the members the snapshot names got the post only at their
+    next §25.6 catch-up. Applying the host's snapshot now replays our rows
+    of the last 30 minutes to each household it added — once, only those,
+    and never on a snapshot from anyone but the host."""
+    h, spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    replays = _Replays()
+    h.attach_space_resume(replays)
     j = FederationEventType.SPACE_MEMBER_JOINED
-    good = _entry(j, _signed_payload(j, seed=seed, member_version=4))
-    forged = _entry(
-        j, _signed_payload(j, seed=b"\x01" * 32, member_version=3, user_id="u-f")
-    )
-    await h._on_space_roster_snapshot(_snapshot([good]))
-    await h._on_space_roster_snapshot(_versioned_snapshot([good, forged], version=9))
-    await h._on_space_roster_snapshot(
-        _versioned_snapshot([good], version=9, from_instance="p-other")
-    )
-    assert landed == []
-    await h._on_space_roster_snapshot(_versioned_snapshot([good], version=9))
-    assert landed == [SPACE_ID]
-    assert await remote.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER) is not None
+    joined = _entry(j, _signed_payload(j, seed=seed, member_version=4))
+    assert MEMBER_INSTANCE not in await spaces.list_member_instances(SPACE_ID)
+    # Not the host's: merged (trust is the space key) but no replay.
+    await h._on_space_roster_snapshot(_snapshot([joined], from_instance="p-other"))
+    assert replays.calls == []
+    await spaces.remove_space_instance(SPACE_ID, MEMBER_INSTANCE)
+    before = datetime.now(UTC)
+    await h._on_space_roster_snapshot(_snapshot([joined]))
+    assert [(s, i) for s, i, _ in replays.calls] == [(SPACE_ID, MEMBER_INSTANCE)]
+    since = datetime.fromisoformat(replays.calls[0][2])
+    assert timedelta(minutes=29) < before - since < timedelta(minutes=31)
+    # Nothing added the second time: nothing replayed.
+    await h._on_space_roster_snapshot(_snapshot([joined]))
+    assert len(replays.calls) == 1
     await db.shutdown()
 
 
@@ -1404,7 +1417,6 @@ class _Outbox:
     def __init__(self, *, fail: bool = False) -> None:
         self.sent: list[tuple[str, object, dict, str | None]] = []
         self.broadcast_to_space_members = AsyncMock()
-        self.space_roster_landed = MagicMock()
         self.fail = fail
 
     async def send_with_mesh_fallback(

@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
+    from .sync.space.resume import SpaceSyncResumeProvider
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +104,12 @@ log = logging.getLogger(__name__)
 #: ``member_version`` may be. Versions are counters (one per roster change);
 #: a household that was away for years of changes is still far inside this.
 MAX_ROSTER_VERSION_LEAD: int = 2**32
+
+#: How far back a household the host's roster snapshot adds gets our rows
+#: (:meth:`PrivateSpaceInviteHandler._replay_to_gained`): the §25.6
+#: periodic catch-up tick — anything older reached the host a full tick ago,
+#: so the added household's own catch-up from the host carries it.
+GAINED_REPLAY_WINDOW_S: float = 30 * 60
 
 #: Longest ``join_request_id`` a host's ``SPACE_REMOTE_MEMBER_REMOVED`` may
 #: name (it is ``uuid4().hex`` on the host).
@@ -278,6 +285,7 @@ class PrivateSpaceInviteHandler:
         "_snapshot_parts",
         "_space_crypto",
         "_space_repo",
+        "_space_resume",
         "_space_service",
         "_writer_certs",
     )
@@ -353,6 +361,9 @@ class PrivateSpaceInviteHandler:
         #: Set by :meth:`attach_to` — records a mesh-only accepting
         #: household's version + identity-key claim (migration 0078).
         self._federation: FederationService | None = None
+        #: Replays our recent rows to a household a roster snapshot adds
+        #: (:meth:`attach_space_resume`). ``None`` → no replay.
+        self._space_resume: SpaceSyncResumeProvider | None = None
 
     def attach_space_service(self, space_service) -> None:
         """Wire :class:`SpaceService` post-construction (#114 phase 2).
@@ -363,6 +374,11 @@ class PrivateSpaceInviteHandler:
         — degrading to a no-op rather than crashing the receiver.
         """
         self._space_service = space_service
+
+    def attach_space_resume(self, space_resume: SpaceSyncResumeProvider) -> None:
+        """Wire the §4.4 replay (built after this handler) that brings a
+        household the host's roster snapshot adds our recent rows."""
+        self._space_resume = space_resume
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert holder (built after this handler)."""
@@ -2218,6 +2234,11 @@ class PrivateSpaceInviteHandler:
         # :meth:`_restatable_removals`); a live entry at or below one of
         # them is dropped by the version guard below and answered after.
         restatable = await self._restatable_removals(space) if from_host else None
+        listed = (
+            set(await self._space_repo.list_member_instances(space_id))
+            if from_host
+            else set()
+        )
         unseen: dict[tuple[str, str], SpaceRemoteMember] = {}
         for (entry_type, payload, tombstoned), reason in zip(
             candidates, reasons, strict=True
@@ -2261,6 +2282,8 @@ class PrivateSpaceInviteHandler:
             )
         if restatable is not None and unseen:
             await self._restate_removals(space, restatable[0], list(unseen.values()))
+        if from_host:
+            await self._replay_to_gained(space_id, listed)
         # The host's snapshot names the roster version it is complete up to;
         # echoed on our next BEGIN to the host, it spares us the periodic
         # resend of what we hold. Only a snapshot from the host, every entry
@@ -2294,14 +2317,48 @@ class PrivateSpaceInviteHandler:
             await self._end_unnamed_host_seats(
                 space, named, roster_version=roster_version
             )
-        if self._federation is not None:
-            # Just joined? What we fanned out before the host's whole,
-            # verified roster came now reaches the member households it adds
-            # (``pending_roster_fanout``).
-            self._federation.space_roster_landed(space_id)
         if self._space_service is not None:
             self._space_service.note_roster_snapshot_applied(
                 space_id, event.from_instance, roster_version
+            )
+
+    async def _replay_to_gained(self, space_id: str, listed: set[str]) -> None:
+        """Bring each household the host's snapshot just added to our roster
+        what we sent the space lately. Our live fan-out reached only the
+        households our roster listed: a household that accepts an invitation
+        is seated from the roster the invitation carried — with several
+        invitations sent at once, the host alone — so its first post, made
+        before this snapshot landed, reached the other members only at
+        their next §25.6 catch-up (up to the 30-minute tick).
+
+        The existing §4.4 replay (``replay_space_to``: membership-gated, our
+        own people's rows unless we act for the roster, deletes as
+        tombstones, files shipped, once per household per 30 minutes) sends
+        the rows of the last :data:`GAINED_REPLAY_WINDOW_S`; the receiver
+        upserts by id, so a row it already holds is a no-op. Only the host's
+        snapshot does this — sent to one household as it is seated, or as a
+        repair — so one join never makes every member replay."""
+        if self._space_resume is None:
+            return
+        gained = (
+            set(await self._space_repo.list_member_instances(space_id))
+            - listed
+            - {self._own_instance_id}
+        )
+        if not gained:
+            return
+        since = (
+            datetime.now(UTC) - timedelta(seconds=GAINED_REPLAY_WINDOW_S)
+        ).isoformat()
+        for instance_id in sorted(gained):
+            sent = await self._space_resume.replay_space_to(
+                space_id=space_id, instance_id=instance_id, since=since
+            )
+            log.info(
+                "space %s: roster snapshot added %s — replayed %d recent row(s)",
+                space_id,
+                instance_id,
+                sent,
             )
 
     async def _restatable_removals(

@@ -616,41 +616,25 @@ member household, not only on the host:
   (the ACK's roster is taken at seat time, and the redeemer has no space row
   yet). The host signs a snapshot's entries, and the receiver verifies
   them, in a worker thread, off the event loop.
-- **What a joiner sends before its roster arrives.** A household that
-  accepts an invitation fans its writes out over the invitation's roster
-  until the seat-time snapshot lands — with several invitations sent at
-  once, that is the host alone. From the accept until the host's whole,
-  fully verified snapshot is applied (the bar the roster-version echo
-  uses), the joiner remembers each `broadcast_to_space_members` call with
-  the households it was planned for (in memory: 16 spaces, 64 calls and
-  8 MiB at most); then, in a background task, each call goes once more,
-  through the same gates, to exactly the member households the snapshot
-  added (`federation/pending_roster_fanout.py`). If the snapshot has not
-  landed after 5 minutes (a lost part, a refused entry), the joiner resends
-  anyway, to the households its roster gained by then. While the space
-  waits, each call goes live only to the households every earlier kept
-  call reached: a household the roster gains meanwhile (by gossip or an
-  earlier snapshot part), or one that drops out and comes back, gets every
-  kept call from the resend, in order. A call made while the resend runs
-  is kept and resent after the earlier ones, so a delete never overtakes
-  its post and no write waits for the resend; a household seated while the
-  resend runs is a newer joiner and gets the earlier calls from its own
-  catch-up, never a later one without them. All or nothing: when a bound
-  refuses a call, the space's wait is dropped (a post kept without its
-  later delete would bring it back), that call goes to the whole roster,
-  and the dropped ones reach the added households through their catch-up.
-  A call narrowed with `only_instances` (space chat, zones, live location)
-  is not kept — its audience came from the same stale roster — and, like
-  pictures and files (the receiver asks with `SPACE_MEDIA_WANTED`; a
-  relay-seated household gets no push with a resent post), reaches the
-  added households through their catch-up. No wire change: the cost is
-  what a complete roster would have sent (≤ 64 items × added households,
-  once per join), and before this a newcomer's first post reached the
-  other members only at their next §25.6 catch-up — up to the 30-minute
-  tick. Only an invitation from the owner starts the wait (a delegated
-  admin sends no snapshot, so a household it invites still waits for its
-  catch-up), and a 17th space joined at once starts none; a resend that fails is
-  skipped, the next one still goes.
+- **Rows for the households a snapshot adds.** A household that accepts an
+  invitation is seated from the invitation's roster — with several
+  invitations sent at once, the host alone — so what it posts before the
+  seat-time snapshot lands reaches only the host. When a snapshot from the
+  host adds households to its roster, it replays its rows of the last
+  30 minutes (the periodic catch-up tick) to each one through the §4.4
+  replay (`SpaceSyncResumeProvider.replay_space_to`): membership-gated, its
+  own people's rows only unless it acts for the roster, deletes as
+  tombstones, files shipped, over whichever path reaches that household,
+  once per household per 30 minutes; the receiver upserts by id
+  (`PrivateSpaceInviteHandler._replay_to_gained`). Only the host's snapshot
+  does this, and it goes to one household (on seating it, or as a repair),
+  so a join never makes every member replay. Cost per snapshot: the
+  households it adds × our rows in the window (a newcomer: its first one or
+  two). A follower-only household it adds gets nothing here (a household
+  that does not act for the roster replays to writer seats only, since
+  the replay carries member-only resources) and takes the rows from the
+  host's catch-up, as does whatever the replay does not carry (reactions,
+  votes, chat).
 - **Repair on a digest mismatch, in reply to an admitted BEGIN.** The host
   never sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
   member household (this version) sends to the space's host — direct, the

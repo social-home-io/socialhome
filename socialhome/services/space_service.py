@@ -7650,7 +7650,6 @@ class SpaceService(
         ):
             accept_payload.update(mesh_member_claim(self._federation.own_identity_pk))
         fresh_seat = opened is not None and await self._spaces.get(space_id) is None
-        roster_wait_started = False
         try:
             if opened is not None and join is not None:
                 await seat_join_stub(
@@ -7668,14 +7667,6 @@ class SpaceService(
                     space_crypto_service=self._space_crypto,
                     inviter_identity_pk=opened.inviter_identity_pk,
                 )
-            # Our roster is the invitation's, which lacks every household
-            # seated since; the owner answers this ACCEPT with its whole
-            # roster. What we fan out before that lands is passed on to the
-            # households it adds — so the wait starts before the ACCEPT. (A
-            # delegated admin's invitation gets no snapshot: no wait.)
-            seated = await self._spaces.get(space_id)
-            if seated is not None and seated.owner_instance_id == host_instance:
-                roster_wait_started = self._federation.expect_space_roster(space_id)
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=host_instance,
                 event_type=FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
@@ -7706,10 +7697,6 @@ class SpaceService(
                     result.error,
                 )
         except Exception:
-            # No seat, so no roster is coming: nothing to keep for one. (A
-            # wait another local member's accept started stays.)
-            if roster_wait_started:
-                self._federation.cancel_space_roster_wait(space_id)
             if fresh_seat:
                 log.warning(
                     "space %s: accept failed — rolling back the stub seated "

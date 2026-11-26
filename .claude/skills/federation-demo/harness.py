@@ -22912,8 +22912,9 @@ def cmd_space_report() -> None:
     d = inst["d"]
     # d posts a moment after it accepted: its roster is still the
     # invitation's (b alone) until b's snapshot lands, so a and c get the
-    # post when that snapshot comes (``pending_roster_fanout``), not at
-    # their next §25.6 catch-up — the wait below once timed out on that.
+    # post from d's replay when that snapshot comes
+    # (``PrivateSpaceInviteHandler._replay_to_gained``), not at their next
+    # §25.6 catch-up — the wait below once timed out on that.
     s, post = _request(
         f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/posts",
         token=d["token"],
