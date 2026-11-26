@@ -7434,3 +7434,94 @@ async def test_a_refused_fanout_goes_to_the_whole_roster():
         fed_repo.add_space_member("sp-join", "inst-a")
         await _post(svc, "p2")
     assert sorted(t for t, _, p in sent if p == {"id": "p2"}) == ["inst-a", "inst-b"]
+
+
+@pytest.mark.asyncio
+async def test_without_the_snapshot_the_deadline_resends_what_was_kept():
+    """A snapshot that never lands (a lost part, a refused entry) must not
+    starve a household the roster gained meanwhile: at the deadline what
+    was kept goes to it anyway, in order, and the wait is over."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    with (
+        patch("socialhome.federation.federation_service.ROSTER_WAIT_TTL_S", 0.01),
+        patch.object(FederationService, "send_with_mesh_fallback", _send),
+    ):
+        assert svc.expect_space_roster("sp-join")
+        await _post(svc, "p1")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        await _post(svc, "p1-deleted")
+        await asyncio.sleep(0.05)
+        await svc.drain_roster_replays()
+        assert [p["id"] for t, _, p in sent if t == "inst-a"] == ["p1", "p1-deleted"]
+        await _post(svc, "p2")
+    assert sorted(t for t, _, p in sent if p == {"id": "p2"}) == ["inst-a", "inst-b"]
+
+
+@pytest.mark.asyncio
+async def test_landing_or_cancelling_disarms_the_deadline_and_stop_clears_it():
+    svc, _fed_repo, _sent, _send = _roster_wait_service()
+    assert svc.expect_space_roster("sp-join")
+    assert svc.expect_space_roster("sp-join") is False
+    handle = svc._roster_deadlines["sp-join"]
+    svc.cancel_space_roster_wait("sp-join")
+    assert handle.cancelled() and not svc._roster_deadlines
+    svc.expect_space_roster("sp-join")
+    handle = svc._roster_deadlines["sp-join"]
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _land(svc)
+    assert handle.cancelled() and not svc._roster_deadlines
+    svc.expect_space_roster("sp-other")
+    handle = svc._roster_deadlines["sp-other"]
+    await svc.stop()
+    assert handle.cancelled() and not svc._roster_deadlines
+
+
+@pytest.mark.asyncio
+async def test_a_household_that_leaves_and_rejoins_gets_items_in_order():
+    """A pinned household removed and re-added meanwhile may have missed a
+    kept fan-out: it gets the rest from the resend, never a delete live
+    before the post it missed."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    fed_repo.add_space_member("sp-join", "inst-p")
+    svc.expect_space_roster("sp-join")
+    with patch.object(FederationService, "send_with_mesh_fallback", _send):
+        await _post(svc, "p1")
+        fed_repo._space_members.discard(("sp-join", "inst-p"))
+        await _post(svc, "p2")
+        fed_repo.add_space_member("sp-join", "inst-p")
+        await _post(svc, "p2-deleted")
+        await _land(svc)
+    assert [p["id"] for t, _, p in sent if t == "inst-p"] == [
+        "p1",
+        "p2",
+        "p2-deleted",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_household_gained_during_the_resend_gets_no_item_without_its_parent():
+    """One seated while the resend runs is a newer joiner: the resend goes
+    to the households listed at its start, so it never gets a later item
+    (a delete, an edit) without the earlier one."""
+    svc, fed_repo, sent, _send = _roster_wait_service()
+    svc.expect_space_roster("sp-join")
+    gate = asyncio.Event()
+
+    async def _slow_send(self, *, to_instance_id, event_type, payload, **kw):
+        if to_instance_id == "inst-a" and payload == {"id": "p1"}:
+            await gate.wait()
+        return await _send(
+            self, to_instance_id=to_instance_id, event_type=event_type, payload=payload
+        )
+
+    with patch.object(FederationService, "send_with_mesh_fallback", _slow_send):
+        await _post(svc, "p1")
+        fed_repo.add_space_member("sp-join", "inst-a")
+        svc.space_roster_landed("sp-join")
+        await asyncio.sleep(0)
+        fed_repo.add_space_member("sp-join", "inst-h")
+        await _post(svc, "p1-deleted")
+        gate.set()
+        await svc.drain_roster_replays()
+    assert [p["id"] for t, _, p in sent if t == "inst-a"] == ["p1", "p1-deleted"]
+    assert [p["id"] for t, _, p in sent if t == "inst-h"] == []

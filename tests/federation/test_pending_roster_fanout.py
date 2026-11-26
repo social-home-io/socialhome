@@ -74,21 +74,15 @@ def test_a_refused_fanout_ends_the_whole_wait():
     assert not pending.waiting("sp2")
 
 
-def test_the_space_whose_wait_ends_first_gives_way_when_every_slot_is_taken():
-    clock = _Clock()
-    pending = PendingRosterFanout(max_spaces=2, clock=clock)
-    pending.expect("old")
+def test_a_join_past_the_last_slot_starts_no_wait_and_cuts_none_short():
+    pending = PendingRosterFanout(max_spaces=2)
+    assert pending.expect("old")
     pending.record("old", _fanout(1), size=10)
-    clock.now += 1.0
-    pending.expect("mid")
-    clock.now += 1.0
-    pending.expect("new")
-    assert not pending.waiting("old")
-    assert pending.take("old") == []
-    assert pending.waiting("mid") and pending.waiting("new")
-    # Expecting a space already waiting takes no second slot.
-    pending.expect("mid")
-    assert pending.waiting("new")
+    assert pending.expect("mid")
+    assert pending.expect("new") is False
+    assert not pending.waiting("new")
+    assert _ids(pending.take("old")) == ["p1"]
+    assert pending.waiting("mid")
 
 
 def test_the_live_audience_is_pinned_by_the_first_fanout_until_the_wait_ends():
@@ -97,8 +91,10 @@ def test_the_live_audience_is_pinned_by_the_first_fanout_until_the_wait_ends():
     assert pending.expect("sp") is False  # already waiting
     first = pending.audience("sp", frozenset({"host", "x"}))
     assert first == {"host", "x"}
-    # Gained since: left to the resend. Gone since: dropped.
+    # Gained since: left to the resend. Gone since: dropped — and it stays
+    # out when it comes back (it may have missed a kept fan-out meanwhile).
     assert pending.audience("sp", frozenset({"host", "new"})) == {"host"}
+    assert pending.audience("sp", frozenset({"host", "x", "new"})) == {"host"}
     pending.end("sp")
     pending.expect("sp")
     assert pending.audience("sp", frozenset({"host", "new"})) == {"host", "new"}

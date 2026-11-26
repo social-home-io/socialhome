@@ -197,7 +197,11 @@ from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
 from .pending_pairing import PendingPairings
-from .pending_roster_fanout import PendingFanout, PendingRosterFanout
+from .pending_roster_fanout import (
+    ROSTER_WAIT_TTL_S,
+    PendingFanout,
+    PendingRosterFanout,
+)
 from .pq_signer import PqSigner
 from .relay_event_body import (
     EVENT_BODY_SUITE_FIELD,
@@ -506,6 +510,7 @@ class FederationService:
         "_presence_service",
         "_relay_accepted_at",
         "_replay_cache",
+        "_roster_deadlines",
         "_roster_replays",
         "_route_service",
         "_routed_handler",
@@ -667,6 +672,9 @@ class FederationService:
         #: ``space_id`` → the task resending those once the roster landed
         #: (:meth:`space_roster_landed`); :meth:`stop` ends the rest.
         self._roster_replays: dict[str, asyncio.Task[None]] = {}
+        #: ``space_id`` → when it resends without the snapshot
+        #: (:data:`ROSTER_WAIT_TTL_S` after :meth:`expect_space_roster`).
+        self._roster_deadlines: dict[str, asyncio.TimerHandle] = {}
         #: See :meth:`attach_mesh_claim_answer`.
         self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
         #: Answers on their way (:meth:`_spawn_mesh_claim_answer`).
@@ -4074,20 +4082,36 @@ class FederationService:
         since. Until the host's roster snapshot lands
         (:meth:`space_roster_landed`), each fan-out to the space is
         remembered so it can reach the households that snapshot adds
-        (:mod:`~socialhome.federation.pending_roster_fanout`). ``True``
-        when this started the wait (the space was not already waiting)."""
-        return self._pending_roster_fanout.expect(space_id)
+        (:mod:`~socialhome.federation.pending_roster_fanout`). When it has
+        not landed after :data:`ROSTER_WAIT_TTL_S`, they go anyway, to the
+        households the roster gained by then. ``True`` when this started
+        the wait (the space was not already waiting, and a slot was free)."""
+        if not self._pending_roster_fanout.expect(space_id):
+            return False
+        self._end_roster_deadline(space_id)
+        self._roster_deadlines[space_id] = asyncio.get_running_loop().call_later(
+            ROSTER_WAIT_TTL_S, self.space_roster_landed, space_id
+        )
+        return True
 
     def cancel_space_roster_wait(self, space_id: str) -> None:
         """The join of ``space_id`` did not happen (the accept failed):
         stop waiting for its roster and forget what was kept."""
+        self._end_roster_deadline(space_id)
         self._pending_roster_fanout.end(space_id)
+
+    def _end_roster_deadline(self, space_id: str) -> None:
+        handle = self._roster_deadlines.pop(space_id, None)
+        if handle is not None:
+            handle.cancel()
 
     def space_roster_landed(self, space_id: str) -> None:
         """The host's whole, verified roster snapshot for ``space_id`` was
-        applied. Each fan-out made while we waited for it goes once more to
-        the member households it added, in a tracked task (never holding up
-        the inbound snapshot). No-op when the space was not waiting."""
+        applied (or the wait's deadline passed). Each fan-out made while we
+        waited for it goes once more to the member households it added, in
+        a tracked task (never holding up the inbound snapshot). No-op when
+        the space was not waiting."""
+        self._end_roster_deadline(space_id)
         if (
             self._stopping
             or space_id in self._roster_replays
@@ -4108,18 +4132,24 @@ class FederationService:
         """Resend, through :meth:`broadcast_to_space_members` (every gate
         applies again), each fan-out kept while ``space_id`` waited for its
         roster, to the member households now listed that it was not
-        planned for — and to no one else. The wait lasts until nothing is
+        planned for — and to no one else. The households are those listed
+        at the first pass that still are (one gained while this runs is a
+        newer joiner: it gets later fan-outs live once the wait is over and
+        the rest from its own catch-up — never a later one without the
+        earlier). The wait lasts until nothing is
         left, so a fan-out made meanwhile is kept too and sent here to the
         households its live send left out, after every earlier one: nothing
         a live broadcast sends overtakes an item resent here, and no live
         broadcast waits for this task. Never raises."""
         pending = self._pending_roster_fanout
+        members: set[str] | None = None
         try:
             while fanouts := pending.take(space_id):
-                members = set(
+                listed = set(
                     await self._federation_repo.list_member_instance_ids(space_id)
                 )
-                members.discard(self._own_instance_id)
+                listed.discard(self._own_instance_id)
+                members = listed if members is None else members & listed
                 for fanout in fanouts:
                     missed = members - fanout.reached
                     if not missed:
@@ -5072,6 +5102,9 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
+        for handle in self._roster_deadlines.values():
+            handle.cancel()
+        self._roster_deadlines.clear()
         # An inbound event waiting for its second try gets it now.
         await self._inbound_retry.stop()
         tasks = [

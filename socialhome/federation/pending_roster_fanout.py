@@ -31,11 +31,15 @@ households are outside it anyway; those reach them through the catch-up,
 as before.
 
 Memory only and bounded — spaces waiting, fan-outs per space, bytes, and a
-TTL: a household that just joined makes a handful of writes before its
-roster arrives (well under a second normally, seconds over a slow path). A
-restart, a host that never sends a snapshot (pre-v_32; an invitation from
-a delegated admin, which starts no wait: only the owner sends one) or a
-bound reached falls back to the §25.6 catch-up, the behaviour before this existed.
+deadline: a household that just joined makes a handful of writes before its
+roster arrives (well under a second normally, seconds over a slow path).
+When the snapshot does not come by :data:`ROSTER_WAIT_TTL_S` (a lost part,
+a host before v_32), the federation service resends anyway, to the
+households the roster gained by then — the wait never just drops what it
+kept. A restart, a 17th space joined at once (it starts no wait) or a bound
+reached falls back to the §25.6 catch-up, the behaviour before this
+existed. An invitation from a delegated admin starts no wait: only the
+owner sends a snapshot.
 """
 
 from __future__ import annotations
@@ -47,11 +51,15 @@ from dataclasses import dataclass
 from ..domain.federation import FederationEventType
 from .bounded_hold import BoundedHold, HoldKey
 
-#: How long a just-joined household waits for the host's roster. The host
-#: sends it as it seats the household; over a durable outbox ladder
-#: (5/10/20/40 s) or a mesh route rebuilt after a restart it may take a few
-#: minutes, never longer than the route-cache window.
+#: How long a just-joined household waits for the host's roster before it
+#: resends what it kept anyway. The host sends it as it seats the household;
+#: over a durable outbox ladder (5/10/20/40 s) or a mesh route rebuilt after
+#: a restart it may take a few minutes, never longer than the route-cache
+#: window.
 ROSTER_WAIT_TTL_S: float = 300.0
+
+#: Backstop: a wait nobody ended (no deadline armed) is forgotten after this.
+ROSTER_WAIT_BACKSTOP_S: float = 2 * ROSTER_WAIT_TTL_S
 
 #: Spaces joined at once that may wait on their roster.
 MAX_WAITING_SPACES: int = 16
@@ -76,7 +84,8 @@ class PendingFanout:
 
     event_type: FederationEventType
     payload: dict
-    #: Every member household the roster listed when it was sent.
+    #: The member households it was planned for live (a gate may still have
+    #: skipped one); the resend goes to the others only.
     reached: frozenset[str]
     min_proto_version: int | None = None
     legacy_payload: dict | None = None
@@ -92,7 +101,7 @@ class PendingRosterFanout:
     def __init__(
         self,
         *,
-        ttl_seconds: float = ROSTER_WAIT_TTL_S,
+        ttl_seconds: float = ROSTER_WAIT_BACKSTOP_S,
         max_spaces: int = MAX_WAITING_SPACES,
         max_per_space: int = MAX_FANOUTS_PER_SPACE,
         max_bytes: int = MAX_FANOUT_BYTES,
@@ -122,24 +131,25 @@ class PendingRosterFanout:
 
     def expect(self, space_id: str) -> bool:
         """This household is joining ``space_id``: remember its fan-outs
-        until :meth:`end`. With every slot taken, the space whose wait ends
-        first gives way. ``True`` when this started the wait (it was not
-        already waiting)."""
+        until :meth:`end`. ``True`` when this started the wait — not when
+        the space already waits, nor when every slot is taken (that join
+        starts none: a wait under way is never cut short)."""
         self._purge()
-        started = space_id not in self._waiting
-        if started and len(self._waiting) >= self._max_spaces:
-            self.end(min(self._waiting, key=self._waiting.__getitem__))
+        if space_id in self._waiting or len(self._waiting) >= self._max_spaces:
+            return False
         self._waiting[space_id] = self._clock() + self._ttl
-        return started
+        return True
 
     def audience(self, space_id: str, members: frozenset[str]) -> frozenset[str]:
         """Who a fan-out to waiting ``space_id`` goes to live, of the
-        current ``members``: those the first kept fan-out reached (pinned
-        by the first call) and still listed. A household the roster gains
-        meanwhile gets every kept fan-out from the resend, in order —
-        never a later one live before an earlier one resent."""
-        pinned = self._audience.setdefault(space_id, members)
-        return pinned & members
+        current ``members``: those every earlier call reached (pinned by
+        the first call, and a household that drops out stays out, even
+        when it comes back). A household the roster gains meanwhile gets
+        every kept fan-out from the resend, in order — never a later one
+        live before an earlier one resent."""
+        pinned = self._audience.get(space_id, members) & members
+        self._audience[space_id] = pinned
+        return pinned
 
     def waiting(self, space_id: str) -> bool:
         """Whether a fan-out to ``space_id`` is to be remembered."""
