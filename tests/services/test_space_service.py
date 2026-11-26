@@ -13409,14 +13409,14 @@ async def test_a_follower_of_a_private_space_cannot_ask_its_way_in(stack, join_m
 
 
 async def test_approving_a_stale_request_never_overwrites_a_newer_seat(stack):
-    """Step-up review I-2: a follower with a request out is promoted
-    meanwhile; the later approval changes nothing (no member written over
-    an admin, by any admin)."""
+    """Step-up review I-2: a follower with a request out is seated another
+    way meanwhile (here: an admin seat written directly — no role change
+    moves a follower seat since final-review M2); the later approval
+    changes nothing (no member written over an admin, by any admin)."""
     fan, space = await _follower(stack, JoinMode.REQUEST)
     request_id = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
-    await stack.space_svc.set_role(
-        space.id, actor_username="anna", user_id=fan.user_id, role="admin"
-    )
+    held = await stack.space_repo.get_member(space.id, fan.user_id)
+    await stack.space_repo.save_member(dataclasses.replace(held, role="admin"))
     await stack.space_svc.approve_join_request(request_id, actor_username="anna")
     assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == "admin"
 
@@ -13462,3 +13462,16 @@ async def test_a_followers_ask_elsewhere_checks_what_we_know_and_asks_once(
     )
     with pytest.raises(InviteOnlyError):
         await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+
+
+async def test_no_role_change_promotes_a_follower(stack):
+    """Final review M2: a follower seat moves only through that person's
+    own approved join / redeem — the owner cannot promote it."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_role(
+            space.id, actor_username="anna", user_id=fan.user_id, role="member"
+        )
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
