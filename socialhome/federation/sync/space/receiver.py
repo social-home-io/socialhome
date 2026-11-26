@@ -162,6 +162,10 @@ class _SyncPageSink(Protocol):
     ) -> None: ...
 
 
+#: Open owner ``bans`` streams tracked at once (each a few sets of ids).
+_OWNER_BANS_STREAMS_MAX = 256
+
+
 class SpaceSyncReceiver(
     MembersMixin,
     PostsMixin,
@@ -195,6 +199,7 @@ class SpaceSyncReceiver(
         "_media_dir",
         "_media_names",
         "_media_refs",
+        "_owner_bans_seen",
         "_page_conflicts",
         "_page_repo",
         "_peer_version",
@@ -252,6 +257,10 @@ class SpaceSyncReceiver(
         #: as ``have_seq`` in the next periodic BEGIN. ``None``: never
         #: recorded, so every periodic session streams in full.
         self._applied_seqs = applied_seqs
+        #: Owner decision A (2026-11-26): ``sync_id -> (space_id, persons,
+        #: households)`` of the OWNER's ``bans`` list in this stream; at a
+        #: clean sentinel every ban row the list lacks is lifted here.
+        self._owner_bans_seen: dict[str, tuple[str, set[str], set[str]]] = {}
         self._timetable_repo = timetable_repo
         #: v_55 — where ``chat_messages`` records go: the space-chat inbound
         #: handlers, which run each through the live create rule. ``None``
@@ -578,6 +587,9 @@ class SpaceSyncReceiver(
                 await self._record_applied(
                     space_id, from_instance, envelope.get("snapshot_seq")
                 )
+            owner_bans = self._owner_bans_seen.pop(sync_id, None)
+            if clean and owner_bans is not None and owner_bans[0] == space_id:
+                await self._lift_bans_the_owner_lifted(*owner_bans)
             # v_95: after the stream's snapshot is recorded — a held page
             # with no verdict yet is compared with what we now hold (the page
             # itself comes as its own ``SPACE_SYNC_PAGE`` event), and the
@@ -719,6 +731,8 @@ class SpaceSyncReceiver(
             log.debug("unknown resource %r in sync chunk", resource)
             return
 
+        if resource == "bans":
+            await self._note_owner_bans(sync_id, space_id, from_instance, records)
         try:
             outcome = await self._apply(
                 resource, space_id, records, provider=from_instance
@@ -755,6 +769,35 @@ class SpaceSyncReceiver(
             space_id,
             from_instance,
         )
+
+    async def _note_owner_bans(
+        self,
+        sync_id: str,
+        space_id: str,
+        provider: str,
+        records: list[Any],
+    ) -> None:
+        """Collect what the OWNER's ``bans`` list names in this stream (an
+        empty chunk included: "no bans"). A delegated admin's stream is
+        never collected — it may miss the owner's latest ban, so it never
+        lifts one here. Bounded: at most :data:`_OWNER_BANS_STREAMS_MAX`
+        open streams are tracked (the oldest dropped: no lift, as before)."""
+        space = await self._space_repo.get(space_id)
+        if space is None or space.owner_instance_id != provider:
+            return
+        entry = self._owner_bans_seen.get(sync_id)
+        if entry is None:
+            if len(self._owner_bans_seen) >= _OWNER_BANS_STREAMS_MAX:
+                self._owner_bans_seen.pop(next(iter(self._owner_bans_seen)))
+            entry = (space_id, set(), set())
+            self._owner_bans_seen[sync_id] = entry
+        for r in records if isinstance(records, list) else []:
+            if not isinstance(r, dict):
+                continue
+            if r.get("user_id"):
+                entry[1].add(str(r["user_id"]))
+            elif r.get("instance_id"):
+                entry[2].add(str(r["instance_id"]))
 
     async def apply_verified(
         self, space_id: str, provider: str, resource: str, record: dict[str, Any]

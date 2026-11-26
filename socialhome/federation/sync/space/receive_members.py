@@ -202,6 +202,33 @@ class MembersMixin(ReceiverBase):
                     )
                 )
 
+    async def _lift_bans_the_owner_lifted(
+        self, space_id: str, persons: set[str], households: set[str]
+    ) -> None:
+        """Owner decision A (2026-11-26): the owner's ``bans`` list is
+        authoritative. After a CLEAN stream from the owner that carried the
+        list (an empty one included), every person or household ban held
+        here that the list lacks is lifted — an unban this household missed
+        (sync used to only add), and the ban / unban race, converge at the
+        owner's next sync. Only the owner's stream gets here."""
+        lifted = 0
+        for row in await self._space_repo.list_bans(space_id):
+            user_id = str(row.get("user_id") or "")
+            if user_id and user_id not in persons:
+                await self._space_repo.unban_member(space_id, user_id)
+                lifted += 1
+        for row in await self._space_repo.list_household_bans(space_id):
+            instance_id = str(row.get("instance_id") or "")
+            if instance_id and instance_id not in households:
+                await self._space_repo.unban_household(space_id, instance_id)
+                lifted += 1
+        if lifted:
+            log.info(
+                "space sync: lifted %d ban(s) in %s the owner's list no longer names",
+                lifted,
+                space_id,
+            )
+
     async def _persist_household_ban(
         self,
         space_id: str,

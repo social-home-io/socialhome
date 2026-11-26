@@ -12,7 +12,10 @@ from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.federation import InstanceSource, PairingStatus, RemoteInstance
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.federation.encoder import FederationEncoder
-from socialhome.federation.sync.space.exporter import serialise_chunk
+from socialhome.federation.sync.space.exporter import (
+    SENTINEL_RESOURCE,
+    serialise_chunk,
+)
 from socialhome.services.inbound_media_store import space_direct_media_name
 
 
@@ -462,6 +465,18 @@ class _SpaceRepoStub:
             if b[0] == space_id
         ]
 
+    async def unban_member(self, space_id, user_id):
+        self._c.bans = [
+            b for b in self._c.bans if not (b[0] == space_id and b[1] == user_id)
+        ]
+
+    async def unban_household(self, space_id, instance_id):
+        self._c.household_bans = [
+            b
+            for b in self._c.household_bans
+            if not (b[0] == space_id and b[1] == instance_id)
+        ]
+
     async def get_owner_user_id(self, space_id):
         return "u-owner"
 
@@ -512,6 +527,31 @@ async def _send(r, kp, resource, records, *, space_id="sp-1", sync_id="sync-1"):
         suite="ed25519",
     )
     await r.on_chunk(serialise_chunk(envelope), from_instance="peer-a")
+
+
+async def _send_sentinel(
+    r,
+    kp,
+    *,
+    space_id="sp-1",
+    sync_id="sync-1",
+    from_instance="peer-a",
+    chunk_count=1,
+):
+    """Build + sign + deliver the end-of-stream sentinel (``chunk_count``:
+    the chunks the stream put on the wire — a clean stream's count)."""
+    sentinel = {
+        "sync_id": sync_id,
+        "resource": SENTINEL_RESOURCE,
+        "space_id": space_id,
+        "is_last": True,
+        "chunk_count": chunk_count,
+    }
+    enc = FederationEncoder(kp.private_key)
+    sentinel["signatures"] = enc.sign_envelope_all(
+        orjson.dumps(sentinel), suite="ed25519"
+    )
+    await r.on_chunk(serialise_chunk(sentinel), from_instance=from_instance)
 
 
 class _GfsMediaSink:

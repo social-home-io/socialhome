@@ -1043,6 +1043,18 @@ pictures every receiver refuses from it. Its own people's `members` rows
 still go because they carry the picture resets only their household may
 make (see "Receiver side" below). The session shape changes with the
 resource set, so the first session after the upgrade is a full one.
+**The owner's `bans` list is authoritative** (owner decision A,
+2026-11-26). `bans` is streamed whole whenever it changed, and an empty list
+is a statement (one empty chunk, `EMPTY_IS_A_STATEMENT`). After a **clean**
+stream from the space's **owner** that carried the list, the receiver lifts
+every person or household ban it holds that the list lacks — an unban it
+missed (sync used to only add), and a ban / unban that crossed on the wire,
+converge at the owner's next sync. A delegated admin's stream never lifts a
+ban (it may lag the owner's latest ban). Residuals: an owner household below
+this change sends no empty list, so the last lifted ban of a space stays
+until its next ban; and a delegated admin's fresh ban that has not reached
+the owner yet can be lifted on a member household by the owner's sync, then
+comes back with the admin's gossip or the owner's next list.
 A follower household (no writer seat) gets `bans` without each ban's
 free-text `reason` — who is banned (its authorship checks) and by whom
 (a person ban needs it), never why. And a receiver never saves a

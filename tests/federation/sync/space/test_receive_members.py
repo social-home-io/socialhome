@@ -43,7 +43,7 @@ from socialhome.services.realtime_service import RealtimeService
 from socialhome.services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
 )
-from tests.federation.sync.space.receiver_fakes import _send
+from tests.federation.sync.space.receiver_fakes import _send, _send_sentinel
 
 
 async def test_bans(setup):
@@ -806,3 +806,64 @@ async def test_a_user_id_seated_under_two_households_is_judged_on_both(stack):
         ],
     )
     assert await stack.spaces.get_member(SPACE_ID, MEMBER) is None
+
+
+# ── Owner decision A (2026-11-26): the owner's bans list is authoritative ──
+
+
+async def test_the_owners_list_lifts_a_ban_this_household_missed_the_unban_of(
+    setup,
+):
+    """Sync used to only add bans: a household that missed an unban kept
+    refusing the person for good. After a clean stream from the OWNER
+    (``peer-a`` owns ``sp-1`` here), every ban its list lacks is lifted."""
+    r, c, kp = setup
+    c.bans.append(("sp-1", "u-lifted", "u-owner", None))
+    c.household_bans.append(("sp-1", "hh-lifted", None))
+    await _send(
+        r,
+        kp,
+        "bans",
+        [{"space_id": "sp-1", "user_id": "u-kept", "banned_by": "u-owner"}],
+    )
+    await _send_sentinel(r, kp)
+    assert [b[1] for b in c.bans] == ["u-kept"]
+    assert c.household_bans == []
+
+
+async def test_an_empty_owner_list_lifts_every_ban(setup):
+    """ "No bans" is a statement: the owner streams an empty ``bans`` chunk."""
+    r, c, kp = setup
+    c.bans.append(("sp-1", "u-lifted", "u-owner", None))
+    await _send(r, kp, "bans", [])
+    await _send_sentinel(r, kp)
+    assert c.bans == []
+
+
+async def test_no_lift_without_the_list_or_a_clean_stream(setup):
+    """A stream that never carried ``bans`` (unchanged) lifts nothing, and
+    neither does an unclean one."""
+    r, c, kp = setup
+    c.bans.append(("sp-1", "u-banned", "u-owner", None))
+    await _send_sentinel(r, kp, chunk_count=0)
+    assert [b[1] for b in c.bans] == ["u-banned"]
+    await _send(r, kp, "bans", [], sync_id="sync-2")
+    r._health.failed("sync-2")
+    await _send_sentinel(r, kp, sync_id="sync-2")
+    assert [b[1] for b in c.bans] == ["u-banned"]
+
+
+async def test_a_delegated_admins_list_never_lifts_a_ban(setup, monkeypatch):
+    """A delegated admin acting as host may miss the owner's latest ban: its
+    stream adds bans, never lifts one."""
+    r, c, _kp = setup
+    c.bans.append(("sp-1", "u-banned", "u-owner", None))
+    real_get = r._space_repo.get
+
+    async def owned_elsewhere(space_id):
+        space = await real_get(space_id)
+        return SimpleNamespace(**{**space.__dict__, "owner_instance_id": "the-owner"})
+
+    monkeypatch.setattr(r._space_repo, "get", owned_elsewhere)
+    await r._note_owner_bans("sync-9", "sp-1", "peer-a", [])
+    assert "sync-9" not in r._owner_bans_seen
