@@ -136,6 +136,8 @@ class _FakeSpaceRepo:
         self.tokens: dict[str, dict] = {}
         self.space_instances: list[tuple[str, str]] = []
         self.bans: set[tuple[str, str]] = set()
+        #: P7b household bans: (space_id, instance_id).
+        self.household_bans: set[tuple[str, str]] = set()
         # Which pending invitations a seated redeem expired (migration 0093).
         self.expired_except: tuple[str, frozenset[str]] | None = None
         # Allow tests to force an exception out of consume_invite_token.
@@ -225,6 +227,11 @@ class _FakeSpaceRepo:
             in self.bans
         ):
             return None
+        if (
+            redeemer_instance_id is not None
+            and (row["space_id"], redeemer_instance_id) in self.household_bans
+        ):
+            return None
         row["uses_remaining"] -= 1
         return {
             "space_id": row["space_id"],
@@ -257,6 +264,9 @@ class _FakeSpaceRepo:
 
     async def is_banned(self, space_id, user_id):
         return (space_id, user_id) in self.bans
+
+    async def is_household_banned(self, space_id, instance_id):
+        return (space_id, instance_id) in self.household_bans
 
     async def get(self, space_id):
         return self.space_rows_for_get.get(space_id)
@@ -3306,6 +3316,20 @@ async def test_a_seated_but_banned_household_gets_no_re_ack():
         await _redeem(env)
     env.relay.lose_to.clear()
     env.issuer_spaces.bans.add(("space-1", U_LOCAL))
+    with pytest.raises(SpacePermissionError) as exc:
+        await _redeem(env)
+    assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE
+
+
+async def test_a_seated_household_banned_as_a_household_gets_no_re_ack():
+    """P7b — the re-ACK judges the household ban too (a seat that outlived
+    a household ban for a moment is never re-answered)."""
+    env = _atomic_pair()
+    env.relay.lose_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    env.relay.lose_to.clear()
+    env.issuer_spaces.household_bans.add(("space-1", env.redeemer_party.instance_id))
     with pytest.raises(SpacePermissionError) as exc:
         await _redeem(env)
     assert str(exc.value) == BOOTSTRAP_DENY_CLIENT_MESSAGE

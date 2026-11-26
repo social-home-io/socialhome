@@ -83,7 +83,7 @@ from ..services.local_community import (
     file_remote_join_request,
     pending_join_request_id,
 )
-from ..services.space_member_guard import user_id_proven
+from ..services.space_member_guard import banned_from_space, user_id_proven
 from .inbound_validator import RELAY_QUEUE_TTL_SECONDS, RELAY_TIMESTAMP_SKEW_SECONDS
 from .invite_bootstrap import (
     KIND_JOIN_REQUEST,
@@ -581,7 +581,9 @@ class GfsJoinRequestCoordinator:
                 user_id,
             )
             return {"ok": True, "filed": False}
-        if await self._spaces.is_banned(space_id, user_id):
+        if await banned_from_space(
+            self._spaces, space_id, user_id=user_id, instance_id=applicant
+        ):
             log.info(
                 "gfs join request from %s refused: applicant banned from %s",
                 applicant,

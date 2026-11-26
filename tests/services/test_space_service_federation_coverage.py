@@ -55,6 +55,7 @@ from socialhome.domain.space import (
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    UserBannedError,
 )
 from socialhome.domain.space_proposal import ProposalAction, ProposalStatus
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
@@ -184,6 +185,30 @@ async def test_invite_remote_user_rejects_unpaired_host(stack):
             invitee_instance_id="peer",
             invitee_user_id="bob",
         )
+
+
+@pytest.mark.parametrize("banned", ["person", "household"])
+async def test_invite_remote_user_refuses_a_banned_person_or_household(stack, banned):
+    """P7b (owner fork (a)): a household ban blocks every person of it,
+    explicit invites included — nothing is minted or sent."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(
+        owner_username="alicehost",
+        name="Private",
+        space_type=SpaceType.PRIVATE,
+    )
+    if banned == "person":
+        await stack.space_repo.ban_member(space.id, "bob", "alicehost")
+    else:
+        await stack.space_repo.ban_household(space.id, "peer")
+    with pytest.raises(UserBannedError):
+        await stack.svc.invite_remote_user(
+            space.id,
+            actor_username="alicehost",
+            invitee_instance_id="peer",
+            invitee_user_id="bob",
+        )
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
 
 
 async def test_invite_remote_user_happy(stack):
@@ -799,6 +824,29 @@ async def test_approve_local_join_request(stack):
     )
     assert member is not None
     assert member.user_id == bob.user_id
+
+
+@pytest.mark.parametrize("banned", ["person", "household"])
+async def test_a_request_of_a_banned_applicant_is_never_approved(stack, banned):
+    """P7b — a request filed before its person or household was banned
+    stays unapproved: no token is minted, the request stays pending."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(
+        owner_username="alicehost",
+        name="S",
+        join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
+    )
+    rid = await stack.space_repo.save_join_request(
+        space.id, "remote-u", remote_applicant_instance_id="remote-house"
+    )
+    if banned == "person":
+        await stack.space_repo.ban_member(space.id, "remote-u", "alicehost")
+    else:
+        await stack.space_repo.ban_household(space.id, "remote-house")
+    with pytest.raises(UserBannedError):
+        await stack.svc.approve_join_request(rid, actor_username="alicehost")
+    assert (await stack.space_repo.get_join_request(rid))["status"] == "pending"
 
 
 async def test_approve_unknown_request_raises(stack):

@@ -344,6 +344,7 @@ from .space_crypto_service import (
 from .space_member_guard import (
     NOT_A_SPACE_MEMBER,
     SpaceMemberGuardMixin,
+    banned_from_space,
     require_seat,
     seat_of,
     user_id_proven,
@@ -7653,6 +7654,16 @@ class SpaceService(
             )
         space = await self._require_space(space_id)
         actor_member = await self._require_admin_or_owner(space, actor_username)
+        # P7b — a banned person, or any person of a banned household, is
+        # never invited (owner decision (a): the household ban holds for
+        # explicit invites too; unban the household first).
+        if await banned_from_space(
+            self._spaces,
+            space_id,
+            user_id=invitee_user_id,
+            instance_id=invitee_instance_id,
+        ):
+            raise UserBannedError()
         # §D3 (Phase 3) — delegated-admin authority gate. The owner/host of a
         # space can always invite. A NON-owner ADMIN (a delegated admin whose
         # household doesn't host the space) may only mint an authoritative
@@ -8682,6 +8693,15 @@ class SpaceService(
         elif via != APPROVE_VIA_REVIEW:
             raise ValueError(f"unknown approval source {via!r}")
         remote_instance = row.get("remote_applicant_instance_id")
+        # P7b — a request filed before its person or household was banned is
+        # never approved (a remote approval would only mint a dead token).
+        if await banned_from_space(
+            self._spaces,
+            str(row["space_id"]),
+            user_id=str(row["user_id"]),
+            instance_id=str(remote_instance) if remote_instance else None,
+        ):
+            raise UserBannedError()
         # An admin/mod elevation (the applicant is ALREADY a member; an
         # admin link filed this). Approving is the owner's click that runs
         # the existing owner-only promote — ``set_role`` for a local member,
@@ -8947,7 +8967,9 @@ class SpaceService(
                 space_id,
             )
             return False
-        if await self._spaces.is_banned(space_id, user_id):
+        if await banned_from_space(
+            self._spaces, space_id, user_id=user_id, instance_id=instance_id
+        ):
             log.info("follow from %s refused: banned from %s", instance_id, space_id)
             return False
         if await self._remote_members.get(space_id, instance_id, user_id) is not None:

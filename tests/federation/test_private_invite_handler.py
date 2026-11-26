@@ -144,6 +144,9 @@ def handler():
     space_repo.save_remote_invitation = AsyncMock()
     space_repo.get_invitation_by_token = AsyncMock()
     space_repo.update_invitation_status = AsyncMock()
+    # Nobody banned by default (P7b: the accept checks person + household).
+    space_repo.is_banned = AsyncMock(return_value=False)
+    space_repo.is_household_banned = AsyncMock(return_value=False)
     # No pre-existing local space row by default (the normal first-invite
     # case) so the §D1b anti-hijack guard (can_seat_remote_stub) allows the
     # stub. Tests that exercise a collision override this per-test.
@@ -279,6 +282,24 @@ async def test_accept_happy_path(handler):
     # The bell goes to the one who sent the invitation, naming the invitee.
     assert accepted.inviter_user_id == "u-inviter"
     assert accepted.invitee_display_name == "Bob"
+
+
+@pytest.mark.parametrize("banned", ["person", "household"])
+async def test_accept_of_a_banned_person_or_household_seats_nobody(handler, banned):
+    """P7b (leak L3): an invitation sent before its person — or their
+    household — was banned can no longer be accepted."""
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(42)
+    if banned == "person":
+        handler.space_repo.is_banned.return_value = True
+    else:
+        handler.space_repo.is_household_banned.return_value = True
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": U1},
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_not_awaited()
+    handler.space_repo.update_invitation_status.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

@@ -46,7 +46,7 @@ from ..local_community import (
     pending_join_request_id,
     require_local_eligibility,
 )
-from ..space_member_guard import user_id_proven
+from ..space_member_guard import banned_from_space, user_id_proven
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -218,7 +218,12 @@ class SpaceInviteInboundHandlers:
                 space_id,
             )
             return
-        if await self._space_repo.is_banned(space_id, user_id):
+        if await banned_from_space(
+            self._space_repo,
+            space_id,
+            user_id=user_id,
+            instance_id=event.from_instance,
+        ):
             log.info(
                 "SPACE_JOIN_REQUEST from %s refused: applicant banned from %s",
                 event.from_instance,
@@ -345,7 +350,12 @@ class SpaceInviteInboundHandlers:
                 space_id,
             )
             return
-        if await self._space_repo.is_banned(space_id, user_id):
+        if await banned_from_space(
+            self._space_repo,
+            space_id,
+            user_id=user_id,
+            instance_id=event.from_instance,
+        ):
             log.info(
                 "follow from %s refused: applicant banned from %s",
                 event.from_instance,

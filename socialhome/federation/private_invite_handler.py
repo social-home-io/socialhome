@@ -76,7 +76,7 @@ from ..services.space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from ..services.space_member_guard import user_id_proven
+from ..services.space_member_guard import banned_from_space, user_id_proven
 from ..services.space_service import (
     SUPPORTED_SEED_SUITES,
     admit_join,
@@ -716,6 +716,20 @@ class PrivateSpaceInviteHandler:
             invite=invite,
             invitee_user_id=invitee_user_id,
         ):
+            return
+        if await banned_from_space(
+            self._space_repo,
+            invite["space_id"],
+            user_id=invitee_user_id,
+            instance_id=event.from_instance,
+        ):
+            # P7b — an invitation sent before its person (or household) was
+            # banned is not a way back in.
+            log.info(
+                "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s: banned — dropping",
+                invite["space_id"],
+                event.from_instance,
+            )
             return
         live_seat = await self._remote_members.get(
             invite["space_id"],

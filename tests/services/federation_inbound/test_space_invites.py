@@ -83,6 +83,8 @@ class _FakeSpaceRepo:
         self.answered: set[str] = set()
         self.spaces = {"sp-1": _space()}
         self.banned: set[tuple[str, str]] = set()
+        #: P7b household bans: (space_id, instance_id).
+        self.household_banned: set[tuple[str, str]] = set()
         #: Join-request rows by id. ``req-1`` is this household's own copy
         #: of a request its user sent to ``peer-a``, which hosts ``sp-r``.
         self.rows: dict[str, dict] = {
@@ -102,6 +104,9 @@ class _FakeSpaceRepo:
 
     async def is_banned(self, space_id, user_id):
         return (space_id, user_id) in self.banned
+
+    async def is_household_banned(self, space_id, instance_id):
+        return (space_id, instance_id) in self.household_banned
 
     async def save_invitation(
         self, *, space_id, invited_user_id, invited_by, ttl_days=7
@@ -341,6 +346,19 @@ async def test_join_request_from_a_banned_user_is_dropped(repo, handlers):
     await handlers._on_join_request(
         _event(
             FederationEventType.SPACE_JOIN_REQUEST, {"user_id": "u-1"}, space_id="sp-1"
+        )
+    )
+    assert repo.join_requests == []
+
+
+async def test_join_request_from_a_banned_household_is_dropped(repo, handlers):
+    """P7b — any person of a banned household, a fresh one included."""
+    repo.household_banned.add(("sp-1", "peer-a"))
+    await handlers._on_join_request(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST,
+            {"user_id": "u-new"},
+            space_id="sp-1",
         )
     )
     assert repo.join_requests == []
@@ -991,6 +1009,15 @@ async def test_a_follow_of_a_space_not_hosted_here_live_and_public_is_dropped(
 async def test_a_banned_follower_is_dropped(bus, repo):
     repo.spaces["sp-1"] = _follow_space()
     repo.banned.add(("sp-1", U_FOLLOWER))
+    approver = _Approver()
+    h = _follow_handlers(bus, repo, approver=approver)
+    await _follow(h)
+    assert approver.calls == []
+
+
+async def test_a_follower_of_a_banned_household_is_dropped(bus, repo):
+    repo.spaces["sp-1"] = _follow_space()
+    repo.household_banned.add(("sp-1", "peer-a"))
     approver = _Approver()
     h = _follow_handlers(bus, repo, approver=approver)
     await _follow(h)
