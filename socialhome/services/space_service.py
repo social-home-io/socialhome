@@ -77,7 +77,7 @@ from ..domain.relay_media_frame import (
     space_item_too_large,
 )
 from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
-from ..federation.host_equivalence import acts_as_host
+from ..federation.host_equivalence import acts_as_host, touches_owner_household
 from ..federation.host_hop import HOST_HOP_UNAVAILABLE
 from ..federation.invite_code import (
     build_invite_code,
@@ -6466,6 +6466,9 @@ class SpaceService(
             space, actor_username, "ban", {"user_id": user_id, "reason": reason}
         ):
             return
+        await self._require_not_owner_household_person(
+            space, user_id, on_behalf_of=on_behalf_of
+        )
         target = await self._spaces.get_member(space_id, user_id)
         if target is not None and target.role == SpaceRole.OWNER:
             raise SpacePermissionError("cannot ban the owner")
@@ -6485,6 +6488,7 @@ class SpaceService(
             user_id,
             banned_by=banned_by,
             reason=reason,
+            owner_ban=banned_by == await self.owner_user_id(space),
         )
         await self._emit_ban(space, banned=True, user_id=user_id, banned_by=banned_by)
         if remote_seat is not None:
@@ -6632,7 +6636,12 @@ class SpaceService(
         actor = await self._users.get(actor_username)
         banned_by = on_behalf_of or (actor.user_id if actor is not None else None)
         await self._spaces.ban_household(
-            space_id, instance_id, reason=reason, banned_by=banned_by
+            space_id,
+            instance_id,
+            reason=reason,
+            banned_by=banned_by,
+            owner_ban=banned_by is not None
+            and banned_by == await self.owner_user_id(space),
         )
         ending: list[SpaceRemoteMember] = (
             await self._remote_members.list_for_instance(
@@ -6727,6 +6736,27 @@ class SpaceService(
                 sequence=space.config_sequence,
             )
         )
+
+    async def _require_not_owner_household_person(
+        self, space: Space, user_id: str, *, on_behalf_of: str | None
+    ) -> None:
+        """Only the owner household decides about its own people's bans (P7b
+        Fable re-review I-A / M-a): a remote admin's forwarded ban / unban
+        run here on the owner (``on_behalf_of``), or a seed-holding admin
+        household acting locally, never names the owner or a person of the
+        owner household. The owner household's own admins may."""
+        if not self._hosted_elsewhere(space):
+            if on_behalf_of is None:
+                return
+            ours = await self._users.get_by_user_id(user_id) is not None
+        else:
+            ours = await touches_owner_household(
+                self._spaces, self._remote_members, space, user_id=user_id
+            )
+        if ours or user_id == await self.owner_user_id(space):
+            raise SpacePermissionError(
+                "only the owner household decides about its own people"
+            )
 
     async def _require_may_lift(
         self, space: Space, *, lifter: str, banner: str | None
@@ -6824,6 +6854,9 @@ class SpaceService(
             space, actor_username, "unban", {"user_id": user_id}
         ):
             return
+        await self._require_not_owner_household_person(
+            space, user_id, on_behalf_of=on_behalf_of
+        )
         await self._require_may_lift(
             space,
             lifter=on_behalf_of or member.user_id,

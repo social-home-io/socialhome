@@ -90,7 +90,14 @@ class _FakeSpaceRepo:
         self.instance_removes.append((space_id, instance_id))
 
     async def ban_member(
-        self, *, space_id, user_id, banned_by, identity_pk=None, reason=None
+        self,
+        *,
+        space_id,
+        user_id,
+        banned_by,
+        identity_pk=None,
+        reason=None,
+        owner_ban=False,
     ):
         self.bans.append((space_id, user_id, banned_by, reason))
 
@@ -98,7 +105,7 @@ class _FakeSpaceRepo:
         self.unbans.append((space_id, user_id))
 
     async def ban_household(
-        self, space_id, instance_id, *, reason=None, banned_by=None
+        self, space_id, instance_id, *, reason=None, banned_by=None, owner_ban=False
     ):
         self.household_bans.append((space_id, instance_id, reason))
         self.household_banners.append((space_id, instance_id, banned_by))

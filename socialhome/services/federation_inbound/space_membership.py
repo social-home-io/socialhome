@@ -561,12 +561,17 @@ class SpaceMembershipInboundHandlers:
             event, space_id, str(banned_by) if banned_by else None
         ):
             return
+        # The owner household's ban becomes the owner's even over an
+        # earlier admin's (re-review I-B); anyone else's keeps the first.
+        space = await self._space_repo.get(space_id)
+        owner_ban = space is not None and event.from_instance == space.owner_instance_id
         if instance_id:
             await self._space_repo.ban_household(
                 space_id,
                 instance_id,
                 reason=reason,
                 banned_by=str(banned_by) if banned_by else None,
+                owner_ban=owner_ban,
             )
             return
         await self._space_repo.ban_member(
@@ -574,6 +579,7 @@ class SpaceMembershipInboundHandlers:
             user_id=user_id,
             banned_by=str(banned_by) if banned_by else event.from_instance,
             reason=reason,
+            owner_ban=owner_ban,
         )
         await self._bus.publish(
             RemoteSpaceMemberBanned(

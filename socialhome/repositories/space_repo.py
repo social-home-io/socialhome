@@ -268,6 +268,7 @@ class AbstractSpaceRepo(Protocol):
         *,
         identity_pk: str | None = None,
         reason: str | None = None,
+        owner_ban: bool = False,
     ) -> None: ...
     async def unban_member(self, space_id: str, user_id: str) -> None: ...
     async def is_banned(self, space_id: str, user_id: str) -> bool: ...
@@ -279,6 +280,7 @@ class AbstractSpaceRepo(Protocol):
         *,
         reason: str | None = None,
         banned_by: str | None = None,
+        owner_ban: bool = False,
     ) -> None: ...
     async def unban_household(self, space_id: str, instance_id: str) -> None: ...
     async def ban_banned_by(
@@ -2027,7 +2029,12 @@ class SqliteSpaceRepo:
         *,
         identity_pk: str | None = None,
         reason: str | None = None,
+        owner_ban: bool = False,
     ) -> None:
+        """Ban ``user_id`` and drop its seat. A re-ban keeps the first
+        banner (P7b Fable review I1 — an admin's re-ban never turns the
+        owner's ban into its own) unless ``owner_ban``: the OWNER's ban
+        always becomes the owner's (re-review I-B)."""
         # One transaction: the ban row and the seat delete land together
         # or not at all. Two ``enqueue`` calls were two transactions (each
         # awaited its own commit, and the writer isolates statements in
@@ -2042,12 +2049,12 @@ class SqliteSpaceRepo:
                 VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(space_id, user_id) DO UPDATE SET
                     identity_pk=excluded.identity_pk,
-                    -- The first banner stays (P7b Fable review I1): a
-                    -- re-ban never turns the owner's ban into an admin's.
-                    banned_by=COALESCE(space_bans.banned_by, excluded.banned_by),
+                    banned_by=CASE WHEN ? THEN excluded.banned_by
+                        ELSE COALESCE(space_bans.banned_by, excluded.banned_by)
+                    END,
                     reason=excluded.reason
                 """,
-                (space_id, user_id, identity_pk, banned_by, reason),
+                (space_id, user_id, identity_pk, banned_by, reason, int(owner_ban)),
             )
             await uow.exec(
                 "DELETE FROM space_members WHERE space_id=? AND user_id=?",
@@ -2085,18 +2092,21 @@ class SqliteSpaceRepo:
         *,
         reason: str | None = None,
         banned_by: str | None = None,
+        owner_ban: bool = False,
     ) -> None:
+        """Ban a whole household; the banner rule of :meth:`ban_member`."""
         await self._db.enqueue(
             """
             INSERT INTO space_instance_bans(space_id, instance_id, reason, banned_by)
             VALUES(?, ?, ?, ?)
             ON CONFLICT(space_id, instance_id) DO UPDATE SET
                 reason=excluded.reason,
-                -- The first banner stays (P7b Fable review I1); an unknown
-                -- one (NULL, before 0157) takes the first named.
-                banned_by=COALESCE(space_instance_bans.banned_by, excluded.banned_by)
+                -- An unknown banner (NULL, before 0157) takes the first named.
+                banned_by=CASE WHEN ? THEN excluded.banned_by
+                    ELSE COALESCE(space_instance_bans.banned_by, excluded.banned_by)
+                END
             """,
-            (space_id, instance_id, reason, banned_by),
+            (space_id, instance_id, reason, banned_by, int(owner_ban)),
         )
 
     async def ban_banned_by(
