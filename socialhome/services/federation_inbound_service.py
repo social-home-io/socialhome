@@ -5014,8 +5014,6 @@ class FederationInboundService(ProtectionGateMixin):
             event_type=event.event_type,
             payload=p,
             from_instance=event.from_instance,
-            # Held before this copy: its forward is free of the author cap.
-            known=held is not None,
         )
 
     async def _keep_reaction_route(
@@ -5106,8 +5104,9 @@ class FederationInboundService(ProtectionGateMixin):
             event_type=event.event_type,
             payload=p,
             from_instance=event.from_instance,
-            # A delete of a moment held here always follows it (author cap).
-            known=outcome in (MomentTombstone.REMOVED, MomentTombstone.CLOSER),
+            # A delete that wiped a moment stored here follows it, free of
+            # the author cap (unless its create was capped here).
+            removed_here=outcome is MomentTombstone.REMOVED,
         )
 
     async def _on_moment_reacted(self, event: FederationEvent) -> None:
@@ -5455,7 +5454,7 @@ class FederationInboundService(ProtectionGateMixin):
         event_type,
         payload: dict,
         from_instance: str,
-        known: bool = False,
+        removed_here: bool = False,
     ) -> None:
         if self._moment_outbound is None:
             return
@@ -5464,7 +5463,7 @@ class FederationInboundService(ProtectionGateMixin):
                 event_type=event_type,
                 payload=payload,
                 from_instance=from_instance,
-                known=known,
+                removed_here=removed_here,
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("moment-relay failed: %s", exc, exc_info=True)

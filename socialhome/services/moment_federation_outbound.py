@@ -48,10 +48,10 @@ totals under a relayed outbox key the per-peer cap evicts first.
 **Per-author relay cap** (owner 2026-11-24, local policy — no protocol
 bump). A relay forwards at most :data:`MOMENT_RELAY_AUTHOR_CAP` moments of
 one author an hour, keyed by the signed origin + author (never the
-neighbour, so a relay can't launder a flood). Creates not held here count,
-deletes of moments neither held nor relayed here on a budget of their own;
-anything about a moment this household knows, a closer copy and totals
-don't. Over the cap only the forward is dropped — the inbound
+neighbour, so a relay can't launder a flood). Every first forward of a
+create counts; deletes of moments neither relayed nor stored here (or whose
+create was capped) count on a budget of their own; a delete of a moment
+relayed or stored here, a closer copy and totals don't. Over the cap only the forward is dropped — the inbound
 handler has already stored the moment for anyone here who looks.
 
 **Reactions further away (v_67).** A reaction is unicast to the author's
@@ -466,7 +466,7 @@ class MomentFederationOutbound(
         from_instance: str,
         held_reach: int | None = None,
         now_ms: int | None = None,
-        known: bool = False,
+        removed_here: bool = False,
     ) -> int:
         """Re-broadcast an inbound moment envelope to *our* paired peers,
         bumping ``hop_count`` and excluding both the original origin
@@ -491,9 +491,8 @@ class MomentFederationOutbound(
         goes only to v_96 peers.
 
         Per-author relay cap (owner 2026-11-24): see
-        :meth:`_author_budget_allows`; *known* — this household held the
-        moment before this copy (the inbound handler's row; a delete that
-        removed a live moment) — makes the forward free.
+        :meth:`_author_budget_allows`; *removed_here* — this delete wiped a
+        live moment stored here (the inbound handler's tombstone outcome).
 
         Returns how many peers it was handed to (0: not relayed).
         """
@@ -574,8 +573,15 @@ class MomentFederationOutbound(
         ):
             return 0
         if copy is _Copy.FIRST and not self._author_budget_allows(
-            event_type, payload, origin=origin, moment_id=moment_id, known=known
+            event_type,
+            payload,
+            origin=origin,
+            moment_id=moment_id,
+            removed_here=removed_here,
         ):
+            if event_type == FederationEventType.MOMENT_CREATED:
+                # Its delete is charged too, even where the moment is stored.
+                self._remember_relay(("capped", moment_id, origin), hop)
             return 0
         self._remember_relay(seen_key, hop, re_relayed=copy is _Copy.CLOSER)
         if event_type == FederationEventType.MOMENT_CREATED and origin:
@@ -670,29 +676,28 @@ class MomentFederationOutbound(
         *,
         origin: str,
         moment_id: str,
-        known: bool,
+        removed_here: bool,
     ) -> bool:
         """The per-author relay cap: whether a moment's first forward from
         here still fits its signed (origin, author)'s budget — charged when
         it does (even if no peer turns out to take it).
 
-        Charged: a create this household didn't hold yet, and — on a budget
-        of its own, so posting never starves deletes — a delete of a moment
-        it never held nor relayed (one for a made-up id is new everywhere,
-        so it would otherwise travel uncapped). Free: anything about a
-        moment this household knows (*known*: its row; or its create relayed
-        lately) — a delete must follow its moment, and a replay of a held
-        create can't spend the author's budget after a restart — and totals
+        Charged: every first forward of a create (held here or not — a
+        stored copy is no licence to forward), and — on a budget of its own,
+        so posting never starves deletes — a delete of a moment this
+        household neither relayed nor stored (one for a made-up id is new
+        everywhere, so it would otherwise travel uncapped) or whose create it
+        capped. Free: a delete of a moment whose create it relayed lately or
+        that wiped a moment stored here (*removed_here*; a delete must
+        follow its moment — a dropped one is never resent), and totals
         (budgeted per origin by every receiver, relayed only for a moment
         held or relayed here). Over the cap: dropped, logged once per
         window, nothing said to the sender."""
-        if (
-            known
-            or event_type == FederationEventType.MOMENT_REACTIONS_COUNTED
-            or (
-                event_type == FederationEventType.MOMENT_DELETED
-                and self.relayed_create(moment_id, origin)
-            )
+        if event_type == FederationEventType.MOMENT_REACTIONS_COUNTED:
+            return True
+        if event_type == FederationEventType.MOMENT_DELETED and (
+            self.relayed_create(moment_id, origin)
+            or (removed_here and not self._capped_here(moment_id, origin))
         ):
             return True
         author = str(payload.get("author_user_id") or "")
@@ -720,6 +725,12 @@ class MomentFederationOutbound(
                 MOMENT_RELAY_AUTHOR_WINDOW_S,
             )
         return False
+
+    def _capped_here(self, moment_id: str, origin: str) -> bool:
+        """Whether this household refused to forward *moment_id*'s create
+        (the author cap) lately."""
+        held = self._relayed.get(("capped", moment_id, origin))
+        return held is not None and monotonic() - held.at <= RELAY_SEEN_TTL_S
 
     def relayed_create(self, moment_id: str, origin: str) -> bool:
         """Whether this household relayed *moment_id*'s create, as *origin*'s

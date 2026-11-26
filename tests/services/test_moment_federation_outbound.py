@@ -1701,7 +1701,7 @@ async def test_a_delete_of_a_moment_held_here_always_goes(capped):
         event_type=FederationEventType.MOMENT_DELETED,
         payload=_relayed({"moment_id": "held"}),
         from_instance="peer-sender",
-        known=True,
+        removed_here=True,
     )
     assert sent == 1
 
@@ -1719,22 +1719,55 @@ async def test_posting_never_starves_deletes(capped):
     assert sent == 1
 
 
-async def test_a_replayed_create_of_a_held_moment_is_free(capped):
-    """After a restart a neighbour replaying an author's held moments can't
-    spend that author's budget."""
+async def test_a_second_copy_of_a_capped_create_is_charged_again(capped):
+    """A refused create leaves no seen-map mark, so another copy of it (a
+    second neighbour, a re-send) is a first forward — charged, and refused
+    while the budget is spent."""
     out, _fed, _clock = capped
-    for n in range(5):
-        assert await _relay_create_known(out, n) == 1
-    assert await _relay_create(out, 9) == 1
+    for n in range(3):
+        await _relay_create(out, n)
+    assert await _relay_create(out, 2, sender="peer-other") == 0
 
 
-async def _relay_create_known(out, n: int) -> int:
-    return await out.relay_inbound(
-        event_type=FederationEventType.MOMENT_CREATED,
-        payload=_relayed({"moment_id": f"m-{n}"}),
+async def test_a_delete_of_a_capped_create_is_charged_even_where_stored(capped):
+    """A flooder's moments stored here but capped: their deletes are not a
+    free channel to peers that never got the moments."""
+    out, _fed, _clock = capped
+    for n in range(3):
+        await _relay_create(out, n)
+    for n in range(2):  # spend the delete budget on made-up ids
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=_relayed({"moment_id": f"made-up-{n}"}),
+            from_instance="peer-sender",
+        )
+    sent = await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload=_relayed({"moment_id": "m-2"}),
         from_instance="peer-sender",
-        known=True,
+        removed_here=True,
     )
+    assert sent == 0
+
+
+async def test_a_made_up_delete_claiming_closer_is_charged_again(capped):
+    """A refused delete leaves no mark: the same made-up id at a lower
+    claimed hop is a first forward, charged — not a free wave."""
+    out, _fed, _clock = capped
+    sent = [
+        await out.relay_inbound(
+            event_type=FederationEventType.MOMENT_DELETED,
+            payload=_relayed({"moment_id": f"made-up-{n}", "hop_count": hop}),
+            from_instance=sender,
+        )
+        for n, hop, sender in (
+            (0, 2, "peer-sender"),
+            (1, 2, "peer-sender"),
+            (2, 2, "peer-sender"),
+            (2, 1, "peer-origin"),
+        )
+    ]
+    assert sent == [1, 1, 0, 0]
 
 
 async def test_totals_are_not_charged(stack, monkeypatch):

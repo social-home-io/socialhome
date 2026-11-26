@@ -208,6 +208,15 @@ async def test_over_the_author_relay_cap_a_moment_is_still_stored(env, monkeypat
         for c in env["federation"].send_event.call_args_list
     }
     assert relayed == {"m-0", "m-1"}
+    # A second copy of the capped (stored) moment is no free pass.
+    ev = _moment_event(hop_count=1)
+    ev.payload["moment_id"] = "m-2"
+    await env["inbound"]._on_moment_created(ev)
+    relayed = {
+        c.kwargs["payload"]["moment_id"]
+        for c in env["federation"].send_event.call_args_list
+    }
+    assert relayed == {"m-0", "m-1"}
 
 
 async def test_a_delete_of_a_held_moment_goes_on_whatever_the_cap(env, monkeypatch):

@@ -286,25 +286,25 @@ wire changes, no protocol bump, no sync change.
   households doesn't launder a flood. The origin is in the key so a
   household naming another household's person (whose home we don't know
   yet) spends only its own budget, never theirs.
-* **What counts.** The first forward of a create this household didn't
-  hold yet. Deletes of moments it never held nor relayed (a delete for a
-  made-up id is new everywhere, so it would otherwise travel uncapped)
-  count on a budget of their own, the same size — posting never starves
-  deletes. Free: anything about a moment this household knows — a delete
-  that removed a row held here or follows a create relayed lately (a
-  delete must always follow its moment; a capped delete is never resent,
-  so dropping one would leave the moment on every household behind us for
-  weeks), a replayed create of a moment held here (after a restart a
-  neighbour can't spend the author's budget with old copies), a closer
-  copy of a moment already relayed (bounded by the seen-map: at most two
-  gated and two ungated waves per moment) — and totals (every receiver
-  already budgets them per origin, and they are relayed only for a moment
-  held or relayed here). A copy is charged even when the look gate then
-  hands it to nobody.
+* **What counts.** Every first forward of a create — stored here or not
+  (a stored copy is no licence to forward; a refused create leaves no
+  seen-map mark, so each later copy of it is charged again). Deletes of
+  moments this household neither relayed nor stored, or whose create it
+  capped, count on a budget of their own, the same size — posting never
+  starves deletes, and a delete for a made-up id (new everywhere) can't
+  travel uncapped, at any claimed hop. Free: a delete of a moment whose
+  create this household relayed lately (seen-map, 48 h) or that wiped a
+  moment stored here (a capped delete is never resent, so dropping one
+  would leave the moment on every household behind us for weeks); a
+  closer copy of a moment already relayed (bounded by the seen-map: at
+  most two gated and two ungated waves per moment); totals (every
+  receiver already budgets them per origin, and they are relayed only for
+  a moment held or relayed here). A copy is charged even when the look
+  gate then hands it to nobody.
 * **Over the cap.** The forward is dropped: nothing is said to the sender,
-  the seen-map keeps no mark (a later copy of that create, once the window
-  frees up, is relayed as usual), and an INFO line is logged at most once
-  per window per author (ids quoted and cut to 64 characters).
+  a later copy of that create is charged again (it goes once the window
+  frees up), and an INFO line is logged at most once per window per
+  author (ids quoted and cut to 64 characters).
 * **Forwarding only, never storing.** The inbound handler stores a moment
   for the people here who look (``max_hops``, follows) before the relay
   runs; the cap doesn't touch that. Storing costs only this household,
@@ -337,9 +337,11 @@ never meets the cap; only an origin that ignores its own limit does.
 author's charged forwards are at most 30 creates + 30 unknown-moment
 deletes an hour, each to *d* − 1 peers: at *d* = 10, 270 create envelopes
 ≈ 0.7 MB (2.5 KB each) plus 270 delete envelopes (< 1 KB). The free
-traffic rides on those: one delete per relayed moment, and a closer copy
-at most two gated and two ungated waves per moment — so the hard bound is
-≈ 4 × (270 + 270) envelopes per author an hour, honest meshes see the
+traffic rides on those: one delete per relayed or stored moment, and a
+closer copy at most two gated and two ungated waves per moment — so the
+hard bound is ≈ 4 × (270 + 270) envelopes per author an hour, plus, after
+a restart of this household (which forgets which creates it capped), one
+delete per moment of that author stored here; honest meshes see the
 first wave only. Network-wide, a flooding origin at 1 moment a second,
 reach 5, *d* = 10 tree (≈ 74 000 envelopes per moment): uncapped
 ≈ 3 600 × 74 000 ≈ 266 million envelopes an hour; capped, every hop past
@@ -360,7 +362,11 @@ that household (relay policy); a second budget per neighbour for origins
 we hold no key for is a possible follow-up. Also left out: an admin
 setting for the cap, capping storage (above), refusing over-long author
 ids at the inbound handler (the cap's keys and log line are bounded
-anyway).
+anyway). Residual: a pass-through household (it stores nothing) that
+forgot relaying a create (48 h, a restart) charges that moment's delete
+to the delete budget — an author deleting more than 30 such old moments
+in an hour leaves the rest on households behind it that got them only
+through this one, until they expire.
 
 ## Reach — how far a person's moments go (v_96)
 
