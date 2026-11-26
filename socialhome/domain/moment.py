@@ -133,9 +133,11 @@ def clamp_moment_expiry(created_at: str, expires_at: str) -> str:
 MOMENT_RATE_WINDOW = timedelta(minutes=15)
 
 #: How far ahead of our clock a moment's signed ``occurred_at`` may be and
-#: still be relayed — the §24.11 envelope timestamp skew (±300 s). A
-#: future-dated moment would otherwise open rate slots no honest author has.
-MOMENT_RELAY_FUTURE_SKEW = timedelta(seconds=300)
+#: still be relayed — one rate window: envelope skew is checked pairwise
+#: (±300 s each hop), so an origin and a relay two hops apart can differ by
+#: more than 300 s. A future-dated moment would otherwise open rate slots no
+#: honest author has; this lets a flooder borrow at most one.
+MOMENT_RELAY_FUTURE_SKEW = MOMENT_RATE_WINDOW
 
 
 def moment_rate_slot(occurred_at: object, *, now: datetime | None = None) -> int | None:

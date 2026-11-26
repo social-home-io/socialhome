@@ -88,6 +88,7 @@ from ..domain.moment import (
     MOMENT_DEFAULT_REACH,
     MOMENT_MAX_HOPS,
     MOMENT_RATE_WINDOW,
+    MOMENT_RELAY_FUTURE_SKEW,
     MOMENT_RELAY_MAX_AGE_HOURS,
     MOMENT_UNGATED_HOPS,
     moment_rate_slot,
@@ -157,10 +158,13 @@ COUNTS_RELAY_MAX_AGE_MS: int = MAX_COUNTS_REV_AGE_MS
 #: ignoring the rule, so dropping the forward is safe.
 MOMENT_RELAY_PER_RATE_WINDOW: int = 2
 
-#: How long a slot's count is kept: as long as a create can be relayed at
-#: all (48 h) plus one window, so an old slot can't be refilled.
+#: How long a slot's count is kept: as long as a moment signed in it can be
+#: relayed at all — from as early as it is let in (the future skew) to 48 h
+#: after the slot's end — so a slot can't be refilled.
 MOMENT_RELAY_SLOT_TTL_S: int = int(
-    MOMENT_RELAY_MAX_AGE_HOURS * 3600 + MOMENT_RATE_WINDOW.total_seconds()
+    MOMENT_RELAY_MAX_AGE_HOURS * 3600
+    + MOMENT_RATE_WINDOW.total_seconds()
+    + MOMENT_RELAY_FUTURE_SKEW.total_seconds()
 )
 
 #: Most slot counts remembered (least recently touched dropped first — a
@@ -743,8 +747,7 @@ class MomentFederationOutbound(
             kind = "top-level moments"
             slot = moment_rate_slot(payload.get("occurred_at"))
             if slot is None:
-                log.debug("moment relay: %s signed in the future", moment_id[:64])
-                return False
+                return self._log_capped("future-signed", origin, author)
             if self._slots.is_allowed(
                 _budget_key("t", origin, author, str(slot)),
                 limit=MOMENT_RELAY_PER_RATE_WINDOW,

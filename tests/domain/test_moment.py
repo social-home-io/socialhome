@@ -307,9 +307,10 @@ def test_no_slot_without_a_time(value):
 
 
 def test_no_slot_for_a_moment_signed_in_the_future():
+    """Up to one rate window ahead is let in: envelope skew (±300 s) is
+    checked per hop, so it adds up between an origin and a far relay."""
     now = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
-    assert moment_rate_slot((now + timedelta(seconds=301)).isoformat(), now=now) is None
-    assert (
-        moment_rate_slot((now + timedelta(seconds=299)).isoformat(), now=now)
-        is not None
-    )
+    later = now + MOMENT_RATE_WINDOW + timedelta(seconds=1)
+    assert moment_rate_slot(later.isoformat(), now=now) is None
+    edge = now + MOMENT_RATE_WINDOW
+    assert moment_rate_slot(edge.isoformat(), now=now) is not None

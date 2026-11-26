@@ -1831,10 +1831,19 @@ async def test_top_level_and_replies_have_separate_budgets(capped):
 async def test_a_top_level_moment_signed_in_the_future_is_not_relayed(stack):
     out, _fed, fed_repo, _ = stack
     fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
-    ahead = (datetime.now(UTC) + timedelta(minutes=6)).isoformat()
+    ahead = (datetime.now(UTC) + timedelta(minutes=16)).isoformat()
     assert await _relay_top(out, 0, 0, occurred_at=ahead) == 0
-    near = (datetime.now(UTC) + timedelta(minutes=4)).isoformat()
+    # Two hops of ±300 s envelope skew: still within one rate window.
+    near = (datetime.now(UTC) + timedelta(minutes=8)).isoformat()
     assert await _relay_top(out, 1, 0, occurred_at=near) == 1
+
+
+def test_a_slot_is_remembered_as_long_as_a_moment_in_it_can_be_relayed():
+    """From the earliest it is let in (one window early) to 48 h after the
+    slot's end: a slot's two can't be taken twice."""
+    assert outbound_mod.MOMENT_RELAY_SLOT_TTL_S == (
+        outbound_mod.MOMENT_RELAY_MAX_AGE_HOURS * 3600 + 2 * 900
+    )
 
 
 async def test_totals_are_not_charged(stack, monkeypatch):

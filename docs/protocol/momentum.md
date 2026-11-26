@@ -179,7 +179,7 @@ always derived from the *current* content.
 One **top-level** moment per author per 15 minutes (``MOMENT_RATE_WINDOW``,
 ``domain/moment.py``); relaying households hold a signed author to the same
 rule (see [Relay rules: per-author cap](#relay-rules-per-author-cap)).
-``moment_repo.count_recent_for_author`` ignores rows where
+``moment_repo.latest_top_level_at`` ignores rows where
 ``parent_moment_id IS NOT NULL`` so back-and-forth replies are
 unconstrained. Reactions are exempt.
 
@@ -299,13 +299,20 @@ policy: nothing on the wire changes, no protocol bump, no sync change.
   at least 15 minutes apart by its own clock, so they never share a slot
   (no clock skew between households enters). Counting by the signed time,
   not by arrival, means an outbox backlog — an hour of moments delivered
-  at once after we were offline — all goes. A moment signed more than
-  300 s ahead of our clock (the §24.11 envelope skew) is not relayed: it
-  would open slots no honest author has; past slots are already bounded by
-  the 48 h relay age.
+  at once after we were offline — all goes. A moment signed more than one
+  window (15 min) ahead of our clock is not relayed (logged like a capped
+  one): it would open slots no honest author has. One window, not the
+  §24.11 300 s, because that skew is checked per hop and adds up between
+  an origin and a far relay. Past slots are bounded by the 48 h relay age,
+  and a slot's count is kept for as long as a moment signed in it can be
+  relayed at all (48 h + two windows), so it can't be refilled.
 * **Replies: 30 an hour.** The origin doesn't rate-limit replies, so they
   get ``MOMENT_RELAY_AUTHOR_CAP`` (30) forwards per author per sliding hour
-  of arrival — a lively hour of replies.
+  of arrival — a lively hour of replies. ``parent_moment_id`` is signed but
+  can name anything, so a household ignoring the rules can move
+  top-level moments into this budget (and a deleted root turns its
+  replies top-level everywhere); the total per author stays 8 + 30 an
+  hour.
 * **Deletes.** Free: a delete of a moment whose create this household
   relayed lately (seen-map, 48 h) or that wiped a moment stored here (a
   capped delete is never resent, so dropping one would leave the moment on
@@ -350,8 +357,8 @@ policy: nothing on the wire changes, no protocol bump, no sync change.
 
 **Cost.** Nothing is added on the wire. Per relaying household and
 author: top-level ≤ 2 new moments per 15-minute slot of signed time — at
-most 8 an hour going forward, and once per 48 h a back-dated burst of up
-to 2 × 193 slots ≈ 390 (the 48 h relay age bounds the past); replies
+most 8 an hour going forward, and once per 48 h a back-dated burst over
+the up to 194 slots in [now − 48 h, now + 15 min], ≤ 2 × 194 = 388; replies
 ≤ 30 an hour; deletes of unknown moments ≤ 30 an hour. Each forward goes
 to *d* − 1 peers: at *d* = 10 and the steady maximum (8 + 30 creates,
 30 deletes) ≈ 340 create envelopes ≈ 0.9 MB (2.5 KB each) plus 270 delete
