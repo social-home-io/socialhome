@@ -114,6 +114,10 @@ async def test_banning_our_own_household_is_refused(client):
         headers=_auth(client._tok),
     )
     assert r.status == 403
+    # A stable code the SPA translates (ban UX review), not raw English.
+    err = (await r.json())["error"]
+    assert err["code"] == "BAN_NOT_ALLOWED"
+    assert err["params"] == {"target": "household"}
 
 
 async def test_household_bans_are_admin_only(client):

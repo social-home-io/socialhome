@@ -224,6 +224,7 @@ from ..domain.space import (
     AgeRestrictedError,
     AlreadyMemberError,
     BannedFromSpaceError,
+    BanNotAllowedError,
     ContentAction,
     HostedSpaceListing,
     HostNotPairedError,
@@ -243,6 +244,7 @@ from ..domain.space import (
     LocalAreaUnavailableError,
     LocationRequiredError,
     OutsideAreaError,
+    OwnerBanError,
     OwnerStillActiveError,
     OwnerTransferFollowerError,
     OwnerTransferNotLocalError,
@@ -6471,7 +6473,7 @@ class SpaceService(
         )
         target = await self._spaces.get_member(space_id, user_id)
         if target is not None and target.role == SpaceRole.OWNER:
-            raise SpacePermissionError("cannot ban the owner")
+            raise BanNotAllowedError("cannot ban the owner", target="person")
         actor = await self._users.get(actor_username)
         assert actor is not None
         remote_seat = (
@@ -6619,7 +6621,9 @@ class SpaceService(
             or instance_id == self._own_instance_id
             or instance_id == space.owner_instance_id
         ):
-            raise SpacePermissionError("this household cannot be banned")
+            raise BanNotAllowedError(
+                "this household cannot be banned", target="household"
+            )
         if not await self._executes_locally_as_delegated_admin(space):
             await self._require_host_for_household_bans(space)
             if await self._forward_admin_action_if_remote(
@@ -6754,8 +6758,9 @@ class SpaceService(
                 self._spaces, self._remote_members, space, user_id=user_id
             )
         if ours or user_id == await self.owner_user_id(space):
-            raise SpacePermissionError(
-                "only the owner household decides about its own people"
+            raise BanNotAllowedError(
+                "only the owner household decides about its own people",
+                target="person",
             )
 
     async def _require_may_lift(
@@ -6768,7 +6773,7 @@ class SpaceService(
             return
         owner_user_id = await self.owner_user_id(space)
         if banner == owner_user_id and lifter != owner_user_id:
-            raise SpacePermissionError("only the owner can lift the owner's ban")
+            raise OwnerBanError()
 
     async def _require_host_for_household_bans(self, space: Space) -> None:
         """A household ban forwarded to a host that predates it would be

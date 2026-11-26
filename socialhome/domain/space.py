@@ -1289,6 +1289,28 @@ class SubscribeNotAllowedError(CodedError, SpacePermissionError):
     detail = "this space does not allow subscribers"
 
 
+class BanNotAllowedError(CodedError, SpacePermissionError):
+    """A ban that may not be made: the owner, the owner household's people
+    (only the owner household decides about them) or a household that can't
+    be banned (the owner's, our own). ``params.target`` is ``person`` or
+    ``household``."""
+
+    status = 403
+    code = "BAN_NOT_ALLOWED"
+
+    def __init__(self, detail: str, *, target: str) -> None:
+        super().__init__(detail, params={"target": target})
+
+
+class OwnerBanError(CodedError, SpacePermissionError):
+    """An admin tried to lift a ban the space owner made — only the owner
+    lifts the owner's ban."""
+
+    status = 403
+    code = "OWNER_BAN"
+    detail = "only the owner can lift the owner's ban"
+
+
 class SubscriberReadOnlyError(CodedError, SpacePermissionError):
     """A subscriber (follower) tried to post, comment or react where
     followers may only read. ``params.action`` is the attempted action."""

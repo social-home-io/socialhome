@@ -18,6 +18,7 @@ from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.space import (
     HostTooOldError,
+    OwnerBanError,
     SpacePermissionError,
     SpaceRole,
 )
@@ -327,11 +328,12 @@ async def test_an_admin_cannot_lift_the_owners_ban(stack):
     await _with_admin(stack, space)
     await stack.svc.ban_household(space.id, actor_username="owner", instance_id="h-1")
     await stack.svc.ban(space.id, actor_username="owner", user_id="u-far")
-    with pytest.raises(SpacePermissionError):
+    # A stable code the SPA translates (``OWNER_BAN``).
+    with pytest.raises(OwnerBanError):
         await stack.svc.unban_household(
             space.id, actor_username="adm", instance_id="h-1"
         )
-    with pytest.raises(SpacePermissionError):
+    with pytest.raises(OwnerBanError):
         await stack.svc.unban(space.id, actor_username="adm", user_id="u-far")
     assert await stack.spaces.is_household_banned(space.id, "h-1")
     assert await stack.spaces.is_banned(space.id, "u-far")
