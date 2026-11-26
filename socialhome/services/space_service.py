@@ -4312,11 +4312,18 @@ class SpaceService(
         authority) have passed: the row, :class:`SpaceMemberJoined`, the
         v_23 roster gossip to member households and the §CP audit.
         ``automatic`` marks a household-tier seat nobody asked for."""
-        member = SpaceMember(
-            space_id=space.id,
-            user_id=user_id,
-            role=role,
-            joined_at=datetime.now(UTC).isoformat(),
+        held = await self._spaces.get_member(space.id, user_id)
+        member = (
+            # A step up over a follower seat keeps its per-space name,
+            # picture, location opt-in and history window.
+            replace(held, role=role)
+            if held is not None
+            else SpaceMember(
+                space_id=space.id,
+                user_id=user_id,
+                role=role,
+                joined_at=datetime.now(UTC).isoformat(),
+            )
         )
         await self._spaces.save_member(member)
         await self._bus.publish(
@@ -8869,6 +8876,7 @@ class SpaceService(
         *,
         user_id: str,
         message: str | None = None,
+        share_location: bool = False,
     ) -> str | None:
         """A local user asks to join ``space_id``. Returns the pending
         request's id — or ``None`` when they were seated at once: an
@@ -8885,18 +8893,38 @@ class SpaceService(
         at, so the answer says nothing about a space the caller can't
         see."""
         space, seat = await self.read_space(space_id, user_id)
-        if seat is not None and seat.role != SpaceRole.SUBSCRIBER:
+        # Step up (owner 2026-11-26): a follower may ask like anyone — but
+        # only where a cold request is allowed at all (a space with a
+        # landing page). A follower of a private space was seated by name
+        # with the read-only role; its join mode is no way in.
+        if seat is not None and (
+            seat.role != SpaceRole.SUBSCRIBER or not self._has_landing(space)
+        ):
             raise AlreadyMemberError()
         if seat is not None and self._hosted_elsewhere(space):
-            # Step up (owner 2026-11-26): a follower of another household's
-            # space asks its host — paired, or through the GFS that lists it
-            # — like anyone's request; the approval's member token makes the
-            # follower seat a member seat when it is redeemed.
+            # A follower of another household's space asks its host —
+            # paired, or through the GFS that lists it — like anyone's
+            # request; the approval's member token makes the follower seat a
+            # member seat when it is redeemed. What we know here is checked
+            # first (join mode, age gate, a request already out).
+            if space.join_mode is JoinMode.INVITE_ONLY:
+                raise InviteOnlyError()
+            if self._child_protection is not None:
+                await self._child_protection.check_space_age_gate(space_id, user_id)
+            pending = await pending_join_request_id(
+                self._spaces,
+                space_id,
+                user_id,
+                household_instance_id=space.owner_instance_id,
+            )
+            if pending is not None:
+                return pending
             return await self.request_join_remote(
                 space_id,
                 applicant_user_id=user_id,
                 host_instance_id=space.owner_instance_id,
                 message=message,
+                share_location=share_location,
             )
         if space.join_mode is JoinMode.INVITE_ONLY:
             raise InviteOnlyError()
@@ -9188,6 +9216,12 @@ class SpaceService(
                 approved_by=actor.user_id,
             )
         )
+        held = await self._spaces.get_member(row["space_id"], row["user_id"])
+        if held is not None and held.role != SpaceRole.SUBSCRIBER:
+            # Seated another way since the request was filed (a promotion,
+            # an invite): the approval changes nothing — never a member
+            # written over an admin, by any admin.
+            return held
         # The seat every local join makes — the row (over a follower seat
         # on a step up), SpaceMemberJoined and the v_23 roster gossip, so
         # member households learn the new member (or the stepped-up role).

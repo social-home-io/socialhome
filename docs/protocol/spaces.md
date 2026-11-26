@@ -512,10 +512,18 @@ seat. One rule, the existing join paths:
   household the new role. A failed ACK restores the follower seat (never
   un-seats). An explicit member link redeemed by a follower does the same.
 
-Gates are those of any join (ban, age gate, the local-community check). No
-rotation: rights only grow, and the person already holds the content key.
-A member never steps down by redeeming a follower link (the re-ACK keeps
-the member seat). Cost: one roster gossip per step up, like a promotion.
+Gates are those of any join (ban, age gate, the local-community check), and
+only where a cold request is allowed at all: a follower of a **private**
+space (seated by name with the read-only role) cannot ask its way in,
+whatever the join mode says. A follower's ask to another household's host is
+checked here first (invite only, age gate) and sent once while it waits. An
+approval never overwrites a seat that changed since the request (a
+promotion meanwhile stands), and a step up keeps the seat's per-space name
+and opt-ins. Only the approved person's own seat steps up — there is no
+admin "promote a follower" for someone who did not ask. No rotation: rights
+only grow, and the person already holds the content key. A remote member
+never steps down by redeeming a follower link (the redeem's re-ACK keeps the
+member seat). Cost: one roster gossip per step up, like a promotion.
 
 ### Keys and rotation
 

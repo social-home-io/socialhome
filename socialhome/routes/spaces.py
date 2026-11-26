@@ -3090,6 +3090,10 @@ class SpaceJoinRequestCollectionView(BaseView):
             self.match("id"),
             user_id=ctx.user_id,
             message=body.get("message"),
+            # Only when the person agreed in the SPA: a follower stepping up
+            # into a local community hosted elsewhere sends its household's
+            # home rounded to ~1 km to that host.
+            share_location=body.get("share_location") is True,
         )
         # ``open`` space hosted here: seated at once, no request to review.
         return web.json_response(

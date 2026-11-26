@@ -1633,11 +1633,19 @@ class SpaceInviteTokenRedeemCoordinator:
         held = await self._remote_members.get(
             space_id, redeemer_instance_id, redeemer_user_id
         )
-        prior_role = (
-            held.role
-            if held is not None and held.role == SpaceRole.SUBSCRIBER.value
-            else None
-        )
+        if held is not None and held.role != SpaceRole.SUBSCRIBER.value:
+            # Seated another way between the re-ACK check and here (a
+            # promotion): never overwrite it — hand the use back and answer
+            # from the seat it holds.
+            await self._release_token_use(token, space_id)
+            reack = await self._reack_seated_redeemer(
+                token,
+                redeemer_instance_id=redeemer_instance_id,
+                redeemer_user_id=redeemer_user_id,
+            )
+            ack, reason = reack if reack is not None else (None, REDEEM_DENY_REASON)
+            return ack, reason, None
+        prior_role = held.role if held is not None else None
         try:
             # The seat lands in the SAME write as the row. It used to be
             # an ``add`` (always ``member``) followed by a ``set_role``,

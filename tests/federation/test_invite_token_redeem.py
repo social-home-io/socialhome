@@ -4015,3 +4015,37 @@ async def test_a_follower_redeeming_a_follower_link_is_answered_from_its_seat():
     assert reason is None and reservation is None
     assert ack is not None and ack["role"] == SpaceRole.SUBSCRIBER.value
     assert env.issuer_spaces.tokens["tok-2"]["uses_remaining"] == 1
+
+
+@pytest.mark.parametrize(
+    "token_over",
+    # (A token bound to another household is refused by the real
+    # repository's atomic UPDATE, covered in tests/repositories.)
+    [{"uses_remaining": 0}],
+)
+async def test_a_follower_replaying_a_dead_member_token_stays_a_follower(token_over):
+    """Step-up review M-5: the step up falls through to the atomic consume,
+    the only thing between a follower and a writer seat — a spent token or
+    one bound to another household is denied, and the follower seat stays."""
+    env = _atomic_pair()
+    env.issuer_spaces.tokens["tok-1"]["role"] = SpaceRole.SUBSCRIBER.value
+    await _redeem(env)
+    key = ("space-1", env.redeemer_party.instance_id, U_LOCAL)
+    env.issuer_spaces.tokens["tok-2"] = {
+        **env.issuer_spaces.tokens["tok-1"],
+        "uses_remaining": 1,
+        "role": SpaceRole.MEMBER.value,
+        **token_over,
+    }
+    ack, reason, reservation = await env.issuer._consume_seat_and_build_ack(
+        token="tok-2",
+        redeemer_instance_id=env.redeemer_party.instance_id,
+        redeemer_user_id=U_LOCAL,
+        redeemer_identity_pk=_REDEEMER_IDENTITY.public_key,
+        redeemer_anchor="alice",
+        redeemer_pk=None,
+        redeemer_display=None,
+        bootstrap=True,
+    )
+    assert ack is None and reason is not None and reservation is None
+    assert env.issuer_members.live[key]["role"] == SpaceRole.SUBSCRIBER.value
