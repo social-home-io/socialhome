@@ -479,11 +479,16 @@ async def test_tombstones_are_hidden_from_every_read(db, repo):
     assert [m.id for m in await repo.list_replies("m-root")] == ["m-reply"]
     engagement = await repo.count_engagement_for(["m-root"])
     assert engagement["m-root"]["reply_count"] == 1
+    root_created_at = (await repo.get("m-root")).created_at
     await repo.delete("m-root")
     assert {m.id for m in await repo.list_visible_to("u-me")} == {"m-reply"}
     assert await repo.list_public_for("u-author") == []
     assert await repo.list_top_hashtags("u-me") == []
-    assert await repo.latest_top_level_at("u-author", since_iso=_now_iso(-5)) is None
+    # A delete never gives the rate-limit slot back (owner 2026-11-24).
+    assert (
+        await repo.latest_top_level_at("u-author", since_iso=_now_iso(-5))
+        == root_created_at
+    )
     # Replies detach from a deleted parent, as the old hard delete did.
     reply = await repo.get("m-reply")
     assert reply is not None and reply.parent_moment_id is None

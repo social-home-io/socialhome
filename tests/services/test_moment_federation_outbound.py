@@ -1813,6 +1813,26 @@ async def test_honest_moments_15_minutes_apart_never_share_a_slot(stack):
     assert sent == [1, 1, 1, 1]
 
 
+async def test_post_delete_post_as_the_api_allows_is_relayed_in_full(stack):
+    """The API counts a deleted moment too (a delete never gives the slot
+    back), so a repost after a delete is at least one window later — and
+    the relay forwards every create and delete the API let through."""
+    out, _fed, fed_repo, _ = stack
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])
+    sent = []
+    for k in range(4):
+        sent.append(await _relay_top(out, k, 15 * k))
+        sent.append(
+            await out.relay_inbound(
+                event_type=FederationEventType.MOMENT_DELETED,
+                payload=_relayed({"moment_id": f"t-{k}"}),
+                from_instance="peer-sender",
+                removed_here=True,
+            )
+        )
+    assert sent == [1] * 8
+
+
 async def test_a_re_sent_top_level_moment_does_not_count_twice(stack):
     out, _fed, fed_repo, _ = stack
     fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-onward")])

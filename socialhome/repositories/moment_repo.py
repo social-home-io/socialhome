@@ -918,11 +918,13 @@ class SqliteMomentRepo:
     ) -> str | None:
         """``created_at`` of the author's newest top-level moment since
         ``since_iso``, or ``None``. Top-level moments only — replies are
-        exempt from the rate limit."""
+        exempt from the rate limit. A deleted one (its tombstone keeps
+        ``created_at``) still counts: a delete never gives the slot back
+        (owner 2026-11-24), the rule relays hold a signed author to."""
         row = await self._db.fetchone(
             "SELECT MAX(created_at) AS last FROM moments "
             "WHERE author_user_id=? AND created_at>=? "
-            "AND parent_moment_id IS NULL AND deleted_at IS NULL",
+            "AND parent_moment_id IS NULL",
             (author_user_id, since_iso),
         )
         return str(row["last"]) if row and row["last"] is not None else None

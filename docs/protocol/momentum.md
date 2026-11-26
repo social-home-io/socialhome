@@ -181,7 +181,11 @@ One **top-level** moment per author per 15 minutes (``MOMENT_RATE_WINDOW``,
 rule (see [Relay rules: per-author cap](#relay-rules-per-author-cap)).
 ``moment_repo.latest_top_level_at`` ignores rows where
 ``parent_moment_id IS NOT NULL`` so back-and-forth replies are
-unconstrained. Reactions are exempt.
+unconstrained. Reactions are exempt. **A deleted moment still counts**
+(owner 2026-11-24: creating and deleting are different things — a delete
+never gives the slot back; its tombstone keeps ``created_at``). Before,
+post / delete / post went through without limit, so a person fixing a
+typo twice posted moments relays then dropped.
 
 ## Mesh relay
 
@@ -278,7 +282,8 @@ Owner decisions 2026-11-24 ("cap per author", based on the posting rate
 limit; no admin cap on how far people look). With reach up to 5 hops, one
 author could make every household within 5 hops pass on a flood. The
 author's household already takes at most one top-level moment per person
-per 15 minutes ([Rate limit](#rate-limit), `429 MOMENT_RATE_LIMIT`); a
+per 15 minutes, a deleted one included ([Rate limit](#rate-limit),
+`429 MOMENT_RATE_LIMIT`); a
 relaying household holds the **signed author** to the same rule, from the
 same constant (``MOMENT_RATE_WINDOW`` in ``domain/moment.py``), in
 ``MomentFederationOutbound.relay_inbound``. Anything above it comes from a
