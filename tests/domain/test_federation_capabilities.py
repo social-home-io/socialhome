@@ -3896,3 +3896,16 @@ def test_capped_space_images_capability_threshold():
     assert fc.OURS == 96
     assert fc.OURS >= 95
     assert _slugs_at(81)
+
+
+def test_two_features_sharing_v96_keep_both_slugs():
+    """Regression (merge of moment reach into subscriber seats): the slug map
+    was keyed by threshold, so the second v_96 feature silently replaced
+    the first's slug, and the space banner would have listed moment reach
+    (a household feature) as a space feature."""
+    assert sorted(_slugs_at(96)) == ["moment_reach", "subscriber_seats"]
+    assert fc.feature_keys_missing_below(95) == ["moment_reach", "subscriber_seats"]
+    assert fc.space_feature_keys_missing_below(95) == ["subscriber_seats"]
+    assert fc.space_features_missing_below(95) == [
+        "Follow spaces with one seat on every path"
+    ]

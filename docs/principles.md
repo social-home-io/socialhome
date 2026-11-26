@@ -1240,10 +1240,26 @@ by every receiver) and a count change is re-published at most once per
 GFS, so a relay or another registered household cannot alter them; it is
 not served onward, so a GFS **can misreport** them to its readers — exactly
 as it could misreport the space's name. Readers treat them as the GFS's
-word. A follower reached
-only through a GFS is no roster seat yet, so it is not counted until the
-subscriber-seats work makes it one. Paired households get the same two
-numbers in the `SPACE_DIRECTORY_SYNC` snapshot.
+word. Since v_96 a follower holds a roster seat on every path (a GFS
+follower too), so `follower_count` counts every live follower seat.
+Paired households get the same two numbers in the
+`SPACE_DIRECTORY_SYNC` snapshot.
+
+### Sign-off: a GFS moderator's space ban only delists the space (v_96)
+
+**Owner sign-off 2026-11-26.** The GFS is content-blind: since v_96 a
+global space's content reaches it only through the space's opaque channel,
+and the GFS can't tell which channel belongs to which space — that is the
+point of the channel. A GFS moderator's space ban (and
+`auto_accept_spaces = false`) therefore removes the space from that GFS's
+listing and refuses its `join_contact`. It cannot stop the space's channel
+or the channel's media. The GFS's lever against abusive content is the
+household (mailbox / connection) ban and the per-channel limits, not the
+space. Rejected: an admin "drop channel" action fed by a seat holder's
+report naming the channel id — the owner mints an unrelated channel at its
+next authority rotation or heal, so a drop is undone at once unless the GFS
+kept a per-channel registrant identity it deliberately doesn't keep, and
+every report would leave the GFS a stored channel ↔ space link.
 
 ### Mailbox tickets hide a household among its epoch's households
 
