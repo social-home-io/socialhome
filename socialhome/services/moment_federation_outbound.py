@@ -45,6 +45,14 @@ signature), sends a ``reach``-carrying copy only to v_96 households,
 relays a closer copy at most once more, and queues relayed creates and
 totals under a relayed outbox key the per-peer cap evicts first.
 
+**Per-author relay cap** (owner 2026-11-24, local policy — no protocol
+bump). A relay forwards at most :data:`MOMENT_RELAY_AUTHOR_CAP` moments of
+one author an hour, keyed by the signed origin + author (never the
+neighbour, so a relay can't launder a flood). Creates and deletes of
+moments not relayed here count; a closer copy, a delete of a relayed moment
+and totals don't. Over the cap only the forward is dropped — the inbound
+handler has already stored the moment for anyone here who looks.
+
 **Reactions further away (v_67).** A reaction is unicast to the author's
 household when it is this one or a paired one. Otherwise the
 :class:`~socialhome.services.moment_reaction_router.MomentReactionRouter`
@@ -90,6 +98,7 @@ from ..moment_origin import (
     reach_marks_of,
     sign_moment_origin,
 )
+from ..rate_limiter import RateLimiter
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
@@ -132,6 +141,24 @@ RELAY_SEEN_MAX: int = 50_000
 #: refuses them before any budget, :data:`~socialhome.moment_counts
 #: .MAX_COUNTS_REV_AGE_MS`).
 COUNTS_RELAY_MAX_AGE_MS: int = MAX_COUNTS_REV_AGE_MS
+
+#: Per-author relay cap (owner 2026-11-24): a household forwards at most this
+#: many moments of one author (keyed by the signed origin + author, never the
+#: neighbour that handed them over) per :data:`MOMENT_RELAY_AUTHOR_WINDOW_S`.
+#: The origin itself takes one top-level moment per person per 15 min (4 an
+#: hour); the rest is room for a lively hour of replies. Over the cap the
+#: copy is still stored here when someone looks (storing costs only this
+#: household) — only the forward is dropped, so one author can't make every
+#: household within 5 hops pass on a flood.
+MOMENT_RELAY_AUTHOR_CAP: int = 30
+MOMENT_RELAY_AUTHOR_WINDOW_S: int = 3600
+
+#: Most (origin, author) budgets remembered (least recently touched dropped
+#: first — its budget starts afresh). Author ids are free to mint, so the map
+#: must be bounded: a busy key holds ≤ 30 stamps (~1 KB) and its log key
+#: (~0.3 KB), so a flood of minted authors costs ≈ 15 MB at worst; honest
+#: traffic is a few hundred authors with a stamp or two each.
+RELAY_AUTHOR_KEYS_MAX: int = 10_000
 
 
 def counts_outbox_key(moment_id: str) -> str:
@@ -188,6 +215,7 @@ class MomentFederationOutbound(
     ``MOMENT_MAX_HOPS``, bounded by the signed reach."""
 
     __slots__ = (
+        "_author_budget",
         "_bus",
         "_child_protection",
         "_federation",
@@ -230,6 +258,11 @@ class MomentFederationOutbound(
         #: moment id, rev); a relayed create's ``("origin", moment id,
         #: origin)`` entry keeps the moment's reach (v_96).
         self._relayed: OrderedDict[tuple[str, ...], _Relayed] = OrderedDict()
+        #: Per (origin, author) forwards in the last hour — the relay cap.
+        #: The module clock is read at each call (tests move it).
+        self._author_budget = RateLimiter(
+            monotonic=lambda: monotonic(), max_keys=RELAY_AUTHOR_KEYS_MAX
+        )
 
     def attach_reaction_router(self, router: MomentReactionRouter) -> None:
         """Wire the v_67 reaction router (key-wrap key on creates, return
@@ -525,6 +558,10 @@ class MomentFederationOutbound(
             target_id=str(payload.get("moment_id") or "") or None,
         ):
             return 0
+        if copy is _Copy.FIRST and not self._author_budget_allows(
+            event_type, payload, origin=origin, moment_id=moment_id
+        ):
+            return 0
         self._remember_relay(seen_key, hop, re_relayed=copy is _Copy.CLOSER)
         if event_type == FederationEventType.MOMENT_CREATED and origin:
             # v_69: which origin's create this was — totals for the moment
@@ -610,6 +647,48 @@ class MomentFederationOutbound(
             log.debug("moment relay: totals for %s too old — not relayed", moment_id)
             return None
         return reach
+
+    def _author_budget_allows(
+        self,
+        event_type: FederationEventType,
+        payload: dict,
+        *,
+        origin: str,
+        moment_id: str,
+    ) -> bool:
+        """The per-author relay cap: whether a moment's first forward from
+        here still fits its (origin, author)'s budget — charged when it does.
+        Charged: a create, and a delete of a moment whose create we didn't
+        relay (one for a made-up id is new everywhere, so it would travel
+        uncapped). Free: a delete of a moment we relayed (it must follow),
+        totals (budgeted per origin by every receiver, and relayed only for
+        a moment held or relayed here). Over the cap: dropped, logged once
+        per window, nothing said to the sender."""
+        if event_type == FederationEventType.MOMENT_REACTIONS_COUNTED or (
+            event_type == FederationEventType.MOMENT_DELETED
+            and self.relayed_create(moment_id, origin)
+        ):
+            return True
+        author = str(payload.get("author_user_id") or "")
+        key = f"{origin}|{author}"
+        if self._author_budget.is_allowed(
+            key,
+            limit=MOMENT_RELAY_AUTHOR_CAP,
+            window_s=MOMENT_RELAY_AUTHOR_WINDOW_S,
+        ):
+            return True
+        if self._author_budget.is_allowed(
+            f"log|{key}", limit=1, window_s=MOMENT_RELAY_AUTHOR_WINDOW_S
+        ):
+            log.info(
+                "moment relay cap: author %s (origin %s) passed %d moments "
+                "in %d s — not relaying more of theirs for now",
+                author,
+                origin,
+                MOMENT_RELAY_AUTHOR_CAP,
+                MOMENT_RELAY_AUTHOR_WINDOW_S,
+            )
+        return False
 
     def relayed_create(self, moment_id: str, origin: str) -> bool:
         """Whether this household relayed *moment_id*'s create, as *origin*'s

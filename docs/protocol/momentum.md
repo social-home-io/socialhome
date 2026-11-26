@@ -270,6 +270,76 @@ A (author)  ────►  B (paired)  ────►  C (B's paired)  ──
 copy cost (n−1) + (n−1)(n−2) + (n−1)(n−2)(n−3) envelopes per moment
 (25 260 for n = 31); relaying once costs (n−1) + (n−1)(n−2) (900).
 
+### Relay rules: per-author cap
+
+Owner decision 2026-11-24 ("cap per author"; no admin cap on how far
+people look). With reach up to 5 hops, one author could make every
+household within 5 hops pass on a flood. So a household **forwards** at
+most ``MOMENT_RELAY_AUTHOR_CAP`` (30) moments of one author per
+``MOMENT_RELAY_AUTHOR_WINDOW_S`` (1 h, sliding), in
+``MomentFederationOutbound.relay_inbound``. Local policy: nothing on the
+wire changes, no protocol bump, no sync change.
+
+* **Key: the signed author.** The budget is per (``origin_instance_id``,
+  ``author_user_id``) — both inside the origin signature — never the
+  neighbour that handed the copy over, so relaying through many
+  households doesn't launder a flood. The origin is in the key so a
+  household naming another household's person (whose home we don't know
+  yet) spends only its own budget, never theirs.
+* **What counts.** The first forward of a create, and of a delete for a
+  moment whose create we did not relay (a delete for a made-up id is new
+  everywhere, so it would otherwise travel uncapped). Free: a closer copy
+  of a moment already relayed (same moment, at most one more wave), a
+  delete of a moment we relayed (it must follow its moment), and totals
+  (every receiver already budgets them per origin, and they are relayed
+  only for a moment held or relayed here).
+* **Over the cap.** The forward is dropped: nothing is said to the sender,
+  the seen-map keeps no mark (a copy arriving once the window frees up is
+  relayed as usual), and an INFO line is logged at most once per window
+  per author.
+* **Forwarding only, never storing.** The inbound handler stores a moment
+  for the people here who look (``max_hops``, follows) before the relay
+  runs; the cap doesn't touch that. Storing costs only this household,
+  once per moment, under its own people's choice — the people who follow
+  a busy author must not lose their moments to a cap meant to stop
+  amplification. The flood that amplifies is the forward: one moment
+  becomes *d − 1* envelopes at every hop.
+* **Nobody is exempt, nobody needs to be.** The author's own household
+  never relays its own moments (its fan-out is the origin path, under the
+  origin's own one-top-level-per-15-min limit). The origin's directly
+  paired households get every moment it sends (that is the origin's own
+  upload, between households that chose to pair), and are capped like any
+  relay when they pass them on — the first and biggest amplification
+  point.
+* **Memory.** The shared ``RateLimiter`` with ``max_keys`` =
+  ``RELAY_AUTHOR_KEYS_MAX`` (10 000, least recently touched dropped
+  first — a busy author's key is touched by every refusal, so it stays):
+  a few hundred authors with a stamp or two each for honest traffic,
+  ≈ 15 MB at worst. In memory only, no table, no migration; a restart
+  forgets the budgets (at most one more window's worth).
+
+**Values against normal use.** The origin takes at most 4 top-level
+moments per person an hour (one per 15 min); replies are not limited
+there, so 30 leaves room for an hour of lively replies. An honest author
+never meets the cap; only an origin that ignores its own limit does.
+
+**Cost.** Nothing is added on the wire. Per relaying household, one
+author costs at most 30 × (*d* − 1) forwarded envelopes an hour — at
+*d* = 10 that is 270 envelopes ≈ 0.7 MB (2.5 KB each). Network-wide, a
+flooding origin at 1 moment a second, reach 5, *d* = 10 tree
+(≈ 74 000 envelopes per moment): uncapped ≈ 3 600 × 74 000 ≈ 266 million
+envelopes an hour; capped, every hop past the first carries at most 30 of
+them, ≈ 30 × 74 000 ≈ 2.2 million — and the origin's own *d* direct
+copies, which its paired households can stop by unpairing or banning it.
+
+**Left out.** A per-neighbour cap (an honest relay forwards everyone's
+moments; it would throttle them). A per-origin cap and anything against
+minted identities: author ids and household keys are free to make, so no
+per-identity cap stops a household that mints them — that is bounded by
+the per-household inbound budget (600 envelopes a minute over the inbox
+and the GFS legs) and by banning or unpairing that household (relay
+policy). An admin setting for the cap, and capping storage (above).
+
 ## Reach — how far a person's moments go (v_96)
 
 Owner decisions 2026-11-23 (answers A/B/C below). Each person chooses how
@@ -1367,6 +1437,10 @@ the one place a reply is written.
   ``repositories/outbox_repo.py``. Release-blocker tests
   ``tests/protocol/test_moment_reach.py`` and
   ``tests/protocol/test_moment_forward_only.py``.
+- Per-author relay cap: ``MomentFederationOutbound._author_budget_allows``
+  (``MOMENT_RELAY_AUTHOR_CAP``, ``MOMENT_RELAY_AUTHOR_WINDOW_S``,
+  ``RELAY_AUTHOR_KEYS_MAX``) on the shared ``socialhome/rate_limiter.py``
+  (``max_keys``).
 - Domain: `socialhome/domain/moment.py` (caps + dataclasses);
   events at `socialhome/domain/events.py`.
 - Repo: `socialhome/repositories/moment_repo.py`.
