@@ -294,6 +294,20 @@ async def test_a_deleted_moment_still_counts_toward_the_rate_limit(stack):
     assert await stack.moment_svc.next_allowed_at(a.user_id) is not None
 
 
+async def test_a_deleted_reply_never_moves_the_rate_limit(stack):
+    """Replies are exempt, deleted or not: a reply's tombstone keeps its
+    parent, so fixing a reply never blocks the next top-level moment."""
+    a = await stack.provision("alice")
+    b = await stack.provision("bob")
+    root = await stack.moment_svc.create_moment(author_user_id=b.user_id, content="r")
+    reply = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="typo", parent_moment_id=root.id
+    )
+    await stack.moment_svc.delete_moment(reply.id, actor_user_id=a.user_id)
+    assert await stack.moment_svc.next_allowed_at(a.user_id) is None
+    await stack.moment_svc.create_moment(author_user_id=a.user_id, content="mine")
+
+
 async def test_replies_skip_rate_limit(stack):
     a = await stack.provision("alice")
     b = await stack.provision("bob")

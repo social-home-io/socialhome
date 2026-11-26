@@ -918,13 +918,16 @@ class SqliteMomentRepo:
     ) -> str | None:
         """``created_at`` of the author's newest top-level moment since
         ``since_iso``, or ``None``. Top-level moments only — replies are
-        exempt from the rate limit. A deleted one (its tombstone keeps
-        ``created_at``) still counts: a delete never gives the slot back
-        (owner 2026-11-24), the rule relays hold a signed author to."""
+        exempt from the rate limit (a reply's tombstone keeps its parent).
+        A deleted one (its tombstone keeps ``created_at``) still counts: a
+        delete never gives the slot back (owner 2026-11-24), the rule
+        relays hold a signed author to. Only moments written here
+        (``received_via='self'``) — a delivered row never blocks a local
+        person."""
         row = await self._db.fetchone(
             "SELECT MAX(created_at) AS last FROM moments "
             "WHERE author_user_id=? AND created_at>=? "
-            "AND parent_moment_id IS NULL",
+            "AND parent_moment_id IS NULL AND received_via='self'",
             (author_user_id, since_iso),
         )
         return str(row["last"]) if row and row["last"] is not None else None
@@ -1544,8 +1547,9 @@ def _tombstone_rows(conn, where: str, params: tuple) -> int:
     and ``expires_at`` (what a tombstone must remember); drops content,
     media, tags, reactions, every save (migration 0124's trigger) and the
     reaction route (0125's trigger), in this same transaction; detaches
-    replies (``parent_moment_id`` →
-    NULL, as the old hard delete's ``ON DELETE SET NULL`` did). Returns the
+    live replies (``parent_moment_id`` → NULL, as the old hard delete's
+    ``ON DELETE SET NULL`` did). The tombstone keeps its own parent, so a
+    deleted reply is still a reply to the posting rate limit. Returns the
     number of live moments tombstoned. ``where`` is a fixed column
     predicate from this module, never caller input.
     """
@@ -1560,12 +1564,13 @@ def _tombstone_rows(conn, where: str, params: tuple) -> int:
         conn.execute("DELETE FROM moment_hashtags WHERE moment_id=?", (mid,))
         conn.execute("DELETE FROM moment_reactions WHERE moment_id=?", (mid,))
         conn.execute(
-            "UPDATE moments SET parent_moment_id=NULL WHERE parent_moment_id=?",
+            "UPDATE moments SET parent_moment_id=NULL"
+            " WHERE parent_moment_id=? AND deleted_at IS NULL",
             (mid,),
         )
         conn.execute(
             "UPDATE moments SET content='', media_url=NULL, media_type=NULL,"
-            " duration_ms=NULL, parent_moment_id=NULL, is_public=0,"
+            " duration_ms=NULL, is_public=0,"
             " deleted_at=datetime('now') WHERE id=?",
             (mid,),
         )

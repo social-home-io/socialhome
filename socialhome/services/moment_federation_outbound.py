@@ -747,7 +747,7 @@ class MomentFederationOutbound(
             kind = "top-level moments"
             slot = moment_rate_slot(payload.get("occurred_at"))
             if slot is None:
-                return self._log_capped("future-signed", origin, author)
+                return self._log_capped("signed-too-far-ahead", origin, author)
             if self._slots.is_allowed(
                 _budget_key("t", origin, author, str(slot)),
                 limit=MOMENT_RELAY_PER_RATE_WINDOW,
@@ -771,11 +771,13 @@ class MomentFederationOutbound(
             window_s=MOMENT_RELAY_AUTHOR_WINDOW_S,
         ):
             log.info(
-                "moment relay cap: author %r (origin %r) over the %s cap"
-                " — not relaying more of theirs for now",
+                "moment relay cap: author %r (origin %r) %s — not relaying"
+                " these for now",
                 author[:64],
                 origin[:64],
-                kind,
+                "signs moments too far ahead"
+                if kind == "signed-too-far-ahead"
+                else f"is over the {kind} cap",
             )
         return False
 

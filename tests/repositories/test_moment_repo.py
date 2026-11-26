@@ -146,6 +146,20 @@ async def test_latest_top_level_at_none_without_recent(db, repo):
         _moment(id="m-only-reply", author="u-bob", parent_moment_id="m-other-root")
     )
     assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+    # A deleted reply keeps its parent — still not top-level.
+    await repo.delete("m-only-reply")
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+    # Nor does a reply's tombstone turn top-level when its root goes later.
+    await repo.delete("m-other-root")
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
+
+
+async def test_latest_top_level_at_counts_only_moments_written_here(db, repo):
+    """A row another household or a GFS delivered never blocks a local
+    person, whatever author id or time it carries."""
+    since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    await repo.save(replace(_moment(id="m-far", author="u-bob"), received_via="gfs"))
+    assert await repo.latest_top_level_at("u-bob", since_iso=since) is None
 
 
 async def test_set_and_clear_reaction(db, repo):

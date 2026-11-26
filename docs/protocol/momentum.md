@@ -185,7 +185,13 @@ unconstrained. Reactions are exempt. **A deleted moment still counts**
 (owner 2026-11-24: creating and deleting are different things — a delete
 never gives the slot back; its tombstone keeps ``created_at``). Before,
 post / delete / post went through without limit, so a person fixing a
-typo twice posted moments relays then dropped.
+typo twice posted moments relays then dropped. A delete by anyone (the
+author, an admin, a guardian) neither frees nor extends the slot: it runs
+from ``created_at``. A deleted reply stays a reply (its tombstone keeps
+its parent), so it never moves the limit; only rows written here
+(``received_via='self'``) count. Known, older edge: deleting a root
+detaches its live replies, which then count as top-level for the rest of
+their 15 minutes.
 
 ## Mesh relay
 
@@ -356,7 +362,11 @@ policy: nothing on the wire changes, no protocol bump, no sync change.
   resets budgets): rate slots ``RELAY_SLOT_KEYS_MAX`` (50 000, like the
   seen-map: every top-level moment relayed in 48 h, ≤ 2 stamps, ~0.3 KB
   each ≈ 15 MB at worst), reply / delete budgets ``RELAY_AUTHOR_KEYS_MAX``
-  (10 000, ≤ 30 stamps ≈ 10–15 MB at worst). Keys are a 16-byte digest,
+  (10 000, ≤ 30 stamps ≈ 10–15 MB at worst). A capped create leaves one
+  entry in the 50 000-entry seen-map (so its delete is charged); a flood
+  can push older entries out, after which their deletes fall to the
+  delete budget — no worse than before, when every relayed create took
+  two. Keys are a 16-byte digest,
   so a peer-chosen id can't make one large. In memory only, no table, no
   migration; a restart forgets them.
 
