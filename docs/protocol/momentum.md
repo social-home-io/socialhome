@@ -190,8 +190,9 @@ author, an admin, a guardian) neither frees nor extends the slot: it runs
 from ``created_at``. A deleted reply stays a reply (its tombstone keeps
 its parent), so it never moves the limit; only rows written here
 (``received_via='self'``) count. Known, older edge: deleting a root
-detaches its live replies, which then count as top-level for the rest of
-their 15 minutes.
+detaches its live replies (and pruning an expired root, through the
+foreign key, any of its replies), which then count as top-level for the
+rest of their 15 minutes.
 
 ## Mesh relay
 
