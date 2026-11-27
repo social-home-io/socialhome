@@ -112,14 +112,25 @@ describe('the hero', () => {
     expect(hero.querySelector('.sh-space-hero-followers')?.textContent).toBe('· 5 followers')
   })
 
-  it('a space that takes no followers never says "0 followers"', async () => {
+  it('a space that takes no followers shows only its members', async () => {
+    // Followers off: the server declares no follower count (null).
     wire('member', {
-      member_count: 3, follower_count: 0, features: { todo: true, allow_subscribers: false },
+      member_count: 3, follower_count: null, features: { todo: true, allow_subscribers: false },
     })
     const { tl, r } = await open()
     const hero = await tl.waitFor(() => present<HTMLElement>(r.container, '.sh-space-hero'))
     await tl.waitFor(() => expect(hero.querySelector('a.sh-space-hero-members')?.textContent).toContain('3 members'))
     expect(hero.querySelector('.sh-space-hero-followers')).toBeNull()
+  })
+
+  it('a space that takes followers says "0 followers" when nobody follows yet', async () => {
+    wire('member', {
+      member_count: 3, follower_count: 0, features: { todo: true, allow_subscribers: true },
+    })
+    const { tl, r } = await open()
+    const hero = await tl.waitFor(() => present<HTMLElement>(r.container, '.sh-space-hero'))
+    await tl.waitFor(() => expect(hero.querySelector('a.sh-space-hero-members')?.textContent).toContain('3 members'))
+    expect(hero.querySelector('.sh-space-hero-followers')?.textContent).toBe('· 0 followers')
   })
 
   it('no number when the server knows none — not the roster length, not 0', async () => {

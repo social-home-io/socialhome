@@ -284,11 +284,11 @@ class SpaceSyncResumeProvider(FileHashesMixin):
     ) -> None:
         """Wire whose rows a replay carries, and to whom (v_92): the roster
         authority (``roster_authority(space_id)``) replays every row to any
-        household of the space (a follower gets its subset there); any other
+        household of the space (a follower gets what a member gets, P10); any other
         household — a trusted helper asked while the host is offline —
         replays only its own people's rows (``own_members(space_id)``) and
-        their files, and only to a household holding a writer seat
-        (``member_gate(space_id, household)``,
+        their files, and only to a household holding a seat — a follower's
+        included (``member_gate(space_id, household)``,
         ``SpaceWriterHouseholds.may_receive``)."""
         self._roster_authority = roster_authority
         self._own_members = own_members
@@ -400,8 +400,8 @@ class SpaceSyncResumeProvider(FileHashesMixin):
         §319.6 resync paths (:meth:`replay_space_to` /
         :meth:`replay_calendar_to`) run this check before any
         ``_replay_*`` call so a resync request can't bypass it. A household
-        that is not the roster authority (a v_92 helper) serves only writer
-        seats — the §25.6 provider's gate for member-only data.
+        that is not the roster authority (a v_92 helper) serves the seated
+        households the gate names — every seat, a follower's included (P10).
         """
         if (
             self._member_gate is not None

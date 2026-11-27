@@ -1,128 +1,48 @@
-"""Author-side producer for the public space-content relay (Phase 5a2).
+"""Host-side authority items for a global space's opaque channel (v_96).
 
-Bus subscriber on :class:`SpacePostCreated`. When a PUBLIC/GLOBAL space
-post is created locally on the space's OWNER household (which holds the
-space's signing seed), this service relays the post to the space's GFS
-subscribers via the content-blind GFS relay:
+Since v_96 a global space's GFS-borne content rides its opaque channel
+(:mod:`socialhome.services.gfs_channel_service`): every member and follower
+household holds a channel seat, every writer publishes its own items there
+(:mod:`socialhome.services.gfs_member_publish_service`, the OWNER's own posts
+included). This service adds what only the space's seed holder can sign, as
+AUTHORITY items inside the channel ciphertext (the inner signed by the space
+authority, :func:`~socialhome.services.space_public_authority
+.channel_authority_plaintext`):
 
-1. Build the inner content payload (post id, author identity, content,
-   media refs, created_at) — including ``author_pk`` so the subscriber
-   can self-certify the author, and ``post_id`` for dedupe.
-2. Encrypt it under the per-space AES-256 content key (the *existing*
-   epoch key — no new key) so the GFS and any relay see only ciphertext.
-3. Wrap as ``{space_id, epoch, encrypted_payload}`` and authority-sign
-   with the space seed (:func:`sign_authority_event`) under
-   ``space_post_public`` so the GFS can authorize the relay against the
-   TOFU-pinned space public key without ever learning the content.
-4. POST to every GFS the space is published to via
-   :meth:`GfsConnectionService.publish_space_event`.
-
-Mirrors :class:`socialhome.services.moment_public_outbound.MomentPublicOutbound`.
-
-Each relayed post carries TWO signatures: the outer **space-authority**
-signature (this seed-holder, verified against the pinned space key — proves
-the relay is authorised) AND an inner **per-author** signature
-(``author_sig``, the author's household identity seed signing the inner
-content via :func:`author_signing_bytes`, verified against ``author_pk`` —
-proves the named author wrote it). Without the per-author signature,
-``author_pk`` / ``author_user_id`` are both public, so a seed-holder could
-attribute a post to any member; the signature closes that hole.
-
-**Who relays what.** The OWNER household relays posts: its own, and other
-members' (the remote-author path below). A *delegated admin* (a household
-the owner handed the seed, so it can act while the owner is offline) relays
-no posts — its own go out as its household's anonymous ``space_item`` like
-any writer's, so a connection server cannot tell which household was handed
-the seed. It relays only what no other path carries and only the seed can
-sign: the removals made on its own household (authority-only items, below)
-— never an answer to something it merely received. (A post is released
-from the moderation queue on the owner alone.) Effect: a post by an author below
-v_90 (who publishes nothing itself) reaches GFS followers once the owner
-has it — while the owner is offline it waits.
-
-Scope: only the owner relays posts here, and on the local-author
-path only its OWN household's posts (the producer's ``author`` must be a
-local user — enforced below — so this household always holds the author's
-identity seed and can produce ``author_sig``). Since v_49 a plain member
-household publishes its own items itself, over the member relay
-(``space_item``, :mod:`socialhome.services.gfs_member_publish_service`:
-always anonymous under the writer group key, to every GFS the owner listed;
-a member household without the group key publishes nothing there). Its posts are still also relayed by the owner
-(the remote-author path below), because a follower on an older build reads
-only ``space_post_public``. Followers dedupe the two copies by post id.
-Authors' own edits and deletes travel over the member relay only; see below
-for removals.
-
-Remote-author relay (Phase 5a relay): a *remote* member's public post — where
-the owner does NOT hold the author's identity seed — is relayed when it
-arrives carrying the author household's pre-signed inner as
-``SpacePostCreated.public_relay`` (built by
-:func:`build_signed_author_inner` on the author's household and propagated
-through the mesh). :meth:`_relay_remote_authored` re-verifies the author's
-self-cert + signature (:func:`verify_signed_author_inner`) — never relaying
-forgeable / unverifiable content — re-encrypts the inner under the existing
-per-space content key, and authority-signs the GFS envelope with the space
-seed. An inbound event with no ``public_relay`` is the pure loop guard and is
-never re-fanned.
-
-Readability gate: a PUBLIC/GLOBAL space whose ``features.allow_subscribers``
-is OFF is published to the GFS *directory* (that is how people discover it and
-get invited) but is **not publicly readable** — no post of it is ever relayed,
-on either the local-author or the remote-author path. This is NOT ``join_mode``:
-how a person becomes a posting member is a separate dial, and an ``invite_only``
-space with followers on is a legitimate broadcast space. The flag is the OWNER's
-alone (``SpaceService.update_config`` gates it with ``_require_owner``, and the
-forwarded-admin path pins it) — exposing a space's content to strangers is not a
-delegated-admin decision. Members are unaffected either way: they receive content
-through ``broadcast_to_space_members``, not the GFS.
-
-Writer certificates (v_49): the relayed inner carries the author
-household's ``writer_cert`` — the space authority key's per-epoch statement
-that this household may write (:mod:`socialhome.writer_cert`). On the
-local-author path a seed holder attaches its own (self-issued) cert for the
-epoch it encrypts under. On the remote-author path a cert in the
-``public_relay`` is checked first (signature against the pinned space key,
-names the author's ``author_pk``, ``write`` scope, this space): a cert that
-fails is a v_49 author's item that must not travel — it is dropped with a
-WARNING. A valid cert is then RE-STAMPED for the epoch this relay encrypts
-under, but only while the author household still holds a seat in our roster
-that permits the item (never a ``comment`` cert onto a post) — a household
-removed since its cert was issued is not relayed. An inner with NO cert is
-relayed as before, on this seed holder's authority signature alone, only
-from an origin below v_49 whose pinned identity key is the inner's
-``author_pk`` (a v_49 author always attaches its cert, so its absence is a
-stripped cert). That no-cert branch is the
-migration tripwire — once every member ships v_49 it can become a refusal.
-
-Authority-only items (:mod:`socialhome.services.space_public_authority`):
-
-* **Removals.** Every space post or comment delete the owner applies —
-  a moderator's, an admin's or the author's own, local or federated (the host
-  path already authorized it) — and every one a delegated admin's own
-  household makes is relayed as an
-  :class:`~socialhome.domain.space_item.AuthorityRemoval` naming the item
-  and its author: never who removed it or why. Followers soft-delete, or keep
-  a tombstone under an id owner-bound to that author in this space.
-  Calendar-derived posts are skipped (never relayed).
+* **Remote-author posts.** A member's post that reaches the OWNER carrying
+  the author household's pre-signed inner (``SpacePostCreated.public_relay``,
+  built by :func:`build_signed_author_inner` on the author's household) and
+  that the author did NOT put on the channel itself (``channel_sent`` in the
+  hint — e.g. an author whose household holds no channel seat yet). The
+  author's self-cert + signature are re-verified first
+  (:func:`verify_signed_author_inner`), the inner's signed ``space_id`` must
+  be this space, a member inner naming an authority kind is refused, and
+  the author household's writer cert is checked and RE-STAMPED for the epoch
+  the item is sealed under — only while that household still holds a seat
+  that permits a post. An inner with NO cert is relayed only from an origin
+  below v_49 whose pinned key is the inner's ``author_pk`` (the migration
+  tripwire). A delegated admin relays no member's post.
 * **Approved posts.** A remote member's post released from the moderation
-  queue is applied here as the submitter's; the queue kept the submitter's
-  author-signed copy (signed at submission), and
-  :meth:`SpacePublicOutbound._relay_approved` relays it — when it is exactly
-  the published post — marked ``approved_post``, with the author household's
-  writer cert re-stamped for the relay epoch at ``comment`` scope at least.
-  The approver is never named; without a signed copy nothing is relayed. A
-  local author's approved post goes out author-signed like any local post.
+  queue, applied here as the submitter's: the queue kept the submitter's
+  author-signed copy and :meth:`SpacePublicOutbound._relay_approved` relays
+  it — when it is exactly the published post — marked ``approved_post``,
+  with the author household's cert re-stamped at ``comment`` scope at least
+  and without follower seats. The approver is never named; without a signed
+  copy nothing is relayed.
+* **Removals.** Every space post or comment delete the owner applies (a
+  moderator's, an admin's or the author's own, local or federated), and
+  every one a delegated admin's own household makes, as an
+  :class:`~socialhome.domain.space_item.AuthorityRemoval` naming the item
+  and its author — never who removed it or why.
 
-Both ride ``space_post_public`` like a post — the connection server cannot
-tell them apart — and every plaintext of this relay is padded to
-:data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS`, inside the AEAD and
-outside every author signature. A member's ``public_relay`` that names an
-authority kind is refused.
+A space without a channel here gets nothing from this service: its members
+are reached by federation and catch up from the host by sync. The
+space-keyed ``POST /gfs/publish`` relay (``space_post_public``) is gone, as
+are its padded / compressed copies and the per-server follower coverage.
 
-This service is the encryption boundary: the cleartext post never leaves
-in a GFS-bound envelope (CLAUDE.md Encryption-First Rule). If the space
-has no content key, :meth:`SpaceContentEncryption.encrypt` raises
-``RuntimeError`` rather than degrading to plaintext.
+This service is the encryption boundary: nothing leaves outside the channel
+ciphertext (CLAUDE.md Encryption-First Rule). With no content key the seal
+raises ``RuntimeError`` rather than degrading to plaintext.
 """
 
 from __future__ import annotations
@@ -130,23 +50,17 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, NamedTuple
 
-from ..authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-    strip_authority_sig_fields,
-)
 from ..domain.events import CommentDeleted, PostDeleted, SpacePostCreated
-from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space import SpaceType
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
-    PAYLOAD_SUITE_FIELD,
+    CHANNEL_SENT_FIELD,
+    ITEM_TYPE_POST,
     REMOVAL_TARGET_COMMENT,
     REMOVAL_TARGET_POST,
     AuthorityRemoval,
-    compressed_item_plaintexts,
-    pad_json_object,
+    reader_cert_permits,
 )
-from ..domain.space_media_ref import post_media_urls
 from ..domain.writer_cert import (
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_WRITE,
@@ -154,13 +68,8 @@ from ..domain.writer_cert import (
 )
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
-from .file_hashes_sender import FileHashesMixin
-from .space_media_refs import SpaceMediaRefsMixin
-from .space_public_author import (
-    build_signed_author_inner,
-    verify_signed_author_inner,
-)
-from .space_public_authority import approved_relay_for
+from .space_public_author import verify_signed_author_inner
+from .space_public_authority import approved_relay_for, channel_authority_plaintext
 from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
@@ -168,28 +77,22 @@ if TYPE_CHECKING:
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
-    from .gfs_connection_service import GfsConnectionService
-    from .media_file_hasher import MediaFileHasher
+    from .gfs_channel_service import GfsChannelService
     from .space_crypto_service import SpaceContentEncryption
-    from .space_relay_coverage import SkipTarget, SpaceRelayCoverage
 
 log = logging.getLogger(__name__)
 
 
-class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
-    """Bus-event → GFS-relay producer for public/global space posts."""
+class SpacePublicOutbound:
+    """Bus-event → channel authority items of a global space (see the
+    module docstring)."""
 
     __slots__ = (
         "_bus",
+        "_channels",
         "_crypto",
-        "_file_hasher",
-        "_gfs",
-        "_media_gfs",
-        "_own_identity_seed",
         "_own_instance_id",
-        "_own_instance_pk",
         "_posts",
-        "_relay_coverage",
         "_spaces",
         "_users",
         "_writer_certs",
@@ -202,41 +105,36 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         space_repo: AbstractSpaceRepo,
         space_crypto: SpaceContentEncryption,
         user_repo: AbstractUserRepo,
-        gfs_service: GfsConnectionService,
     ) -> None:
         self._bus = bus
         self._spaces = space_repo
         self._crypto = space_crypto
+        #: Only read to tell a local author (whose own post goes into the
+        #: channel through the member publisher) from a remote one.
         self._users = user_repo
-        self._gfs = gfs_service
-        #: The post's file hashes, author-signed into the inner (one name on every path).
-        self._file_hasher: MediaFileHasher | None = None
         self._own_instance_id: str = ""
-        #: This household's 32-byte Ed25519 identity public key. Shipped as
-        #: ``author_pk`` inside the encrypted payload so the subscriber can
-        #: self-certify ``derive_user_id(author_pk, username) ==
-        #: author_user_id`` (mirrors the moments self-cert).
-        self._own_instance_pk: bytes = b""
-        #: This household's 32-byte Ed25519 identity *seed*. Signs the inner
-        #: ``author_sig`` over the content (verified against ``author_pk`` by
-        #: the subscriber). The producer only relays its own household's
-        #: locally-authored posts, so this seed can always author-sign them.
-        self._own_identity_seed: bytes = b""
-        #: v_49 writer certs — ``None`` keeps the pre-v_49 relay unchanged.
+        #: v_49 writer certs — ``None`` relays an inner without re-stamping.
         self._writer_certs: SpaceWriterCertService | None = None
-        #: Step 12 — which GFSs need our copy of a remote member's post.
-        self._relay_coverage: SpaceRelayCoverage | None = None
         #: The space post store — only read to skip the removal of a
         #: calendar-derived post (never relayed, so nothing to remove).
         self._posts: AbstractSpacePostRepo | None = None
-        #: v_80 — the post's pictures for followers (``media_refs`` in the
-        #: inner, under the author's ``media_refs_sig``; one upload per GFS).
-        self._media_gfs = None
+        #: v_96 — a GLOBAL space's opaque channel: the only place anything
+        #: of this service goes. ``None`` → nothing is sent.
+        self._channels: GfsChannelService | None = None
 
-    def attach_relay_coverage(self, coverage: SpaceRelayCoverage) -> None:
-        """Wire step 12: a remote member's post skips the GFSs where every
-        follower reads the author's own ``space_item``."""
-        self._relay_coverage = coverage
+    def attach_channels(self, channels: GfsChannelService) -> None:
+        """Wire the channel service (v_96, see :attr:`_channels`)."""
+        self._channels = channels
+
+    async def _on_channel(self, space: Space) -> bool:
+        """Whether *space* is a GLOBAL space that stores a channel here (the
+        owner's own, or a delegated admin's grant) — the one case this
+        service sends anything."""
+        return (
+            self._channels is not None
+            and space.space_type is SpaceType.GLOBAL
+            and await self._channels.has_channel(space.id)
+        )
 
     def attach_posts(self, posts: AbstractSpacePostRepo) -> None:
         """Wire the space post store (see :attr:`_posts`)."""
@@ -246,16 +144,9 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         """Wire the v_49 writer-cert service (see the module docstring)."""
         self._writer_certs = writer_certs
 
-    def attach_identity(
-        self,
-        *,
-        own_instance_id: str,
-        own_instance_public_key: bytes,
-        own_identity_seed: bytes,
-    ) -> None:
+    def attach_identity(self, *, own_instance_id: str) -> None:
+        """Wire our own instance id (who owns a space)."""
         self._own_instance_id = own_instance_id
-        self._own_instance_pk = own_instance_public_key
-        self._own_identity_seed = own_identity_seed
 
     def _owns(self, space: Space) -> bool:
         """Whether this household is *space*'s owner (callers check the
@@ -268,9 +159,8 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._bus.subscribe(CommentDeleted, self._on_comment_deleted)
 
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
-        # Inbound (another member's post). Relay it to the GFS subscribers
-        # only when it carries a verified, author-signed public_relay hint and
-        # we own the space (remote-author relay). Otherwise
+        # Inbound (another member's post): the remote-author relay, when it
+        # carries a verified, author-signed public_relay hint. Otherwise
         # this is the loop guard — never re-fan an inbound post.
         if event.origin_instance_id is not None:
             await self._relay_remote_authored(event)
@@ -283,131 +173,35 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # relay would double up. Mirrors SpacePostOutbound.
         if post.linked_event_id is not None:
             return
+        # The one local post this service relays: a remote member's post
+        # released from the moderation queue (applied here as theirs). Our
+        # own authors' posts go into the channel through the member
+        # publisher, like any writer's.
+        if not event.approved_by:
+            return
         space = await self._spaces.get(event.space_id)
-        if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+        if space is None or not await self._on_channel(space):
             return
-        # Readability is an explicit admin opt-in, independent of join_mode: a
-        # public/global space with ``allow_subscribers`` OFF is LISTED in the
-        # GFS directory (discovery + invites) but is NOT publicly readable —
-        # only members get content. Stop the relay at the source, so nothing
-        # of its content stream ever reaches the GFS.
-        if not space.features.allow_subscribers:
-            log.debug(
-                "space_public.outbound: space %s does not allow subscribers — "
-                "not publicly readable, skipping relay",
-                event.space_id,
-            )
-            return
-        # Only the owner relays posts. A NULL seed means this household
-        # can't authority-sign — skip silently.
         seed = await self._spaces.get_space_seed(event.space_id)
-        if seed is None:
+        if seed is None or not self._own_instance_id or not self._owns(space):
             return
-        if (
-            not self._own_instance_id
-            or not self._own_instance_pk
-            or not self._own_identity_seed
-        ):
-            log.warning(
-                "space_public.outbound: identity not attached — "
-                "dropping relay for space %s",
-                event.space_id,
-            )
-            return
-        # A delegated admin's own post goes out as its household's anonymous
-        # item, like any writer's. (A post released from the moderation
-        # queue is applied on the owner alone, so it is relayed there.)
-        if not self._owns(space):
-            return
-        author = await self._users.get_by_user_id(post.author)
-        if author is None:
-            # Author isn't a LOCAL user (system/bot/remote member). We don't
-            # hold their identity seed, so we cannot produce the per-author
-            # ``author_sig``. A remote member's own post reaches us with its
-            # pre-signed ``public_relay`` (the inbound branch above); the one
-            # we apply locally is a post released from the moderation queue,
-            # which we relay on the authority's word. Anything else is skipped
-            # rather than relayed unattributable.
-            if event.approved_by:
-                await self._relay_approved(event, space, seed)
-            return
-
-        # Per-author signature: the author's household identity seed signs the
-        # canonical, domain-separated bytes over the attributable inner fields
-        # (excluding ``author_sig`` itself). Verified by the subscriber against
-        # ``author_pk`` so a relaying seed-holder can't forge authorship.
-        # Centralised in build_signed_author_inner so the member-broadcast
-        # relay-hint produces a byte-identical signed inner.
-        # v_80 — the pictures, for followers reading through a GFS, under
-        # the author's separate signature over the descriptor
-        # (``media_refs_sig``; the main author bytes don't change).
-        media_plan = await self._plan_media_refs(
-            event.space_id, post_media_urls(post), item_id=post.id, followers=True
-        )
-        inner = build_signed_author_inner(
-            post=post,
-            space_id=event.space_id,
-            author_username=author.username,
-            author_pk=self._own_instance_pk,
-            author_identity_seed=self._own_identity_seed,
-            origin_instance_id=self._own_instance_id,
-            # Derivation input for the subscriber's self-cert: the immutable
-            # uuid anchor (new users) so the check survives a username change.
-            # Passed raw — the builder normalises a legacy username-anchored
-            # row (``anchor == username``, the 0041 backfill) to "absent" so
-            # its signed bytes stay v_25-compatible.
-            author_identity_anchor=author.identity_anchor,
-            media_refs=media_plan.wire() if media_plan is not None else None,
-            file_hashes=await self._file_hashes_of(post_media_urls(post)),
-        )
-        # Encrypt under the existing per-space epoch key. Raises if no key —
-        # we never relay plaintext (Encryption-First Rule). v_49: our own
-        # writer cert for exactly the epoch we encrypt under rides inside.
-        try:
-            sealed = await self._encrypt_with_cert(
-                event.space_id, inner, self._own_instance_id
-            )
-        except RuntimeError:
-            log.warning(
-                "space_public.outbound: no content key for space %s — "
-                "cannot relay post %s",
-                event.space_id,
-                post.id,
-            )
-            return
-        await self._publish(event.space_id, seed, sealed, what=f"post {post.id}")
-        self._upload_media(media_plan)
+        if await self._users.get_by_user_id(post.author) is not None:
+            return  # a local author: the member publisher carries it
+        await self._relay_approved(event, space)
 
     async def _relay_remote_authored(self, event: SpacePostCreated) -> None:
-        """Relay another member household's public/global post to the GFS
-        subscribers — on the space's OWNER household only.
-
-        A v_90 member publishes its own post itself (``space_item``); this
-        copy is for a follower that reads only ``space_post_public`` and for
-        an author below v_90, who publishes nothing itself. When such a post
-        reaches the owner, we re-wrap the
-        author's pre-signed inner (carried as ``event.public_relay``) under our
-        authority signature. We verify the original author's self-cert +
-        signature first — never relay forgeable / unverifiable content — and
-        re-encrypt under the existing per-space content key (Encryption-First).
-        """
+        """Put another member household's post into the space's channel as
+        an authority item — on the space's OWNER household only, and only
+        when the author did not put it there itself (see the module
+        docstring). The original author's self-cert + signature are
+        verified first — never relay forgeable / unverifiable content."""
         relay = event.public_relay
         if not isinstance(relay, dict):
             return
         if not event.space_id:
             return
         space = await self._spaces.get(event.space_id)
-        if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
-            return
-        # Same gate on the remote-author path: a seed-holder must not launder
-        # another member's post into the (nonexistent) public stream of a
-        # space that admits no subscribers.
-        if not space.features.allow_subscribers:
-            log.debug(
-                "space_public.outbound: space %s does not allow subscribers — "
-                "not publicly readable, skipping remote-authored relay",
-                event.space_id,
-            )
+        if space is None or not await self._on_channel(space):
             return
         seed = await self._spaces.get_space_seed(event.space_id)
         if seed is None:
@@ -425,10 +219,21 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             # other writer household — and a GFS could test a household by
             # handing a post to its seat alone.
             return
+        # v_96 — the author put this post on the channel itself: never a
+        # second copy there. The mark rides outside the author signature
+        # and is never relayed on.
+        channel_sent = relay.get(CHANNEL_SENT_FIELD) is True
+        relay = {k: v for k, v in relay.items() if k != CHANNEL_SENT_FIELD}
+        if channel_sent:
+            log.debug(
+                "space_public.outbound: author put its post on the channel of "
+                "space %s — no host copy",
+                event.space_id,
+            )
+            return
         # Verify the ORIGINAL author's signature + self-cert before relaying —
-        # never relay unverifiable / forgeable content (the subscriber
-        # re-verifies, but we fail-closed here too and don't waste a GFS
-        # round-trip).
+        # never relay unverifiable / forgeable content (every reader
+        # re-verifies, but we fail closed here too).
         if not verify_signed_author_inner(relay):
             log.warning(
                 "space_public.outbound: public_relay failed verification for "
@@ -479,7 +284,6 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                     relay,
                     restamp_for,
                     expect_pk=str(relay.get("author_pk") or ""),
-                    required=True,
                 )
             else:
                 sealed = await self._seal(event.space_id, relay)
@@ -499,25 +303,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 event.space_id,
             )
             return
-        # Step 12: a v_57 author published this post itself to every listed
-        # GFS; a server where every follower reads that ``space_item`` gets
-        # no copy from us.
-        skip = (
-            await self._relay_coverage.redundant_on(
-                event.space_id, event.origin_instance_id
-            )
-            if self._relay_coverage is not None
-            else None
-        )
-        await self._publish(
-            event.space_id, seed, sealed, what="remote-author post", skip=skip
-        )
+        await self._publish(event.space_id, sealed, what="remote-author post")
 
     # ── Authority-only items: approved posts and removals ────────────────
 
-    async def _relay_approved(
-        self, event: SpacePostCreated, space: Space, seed: bytes
-    ) -> None:
+    async def _relay_approved(self, event: SpacePostCreated, space: Space) -> None:
         """Relay a remote member's post just released from the moderation
         queue, under its AUTHOR's signature: the submitter's household signed
         the post inner when it submitted the item, and the queue kept that
@@ -525,7 +315,9 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         published (:func:`approved_relay_for`); it goes out marked
         ``approved_post`` with the author household's writer cert re-stamped
         for the relay epoch at ``comment`` scope at least — a plain member of
-        a ``MODERATED`` space holds only that. The approver is never named.
+        a ``MODERATED`` space holds only that — issued without follower seats
+        (v_96: never a reader cert, which no receiver takes on a post). The
+        approver is never named.
         No signed copy (an older submitter) → not relayed: a seed holder
         never vouches for authorship on its own."""
         post = event.post
@@ -546,8 +338,12 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 inner,
                 origin,
                 expect_pk=str(inner.get("author_pk") or ""),
-                required=True,
                 required_scope=WRITER_SCOPE_COMMENT,
+                # A post is never a follower's: re-issue without follower
+                # seats, so a member whose household also holds a follower
+                # (one reader cert for both) still gets a cert receivers
+                # accept on a post — members equal on any path.
+                followers=False,
             )
         except _NoWriterCert:
             log.warning(
@@ -566,9 +362,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 post.id,
             )
             return
-        await self._publish(
-            event.space_id, seed, sealed, what=f"approved post {post.id}"
-        )
+        await self._publish(event.space_id, sealed, what=f"approved post {post.id}")
 
     async def _on_post_deleted(self, event: PostDeleted) -> None:
         if not event.space_id:
@@ -618,8 +412,8 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         *,
         origin: str | None,
     ) -> None:
-        """Relay a post or comment removal to the space's GFS followers, on
-        this seed holder's authority. The OWNER relays every removal applied
+        """Put a post or comment removal into the space's channel, on this
+        seed holder's authority. The OWNER relays every removal applied
         here — a moderator's, an admin's or the author's own, local or
         federated (the host path already authorized it). A delegated admin
         relays only a removal made on its own household (*origin* ``None``):
@@ -632,9 +426,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         from a short post. A follower that already applied it is unaffected
         by a duplicate."""
         space = await self._spaces.get(space_id)
-        if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
-            return
-        if not space.features.allow_subscribers:
+        if space is None or not await self._on_channel(space):
             return
         if archive_refusal(space, "") is not None:
             return  # read-only: followers drop it anyway
@@ -677,77 +469,41 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 target,
             )
             return
-        await self._publish(space_id, seed, sealed, what=f"{target} removal")
+        await self._publish(space_id, sealed, what=f"{target} removal")
 
     async def _seal(self, space_id: str, body: dict) -> _Sealed:
-        """Encrypt ``body`` under the current epoch, padded JSON — plus the
-        compressed copies that land in a smaller size bucket
-        (:func:`compressed_item_plaintexts`: ``zlib1+dict1`` / ``zlib1``),
-        sealed under the same epoch. Raises ``RuntimeError`` when there is
-        no content key."""
-        plain = pad_json_object(body)
-        epoch, ct = await self._crypto.encrypt(space_id, plain)
-        compressed: dict[str, str] = {}
-        for suite, pt in compressed_item_plaintexts(body, json_len=len(plain)).items():
-            z_epoch, z_ct = await self._crypto.encrypt(space_id, pt)
-            # A rotation in between: the JSON copy alone (it is the one
-            # every follower reads).
-            if z_epoch != epoch:
-                return _Sealed(epoch, ct, {})
-            compressed[suite] = z_ct
-        return _Sealed(epoch, ct, compressed)
-
-    @staticmethod
-    def _envelope(
-        space_id: str, seed: bytes, epoch: int, ct: str, *, suite: str | None
-    ) -> dict:
-        """``{space_id, epoch, encrypted_payload[, payload_suite]}`` plus the
-        authority signature over all of it (so the suite tag is signed)."""
-        envelope: dict = {
-            "space_id": space_id,
-            "epoch": epoch,
-            "encrypted_payload": ct,
-        }
-        if suite is not None:
-            envelope[PAYLOAD_SUITE_FIELD] = suite
-        envelope.update(
-            sign_authority_event(
-                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-                space_id=space_id,
-                payload=strip_authority_sig_fields(envelope),
-                space_seed=seed,
+        """Seal ``body`` as a channel authority item under the current epoch
+        (:func:`channel_authority_plaintext`: the inner signed by the space
+        authority, binding that epoch). Raises ``RuntimeError`` without the
+        seed or a content key."""
+        seed = await self._spaces.get_space_seed(space_id)
+        if seed is None:
+            raise RuntimeError(f"no space seed for {space_id}")
+        # The signature binds the epoch the item is sealed under: re-read
+        # once if a rotation lands in between.
+        for _attempt in range(2):
+            current = await self._crypto.get_current_epoch(space_id)
+            if current is None:
+                raise RuntimeError(f"no content key for space {space_id}")
+            plain = channel_authority_plaintext(
+                body, space_id=space_id, epoch=current, space_seed=seed
             )
-        )
-        return envelope
+            epoch, ct = await self._crypto.encrypt(space_id, plain)
+            if epoch == current:
+                return _Sealed(epoch, ct)
+        raise RuntimeError(f"content epoch kept moving for space {space_id}")
 
-    async def _publish(
-        self,
-        space_id: str,
-        seed: bytes,
-        sealed: _Sealed,
-        *,
-        what: str,
-        skip: SkipTarget | None = None,
-    ) -> None:
-        """Authority-sign ``{space_id, epoch, encrypted_payload}`` under
-        ``space_post_public`` and hand it to every GFS the space is on — the
-        compressed copies too, for the servers that take them."""
-        envelope = self._envelope(space_id, seed, sealed.epoch, sealed.ct, suite=None)
-        compressed = {
-            suite: self._envelope(space_id, seed, sealed.epoch, ct, suite=suite)
-            for suite, ct in sealed.compressed_cts.items()
-        }
+    async def _publish(self, space_id: str, sealed: _Sealed, *, what: str) -> None:
+        """Hand a sealed authority item to the space's channel."""
+        if self._channels is None:
+            return
         try:
-            await self._gfs.publish_space_event(
-                space_id=space_id,
-                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-                payload=envelope,
-                skip=skip,
-                compressed_payloads=compressed or None,
-            )
+            await self._channels.publish_current(space_id, sealed.epoch, sealed.ct)
         except Exception:
             log.exception(
-                "space_public.outbound: %s relay failed for space=%s", what, space_id
+                "space_public.outbound: %s channel publish failed for space=%s",
+                what,
+                space_id,
             )
 
     # ── v_49 writer certs ─────────────────────────────────────────────────
@@ -769,6 +525,9 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             epoch=epoch,
             author_pk=author_pk,
             required_scope=WRITER_SCOPE_WRITE,
+            # A remote author's post: never carried by a follower's reader
+            # cert (v_96), whatever its scope says.
+            item_type=ITEM_TYPE_POST,
         )
 
     async def _legacy_hint_ok(self, origin: str | None, relay: dict) -> bool:
@@ -810,70 +569,72 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         instance_id: str,
         *,
         expect_pk: str = "",
-        required: bool = False,
         required_scope: str = WRITER_SCOPE_WRITE,
+        followers: bool = True,
     ) -> _Sealed:
-        """Encrypt ``inner`` with ``instance_id``'s writer cert for the epoch
-        it is encrypted under (re-read once if a rotation lands in between).
-        Without a cert service, or with no cert for that household that
-        permits ``required_scope``, the inner goes as is — unless ``required``
-        (a re-stamp), which raises :class:`_NoWriterCert`. ``expect_pk`` pins the cert to the author key
-        the inner names. Raises ``RuntimeError`` when there is no content key.
+        """Seal the post ``inner`` re-stamped with remote household
+        ``instance_id``'s writer cert for the epoch it is sealed under
+        (re-read once if a rotation lands in between). Raises
+        :class:`_NoWriterCert` when there is no cert service, or no cert for
+        that household that permits ``required_scope`` on a post (a
+        follower's ``reader`` cert never does, v_96). ``expect_pk`` pins the
+        cert to the author key the inner names. ``followers=False`` re-issues
+        the cert without the household's follower seats (a plain cert binding
+        only seated users). Raises ``RuntimeError`` when there is no content
+        key.
         """
         if self._writer_certs is None:
-            if required:
-                raise _NoWriterCert(instance_id)
-            return await self._seal(space_id, inner)
+            raise _NoWriterCert(instance_id)
+        try:
+            hint = bytes.fromhex(expect_pk) if expect_pk else None
+        except ValueError:
+            hint = None
         for _attempt in range(2):
             current = await self._crypto.get_current_epoch(space_id)
             if current is None:
                 raise RuntimeError(f"no content key for space {space_id}")
-            if instance_id == self._own_instance_id:
-                cert = await self._writer_certs.own_cert(space_id, current)
-            else:
-                hint: bytes | None
-                try:
-                    hint = bytes.fromhex(expect_pk) if expect_pk else None
-                except ValueError:
-                    hint = None
-                cert = await self._writer_certs.issue_for_instance(
-                    space_id, instance_id, epoch=current, instance_pk_hint=hint
-                )
+            cert = await self._writer_certs.issue_for_instance(
+                space_id,
+                instance_id,
+                epoch=current,
+                instance_pk_hint=hint,
+                followers=followers,
+            )
             if cert is not None and expect_pk:
                 named = SpaceWriterCertService.cert_instance_pk(cert.to_wire())
                 if named is None or named.hex() != expect_pk:
                     cert = None
             # Never put a cert on an item it does not authorize (a comment
-            # cert on a post).
+            # cert on a post), nor a follower's reader cert (every receiver
+            # refuses it on a post).
             if cert is not None and not scope_permits(cert.scope, required_scope):
                 cert = None
-            if cert is None and required:
+            if cert is not None and cert.reader:
+                space = await self._spaces.get(space_id)
+                if space is None or not reader_cert_permits(
+                    cert, ITEM_TYPE_POST, space.features
+                ):
+                    cert = None
+            if cert is None:
                 raise _NoWriterCert(instance_id)
-            body = dict(inner)
-            body.pop(WRITER_CERT_FIELD, None)
-            if cert is not None:
-                body[WRITER_CERT_FIELD] = cert.to_wire()
+            body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
+            body[WRITER_CERT_FIELD] = cert.to_wire()
             sealed = await self._seal(space_id, body)
-            if cert is None or sealed.epoch == cert.epoch:
+            if sealed.epoch == cert.epoch:
                 return sealed
         log.warning(
             "space_public.outbound: content epoch kept moving for space %s — "
-            "relaying without a writer cert",
+            "not relaying",
             space_id,
         )
-        if required:
-            raise _NoWriterCert(instance_id)
-        body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
-        return await self._seal(space_id, body)
+        raise _NoWriterCert(instance_id)
 
 
 class _Sealed(NamedTuple):
-    """One item sealed for the relay: the padded-JSON ciphertext every
-    follower reads, and its compressed copies (same epoch) by suite."""
+    """One authority item sealed for the space's channel."""
 
     epoch: int
     ct: str
-    compressed_cts: dict[str, str]
 
 
 class _NoWriterCert(Exception):

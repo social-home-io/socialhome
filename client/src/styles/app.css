@@ -3161,12 +3161,14 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   min-width: 36px;
   justify-content: center;
 }
-.sh-reaction-chip:hover {
+.sh-reaction-chip:hover:not(:disabled) {
   background: var(--sh-primary-soft);
   border-color: var(--sh-primary);
   color: var(--sh-primary-text);
 }
-.sh-reaction-chip:active { transform: scale(0.96); }
+.sh-reaction-chip:active:not(:disabled) { transform: scale(0.96); }
+/* A count the viewer may not add to (a follower without reactions). */
+.sh-reaction-chip:disabled { cursor: default; }
 .sh-reaction-add {
   color: var(--sh-text-muted);
   font-weight: 600;
@@ -3454,7 +3456,9 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   transition: color var(--sh-transition-fast), background var(--sh-transition-fast);
 }
 .sh-comment-overflow:hover { background: var(--sh-bg-secondary); color: var(--sh-text); }
-.sh-comment-overflow-wrap .sh-post-menu { right: 0; top: calc(100% + 4px); }
+/* The ··· sits by the time, on the left of the comment: open rightwards
+ * so the menu never runs off a phone screen. */
+.sh-comment-overflow-wrap .sh-post-menu { left: 0; right: auto; top: calc(100% + 4px); }
 /* The typing line lives between the comments list and the .sh-comment-new
    input row — keep its left padding aligned with the comment bodies and
    give it a slight italic feel so it reads as ambient state, not content. */
@@ -10963,6 +10967,7 @@ hr {
 }
 .sh-join-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sh-space-sm);
   justify-content: center;
 }
@@ -11164,6 +11169,18 @@ hr {
   margin: 0;
   white-space: nowrap;
 }
+/* Followers: their own group under the members, same rows. */
+.sh-member-followers {
+  margin-top: var(--sh-space-lg);
+}
+.sh-member-followers > h2 {
+  margin: 0;
+  padding-block: var(--sh-space-xs);
+}
+.sh-member-followers__empty {
+  margin: 0;
+  padding: var(--sh-space-xs) var(--sh-space-md);
+}
 .sh-member-row {
   position: relative;
   display: flex;
@@ -11184,7 +11201,32 @@ hr {
 .sh-member-row--moderator  { border-inline-start-color: color-mix(in srgb, var(--sh-warning) 50%, var(--sh-success)); }
 .sh-member-row--member     { border-inline-start-color: var(--sh-success); }
 .sh-member-row--subscriber { border-inline-start-color: var(--sh-text-muted); }
-.sh-member-row--banned     { opacity: 0.5; background: color-mix(in srgb, var(--sh-danger) 4%, transparent); border-inline-start-color: var(--sh-danger); }
+/* Banned: only who is faded — the reason and Unban stay readable. */
+.sh-member-row--banned     { background: color-mix(in srgb, var(--sh-danger) 4%, transparent); border-inline-start-color: var(--sh-danger); }
+.sh-member-row--banned .sh-avatar,
+.sh-member-row--banned .sh-member-name { opacity: 0.6; }
+.sh-ban-reason { color: var(--sh-text); font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
+.sh-ban-row-actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); justify-content: flex-end; margin-inline-start: auto; }
+.sh-ban-list { display: flex; flex-direction: column; }
+/* Who and why keep a readable width; the buttons wrap below on a phone. */
+.sh-ban-list .sh-member-row { flex-wrap: wrap; }
+.sh-ban-list .sh-member-info { flex: 1 1 12rem; min-width: 0; }
+/* The ban confirm: an optional reason under the consequences. */
+.sh-ban-dialog__reason { display: flex; flex-direction: column; gap: var(--sh-space-xs); margin-top: var(--sh-space-sm); font-weight: 600; }
+.sh-ban-dialog__reason textarea { font: inherit; font-weight: 400; width: 100%; box-sizing: border-box; }
+.sh-ban-dialog__hint { margin: var(--sh-space-xs) 0 0; font-size: var(--sh-font-size-sm); }
+/* Member sheet: whose household, and Remove / Ban as one group. */
+.sh-member-actions-household { margin: 0 0 var(--sh-space-sm); }
+.sh-member-actions-leave {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  flex-basis: 100%;
+  padding-top: var(--sh-space-sm);
+  border-top: 1px solid var(--sh-border);
+}
+.sh-member-actions-hint { flex-basis: 100%; margin: 0; font-size: var(--sh-font-size-sm); }
 .sh-member-row--me {
   background: color-mix(in srgb, var(--sh-primary) 6%, transparent);
 }

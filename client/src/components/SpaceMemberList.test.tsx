@@ -99,19 +99,14 @@ describe('SpaceMemberList', () => {
     expect(r.container.textContent).not.toContain('+ Invite')
   })
 
-  it('a follower sees who, never when: no presence dot, no join date', async () => {
+  it('a follower sees the same roster as a member, presence included (P10)', async () => {
     const { SpaceMemberList } = await import('./SpaceMemberList')
     apiGet.mockImplementationOnce(async () => [
-      // A follower's roster carries no presence / joined_at at all.
-      { user_id: 'u-o', display_name: 'Olivia', role: 'owner' },
+      { user_id: 'u-o', display_name: 'Olivia', role: 'owner', is_online: true, is_idle: false },
     ])
     const r = render(<SpaceMemberList spaceId="sp-follow" viewerRole="subscriber" />)
     await waitFor(() => expect(r.container.textContent).toContain('Olivia'))
-    // The household-wide ``user.online`` frame must not paint a dot.
-    emit('user.online', { user_id: 'u-o' })
-    await new Promise(res => setTimeout(res, 10))
-    expect(r.container.querySelector('.sh-avatar-status-dot')).toBeNull()
-    expect(r.container.querySelector('.sh-member-joined')).toBeNull()
+    await waitFor(() => expect(r.container.querySelector('.sh-avatar-status-dot')).toBeTruthy())
   })
 
   it("refetches when the host's role update arrives, not for other config", async () => {
@@ -185,15 +180,15 @@ describe('SpaceMemberList — header count and language', () => {
     await waitFor(() => expect(many.container.querySelector('h2')?.textContent).toBe('3 members'))
   })
 
-  it('renders the header, ban list and chips in German', async () => {
+  it('renders the header and chips in German (bans live in Settings now)', async () => {
     await setLocale('de')
     const { SpaceMemberList } = await import('./SpaceMemberList')
     serve(1)
     const one = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" />)
     await waitFor(() => expect(one.container.querySelector('h2')?.textContent).toBe('1 Mitglied'))
     const headings = [...one.container.querySelectorAll('h2.sh-settings-section-heading')].map(h => h.textContent)
-    expect(headings).toEqual(['1 Mitglied', 'Gesperrt'])
-    expect(one.getByText('Entsperren')).toBeTruthy()
+    expect(headings).toEqual(['1 Mitglied'])
+    expect(one.queryByText('Entsperren')).toBeNull()
     expect(one.container.textContent).toContain('Nutzt dein Haushaltsprofil')
     expect(one.getByLabelText('Person 0 verwalten')).toBeTruthy()
     one.unmount()
@@ -203,34 +198,68 @@ describe('SpaceMemberList — header count and language', () => {
   })
 })
 
-describe('SpaceMemberList — banned people by name', () => {
-  it('names each banned remote person from the server, never "Someone" for all', async () => {
-    apiGet.mockImplementation(async (url: string) => {
-      if (url.endsWith('/members')) return []
-      if (url.endsWith('/bans')) {
-        return [
-          {
-            user_id: 'ru-rita', banned_by: 'u-o', banned_at: '2026-01-01',
-            display_name: 'Remote Rita', picture_url: 'api/users/ru-rita/picture?v=1&sig=x',
-          },
-          {
-            user_id: 'ru-sam', banned_by: 'u-o', banned_at: '2026-01-01',
-            display_name: null, personal_alias: 'Sammy',
-          },
-          { user_id: 'ru-gone', banned_by: 'u-o', banned_at: '2026-01-01', display_name: null },
-        ]
-      }
-      return []
-    })
+describe('SpaceMemberList — followers in their own group (P8)', () => {
+  const roster = [
+    { user_id: 'u-o', display_name: 'Olivia', role: 'owner' },
+    { user_id: 'u-b', display_name: 'Bob', role: 'member' },
+    { user_id: 'u-f1', display_name: 'Fern', role: 'subscriber' },
+    { user_id: 'u-f2', display_name: 'Fred', role: 'subscriber', instance_id: 'peer-f' },
+  ]
+  const withRoster = (rows: unknown[]) => apiGet.mockImplementation(async (url: string) =>
+    url.endsWith('/members') ? rows : [])
+
+  it('members count the members only; followers have their own heading and count', async () => {
+    withRoster(roster)
     const { SpaceMemberList } = await import('./SpaceMemberList')
-    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" />)
-    await waitFor(() => expect(r.container.querySelectorAll('.sh-member-row--banned').length).toBe(3))
-    const names = [...r.container.querySelectorAll('.sh-member-row--banned .sh-member-name')]
-      .map(n => n.textContent)
-    expect(names).toEqual(['Remote Rita', 'Sammy', 'Someone'])
-    const img = r.container.querySelector('.sh-member-row--banned img') as HTMLImageElement | null
-    expect(img?.getAttribute('src')).toContain('ru-rita')
-    expect(r.container.textContent).not.toContain('ru-gone')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" takesFollowers />)
+    await waitFor(() => expect(r.container.textContent).toContain('Fern'))
+    const headings = [...r.container.querySelectorAll('h2.sh-settings-section-heading')].map(h => h.textContent)
+    expect(headings).toEqual(['2 members', '2 followers'])
+    const group = r.container.querySelector('.sh-member-followers')!
+    expect([...group.querySelectorAll('.sh-member-name')].map(n => n.textContent))
+      .toEqual(['Fern', 'Fred'])
+  })
+
+  it('a space that takes followers but has none says so', async () => {
+    withRoster(roster.slice(0, 2))
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="subscriber" takesFollowers />)
+    await waitFor(() => expect(r.container.textContent).toContain('Olivia'))
+    expect(r.container.textContent).toContain('0 followers')
+    expect(r.container.textContent).toContain('No followers yet.')
+  })
+
+  it('a space without followers shows the member count only', async () => {
+    withRoster(roster.slice(0, 2))
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
+    await waitFor(() => expect(r.container.textContent).toContain('Olivia'))
+    expect([...r.container.querySelectorAll('h2.sh-settings-section-heading')].map(h => h.textContent)).toEqual(['2 members'])
+    expect(r.container.querySelector('.sh-member-followers')).toBeNull()
+  })
+})
+
+describe('SpaceMemberList — the ban context the sheet gets (ban UX review)', () => {
+  it('a space hosted elsewhere: no Ban on the owner household people; the household lists its seats', async () => {
+    apiGet.mockImplementation(async (url: string) => url.endsWith('/members')
+      ? [
+        { user_id: 'u-host', display_name: 'Hosta', role: 'member', instance_id: 'peer-owner' },
+        { user_id: 'u-k1', display_name: 'Kay', role: 'member', instance_id: 'peer-k' },
+        { user_id: 'u-k2', display_name: 'Kim', role: 'subscriber', instance_id: 'peer-k' },
+      ]
+      : [])
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" hostedElsewhere
+                                      ownerInstanceId="peer-owner" />)
+    await waitFor(() => expect(r.container.textContent).toContain('Hosta'))
+    fireEvent.click(r.getByLabelText('Manage Hosta'))
+    await waitFor(() => expect(r.baseElement.querySelector('h2.sh-modal-title, [role=dialog] h2')).toBeTruthy())
+    expect(r.baseElement.querySelector('[data-action="ban"]')).toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.click(r.getByLabelText('Manage Kay'))
+    await waitFor(() => expect(r.baseElement.querySelector('[data-action="ban-household"]')).not.toBeNull())
+    fireEvent.click(r.baseElement.querySelector('[data-action="ban-household"]') as HTMLElement)
+    await waitFor(() => expect(r.baseElement.textContent).toContain('Kay, Kim (2 people) leave this space.'))
   })
 })
 

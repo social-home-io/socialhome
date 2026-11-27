@@ -67,6 +67,48 @@ export interface SpaceMentionRender {
 
 const _tokenCache = new WeakMap<Map<string, SpaceMemberProfile>, Set<string>>()
 
+/** What a follower may write in a space, as last read from
+ *  ``GET /api/spaces/{id}`` (set by the space feed page): the viewer's
+ *  ``my_role`` there and the owner's follower switches
+ *  (``features.allow_subscriber_comment`` / ``_react``). */
+export interface SpaceFollowerWrites {
+  role: SpaceRole | undefined
+  comment: boolean
+  react: boolean
+}
+
+export const spaceFollowerWrites = signal<Record<string, SpaceFollowerWrites>>({})
+
+export function setSpaceFollowerWrites(spaceId: string, writes: SpaceFollowerWrites): void {
+  const prev = spaceFollowerWrites.value[spaceId]
+  if (prev && prev.role === writes.role && prev.comment === writes.comment
+    && prev.react === writes.react) return
+  spaceFollowerWrites.value = { ...spaceFollowerWrites.value, [spaceId]: writes }
+}
+
+/** Is the viewer a follower of ``spaceId`` — by the roster, else by the
+ *  space detail's ``my_role``? */
+function viewerFollows(spaceId: string): boolean {
+  return (viewerSpaceRole(spaceId) ?? spaceFollowerWrites.value[spaceId]?.role) === 'subscriber'
+}
+
+/** May the viewer write a comment (new, reply, edit) in ``spaceId``? A
+ *  member always; a follower only while the space lets followers comment
+ *  (unknown switches → no, the server would refuse). Outside a space,
+ *  yes. UI hint only — every household re-checks. Deleting one's own
+ *  comment is always allowed and not gated here. */
+export function viewerMayComment(spaceId: string | null | undefined): boolean {
+  if (!spaceId || !viewerFollows(spaceId)) return true
+  return spaceFollowerWrites.value[spaceId]?.comment === true
+}
+
+/** May the viewer react in ``spaceId``? Same rule as
+ *  :func:`viewerMayComment`, on the react switch. */
+export function viewerMayReact(spaceId: string | null | undefined): boolean {
+  if (!spaceId || !viewerFollows(spaceId)) return true
+  return spaceFollowerWrites.value[spaceId]?.react === true
+}
+
 /** Per-space ``allow_here_mention`` as last read from
  *  ``GET /api/spaces/{id}`` (set by the space feed / settings pages). Absent
  *  → treated as off: the picker never offers ``@here`` on a guess. */

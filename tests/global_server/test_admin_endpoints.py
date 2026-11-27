@@ -84,9 +84,9 @@ async def test_overview_counts_the_space_media_cache(client, tmp_dir):
     data = os.urandom(PAD_BUCKETS[1] + BLOB_OVERHEAD)
     now = int(time.time())
     await store.put(
-        scope_kind="space",
-        scope_id="s1",
-        blob_id=space_media_address("space", "s1", data),
+        scope_kind="channel",
+        scope_id="0f" * 16,
+        blob_id=space_media_address("channel", "0f" * 16, data),
         data=data,
         expires_at=now + 60,
         now=now,
@@ -1019,32 +1019,3 @@ async def test_moderator_can_ban_a_withdrawn_space_and_ban_sticks(client):
     assert (await fed_repo.get_space("ev-space")).status == "banned"
     resp = await client.get("/gfs/spaces")
     assert [s["space_id"] for s in (await resp.json())["spaces"]] == []
-
-
-async def test_a_ban_drops_the_spaces_cached_media(client):
-    """Banning a space hides its blobs in the space media cache at once and
-    drops them (rows and files)."""
-    app = client._app
-    fed = app[gfs_fed_repo_key]
-    await fed.upsert_instance(
-        ClientInstance(instance_id="x", display_name="X", public_key="bb" * 32)
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="sp-bad", owning_instance="x", status="active")
-    )
-    store = app[gfs_space_media_store_key]
-    data = os.urandom(PAD_BUCKETS[1] + BLOB_OVERHEAD)
-    bid = space_media_address("space", "sp-bad", data)
-    now = int(time.time())
-    await store.put(
-        scope_kind="space",
-        scope_id="sp-bad",
-        blob_id=bid,
-        data=data,
-        expires_at=now + 600,
-        now=now,
-    )
-    resp = await client.post("/admin/api/spaces/sp-bad/ban", json={"reason": "x"})
-    assert resp.status == 200
-    assert await store.read(bid) is None
-    assert await store._repo.get_blob(bid) is None

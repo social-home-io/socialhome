@@ -618,17 +618,6 @@ async def test_a_tofu_row_receives_no_heartbeat(gfs, tmp_dir, listeners):
     assert tofu.hits == []
 
 
-async def test_a_tofu_row_receives_no_partition_catchup(gfs, tmp_dir, listeners):
-    member, tofu = listeners
-    await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
-    svc = gfs.app[gfs_cluster_key]
-    svc.record_relay_ts("space-1")
-    for node_id in ("node-b", "tofu"):
-        await svc.apply_partition_catchup(node_id, {"space-1": 0})
-    assert member.types() == ["NODE_PARTITION_GAP"]
-    assert tofu.hits == []
-
-
 async def test_a_tofu_row_is_never_the_signaling_node(gfs, tmp_dir, listeners):
     member, tofu = listeners
     await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)

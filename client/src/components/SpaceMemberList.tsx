@@ -1,10 +1,10 @@
 /**
  * SpaceMemberList — member list view (§23.28).
  *
- * Also surfaces the banned-members list and a kebab menu that opens
- * :func:`openMemberActions` from :mod:`./MemberActionSheet`. Admins see
- * role changes, ban, and unban actions. Regular members see a read-only
- * list.
+ * A kebab menu opens :func:`openMemberActions` from
+ * :mod:`./MemberActionSheet`: admins see role changes, remove and ban.
+ * Who is banned lives in Settings › Moderation (``SpaceBanList``, owner
+ * decision C). Regular members see a read-only list.
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -16,11 +16,10 @@ import { LoadErrorState } from './LoadErrorState'
 import { Button } from './Button'
 import { t, isOne } from '@/i18n/i18n'
 import { openReport } from './ReportDialog'
-import { showToast } from './Toast'
 import { PersonButton } from './PersonButton'
 import { rosterPersonHint, type PersonHint } from '@/utils/personHint'
 import { openMemberActions, MemberActionSheet, roleLabel } from './MemberActionSheet'
-import { hasSettingsAuthority, isFollower, type SpaceRole } from '@/features/spaces/spaceRoles'
+import { hasSettingsAuthority, isFollower, parseSpaceRole, type SpaceRole } from '@/features/spaces/spaceRoles'
 import {
   SpaceProfileDialog,
   openSpaceProfileDialog,
@@ -60,7 +59,6 @@ interface Member {
   user_id: string
   display_name?: string | null
   role: string
-  /** Absent on a follower's roster (it lists who, not when). */
   joined_at?: string
   space_display_name?: string | null
   /** §4.1.6 — viewer's private rename (only the requesting user sees it). */
@@ -85,32 +83,11 @@ interface Member {
   is_owner?: boolean
 }
 
-export interface Ban {
-  user_id: string
-  banned_by: string
-  banned_at: string
-  reason?: string | null
-  /** Server-resolved: the per-space name, else the person's household
-   *  name, else the space roster's — null when nobody here knows them. */
-  display_name?: string | null
-  /** The viewer's private nickname for them, if any. */
-  personal_alias?: string | null
-  /** Signed; null with no picture or across a guardian block. */
-  picture_url?: string | null
-}
-
-/** A banned person's label: the name the server resolved (a remote
- *  person's too), else the viewer's nickname, else "Someone". */
-export function banName(b: Ban): string {
-  return personLabel(b.display_name, b.personal_alias)
-}
-
 /** ``space.config.changed`` event types that mean a seat's role moved
  *  (``role_change_event_type`` in ``domain/space.py``). */
 const ROLE_EVENT_TYPES = new Set(['role_changed', 'admin_granted', 'admin_revoked'])
 
 const members = signal<Member[]>([])
-const bans = signal<Ban[]>([])
 const loading = signal(true)
 const loadFailed = signal(false)
 const canManage = signal(false)
@@ -130,22 +107,26 @@ interface Props {
    *  (``features.delegated_admin_authority``), for the member sheet's
    *  note before an admin grant to another household. */
   adminsActForOwner?: boolean
+  /** The space takes followers (``features.allow_subscribers``): the
+   *  Followers group shows, with its count, even while empty. Off: only
+   *  the members and their count (owner decision). */
+  takesFollowers?: boolean
+  /** The space is hosted on another household (we hold a stub), and that
+   *  household — the owner's. An admin there never bans the owner
+   *  household's people (only the owner household decides about them). */
+  hostedElsewhere?: boolean
+  ownerInstanceId?: string | null
 }
 
 export function SpaceMemberList({
   spaceId, viewerRole, joinRequests = 0, adminsActForOwner = false,
+  takesFollowers = false, hostedElsewhere = false, ownerInstanceId = null,
 }: Props) {
-  const follower = isFollower(viewerRole)
   const reload = () => {
     loading.value = true
     loadFailed.value = false
-    const p1 = api.get(`/api/spaces/${spaceId}/members`)
-    const p2 = hasSettingsAuthority(viewerRole)
-      ? api.get(`/api/spaces/${spaceId}/bans`).catch(() => [] as Ban[])
-      : Promise.resolve([] as Ban[])
-    Promise.all([p1, p2]).then(([mems, bansList]) => {
+    api.get(`/api/spaces/${spaceId}/members`).then((mems) => {
       members.value = mems as Member[]
-      bans.value = bansList as Ban[]
       canManage.value = hasSettingsAuthority(viewerRole)
       loading.value = false
     }).catch(() => {
@@ -228,16 +209,6 @@ export function SpaceMemberList({
     return null
   }
 
-  const unban = async (userId: string) => {
-    try {
-      await api.delete(`/api/spaces/${spaceId}/bans/${userId}`)
-      showToast(t('space.members.unbanned'), 'success')
-      reload()
-    } catch (e: any) {
-      showToast(e.message || t('space.members.unban_failed'), 'error')
-    }
-  }
-
   // The sheet's nickname editor patches this row in place, so the new
   // name shows before the next reload tick.
   const onAliasChanged = (userId: string, alias: string | null) => {
@@ -274,6 +245,132 @@ export function SpaceMemberList({
     return { name: fallback, source: 'global' as const, fallback }
   }
 
+  const renderRow = (m: Member) => {
+    const r = resolveName(m)
+    const isMe = m.user_id === me
+    return (
+      <div
+        key={m.user_id}
+        class={[
+          'sh-member-row',
+          `sh-member-row--${m.role}`,
+          isMe ? 'sh-member-row--me' : '',
+        ].filter(Boolean).join(' ')}
+      >
+        <PersonButton
+          userId={m.user_id}
+          hint={() => memberHint(m)}
+          onAliasChanged={onAliasChanged}
+          class="sh-person-btn--row sh-member-row-person"
+          data-testid="member-person"
+        >
+        <Avatar
+          name={r.name}
+          // ``m.picture_url`` is the per-space override only —
+          // local members typically don't set one, so the row
+          // would show initials even when the household-level
+          // avatar is cached. Route through ``resolveAvatar``
+          // so the householdUsers fallback (and, for remote
+          // members, the picture URL backend serves directly)
+          // kicks in. The space-override still wins when set.
+          src={resolveAvatar(spaceId, m.user_id, null)}
+          size={32}
+          // Everyone in the space sees the same roster, presence
+          // included — a follower too (P10).
+          online={m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
+        />
+        <span class="sh-member-info">
+          <span class="sh-member-name">{r.name}</span>
+          {r.source === 'space' && r.name !== m.display_name && (
+            <span class="sh-member-original-name">
+              {t('space.members.household_name', { name: personLabel(m.display_name) })}
+            </span>
+          )}
+          {r.source === 'personal' && (
+            <span class="sh-member-alias-chip"
+                  title={t('space.members.originally', { name: r.fallback })}>
+              ✏ {t('space.members.your_nickname')}
+            </span>
+          )}
+          {roleBadge(m.role)}
+          {m.instance_id && (
+            <span
+              class="sh-member-remote-chip"
+              title={t('space.members.other_household_title')}
+            >
+              🏘 {t('space.members.other_household')}
+            </span>
+          )}
+          {isMe && (
+            <span class="sh-muted sh-member-me-chip">{t('space.members.you')}</span>
+          )}
+          {/* Joined date moved INSIDE the column-flex info block
+              so it stacks underneath the name + chips instead of
+              sharing a row with them. For a long display name on
+              a same-household row the two were colliding (no room
+              for both "Pascal Vizeli ✏ Your nickname" and the
+              date on a 360 px phone). On its own line the date
+              reads as quiet metadata. */}
+          {m.joined_at && (
+            <time
+              class="sh-muted sh-member-joined"
+              dateTime={m.joined_at}
+              title={new Date(m.joined_at).toLocaleString()}
+            >
+              {formatRelativeJoined(m.joined_at)}
+            </time>
+          )}
+        </span>
+        </PersonButton>
+        {/* Nickname moved into the person sheet (tap the row). The
+            🚩 stays: it reports to THIS space's moderators, which
+            the sheet's household-level Report does not. */}
+        {!isMe && (
+          <button
+            class="sh-member-rename-btn sh-member-report-btn"
+            type="button"
+            aria-label={t('report.member_aria', { name: r.name })}
+            title={t('report.member_title')}
+            onClick={() => openReport('user', m.user_id, spaceId)}
+          >
+            🚩
+          </button>
+        )}
+        {canManage.value && !isMe && (
+          <button
+            class="sh-post-overflow"
+            type="button"
+            aria-label={t('space.members.manage_aria', { name: r.name })}
+            onClick={() => openMemberActions(
+              spaceId, m.user_id, m.is_owner ? 'owner' : m.role,
+              m.instance_id ?? null, viewerRole, adminsActForOwner,
+              m.household_name ?? null,
+              {
+                name: r.name,
+                // Our admins act on a space hosted elsewhere: the owner
+                // household's people are not theirs to ban.
+                ownerHousehold: hostedElsewhere && !!m.instance_id
+                  && m.instance_id === ownerInstanceId,
+                people: m.instance_id
+                  ? members.value.filter(x => x.instance_id === m.instance_id)
+                    .map(x => resolveName(x).name)
+                  : [],
+              },
+            )}
+          >
+            ···
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  // Members first, then followers in their own group (D3: everyone in
+  // the space sees who follows). The members' count never counts them.
+  const seated = members.value.filter(m => !isFollower(parseSpaceRole(m.role)))
+  const followers = members.value.filter(m => isFollower(parseSpaceRole(m.role)))
+  const followersShown = takesFollowers
+
   return (
     <>
       <div class="sh-member-list">
@@ -309,8 +406,8 @@ export function SpaceMemberList({
           {/* The section's heading under the page h1 (axe heading-order). */}
           <h2 class="sh-settings-section-heading">
             {t(
-              isOne(members.value.length) ? 'space.members.count_one' : 'space.members.count',
-              { n: String(members.value.length) },
+              isOne(seated.length) ? 'space.members.count_one' : 'space.members.count',
+              { n: String(seated.length) },
             )}
           </h2>
           {canManage.value && (
@@ -323,136 +420,19 @@ export function SpaceMemberList({
             </div>
           )}
         </div>
-        {members.value.map(m => {
-          const r = resolveName(m)
-          const isMe = m.user_id === me
-          return (
-            <div
-              key={m.user_id}
-              class={[
-                'sh-member-row',
-                `sh-member-row--${m.role}`,
-                isMe ? 'sh-member-row--me' : '',
-              ].filter(Boolean).join(' ')}
-            >
-              <PersonButton
-                userId={m.user_id}
-                hint={() => memberHint(m)}
-                onAliasChanged={onAliasChanged}
-                class="sh-person-btn--row sh-member-row-person"
-                data-testid="member-person"
-              >
-              <Avatar
-                name={r.name}
-                // ``m.picture_url`` is the per-space override only —
-                // local members typically don't set one, so the row
-                // would show initials even when the household-level
-                // avatar is cached. Route through ``resolveAvatar``
-                // so the householdUsers fallback (and, for remote
-                // members, the picture URL backend serves directly)
-                // kicks in. The space-override still wins when set.
-                src={resolveAvatar(spaceId, m.user_id, null)}
-                size={32}
-                // A follower sees who, never when (owner decision 13): the
-                // server sends them no presence, and the household-wide
-                // ``user.*`` frames must not paint a dot on their roster.
-                online={!follower && m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
-              />
-              <span class="sh-member-info">
-                <span class="sh-member-name">{r.name}</span>
-                {r.source === 'space' && r.name !== m.display_name && (
-                  <span class="sh-member-original-name">
-                    {t('space.members.household_name', { name: personLabel(m.display_name) })}
-                  </span>
-                )}
-                {r.source === 'personal' && (
-                  <span class="sh-member-alias-chip"
-                        title={t('space.members.originally', { name: r.fallback })}>
-                    ✏ {t('space.members.your_nickname')}
-                  </span>
-                )}
-                {roleBadge(m.role)}
-                {m.instance_id && (
-                  <span
-                    class="sh-member-remote-chip"
-                    title={t('space.members.other_household_title')}
-                  >
-                    🏘 {t('space.members.other_household')}
-                  </span>
-                )}
-                {isMe && (
-                  <span class="sh-muted sh-member-me-chip">{t('space.members.you')}</span>
-                )}
-                {/* Joined date moved INSIDE the column-flex info block
-                    so it stacks underneath the name + chips instead of
-                    sharing a row with them. For a long display name on
-                    a same-household row the two were colliding (no room
-                    for both "Pascal Vizeli ✏ Your nickname" and the
-                    date on a 360 px phone). On its own line the date
-                    reads as quiet metadata. */}
-                {m.joined_at && (
-                  <time
-                    class="sh-muted sh-member-joined"
-                    dateTime={m.joined_at}
-                    title={new Date(m.joined_at).toLocaleString()}
-                  >
-                    {formatRelativeJoined(m.joined_at)}
-                  </time>
-                )}
-              </span>
-              </PersonButton>
-              {/* Nickname moved into the person sheet (tap the row). The
-                  🚩 stays: it reports to THIS space's moderators, which
-                  the sheet's household-level Report does not. */}
-              {!isMe && (
-                <button
-                  class="sh-member-rename-btn sh-member-report-btn"
-                  type="button"
-                  aria-label={t('report.member_aria', { name: r.name })}
-                  title={t('report.member_title')}
-                  onClick={() => openReport('user', m.user_id, spaceId)}
-                >
-                  🚩
-                </button>
+        {seated.map(renderRow)}
+        {followersShown && (
+          <section class="sh-member-followers" aria-labelledby={`sh-followers-${spaceId}`}>
+            <h2 class="sh-settings-section-heading" id={`sh-followers-${spaceId}`}>
+              {t(
+                isOne(followers.length) ? 'space.followers.count_one' : 'space.followers.count',
+                { n: String(followers.length) },
               )}
-              {canManage.value && !isMe && (
-                <button
-                  class="sh-post-overflow"
-                  type="button"
-                  aria-label={t('space.members.manage_aria', { name: r.name })}
-                  onClick={() => openMemberActions(
-                    spaceId, m.user_id, m.is_owner ? 'owner' : m.role,
-                    m.instance_id ?? null, viewerRole, adminsActForOwner,
-                  )}
-                >
-                  ···
-                </button>
-              )}
-            </div>
-          )
-        })}
-        {canManage.value && bans.value.length > 0 && (
-          <>
-            <h2 class="sh-settings-section-heading">{t('space.members.banned_heading')}</h2>
-            {bans.value.map(b => (
-              <div key={b.user_id} class="sh-member-row sh-member-row--banned">
-                <Avatar name={banName(b)} src={b.picture_url ?? null} size={32} />
-                <div class="sh-member-info">
-                  <span class="sh-member-name">{banName(b)}</span>
-                  <span class="sh-badge sh-badge--danger">{t('space.members.banned_badge')}</span>
-                  {b.reason && (
-                    <span class="sh-muted">{b.reason}</span>
-                  )}
-                </div>
-                <Button
-                  variant="secondary"
-                  onClick={() => unban(b.user_id)}
-                >
-                  {t('space.members.unban')}
-                </Button>
-              </div>
-            ))}
-          </>
+            </h2>
+            {followers.length === 0
+              ? <p class="sh-muted sh-member-followers__empty">{t('space.members.no_followers')}</p>
+              : followers.map(renderRow)}
+          </section>
         )}
       </div>
       <MemberActionSheet onUpdate={reload} />

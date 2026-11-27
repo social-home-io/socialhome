@@ -1,27 +1,21 @@
-"""Tests for the household side of member publish (anonymous — one mode, v_90).
+"""Tests for the household side of member publish — the opaque channel only.
 
-The household service runs against the REAL connection-server app (real
-SQLite, real aiohttp) so the signatures it produces — the anonymous member
-publish under the writer group key, the owner's household-signed epoch
-notice, a delegated admin's authority-signed one — are checked by the code
-that will check them in production.
+Since v_96 a household's own space items reach a connection server only
+through the space's opaque channel (v_51 private, v_96 global): the
+space-keyed ``/gfs/member-publish-anon`` and ``/gfs/spaces/{id}/epoch``
+senders are gone. These tests drive :class:`GfsMemberPublishService` against
+a recording channel service: what it plans, seals and hands over, the
+padded plaintext codec, and the follower-switch gate on a reader cert.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 
-import aiohttp
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from yarl import URL
 
 from socialhome.crypto import (
     b64url_decode,
@@ -29,47 +23,25 @@ from socialhome.crypto import (
     derive_instance_id,
     ed25519_public_key,
 )
-from socialhome.domain.events import (
-    SpaceConfigChanged,
-    SpaceContentKeyImported,
-    SpaceMemberJoined,
-)
 from socialhome.domain.federation import GfsConnection
-from socialhome.domain.gfs_member_publish import MEMBER_PUBLISH_ANON_ROUTE
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
-    SpaceMember,
-    SpaceRole,
     SpaceType,
 )
-from socialhome.domain.space_item import ITEM_SIZE_BUCKETS, open_item_plaintext
+from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
 from socialhome.domain.writer_cert import WriterCert
-from socialhome.global_server.app_keys import (
-    gfs_envelope_queue_repo_key,
-    gfs_fed_repo_key,
-    gfs_member_publish_key,
-    gfs_space_epoch_repo_key,
-)
-from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance, GlobalSpace
-from socialhome.global_server.server import create_gfs_app
-from socialhome.infrastructure.event_bus import EventBus
-from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services.gfs_member_publish_service import (
-    ANON_TS_JITTER_S,
     GfsMemberPublishService,
+    _cert_lets,
     build_item_plaintext,
     parse_item_plaintext,
 )
-from socialhome.services.gfs_publish_retry import GfsPublish
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
-from socialhome.writer_key import derive_writer_seed, issue_writer_key_grant
 
 SPACE_ID = "sp-pub"
 AUTHOR = "u-me"
-GFS_ID = "gfs-node-a"
 SPACE_SEED = os.urandom(32)
 SPACE_PK = ed25519_public_key(SPACE_SEED)
 
@@ -107,10 +79,6 @@ class _Certs:
         self.holder = holder
         self.scope: str | None = scope
         self.users: list[str] = [AUTHOR]
-        #: The epochs this household holds the writer group key for (every
-        #: v_90 publisher of a publicly readable space holds the current one).
-        self.strict_epochs: set[int] = {3}
-        self.pin_epochs: set[int] = {3}
 
     async def own_cert(self, space_id, epoch) -> WriterCert | None:
         if self.scope is None:
@@ -128,1370 +96,21 @@ class _Certs:
         cert = await self.own_cert(space_id, 3)
         return cert.to_wire() if cert is not None else None
 
-    # The writer group key, when this household holds one
-    # (``strict_epochs``), derived like a real seed holder would.
-    async def own_writer_key(self, space_id, epoch) -> bytes | None:
-        if epoch not in self.strict_epochs:
-            return None
-        return derive_writer_seed(SPACE_SEED, space_id, epoch)
-
-    async def writer_key_cert_wire(self, space_id, epoch) -> dict | None:
-        if epoch not in self.pin_epochs:
-            return None
-        return issue_writer_key_grant(
-            space_seed=SPACE_SEED, space_id=space_id, epoch=epoch
-        ).writer_key_cert.to_wire()
-
 
 @dataclass
 class _Spaces:
     spaces: dict[str, Space] = field(default_factory=dict)
-    seeds: dict[str, bytes] = field(default_factory=dict)
-    local: dict[str, list[str]] = field(default_factory=dict)
-    members: dict[str, list[SpaceMember]] = field(default_factory=dict)
 
     async def get(self, space_id):
         return self.spaces.get(space_id)
 
-    async def get_space_seed(self, space_id):
-        return self.seeds.get(space_id)
-
-    async def list_all(self):
-        return list(self.spaces.values())
-
-    async def list_local_member_user_ids(self, space_id):
-        return self.local.get(space_id, [])
-
-    async def list_members(self, space_id):
-        return self.members.get(space_id, [])
-
 
 class _Conns:
-    def __init__(self, conns: list[GfsConnection], own: list[str] | None = None):
+    def __init__(self, conns: list[GfsConnection]):
         self.conns = conns
-        self.own = own or []
-
-    async def list_active(self):
-        return [c for c in self.conns if c.status == "active"]
-
-    async def list_gfs_for_space(self, space_id):
-        return [c for c in self.conns if c.id in self.own]
-
-    async def list_active_listings_for_space(self, space_id):
-        """Listings in ``inactive`` stand for a pending / banned row."""
-        return [
-            c
-            for c in self.conns
-            if c.id in self.own and c.status == "active" and c.id not in self.inactive
-        ]
-
-    inactive: frozenset[str] = frozenset()
 
     async def get(self, gfs_id):
         return next((c for c in self.conns if c.id == gfs_id), None)
-
-
-class _Gfs:
-    """The slice of ``GfsConnectionService`` the member service uses."""
-
-    def __init__(self, session: aiohttp.ClientSession, *, capable: bool = True):
-        self.session = session
-        self.capable = capable
-        #: The session a listing target is reached through, and every target
-        #: an anonymous session was opened for.
-        self.listing_session: object = None
-        self.listing_opened: list = []
-        self.strict_capable = True
-        self.subscribed: list[tuple[str, str]] = []
-
-    async def member_publish_strict_supported(self, conn):
-        return self.capable and self.strict_capable
-
-    def client(self):
-        return self.session
-
-    def publish_client(self):
-        return self.session
-
-    #: What ``addressee_key_for`` answers (``None`` = server not proven).
-    addressee_key: str | None = None
-
-    def addressee_key_for(self, conn):
-        return self.addressee_key
-
-    def forget_addressee_key(self, conn):
-        self.addressee_key = None
-
-    async def refresh_if_stale(self, conn):
-        return conn
-
-    #: Whether the server proved ``payload_zlib1`` / ``payload_zlib1_dict1``;
-    #: the (server, space, suite) triples it refused.
-    zlib: bool = False
-    dict1: bool = False
-    suite_refused: frozenset[tuple[str, str, str]] = frozenset()
-
-    async def payload_suite_for(self, conn, space_id, offered):
-        proved = {"zlib1": self.zlib, "zlib1+dict1": self.dict1}
-        for suite in ("zlib1+dict1", "zlib1"):
-            if (
-                suite in offered
-                and proved[suite]
-                and (conn.id, space_id, suite) not in self.suite_refused
-            ):
-                return suite
-        return None
-
-    def note_suite_refused(self, conn, space_id, suite):
-        self.suite_refused = self.suite_refused | {(conn.id, space_id, suite)}
-
-    async def subscribe_to_gfs_space(self, space_id, gfs_id):
-        self.subscribed.append((space_id, gfs_id))
-        return "subscribed"
-
-    #: v_57 — what ``server_targets`` answers (``None`` = no owner list).
-    targets: list | None = None
-
-    async def server_targets(self, space_id):
-        return self.targets
-
-    #: What ``capability_unknown`` answers (the server did not answer).
-    unknown: bool = False
-
-    def capability_unknown(self, conn):
-        return self.unknown
-
-    @asynccontextmanager
-    async def anon_session(self, conn):
-        if conn.registered:
-            yield self.session
-            return
-        self.listing_opened = [*self.listing_opened, conn.id]
-        if isinstance(self.listing_session, Exception):
-            raise self.listing_session
-        yield self.listing_session
-
-
-def _space(*, owner: str = "host.home", public=True, readable=True, sid=SPACE_ID):
-    return Space(
-        id=sid,
-        name="Public",
-        owner_instance_id=owner,
-        owner_username="o",
-        identity_public_key=SPACE_PK.hex(),
-        config_sequence=0,
-        features=SpaceFeatures(allow_subscribers=readable),
-        space_type=SpaceType.GLOBAL if public else SpaceType.PRIVATE,
-        join_mode=JoinMode.OPEN,
-    )
-
-
-@pytest.fixture
-async def world(tmp_dir):
-    """A real GFS with the space listed, a member household (``me``), the
-    space owner household and an offline subscriber seen recently."""
-    cfg = GfsConfig(
-        host="127.0.0.1",
-        port=0,
-        base_url="http://gfs.test",
-        data_dir=str(tmp_dir),
-        instance_id=GFS_ID,
-        cluster_enabled=False,
-        cluster_node_id=GFS_ID,
-        cluster_peers=(),
-    )
-    app = create_gfs_app(cfg)
-    async with TestClient(TestServer(app)) as tc:
-        me, owner, sub = _Household(), _Household(), _Household()
-        fed = app[gfs_fed_repo_key]
-        for h in (me, owner, sub):
-            await fed.upsert_instance(
-                ClientInstance(
-                    instance_id=h.instance_id,
-                    display_name="h",
-                    public_key=h.pk.hex(),
-                    status="active",
-                )
-            )
-        await fed.upsert_space(
-            GlobalSpace(
-                space_id=SPACE_ID,
-                owning_instance=owner.instance_id,
-                name="Public",
-                allow_subscribers=True,
-                status="active",
-                identity_public_key=SPACE_PK.hex(),
-            )
-        )
-        await fed.add_subscriber(space_id=SPACE_ID, instance_id=sub.instance_id)
-        await fed.mark_relay_seen(sub.instance_id, at=int(time.time()))
-        conn = GfsConnection(
-            id="conn-1",
-            gfs_instance_id=GFS_ID,
-            display_name="GFS",
-            public_key="00" * 32,
-            inbox_url=str(tc.make_url("")).rstrip("/"),
-            status="active",
-            paired_at="",
-        )
-        spaces = _Spaces(spaces={SPACE_ID: _space(owner=owner.instance_id)})
-        crypto = _Crypto()
-        gfs = _Gfs(tc.session)
-        svc = GfsMemberPublishService(
-            gfs=gfs,  # type: ignore[arg-type]
-            conn_repo=_Conns([conn]),  # type: ignore[arg-type]
-            space_repo=spaces,  # type: ignore[arg-type]
-            space_crypto=crypto,  # type: ignore[arg-type]
-            writer_certs=_Certs(me),  # type: ignore[arg-type]
-            own_instance_id=me.instance_id,
-            own_identity_seed=me.seed,
-        )
-        # The owner's notice already confirmed epoch 3 and pinned its writer
-        # key there (what every reconnect re-sends).
-        epochs = app[gfs_space_epoch_repo_key]
-        await epochs.confirm(SPACE_ID, 3, now=int(time.time()))
-        await epochs.pin_writer_key(
-            SPACE_ID,
-            3,
-            issue_writer_key_grant(
-                space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=3
-            ).writer_key_cert.writer_pk,
-            replace=True,
-        )
-        await svc.start()
-        yield {
-            "tc": tc,
-            "app": app,
-            "svc": svc,
-            "me": me,
-            "owner": owner,
-            "sub": sub,
-            "conn": conn,
-            "spaces": spaces,
-            "crypto": crypto,
-            "gfs": gfs,
-        }
-        await svc.stop()
-
-
-def _owner_svc(world) -> GfsMemberPublishService:
-    """The same household setup, but acting as the space OWNER."""
-    owner = world["owner"]
-    world["spaces"].seeds[SPACE_ID] = SPACE_SEED
-    return GfsMemberPublishService(
-        gfs=world["gfs"],
-        conn_repo=_Conns([world["conn"]]),  # type: ignore[arg-type]
-        space_repo=world["spaces"],  # type: ignore[arg-type]
-        space_crypto=world["crypto"],  # type: ignore[arg-type]
-        writer_certs=_Certs(owner),  # type: ignore[arg-type]
-        own_instance_id=owner.instance_id,
-        own_identity_seed=owner.seed,
-    )
-
-
-async def _queued(world) -> list:
-    await world["app"][gfs_member_publish_key].wait_idle()
-    return await world["app"][gfs_envelope_queue_repo_key].list_for(
-        world["sub"].instance_id, now=0
-    )
-
-
-def _inner(**extra) -> dict:
-    return {"post_id": "p-1", "space_id": SPACE_ID, "content": "hello", **extra}
-
-
-# ── Plaintext codec ──────────────────────────────────────────────────────
-
-
-def test_item_plaintext_round_trips_and_refuses_the_rest():
-    pt = build_item_plaintext("post", {"a": 1})
-    assert parse_item_plaintext(pt) == ("post", {"a": 1})
-    for bad in (
-        b"x",
-        b"[]",
-        build_item_plaintext("poll", {}),
-        b'{"item_type":"post"}',
-    ):
-        assert parse_item_plaintext(bad) is None
-
-
-# ── Planning ─────────────────────────────────────────────────────────────
-
-
-async def test_plan_targets_a_capable_server_listing_the_space(world):
-    assert [c.id for c in await world["svc"].plan_post(SPACE_ID, AUTHOR)] == ["conn-1"]
-
-
-@pytest.mark.parametrize(
-    "setup",
-    ["private", "unreadable", "no_cert", "comment_cert", "incapable"],
-)
-async def test_plan_is_empty_when_the_household_must_not_publish(world, setup):
-    svc, spaces = world["svc"], world["spaces"]
-    if setup == "private":
-        spaces.spaces[SPACE_ID] = _space(public=False)
-    elif setup == "unreadable":
-        spaces.spaces[SPACE_ID] = _space(readable=False)
-    elif setup == "no_cert":
-        svc._writer_certs.scope = None
-    elif setup == "comment_cert":
-        svc._writer_certs.scope = "comment"
-    elif setup == "incapable":
-        world["gfs"].capable = False
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-
-
-async def test_a_server_not_listing_the_space_is_not_a_target(world):
-    spaces = world["spaces"]
-    spaces.spaces["sp-unlisted"] = _space(sid="sp-unlisted")
-    assert await world["svc"].plan_post("sp-unlisted", AUTHOR) == []
-
-
-async def test_a_server_we_published_to_counts_as_listing_without_a_probe(world):
-    svc = world["svc"]
-    svc._conn_repo.own = ["conn-1"]
-    world["spaces"].spaces["sp-unlisted"] = _space(sid="sp-unlisted")
-    assert [c.id for c in await svc.plan_post("sp-unlisted", AUTHOR)] == ["conn-1"]
-
-
-async def test_the_listing_answer_is_cached(world, monkeypatch):
-    svc = world["svc"]
-    assert await svc._listed(world["conn"], SPACE_ID)
-    calls = 0
-    real_get = world["tc"].session.get
-
-    def _counting_get(*a, **kw):
-        nonlocal calls
-        calls += 1
-        return real_get(*a, **kw)
-
-    monkeypatch.setattr(world["tc"].session, "get", _counting_get)
-    assert await svc._listed(world["conn"], SPACE_ID)
-    assert calls == 0
-
-
-# ── Publishing ───────────────────────────────────────────────────────────
-
-
-@pytest.mark.security
-async def test_a_published_post_is_accepted_and_carries_only_ciphertext(world):
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    inner = _inner(writer_cert={"stale": True})
-    assert [c.id for c in await svc.publish_post(SPACE_ID, inner, targets)] == [
-        "conn-1"
-    ]
-    rows = await _queued(world)
-    assert len(rows) == 1
-    frame = rows[0].sealed
-    assert frame["event_type"] == "space_item"
-    assert "hello" not in json.dumps(frame)
-    item_type, got = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
-    assert item_type == "post"
-    # Our own fresh cert rides inside only — with its user binding; the
-    # frame carries no cert and nothing that names this household.
-    assert "writer_cert" not in frame
-    assert WriterCert.from_wire(got["writer_cert"]).scope == "write"
-    assert got["writer_cert"]["writer_user_ids"] == [AUTHOR]
-    assert world["me"].instance_id not in json.dumps(frame)
-    assert got["content"] == "hello"
-
-
-@pytest.mark.security
-async def test_the_request_is_signed_for_the_pinned_server_id(world):
-    """``gfs_instance_id`` is inside the writer signature: a request built
-    for a connection pinned to another id is refused (403, never retried)."""
-    svc = world["svc"]
-    wrong = replace(world["conn"], gfs_instance_id="gfs-node-b")
-    data = {"epoch": 3, "payload": "Y3Q"}
-    outcome = await svc._post_anon_item(wrong, SPACE_ID, data)
-    assert outcome.kind == "permanent"
-    outcome = await svc._post_anon_item(world["conn"], SPACE_ID, data)
-    assert outcome.kind == "delivered"
-
-
-async def test_a_transient_failure_is_queued_and_re_signed_on_retry(world):
-    svc = world["svc"]
-    down = replace(world["conn"], inbox_url="http://127.0.0.1:9")
-    svc._conn_repo.conns = [down]
-    data = {
-        "epoch": 3,
-        "payload": "Y3Q",
-    }
-    item = GfsPublish(space_id=SPACE_ID, event_type="space_item_anon", payload=data)
-    assert not await svc._first_attempt(down, item)
-    assert svc._retry.pending(down.id)
-    # The queued item holds no timestamp or signature: every attempt signs
-    # afresh (a request is only valid for ±300 s).
-    queued = svc._retry._queues[down.id].items[0]
-    for signed in ("ts", "nonce", "writer_sig", "signature"):
-        assert signed not in queued.payload
-
-
-async def test_a_retry_drops_the_item_once_the_capability_is_gone(world):
-    svc = world["svc"]
-    world["gfs"].capable = False
-    item = GfsPublish(space_id=SPACE_ID, event_type="space_item", payload={})
-    assert (await svc._retry_send("conn-1", item)).kind == "permanent"
-    assert (await svc._retry_send("missing", item)).kind == "permanent"
-
-
-async def test_without_the_capability_nothing_identified_is_sent(world, monkeypatch):
-    world["gfs"].capable = False
-    posted = []
-    monkeypatch.setattr(
-        world["tc"].session, "post", lambda *a, **kw: posted.append(a) or None
-    )
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-    assert await svc.publish_post(SPACE_ID, _inner(), []) == []
-    assert await svc.announce_epoch(SPACE_ID) == 0
-    assert posted == []
-
-
-async def test_no_cert_for_the_sealing_epoch_publishes_nothing(world):
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    svc._writer_certs.scope = None
-    assert await svc.publish_post(SPACE_ID, _inner(), targets) == []
-    assert await _queued(world) == []
-
-
-# ── Epoch notices ────────────────────────────────────────────────────────
-
-
-async def _epoch(world):
-    return await world["app"][gfs_space_epoch_repo_key].get(SPACE_ID)
-
-
-async def test_the_owner_announces_with_its_household_signature(world):
-    owner_svc = _owner_svc(world)
-    world["crypto"].epoch = 7
-    assert await owner_svc.announce_epoch(SPACE_ID) == 1
-    state = await _epoch(world)
-    assert (state.confirmed, state.current) == (7, 7)
-    # An owner may jump (a v_44 restore lifts the epoch to unix seconds).
-    world["crypto"].epoch = int(time.time())
-    assert await owner_svc.announce_epoch(SPACE_ID) == 1
-    assert (await _epoch(world)).confirmed == world["crypto"].epoch
-
-
-async def test_a_delegated_admin_announces_the_authority_signed_plus_one(world):
-    await _owner_svc(world).announce_epoch(SPACE_ID)  # owner confirms 3
-    await world["app"][gfs_space_epoch_repo_key].confirm(
-        SPACE_ID, 3, now=int(time.time()) - 120
-    )
-    db_state = await _epoch(world)
-    assert db_state.confirmed == 3
-    # ``me`` holds the seed as a delegated admin (not the owner).
-    world["spaces"].seeds[SPACE_ID] = SPACE_SEED
-    world["crypto"].epoch = 4
-    await world["app"][gfs_space_epoch_repo_key]._db.enqueue(
-        "UPDATE global_spaces SET content_epoch_raised_at=0 WHERE space_id=?",
-        (SPACE_ID,),
-    )
-    assert await world["svc"].announce_epoch(SPACE_ID) == 1
-    state = await _epoch(world)
-    assert (state.current, state.confirmed) == (4, 3)
-
-
-async def test_no_seed_or_no_readability_announces_nothing(world):
-    svc = world["svc"]
-    assert await svc.announce_epoch(SPACE_ID) == 0  # no seed held
-    world["spaces"].seeds[SPACE_ID] = SPACE_SEED
-    world["spaces"].spaces[SPACE_ID] = _space(readable=False)
-    assert await svc.announce_epoch(SPACE_ID) == 0
-
-
-async def test_announce_held_epochs_covers_owned_spaces_on_one_server(world):
-    owner_svc = _owner_svc(world)
-    world["crypto"].epoch = 9
-    assert await owner_svc.announce_held_epochs("conn-1") == 1
-    assert (await _epoch(world)).confirmed == 9
-    assert await owner_svc.announce_held_epochs("missing") == 0
-
-
-# ── Auto-subscribe ───────────────────────────────────────────────────────
-
-
-def _member(user_id: str, role: SpaceRole) -> SpaceMember:
-    return SpaceMember(
-        space_id=SPACE_ID, user_id=user_id, role=role.value, joined_at="2026-10-03"
-    )
-
-
-async def test_a_writer_household_subscribes_to_its_spaces(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 1
-    assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
-
-
-async def test_an_auto_subscribe_is_a_recorded_seat(world):
-    """M1: with the seat keeper wired, every auto-subscribe goes through
-    ``take_seat`` (which records it), so a leave can tear it down."""
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-
-    class _Seats:
-        def __init__(self):
-            self.taken: list[tuple[str, str]] = []
-
-        async def take_seat(self, space_id, conn):
-            self.taken.append((space_id, conn.gfs_instance_id))
-
-    seats = _Seats()
-    world["svc"].attach_seats(seats)
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 1
-    assert seats.taken == [(SPACE_ID, world["conn"].gfs_instance_id)]
-    assert world["gfs"].subscribed == []  # never the raw, unrecorded path
-
-
-@pytest.mark.parametrize("case", ["follower_only", "incapable", "none"])
-async def test_auto_subscribe_skips_what_it_must(world, case):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-    if case == "follower_only":
-        spaces.members[SPACE_ID] = [_member("u1", SpaceRole.SUBSCRIBER)]
-    elif case == "incapable":
-        world["gfs"].capable = False
-    elif case == "none":
-        spaces.local[SPACE_ID] = []
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 0
-    assert world["gfs"].subscribed == []
-
-
-async def test_a_failing_subscribe_is_fail_soft(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.ADMIN)]
-
-    async def _boom(space_id, gfs_id):
-        raise RuntimeError("down")
-
-    world["gfs"].subscribe_to_gfs_space = _boom
-    assert await world["svc"].subscribe_member_spaces("conn-1") == 0
-
-
-async def test_planning_a_post_never_subscribes(world):
-    """An identified subscribe right before an anonymous publish would link
-    the two: the auto-subscribe runs only on a seat and on (re)connect."""
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, AUTHOR)
-    assert world["gfs"].subscribed == []
-
-
-async def test_a_local_writer_seat_subscribes_on_join(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
-    bus = EventBus()
-    world["svc"].wire(bus)
-    await bus.publish(SpaceMemberJoined(space_id=SPACE_ID, user_id="u1"))
-    assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
-
-
-async def test_ensure_subscribed_skips_followers_and_the_owner(world):
-    spaces = world["spaces"]
-    spaces.local[SPACE_ID] = ["u1"]
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.SUBSCRIBER)]
-    assert await world["svc"].ensure_subscribed(SPACE_ID) == 0
-    # The owner household (it lists the space under its own name anyway)
-    # receives over federation and relays: no seat.
-    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.OWNER)]
-    owner_svc = _owner_svc(world)
-    assert await owner_svc.ensure_subscribed(SPACE_ID) == 0
-    assert await owner_svc.member_subscription_ids("conn-1") == []
-    assert world["gfs"].subscribed == []
-
-
-# ── A delegated admin looks like any writer to the GFS ────────────────────
-
-
-class _GfsTrace:
-    """Wraps the HTTP session: every request the household sends the GFS,
-    as ``(method, path, sorted body keys)``."""
-
-    def __init__(self, session) -> None:
-        self._session = session
-        self.seen: list[tuple[str, str, tuple[str, ...]]] = []
-
-    def _note(self, method: str, url, kwargs: dict) -> None:
-        body = kwargs.get("json")
-        keys = tuple(sorted(body)) if isinstance(body, dict) else ()
-        self.seen.append((method, URL(str(url)).path, keys))
-
-    def post(self, url, **kwargs):
-        self._note("POST", url, kwargs)
-        return self._session.post(url, **kwargs)
-
-    def get(self, url, **kwargs):
-        self._note("GET", url, kwargs)
-        return self._session.get(url, **kwargs)
-
-
-async def _gfs_view(world, *, delegated_admin: bool) -> dict:
-    """What the GFS sees from the ``me`` household over one life: a writer
-    seat taken on a join, a post, a comment, then a socket reconnect (the
-    seat list and the epoch re-announce, as ``app._gfs_reconcile`` runs
-    them)."""
-    svc, spaces, gfs = world["svc"], world["spaces"], world["gfs"]
-    spaces.local[SPACE_ID] = [AUTHOR]
-    spaces.members[SPACE_ID] = [
-        _member(AUTHOR, SpaceRole.ADMIN if delegated_admin else SpaceRole.MEMBER)
-    ]
-    if delegated_admin:
-        spaces.seeds[SPACE_ID] = SPACE_SEED
-    rec = _GfsTrace(gfs.session)
-    gfs.session = rec
-    seat_on_join = await svc.ensure_subscribed(SPACE_ID)
-    post_targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    posted = await svc.publish_post(SPACE_ID, _inner(), post_targets)
-    commented = await svc.publish_item(
-        SPACE_ID,
-        "comment",
-        {"item_target": "c-1", "content": "hi"},
-        await svc.plan_item(SPACE_ID, AUTHOR, "comment"),
-    )
-    # The socket came back.
-    reconnect_seats = await svc.member_subscription_ids("conn-1")
-    before = len(rec.seen)
-    announced = await svc.announce_held_epochs("conn-1")
-    return {
-        "seat_on_join": seat_on_join,
-        "subscribed": list(gfs.subscribed),
-        "post_targets": [c.id for c in post_targets],
-        "posted": [c.id for c in posted],
-        "commented": [c.id for c in commented],
-        "reconnect_seats": reconnect_seats,
-        "reconnect_requests": rec.seen[before:],
-        "announced": announced,
-        "requests": [(m, path) for m, path, _ in rec.seen],
-        "bodies": sorted({keys for _, path, keys in rec.seen if keys}),
-    }
-
-
-@pytest.mark.security
-async def test_the_gfs_sees_a_delegated_admin_as_any_writer(world):
-    """GFS must not learn who holds a space's signing seed: a delegated
-    admin household keeps its fan-out seat, publishes its posts anonymously
-    under the writer group key and stays silent on a reconnect — request for
-    request what a plain writer household sends."""
-    view = await _gfs_view(world, delegated_admin=True)
-    assert view["seat_on_join"] == 1
-    assert view["subscribed"] == [(SPACE_ID, "conn-1")]
-    assert view["post_targets"] == ["conn-1"]
-    assert view["posted"] == ["conn-1"]
-    assert view["commented"] == ["conn-1"]
-    assert view["reconnect_seats"] == [SPACE_ID]
-    assert view["reconnect_requests"] == []
-    assert view["announced"] == 0
-    # Two anonymous items and nothing else that names the space.
-    assert [r for r in view["requests"] if r[0] == "POST"] == [
-        ("POST", MEMBER_PUBLISH_ANON_ROUTE),
-        ("POST", MEMBER_PUBLISH_ANON_ROUTE),
-    ]
-    assert not any("authority_sig" in keys for keys in view["bodies"])
-
-
-@pytest.mark.security
-async def test_a_plain_writer_gives_the_gfs_the_same_view(world):
-    """The reference the test above is held to: the very same trace."""
-    plain = await _gfs_view(world, delegated_admin=False)
-    assert plain["seat_on_join"] == 1
-    assert plain["reconnect_seats"] == [SPACE_ID]
-    assert plain["reconnect_requests"] == []
-    # Now the same household is handed the seed: nothing it sends changes.
-    world["gfs"].session = world["gfs"].session._session
-    world["gfs"].subscribed.clear()
-    world["svc"]._subscribed.clear()
-    world["svc"].forget_directories()
-    admin = await _gfs_view(world, delegated_admin=True)
-    assert admin == plain
-
-
-@pytest.mark.security
-async def test_a_delegated_admin_reconnect_sends_no_epoch_notice(world):
-    """Only the owner re-announces on a reconnect. A delegated admin's
-    notice there would tie the space's notices to that household's socket."""
-    await _owner_svc(world).announce_epoch(SPACE_ID)  # owner confirmed 3
-    world["crypto"].epoch = 4  # ``me`` (seed held, not the owner) is ahead
-    before = await _epoch(world)
-    assert await world["svc"].announce_held_epochs("conn-1") == 0
-    after = await _epoch(world)
-    assert (after.current, after.confirmed) == (before.current, before.confirmed)
-    # Its OWN rotation still announces (the +1 notice, anonymous): until it
-    # lands the GFS would keep relaying a writer the rotation removed.
-    await world["app"][gfs_space_epoch_repo_key].confirm(
-        SPACE_ID, 3, now=int(time.time()) - 120
-    )
-    await world["app"][gfs_space_epoch_repo_key]._db.enqueue(
-        "UPDATE global_spaces SET content_epoch_raised_at=0 WHERE space_id=?",
-        (SPACE_ID,),
-    )
-    assert await world["svc"].announce_epoch(SPACE_ID) == 1
-    assert (await _epoch(world)).current == 4
-
-
-async def test_a_failing_join_subscribe_is_logged_not_raised(world, monkeypatch):
-    async def _boom(self, space_id):
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(GfsMemberPublishService, "ensure_subscribed", _boom)
-    bus = EventBus()
-    world["svc"].wire(bus)
-    await bus.publish(SpaceMemberJoined(space_id=SPACE_ID, user_id="u1"))
-
-
-# ── v2: author binding, accepted-only targets, directory listing ─────────
-
-
-async def test_an_author_outside_our_cert_binding_takes_the_host_path(world):
-    """A plain member of a moderated / admin-only space (or any user the
-    cert does not bind) publishes nothing itself — its post goes through
-    the host (queue / refusal)."""
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, "u-other") == []
-
-
-async def test_a_v1_cert_without_a_binding_takes_the_host_path(world, monkeypatch):
-    svc = world["svc"]
-
-    async def _v1(space_id):
-        cert = sign_writer_cert(
-            space_seed=SPACE_SEED,
-            space_id=space_id,
-            epoch=3,
-            instance_pk=world["me"].pk,
-            scope="write",
-        )
-        return cert.to_wire()
-
-    monkeypatch.setattr(svc._writer_certs, "current_own_cert_wire", _v1)
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-
-
-async def test_only_servers_that_accepted_are_returned(world):
-    svc = world["svc"]
-    down = replace(world["conn"], id="conn-down", inbox_url="http://127.0.0.1:9")
-    accepted = await svc.publish_post(SPACE_ID, _inner(), [world["conn"], down])
-    assert [c.id for c in accepted] == ["conn-1"]
-    assert svc._retry.pending("conn-down")
-
-
-async def test_schedule_post_publishes_in_the_background(world):
-    svc = world["svc"]
-    assert svc.schedule_post(SPACE_ID, AUTHOR, _inner())
-    await svc.wait_idle()
-    assert len(await _queued(world)) == 1
-
-
-async def test_schedule_post_for_an_author_without_rights_publishes_nothing(world):
-    svc = world["svc"]
-    assert svc.schedule_post(SPACE_ID, "u-other", _inner())
-    await svc.wait_idle()
-    assert await _queued(world) == []
-
-
-async def test_schedule_post_refuses_while_stopping_or_saturated(world, monkeypatch):
-    svc = world["svc"]
-    await svc.stop()
-    assert not svc.schedule_post(SPACE_ID, AUTHOR, _inner())
-    await svc.start()
-    monkeypatch.setattr(
-        "socialhome.services.gfs_member_publish_service.MAX_PENDING_PUBLISHES", 0
-    )
-    assert not svc.schedule_post(SPACE_ID, AUTHOR, _inner())
-
-
-async def test_a_failing_background_publish_is_logged(world, monkeypatch, caplog):
-    svc = world["svc"]
-
-    async def _boom(self, space_id, author_user_id, item_type):
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(GfsMemberPublishService, "plan_item", _boom)
-    with caplog.at_level("ERROR"):
-        svc.schedule_post(SPACE_ID, AUTHOR, _inner())
-        await svc.wait_idle()
-    assert "background publish failed" in caplog.text
-
-
-async def test_listing_reads_the_whole_directory_never_a_space_probe(
-    world, monkeypatch
-):
-    svc = world["svc"]
-    seen: list[str] = []
-    real_get = world["tc"].session.get
-
-    def _spy(url, *a, **kw):
-        seen.append(str(url))
-        return real_get(url, *a, **kw)
-
-    monkeypatch.setattr(world["tc"].session, "get", _spy)
-    assert await svc._listed(world["conn"], SPACE_ID)
-    assert not await svc._listed(world["conn"], "sp-unlisted")
-    assert seen == [f"{world['conn'].inbox_url}/gfs/spaces"]
-
-
-async def test_listing_without_a_publish_session_lists_nothing(world, monkeypatch):
-    monkeypatch.setattr(world["gfs"], "publish_client", lambda: None)
-    assert not await world["svc"]._listed(world["conn"], SPACE_ID)
-
-
-# ── v_49 PR 3: comments, reactions, own edits / deletes ──────────────────
-
-
-def test_every_member_item_type_round_trips_the_plaintext_codec():
-    for item_type in (
-        "post_edit",
-        "post_delete",
-        "comment",
-        "comment_edit",
-        "comment_delete",
-        "reaction_add",
-        "reaction_remove",
-    ):
-        assert parse_item_plaintext(build_item_plaintext(item_type, {"a": 1})) == (
-            item_type,
-            {"a": 1},
-        )
-
-
-@pytest.mark.parametrize(
-    ("item_type", "scope", "planned"),
-    [
-        ("comment", "comment", True),
-        ("comment", "write", True),
-        ("reaction_add", "comment", True),
-        ("comment_delete", "comment", True),
-        # A post edit or delete needs the post's own right.
-        ("post_edit", "comment", False),
-        ("post_delete", "comment", False),
-        ("post_delete", "write", True),
-    ],
-)
-async def test_plan_item_follows_the_scope_the_type_needs(
-    world, item_type, scope, planned
-):
-    svc = world["svc"]
-    svc._writer_certs.scope = scope
-    targets = await svc.plan_item(SPACE_ID, AUTHOR, item_type)
-    assert bool(targets) is planned
-
-
-async def test_plan_item_needs_the_author_in_the_binding(world):
-    svc = world["svc"]
-    svc._writer_certs.users = ["someone-else"]
-    assert await svc.plan_item(SPACE_ID, AUTHOR, "comment") == []
-
-
-async def test_the_owner_publishes_items_but_not_posts(world):
-    """The owner relays posts with the authority signature, but nothing else
-    reaches followers: its comments, reactions and own edits / deletes go
-    over the member relay like any member's."""
-    svc = _owner_svc(world)
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-    assert [c.id for c in await svc.plan_item(SPACE_ID, AUTHOR, "comment")] == [
-        "conn-1"
-    ]
-    # The owner never auto-subscribes: it receives over federation.
-    assert world["gfs"].subscribed == []
-
-
-@pytest.mark.security
-async def test_a_published_comment_carries_only_ciphertext_and_its_real_type(world):
-    """(With a ``write`` cert: a ``comment``-scope cert names its scope in
-    plaintext, which the GFS is meant to see — never the item type.)"""
-    svc = world["svc"]
-    targets = await svc.plan_item(SPACE_ID, AUTHOR, "comment")
-    accepted = await svc.publish_item(
-        SPACE_ID, "comment", {"item_target": "c-1", "content": "hello"}, targets
-    )
-    assert [c.id for c in accepted] == ["conn-1"]
-    frame = (await _queued(world))[0].sealed
-    assert frame["event_type"] == "space_item"
-    assert "comment" not in json.dumps(frame)
-    assert "hello" not in json.dumps(frame)
-    item_type, got = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
-    assert (item_type, got["content"]) == ("comment", "hello")
-
-
-# ── payload_suite "zlib1" (against the real GFS) ────────────────────────
-
-
-def _long_inner(**extra) -> dict:
-    # Its JSON needs the 4 KiB bucket; compressed it fits in 1 KiB.
-    return _inner(content="hello from the allotment, " * 80, **extra)
-
-
-async def _label(world, *households, bits: int = 3) -> None:
-    fed = world["app"][gfs_fed_repo_key]
-    for h in households:
-        await fed.set_seat_accepts(SPACE_ID, h.instance_id, bits=bits)
-
-
-async def test_a_post_goes_compressed_where_every_follower_reads_it(world):
-    world["gfs"].zlib = True
-    await _label(world, world["sub"])
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    assert [c.id for c in await svc.publish_post(SPACE_ID, _long_inner(), targets)] == [
-        "conn-1"
-    ]
-    frame = (await _queued(world))[0].sealed
-    assert frame["payload_suite"] == "zlib1"
-    pt = world["crypto"].decrypt(frame["payload"])
-    assert len(pt) == 1024
-    item_type, got = parse_item_plaintext(open_item_plaintext(pt, "zlib1"))
-    assert (item_type, got["content"]) == ("post", _long_inner()["content"])
-
-
-async def test_an_old_follower_makes_the_gfs_refuse_and_the_post_goes_json(world):
-    """The subscriber's seat has no ``payload_zlib1`` (an older household):
-    the GFS answers 409, the household notes it and sends the JSON item at
-    once — the follower still gets the post."""
-    world["gfs"].zlib = True
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    assert [c.id for c in await svc.publish_post(SPACE_ID, _long_inner(), targets)] == [
-        "conn-1"
-    ]
-    rows = await _queued(world)
-    assert len(rows) == 1
-    frame = rows[0].sealed
-    assert "payload_suite" not in frame
-    _type, got = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
-    assert got["content"] == _long_inner()["content"]
-    assert world["gfs"].suite_refused == {("conn-1", SPACE_ID, "zlib1")}
-
-
-async def test_a_server_without_payload_zlib1_never_sees_a_compressed_item(world):
-    await _label(world, world["sub"])
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    await svc.publish_post(SPACE_ID, _long_inner(), targets)
-    assert "payload_suite" not in (await _queued(world))[0].sealed
-
-
-async def test_publish_item_refuses_a_type_our_cert_cannot_carry(world):
-    svc = world["svc"]
-    svc._writer_certs.scope = "comment"
-    assert (
-        await svc.publish_item(SPACE_ID, "post_delete", {"x": 1}, [world["conn"]]) == []
-    )
-    assert await _queued(world) == []
-
-
-async def test_schedule_item_publishes_in_the_background(world):
-    svc = world["svc"]
-    assert svc.schedule_item(SPACE_ID, AUTHOR, "reaction_add", {"emoji": "x"})
-    await svc.wait_idle()
-    frame = (await _queued(world))[0].sealed
-    item_type, _inner = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
-    assert item_type == "reaction_add"
-
-
-async def test_on_published_runs_once_a_server_took_the_item(world):
-    """PR B review I2: the caller records a profile as published only when
-    a server took it."""
-    svc = world["svc"]
-    done: list[bool] = []
-
-    async def _done() -> None:
-        done.append(True)
-
-    assert svc.schedule_item(
-        SPACE_ID, AUTHOR, "reaction_add", {"emoji": "x"}, on_published=_done
-    )
-    await svc.wait_idle()
-    assert done == [True]
-
-
-async def test_schedule_post_hands_its_on_published_through(world):
-    """A post a server took is reported (the sync status's "Not sent yet"
-    clears)."""
-    svc = world["svc"]
-    done: list[bool] = []
-
-    async def _done() -> None:
-        done.append(True)
-
-    assert svc.schedule_post(SPACE_ID, AUTHOR, {"post_id": "p"}, on_published=_done)
-    await svc.wait_idle()
-    assert done == [True]
-
-
-async def test_on_published_never_runs_when_no_server_took_it(world):
-    svc = world["svc"]
-    svc._writer_certs.scope = "comment"  # our cert cannot carry this type
-    done: list[bool] = []
-
-    async def _done() -> None:
-        done.append(True)
-
-    assert svc.schedule_item(
-        SPACE_ID, AUTHOR, "post_delete", {"x": 1}, on_published=_done
-    )
-    await svc.wait_idle()
-    assert done == []
-
-
-# ── Review: size-bucket padding (the type hides from the payload size) ────
-
-
-@pytest.mark.parametrize("size", [0, 10, 900, 1100, 5000, 20000, 70000])
-def test_the_item_plaintext_is_padded_to_a_size_bucket(size):
-    pt = build_item_plaintext("comment", {"content": "x" * size})
-    assert len(pt) in ITEM_SIZE_BUCKETS
-    assert parse_item_plaintext(pt) == ("comment", {"content": "x" * size})
-
-
-def test_a_reaction_and_a_short_post_share_one_bucket():
-    reaction = build_item_plaintext("reaction_add", {"emoji": "👍"})
-    post = build_item_plaintext("post", {"content": "hello there " * 20})
-    assert len(reaction) == len(post)
-
-
-def test_the_padding_rides_a_field_a_pr2_receiver_ignores():
-    """A receiver from before this release reads ``item_type`` / ``inner``
-    off a JSON object and ignores other keys — a padded post still parses."""
-    body = json.loads(build_item_plaintext("post", {"post_id": "p"}))
-    assert set(body) == {"item_type", "inner", "_pad"}
-    assert (body["item_type"], body["inner"]) == ("post", {"post_id": "p"})
-
-
-def test_an_item_past_the_largest_bucket_is_left_unpadded():
-    pt = build_item_plaintext("post", {"content": "x" * (ITEM_SIZE_BUCKETS[-1] + 1)})
-    assert len(pt) > ITEM_SIZE_BUCKETS[-1]
-    assert parse_item_plaintext(pt) is not None
-
-
-# ── Anonymous publish over the sessions (the one mode) ───────────────────
-
-
-def _strict_space(**kw) -> Space:
-    """A publicly readable space — there is no publish mode any more."""
-    return _space(**kw)
-
-
-async def _gfs_strict(world, epoch: int = 3) -> None:
-    """Put the real GFS where the owner's notice would: epoch confirmed, the
-    writer key pinned."""
-    epochs = world["app"][gfs_space_epoch_repo_key]
-    await epochs.confirm(SPACE_ID, epoch, now=int(time.time()))
-    wkc = issue_writer_key_grant(
-        space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=epoch
-    ).writer_key_cert
-    await epochs.pin_writer_key(SPACE_ID, epoch, wkc.writer_pk, replace=True)
-
-
-class _Recorder:
-    """Wraps an aiohttp session and records every POST (url, json)."""
-
-    def __init__(self, session: aiohttp.ClientSession) -> None:
-        self._session = session
-        self.posts: list[tuple[str, dict]] = []
-
-    def post(self, url, *, json=None, **kw):
-        self.posts.append((str(url), json))
-        return self._session.post(url, json=json, **kw)
-
-    def get(self, *a, **kw):
-        return self._session.get(*a, **kw)
-
-
-def _strict_world(world, *, key: bool = True):
-    world["spaces"].spaces[SPACE_ID] = _strict_space(owner=world["owner"].instance_id)
-    if key:
-        world["svc"]._writer_certs.strict_epochs.add(3)
-    else:
-        world["svc"]._writer_certs.strict_epochs.clear()
-    gfs = world["gfs"]
-    identified = _Recorder(world["tc"].session)
-    anon = _Recorder(world["tc"].session)
-    gfs.client = lambda: identified  # type: ignore[method-assign]
-    gfs.publish_client = lambda: anon  # type: ignore[method-assign]
-    return identified, anon
-
-
-@pytest.mark.security
-async def test_strict_publishes_anonymously_over_the_cookie_less_session(world):
-    await _gfs_strict(world)
-    identified, anon = _strict_world(world)
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    assert [c.id for c in targets] == ["conn-1"]
-    accepted = await svc.publish_post(SPACE_ID, _inner(), targets)
-    assert [c.id for c in accepted] == ["conn-1"]
-    # Nothing went over the identified session — no publish, no subscribe.
-    assert identified.posts == []
-    assert world["gfs"].subscribed == []
-    [(_url, body)] = [
-        p for p in anon.posts if p[0].endswith("/gfs/member-publish-anon")
-    ]
-    for forbidden in ("instance_id", "signature", "writer_cert"):
-        assert forbidden not in body
-    assert world["me"].instance_id not in json.dumps(body)
-    assert b64url_encode(world["me"].pk) not in json.dumps(body)
-    # The subscriber gets a cert-less frame; the cert is inside the ciphertext.
-    [row] = await _queued(world)
-    assert "writer_cert" not in row.sealed
-    item_type, got = parse_item_plaintext(
-        world["crypto"].decrypt(row.sealed["payload"])
-    )
-    assert item_type == "post"
-    assert got["writer_cert"]["writer_user_ids"] == [AUTHOR]
-
-
-@pytest.mark.security
-async def test_strict_compresses_and_falls_back_like_trusted(world):
-    """The anonymous request signs ``payload_suite`` under the writer key;
-    an older follower's seat makes the GFS refuse it (409) and the JSON
-    item goes anonymously right after."""
-    await _gfs_strict(world)
-    _identified, anon = _strict_world(world)
-    world["gfs"].zlib = True
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    assert [c.id for c in await svc.publish_post(SPACE_ID, _long_inner(), targets)] == [
-        "conn-1"
-    ]
-    sent = [b for u, b in anon.posts if u.endswith("/gfs/member-publish-anon")]
-    assert [b.get("payload_suite") for b in sent] == ["zlib1", None]
-    [row] = await _queued(world)
-    assert "payload_suite" not in row.sealed
-    # With every seat labelled, the next one stays compressed.
-    world["gfs"].suite_refused = frozenset()
-    await _label(world, world["sub"])
-    anon.posts.clear()
-    await svc.publish_post(SPACE_ID, _long_inner(post_id="p-2"), targets)
-    sent = [b for u, b in anon.posts if u.endswith("/gfs/member-publish-anon")]
-    assert [b.get("payload_suite") for b in sent] == ["zlib1"]
-
-
-@pytest.mark.security
-async def test_strict_without_the_writer_key_takes_the_host_path(world):
-    await _gfs_strict(world)
-    identified, anon = _strict_world(world, key=False)
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-    # Even handed targets, the item is never sent identified.
-    assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
-    assert identified.posts == [] and anon.posts == []
-    assert world["gfs"].subscribed == []
-
-
-@pytest.mark.security
-async def test_strict_without_a_strict_capable_server_takes_the_host_path(world):
-    identified, anon = _strict_world(world)
-    world["gfs"].strict_capable = False
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-    assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
-    assert identified.posts == [] and anon.posts == []
-
-
-@pytest.mark.security
-async def test_strict_a_403_from_the_server_is_final_and_never_downgraded(world):
-    # The GFS pinned another writer key: the anonymous publish is refused,
-    # and the household does NOT retry identified — the host path carries it.
-    identified, anon = _strict_world(world)
-    svc = world["svc"]
-
-    async def _other_key(space_id, epoch):
-        return os.urandom(32)
-
-    svc._writer_certs.own_writer_key = _other_key
-    assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
-    assert any(u.endswith("/gfs/member-publish-anon") for u, _ in anon.posts)
-    assert identified.posts == []
-    assert not svc._retry.pending(world["conn"].id)
-
-
-@pytest.mark.security
-async def test_strict_retry_re_signs_with_a_fresh_nonce(world):
-    await _gfs_strict(world)
-    _identified, anon = _strict_world(world)
-    svc = world["svc"]
-    data = {"epoch": 3, "payload": "Y3Q"}
-    first = await svc._post_anon_item(world["conn"], SPACE_ID, data)
-    second = await svc._post_anon_item(world["conn"], SPACE_ID, data)
-    assert first.kind == second.kind == "delivered"
-    a, b = (body for _u, body in anon.posts)
-    assert a["nonce"] != b["nonce"] and a["writer_sig"] != b["writer_sig"]
-
-
-async def test_strict_retry_without_the_key_any_more_is_dropped(world):
-    _identified, anon = _strict_world(world)
-    svc = world["svc"]
-    svc._writer_certs.strict_epochs.clear()
-    outcome = await svc._post_anon_item(
-        world["conn"], SPACE_ID, {"epoch": 3, "payload": "Y3Q"}
-    )
-    assert outcome.kind == "permanent"
-    assert anon.posts == []
-
-
-async def test_strict_retry_needs_the_strict_capability(world):
-    _strict_world(world)
-    svc = world["svc"]
-    world["gfs"].strict_capable = False
-    item = GfsPublish(
-        space_id=SPACE_ID,
-        event_type="space_item_anon",
-        payload={"epoch": 3, "payload": "x"},
-    )
-    assert (await svc._retry_send("conn-1", item)).kind == "permanent"
-    # Merely unknown (the server did not answer): the retry waits.
-    world["gfs"].unknown = True
-    assert (await svc._retry_send("conn-1", item)).kind == "transient"
-
-
-async def test_strict_without_a_cookie_less_session_sends_nothing(world):
-    identified, _anon = _strict_world(world)
-    world["gfs"].publish_client = lambda: None  # type: ignore[method-assign]
-    outcome = await world["svc"]._post_anon_item(
-        world["conn"], SPACE_ID, {"epoch": 3, "payload": "Y3Q"}
-    )
-    assert outcome.kind == "permanent"
-    assert identified.posts == []
-
-
-async def test_a_held_writer_key_goes_anonymous_even_before_the_mode_arrives(world):
-    """The key is only ever handed out in a strict space, so holding one for
-    the epoch is reason enough to publish anonymously — a member that got the
-    rekey before the config change never sends identified in between."""
-    await _gfs_strict(world)
-    world["svc"]._writer_certs.strict_epochs.add(3)
-    identified = _Recorder(world["tc"].session)
-    world["gfs"].client = lambda: identified  # type: ignore[method-assign]
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    assert await svc.publish_post(SPACE_ID, _inner(), targets)
-    assert identified.posts == []
-
-
-async def test_strict_comments_go_anonymous_too(world):
-    await _gfs_strict(world)
-    identified, _anon = _strict_world(world)
-    svc = world["svc"]
-    svc._writer_certs.scope = "comment"
-    targets = await svc.plan_item(SPACE_ID, AUTHOR, "comment")
-    assert await svc.publish_item(SPACE_ID, "comment", {"item_target": "c"}, targets)
-    assert identified.posts == []
-
-
-@pytest.mark.security
-async def test_the_owner_notice_pins_the_writer_key_and_names_no_mode(world):
-    world["spaces"].spaces[SPACE_ID] = _strict_space(owner=world["owner"].instance_id)
-    owner_svc = _owner_svc(world)
-    identified = _Recorder(world["tc"].session)
-    world["gfs"].client = lambda: identified  # type: ignore[method-assign]
-    owner_svc._writer_certs.pin_epochs.add(4)
-    world["crypto"].epoch = 4
-    assert await owner_svc.announce_epoch(SPACE_ID) == 1
-    [(_url, body)] = identified.posts
-    assert "publish_mode" not in body
-    assert body["writer_key_cert"]["epoch"] == 4
-    epochs = world["app"][gfs_space_epoch_repo_key]
-    keys = await epochs.get_writer_keys(SPACE_ID)
-    assert keys.writer_pk_for(4) is not None
-    assert (await epochs.get(SPACE_ID)).confirmed == 4
-
-
-async def test_a_server_without_member_publish_gets_no_notice(world):
-    """Every notice now carries the writer key pin, which an older server
-    would refuse: a server that never proved ``member_publish_strict`` gets
-    none (nothing is published there either)."""
-    owner_svc = _owner_svc(world)
-    world["gfs"].strict_capable = False
-    identified = _Recorder(world["tc"].session)
-    world["gfs"].client = lambda: identified  # type: ignore[method-assign]
-    assert await owner_svc.announce_epoch(SPACE_ID) == 0
-    assert identified.posts == []
-
-
-async def test_a_delegated_admin_notice_carries_only_the_writer_key_pin(world):
-    world["spaces"].spaces[SPACE_ID] = _strict_space(owner="someone-else")
-    world["spaces"].seeds[SPACE_ID] = SPACE_SEED
-    svc = world["svc"]
-    svc._writer_certs.pin_epochs.add(3)
-    anon = _Recorder(world["tc"].session)
-    world["gfs"].publish_client = lambda: anon  # type: ignore[method-assign]
-    await svc.announce_epoch(SPACE_ID)
-    [(_url, body)] = [p for p in anon.posts if p[0].endswith("/epoch")]
-    assert "writer_key_cert" in body
-    assert "publish_mode" not in body and "owning_instance" not in body
-
-
-async def test_strict_auto_subscribe_is_the_plain_follower_subscribe(world):
-    """The member auto-subscribe calls the very same signed subscribe a
-    follower's subscribe / re-subscribe uses — ``(space_id, gfs_id)`` and
-    nothing else — so the server cannot tell a writer from a follower."""
-    _strict_world(world)
-    world["spaces"].local[SPACE_ID] = [AUTHOR]
-    world["spaces"].members[SPACE_ID] = [
-        SpaceMember(space_id=SPACE_ID, user_id=AUTHOR, role="member", joined_at="")
-    ]
-    assert await world["svc"].ensure_subscribed(SPACE_ID) == 1
-    assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
-
-
-async def test_member_subscription_ids_lists_the_writer_spaces(world):
-    world["spaces"].local[SPACE_ID] = [AUTHOR]
-    world["spaces"].members[SPACE_ID] = [
-        SpaceMember(space_id=SPACE_ID, user_id=AUTHOR, role="member", joined_at="")
-    ]
-    assert await world["svc"].member_subscription_ids("conn-1") == [SPACE_ID]
-    # Nothing subscribed by the listing itself — the reconnect batch does it.
-    assert world["gfs"].subscribed == []
-    assert await world["svc"].member_subscription_ids("nope") == []
-    world["gfs"].capable = False
-    assert await world["svc"].member_subscription_ids("conn-1") == []
-
-
-@pytest.mark.security
-async def test_strict_ts_is_whole_seconds_with_jitter(world):
-    """No sub-second clock skew to fingerprint the household by; the jitter
-    stays well inside the server's ±300 s window."""
-    await _gfs_strict(world)
-    _identified, anon = _strict_world(world)
-    svc = world["svc"]
-    for _ in range(5):
-        await svc._post_anon_item(
-            world["conn"], SPACE_ID, {"epoch": 3, "payload": "Y3Q"}
-        )
-    for _u, body in anon.posts:
-        parsed = datetime.fromisoformat(body["ts"])
-        assert parsed.microsecond == 0 and "." not in body["ts"]
-        assert abs(parsed.timestamp() - time.time()) <= ANON_TS_JITTER_S + 2
-
-
-@pytest.mark.security
-async def test_the_directory_cache_is_dropped_on_a_key_or_config_change(world):
-    svc = world["svc"]
-    bus = EventBus()
-    svc.wire(bus)
-    assert await svc._listed(world["conn"], SPACE_ID)
-    assert len(svc._directories) == 1
-    await world["app"][gfs_fed_repo_key].delete_space(SPACE_ID)
-    # Still cached as listed …
-    assert await svc._listed(world["conn"], SPACE_ID)
-    # … until a key import (a rotation) re-reads it.
-    await bus.publish(SpaceContentKeyImported(space_id=SPACE_ID, epoch=4))
-    assert len(svc._directories) == 0
-    assert not await svc._listed(world["conn"], SPACE_ID)
-    await bus.publish(
-        SpaceConfigChanged(space_id=SPACE_ID, event_type="x", payload={}, sequence=1)
-    )
-    assert len(svc._directories) == 0
-
-
-# ── Private spaces: the opaque channel (v_51) ────────────────────────────
 
 
 class _Channels:
@@ -1540,48 +159,363 @@ class _Channels:
         return True
 
 
-def _private(world) -> _Channels:
-    world["spaces"].spaces[SPACE_ID] = _space(
-        owner=world["owner"].instance_id, public=False, readable=False
+def _space(*, owner: str = "host.home", public=True, readable=True, sid=SPACE_ID):
+    return Space(
+        id=sid,
+        name="Public",
+        owner_instance_id=owner,
+        owner_username="o",
+        identity_public_key=SPACE_PK.hex(),
+        config_sequence=0,
+        features=SpaceFeatures(allow_subscribers=readable),
+        space_type=SpaceType.GLOBAL if public else SpaceType.PRIVATE,
+        join_mode=JoinMode.OPEN,
     )
-    channels = _Channels(world["conn"])
-    world["svc"].attach_channels(channels)
-    return channels
 
 
-async def test_a_private_space_publishes_only_through_its_channel(world):
-    channels = _private(world)
+@pytest.fixture
+async def world():
+    """A member household (``me``) of a global space that runs a channel
+    here, and the recording channel service."""
+    me, owner = _Household(), _Household()
+    conn = GfsConnection(
+        id="conn-1",
+        gfs_instance_id="gfs-node-a",
+        display_name="GFS",
+        public_key="00" * 32,
+        inbox_url="https://gfs.example",
+        status="active",
+        paired_at="",
+    )
+    spaces = _Spaces(spaces={SPACE_ID: _space(owner=owner.instance_id)})
+    crypto = _Crypto()
+    svc = GfsMemberPublishService(
+        conn_repo=_Conns([conn]),  # type: ignore[arg-type]
+        space_repo=spaces,  # type: ignore[arg-type]
+        space_crypto=crypto,  # type: ignore[arg-type]
+        writer_certs=_Certs(me),  # type: ignore[arg-type]
+    )
+    channels = _Channels(conn)
+    svc.attach_channels(channels)  # type: ignore[arg-type]
+    await svc.start()
+    yield {
+        "svc": svc,
+        "me": me,
+        "owner": owner,
+        "conn": conn,
+        "spaces": spaces,
+        "crypto": crypto,
+        "channels": channels,
+    }
+    await svc.stop()
+
+
+def _inner(**extra) -> dict:
+    return {"post_id": "p-1", "space_id": SPACE_ID, "content": "hello", **extra}
+
+
+def _sealed(world) -> list[tuple[str, dict]]:
+    """What went into the channel, opened: ``(item_type, inner)`` each."""
+    out = []
+    for _sid, _epoch, ct, _targets in world["channels"].sealed:
+        got = parse_item_plaintext(world["crypto"].decrypt(ct))
+        assert got is not None
+        out.append(got)
+    return out
+
+
+# ── Plaintext codec ──────────────────────────────────────────────────────
+
+
+def test_item_plaintext_round_trips_and_refuses_the_rest():
+    pt = build_item_plaintext("post", {"a": 1})
+    assert parse_item_plaintext(pt) == ("post", {"a": 1})
+    for bad in (
+        b"x",
+        b"[]",
+        build_item_plaintext("poll", {}),
+        b'{"item_type":"post"}',
+    ):
+        assert parse_item_plaintext(bad) is None
+
+
+# ── Planning ─────────────────────────────────────────────────────────────
+
+
+def test_every_member_item_type_round_trips_the_plaintext_codec():
+    for item_type in (
+        "post_edit",
+        "post_delete",
+        "comment",
+        "comment_edit",
+        "comment_delete",
+        "reaction_add",
+        "reaction_remove",
+    ):
+        assert parse_item_plaintext(build_item_plaintext(item_type, {"a": 1})) == (
+            item_type,
+            {"a": 1},
+        )
+
+
+@pytest.mark.parametrize("size", [0, 10, 900, 1100, 5000, 20000, 70000])
+def test_the_item_plaintext_is_padded_to_a_size_bucket(size):
+    pt = build_item_plaintext("comment", {"content": "x" * size})
+    assert len(pt) in ITEM_SIZE_BUCKETS
+    assert parse_item_plaintext(pt) == ("comment", {"content": "x" * size})
+
+
+def test_a_reaction_and_a_short_post_share_one_bucket():
+    reaction = build_item_plaintext("reaction_add", {"emoji": "👍"})
+    post = build_item_plaintext("post", {"content": "hello there " * 20})
+    assert len(reaction) == len(post)
+
+
+def test_the_padding_rides_a_field_a_pr2_receiver_ignores():
+    """A receiver from before this release reads ``item_type`` / ``inner``
+    off a JSON object and ignores other keys — a padded post still parses."""
+    body = json.loads(build_item_plaintext("post", {"post_id": "p"}))
+    assert set(body) == {"item_type", "inner", "_pad"}
+    assert (body["item_type"], body["inner"]) == ("post", {"post_id": "p"})
+
+
+def test_an_item_past_the_largest_bucket_is_left_unpadded():
+    pt = build_item_plaintext("post", {"content": "x" * (ITEM_SIZE_BUCKETS[-1] + 1)})
+    assert len(pt) > ITEM_SIZE_BUCKETS[-1]
+    assert parse_item_plaintext(pt) is not None
+
+
+# ── Planning and sealing ─────────────────────────────────────────────────
+
+
+async def test_a_global_space_with_a_channel_publishes_only_there(world):
     svc = world["svc"]
     assert await svc.channel_space(SPACE_ID)
     targets = await svc.plan_item(SPACE_ID, AUTHOR, "post")
-    assert [t.id for t in targets] == ["conn-1"]
-    # Nothing identified or space-keyed: no subscribe to the space, no
-    # /gfs/member-publish.
-    assert world["gfs"].subscribed == []
-    accepted = await svc.publish_item(SPACE_ID, "post", _inner(), targets)
-    assert accepted == targets
-    (space_id, epoch, ct, _t) = channels.sealed[0]
-    assert (space_id, epoch) == (SPACE_ID, 3)
+    assert targets == [world["conn"]]
+    assert await svc.publish_item(SPACE_ID, "post", _inner(), targets) == targets
+    [(item_type, inner)] = _sealed(world)
     # Sealed under the content key with our space writer cert INSIDE.
-    item_type, inner = parse_item_plaintext(world["crypto"].decrypt(ct))
     assert item_type == "post" and inner["writer_cert"]["space_id"] == SPACE_ID
-    assert await _queued(world) == []
+    assert inner["content"] == "hello"
 
 
-async def test_a_private_item_the_cert_does_not_allow_takes_the_host_path(world):
-    _private(world)
+@pytest.mark.security
+async def test_a_global_space_without_a_channel_publishes_nothing(world):
+    """v_96 — no channel, no GFS path: the write takes the host path alone
+    (no space-keyed member relay any more)."""
+    world["channels"].channel = False
+    svc = world["svc"]
+    assert not await svc.channel_space(SPACE_ID)
+    assert await svc.plan_item(SPACE_ID, AUTHOR, "post") == []
+    assert await svc.publish_item(SPACE_ID, "post", _inner(), [world["conn"]]) == []
+    assert world["channels"].sealed == []
+
+
+async def test_without_a_channel_service_nothing_is_planned(world):
+    svc = GfsMemberPublishService(
+        conn_repo=_Conns([world["conn"]]),  # type: ignore[arg-type]
+        space_repo=world["spaces"],  # type: ignore[arg-type]
+        space_crypto=world["crypto"],  # type: ignore[arg-type]
+        writer_certs=_Certs(world["me"]),  # type: ignore[arg-type]
+    )
+    assert await svc.plan_item(SPACE_ID, AUTHOR, "post") == []
+    assert await svc.publish_item(SPACE_ID, "post", _inner(), [world["conn"]]) == []
+    assert await svc.announce_epoch(SPACE_ID) == 0
+    assert await svc.announce_held_epochs("conn-1") == 0
+
+
+async def test_a_public_space_never_touches_the_channel(world):
+    """A PUBLIC (not global) space has no channel tier."""
+    world["spaces"].spaces[SPACE_ID] = replace(
+        world["spaces"].spaces[SPACE_ID], space_type=SpaceType.PUBLIC
+    )
+    svc = world["svc"]
+    assert not await svc.channel_space(SPACE_ID)
+    assert await svc.plan_item(SPACE_ID, AUTHOR, "post") == []
+    await svc.reconcile_channel(SPACE_ID)
+    await svc.enable_channel(SPACE_ID)
+    await svc.channel_rekey_sent(SPACE_ID)
+    assert await svc.announce_epoch(SPACE_ID) == 0
+    assert world["channels"].rotations == []
+
+
+async def test_the_owner_publishes_its_own_global_post_into_the_channel(world):
+    """Q4 — the owner's own post is its household's item in the channel."""
+    world["spaces"].spaces[SPACE_ID] = _space(owner=world["me"].instance_id)
+    assert await world["svc"].plan_post(SPACE_ID, AUTHOR) == [world["conn"]]
+
+
+@pytest.mark.parametrize(
+    ("item_type", "scope", "planned"),
+    [
+        ("comment", "comment", True),
+        ("comment", "write", True),
+        ("reaction_add", "comment", True),
+        ("comment_delete", "comment", True),
+        # A post edit or delete needs the post's own right.
+        ("post_edit", "comment", False),
+        ("post_delete", "comment", False),
+        ("post_delete", "write", True),
+    ],
+)
+async def test_plan_item_follows_the_scope_the_type_needs(
+    world, item_type, scope, planned
+):
+    svc = world["svc"]
+    svc._writer_certs.scope = scope
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, item_type)
+    assert bool(targets) is planned
+
+
+async def test_plan_item_needs_the_author_in_the_binding(world):
     world["svc"]._writer_certs.users = ["someone-else"]
-    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "post") == []
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") == []
 
 
-async def test_a_private_space_without_a_channel_is_not_offered(world):
-    channels = _private(world)
-    channels.channel = False
-    assert not await world["svc"].channel_space(SPACE_ID)
+async def test_a_v1_cert_without_a_binding_takes_the_host_path(world, monkeypatch):
+    svc = world["svc"]
+
+    async def _v1(space_id):
+        return sign_writer_cert(
+            space_seed=SPACE_SEED,
+            space_id=space_id,
+            epoch=3,
+            instance_pk=world["me"].pk,
+            scope="write",
+        ).to_wire()
+
+    monkeypatch.setattr(svc._writer_certs, "current_own_cert_wire", _v1)
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
 
 
-async def test_private_epoch_notices_and_heal_go_to_the_channel(world):
-    channels = _private(world)
+async def test_publish_item_refuses_a_type_our_cert_cannot_carry(world):
+    world["svc"]._writer_certs.scope = "comment"
+    got = await world["svc"].publish_item(
+        SPACE_ID, "post_delete", {"x": 1}, [world["conn"]]
+    )
+    assert got == []
+    assert world["channels"].sealed == []
+
+
+async def test_no_cert_for_the_sealing_epoch_publishes_nothing(world):
+    world["svc"]._writer_certs.scope = None
+    assert (
+        await world["svc"].publish_item(SPACE_ID, "post", _inner(), [world["conn"]])
+        == []
+    )
+
+
+async def test_a_moving_epoch_publishes_nothing(world, monkeypatch):
+    """The cert binds the epoch it is sealed under: when every attempt
+    lands under another epoch, nothing goes."""
+    crypto = world["crypto"]
+
+    async def _moving(space_id, plaintext):
+        crypto.epoch += 1
+        return crypto.epoch, "ct"
+
+    monkeypatch.setattr(crypto, "encrypt", _moving)
+    assert (
+        await world["svc"].publish_item(SPACE_ID, "post", _inner(), [world["conn"]])
+        == []
+    )
+
+
+# ── In the background ────────────────────────────────────────────────────
+
+
+async def test_schedule_post_publishes_in_the_background(world):
+    svc = world["svc"]
+    assert svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+    await svc.wait_idle()
+    assert [t for t, _i in _sealed(world)] == ["post"]
+
+
+async def test_schedule_item_publishes_in_the_background(world):
+    svc = world["svc"]
+    assert svc.schedule_item(SPACE_ID, AUTHOR, "reaction_add", {"emoji": "x"})
+    await svc.wait_idle()
+    assert [t for t, _i in _sealed(world)] == ["reaction_add"]
+
+
+async def test_schedule_post_for_an_author_without_rights_publishes_nothing(world):
+    svc = world["svc"]
+    assert svc.schedule_post(SPACE_ID, "u-other", _inner())
+    await svc.wait_idle()
+    assert world["channels"].sealed == []
+
+
+async def test_schedule_post_refuses_while_stopping_or_saturated(world, monkeypatch):
+    svc = world["svc"]
+    await svc.stop()
+    assert not svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+    await svc.start()
+    monkeypatch.setattr(
+        "socialhome.services.gfs_member_publish_service.MAX_PENDING_PUBLISHES", 0
+    )
+    assert not svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+
+
+async def test_a_failing_background_publish_is_logged(world, monkeypatch, caplog):
+    svc = world["svc"]
+
+    async def _boom(self, space_id, author_user_id, item_type):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(GfsMemberPublishService, "plan_item", _boom)
+    with caplog.at_level("ERROR"):
+        svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+        await svc.wait_idle()
+    assert "background publish failed" in caplog.text
+
+
+async def test_on_published_runs_once_a_server_took_the_item(world):
+    svc = world["svc"]
+    done: list[bool] = []
+
+    async def _done() -> None:
+        done.append(True)
+
+    assert svc.schedule_item(
+        SPACE_ID, AUTHOR, "reaction_add", {"emoji": "x"}, on_published=_done
+    )
+    await svc.wait_idle()
+    assert done == [True]
+
+
+async def test_schedule_post_hands_its_on_published_through(world):
+    svc = world["svc"]
+    done: list[bool] = []
+
+    async def _done() -> None:
+        done.append(True)
+
+    assert svc.schedule_post(SPACE_ID, AUTHOR, {"post_id": "p"}, on_published=_done)
+    await svc.wait_idle()
+    assert done == [True]
+
+
+async def test_on_published_never_runs_when_no_server_took_it(world):
+    svc = world["svc"]
+    svc._writer_certs.scope = "comment"  # our cert cannot carry this type
+    done: list[bool] = []
+
+    async def _done() -> None:
+        done.append(True)
+
+    assert svc.schedule_item(
+        SPACE_ID, AUTHOR, "post_delete", {"x": 1}, on_published=_done
+    )
+    await svc.wait_idle()
+    assert done == []
+
+
+# ── Epochs and the channel lifecycle ─────────────────────────────────────
+
+
+async def test_epoch_notices_and_heal_go_to_the_channel(world):
+    channels = world["channels"]
     svc = world["svc"]
     assert await svc.announce_epoch(SPACE_ID) == 1
     assert channels.rotations == [SPACE_ID]
@@ -1599,416 +533,69 @@ async def test_private_epoch_notices_and_heal_go_to_the_channel(world):
     assert channels.rotations[-1] == f"rekey-sent:{SPACE_ID}"
 
 
-async def test_a_public_space_never_touches_the_channel(world):
-    channels = _Channels(world["conn"])
-    world["svc"].attach_channels(channels)
-    assert not await world["svc"].channel_space(SPACE_ID)
-    await world["svc"].reconcile_channel(SPACE_ID)
-    await world["svc"].enable_channel(SPACE_ID)
-    await world["svc"].channel_rekey_sent(SPACE_ID)
-    assert channels.rotations == []
-
-
-@pytest.mark.security
-async def test_the_request_binds_the_pinned_server_key_when_the_server_takes_it(
-    world,
-):
-    """L2: with the server's ``addressee_key`` proven, the signed body names
-    its pinned key — the server accepts its own key and refuses another."""
-    svc = world["svc"]
-    anon = _Recorder(world["tc"].session)
-    world["gfs"].publish_client = lambda: anon  # type: ignore[method-assign]
-    data = {"epoch": 3, "payload": "Y3Q"}
-    info = await (await world["tc"].get("/gfs/info")).json()
-    world["gfs"].addressee_key = info["public_key"]
-    outcome = await svc._post_anon_item(world["conn"], SPACE_ID, data)
-    assert outcome.kind == "delivered"
-    assert anon.posts[-1][1]["gfs_key"] == info["public_key"]
-    world["gfs"].addressee_key = "ab" * 32
-    outcome = await svc._post_anon_item(world["conn"], SPACE_ID, data)
-    assert outcome.kind == "permanent"
-    world["gfs"].addressee_key = None
-    await svc._post_anon_item(world["conn"], SPACE_ID, data)
-    assert "gfs_key" not in anon.posts[-1][1]
-
-
-class _OldNode:
-    """An older GFS node (a cluster mid-upgrade): it answers 400 "unexpected or
-    missing fields" to any body carrying ``gfs_key``, 200 otherwise."""
-
-    def __init__(self) -> None:
-        self.bodies: list[dict] = []
-
-    def app(self) -> web.Application:
-        async def handler(request: web.Request) -> web.Response:
-            body = await request.json()
-            self.bodies.append(body)
-            if "gfs_key" in body:
-                raise web.HTTPBadRequest(reason="unexpected or missing fields")
-            return web.json_response({"status": "published"})
-
-        app = web.Application()
-        app.router.add_post("/gfs/member-publish-anon", handler)
-        return app
-
-
-@pytest.mark.security
-async def test_an_older_node_refusing_gfs_key_gets_one_retry_without_it(world):
-    """L1: the capability was learned from a newer node, the balancer sent
-    the request to an older one. The key is dropped for this connection and
-    the item goes out once more, without it — learned again on the next
-    verified ``/gfs/info``."""
-    svc = world["svc"]
-    old = _OldNode()
-    async with TestServer(old.app()) as server:
-        conn = replace(world["conn"], inbox_url=str(server.make_url("")).rstrip("/"))
-        world["gfs"].addressee_key = "ab" * 32
-        data = {
-            "epoch": 3,
-            "payload": "Y3Q",
-        }
-        item = GfsPublish(space_id=SPACE_ID, event_type="space_item_anon", payload=data)
-        outcome = await svc._send(conn, item)
-    assert outcome.kind == "delivered"
-    assert ["gfs_key" in b for b in old.bodies] == [True, False]
-    assert world["gfs"].addressee_key is None
-
-
-@pytest.mark.security
-async def test_a_space_that_left_the_global_tier_gets_no_epoch_notice(world):
-    """Owner model: a public space is never on a GFS. A leftover listing (its
-    withdrawal failed) must not keep receiving epoch notices."""
-    owner_svc = _owner_svc(world)
-    world["crypto"].epoch = 7
-    world["spaces"].spaces[SPACE_ID] = replace(
-        world["spaces"].spaces[SPACE_ID], space_type=SpaceType.PUBLIC
+async def test_a_private_space_publishes_through_its_channel(world):
+    world["spaces"].spaces[SPACE_ID] = _space(
+        owner=world["owner"].instance_id, public=False, readable=False
     )
-    assert await owner_svc.announce_epoch(SPACE_ID) == 0
+    svc = world["svc"]
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, "post")
+    assert await svc.publish_item(SPACE_ID, "post", _inner(), targets) == targets
+    assert [t for t, _i in _sealed(world)] == ["post"]
 
 
-async def test_a_pending_own_listing_is_not_a_target(world, monkeypatch):
-    """Our own row counts only once the GFS accepted the listing; a pending
-    / banned row falls back to the server's public directory."""
-    conns = _Conns([world["conn"]], own=["conn-1"])
-    conns.inactive = frozenset({"conn-1"})
-    world["svc"]._conn_repo = conns
-
-    async def _not_listed(self, conn, space_id):
-        return False
-
-    monkeypatch.setattr(GfsMemberPublishService, "_listed", _not_listed)
-    assert await world["svc"]._capable_listed(SPACE_ID) == []
-    conns.inactive = frozenset()
-    assert [c.id for c in await world["svc"]._capable_listed(SPACE_ID)] == ["conn-1"]
+async def test_a_reconnect_only_heals_the_channels(world):
+    """v_96 — a reconnect announces nothing space-keyed (the owned-space
+    epoch notice loop is gone): it heals the channels on that server."""
+    svc = world["svc"]
+    world["spaces"].spaces[SPACE_ID] = _space(owner=world["me"].instance_id)
+    await svc.announce_held_epochs("conn-1")
+    assert world["channels"].healed == ["conn-1"]
+    assert world["channels"].rotations == []
+    assert world["channels"].announced == []
+    assert await svc.announce_held_epochs("conn-unknown") == 0
 
 
-# ── v_57: every listed GFS, anonymously ───────────────────────────────────
+async def test_a_failing_heal_is_logged_not_raised(world, monkeypatch, caplog):
+    async def _boom(gfs_id):
+        raise RuntimeError("down")
 
-
-async def _gfs_trusted_pin(world, epoch: int = 3) -> None:
-    """What the owner's v_57 notice establishes in a TRUSTED space: the
-    epoch confirmed and the writer key pinned — no strict mode."""
-    epochs = world["app"][gfs_space_epoch_repo_key]
-    await epochs.confirm(SPACE_ID, epoch, now=int(time.time()))
-    wkc = issue_writer_key_grant(
-        space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=epoch
-    ).writer_key_cert
-    await epochs.pin_writer_key(SPACE_ID, epoch, wkc.writer_pk, replace=True)
-
-
-def _listing(world) -> GfsConnection:
-    """The space's GFS, as a server on the owner's list we never joined."""
-    return replace(world["conn"], id=f"listing:{GFS_ID}", registered=False)
-
-
-def _multi_world(world, *, key: bool = True):
-    """A publicly readable space; the owner's list names the GFS as a
-    listing target. Returns the three recorders (identified, the shared
-    cookie-less session, the listing target's own session)."""
-    if key:
-        world["svc"]._writer_certs.strict_epochs.add(3)
-    else:
-        world["svc"]._writer_certs.strict_epochs.clear()
-    gfs = world["gfs"]
-    identified = _Recorder(world["tc"].session)
-    anon = _Recorder(world["tc"].session)
-    listing = _Recorder(world["tc"].session)
-    gfs.client = lambda: identified  # type: ignore[method-assign]
-    gfs.publish_client = lambda: anon  # type: ignore[method-assign]
-    gfs.listing_session = listing
-    gfs.targets = [_listing(world)]
-    return identified, anon, listing
-
-
-def _tail(posts) -> list[str]:
-    return [u.rsplit("/", 1)[-1] for u, _ in posts]
+    monkeypatch.setattr(world["channels"], "heal", _boom)
+    with caplog.at_level("ERROR"):
+        assert await world["svc"].announce_held_epochs("conn-1") == 0
+    assert "channel heal failed" in caplog.text
 
 
 @pytest.mark.security
-async def test_with_the_key_a_trusted_space_publishes_anonymously_to_a_listed_gfs(
-    world,
+@pytest.mark.parametrize(
+    ("item_type", "comment", "react", "ok"),
+    [
+        ("comment", True, False, True),
+        ("comment", False, True, False),
+        ("reaction_add", False, True, True),
+        ("reaction_add", True, False, False),
+        ("post", True, True, False),
+    ],
+)
+def test_a_reader_cert_publishes_only_what_the_follower_switches_allow(
+    item_type, comment, react, ok
 ):
-    """v_57: a member never registered on a listed server still reaches it —
-    anonymously, over that server's own session — and the server (trusted
-    mode, writer key pinned) relays it to its followers."""
-    await _gfs_trusted_pin(world)
-    identified, anon, listing = _multi_world(world)
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    assert [(c.id, c.registered) for c in targets] == [(f"listing:{GFS_ID}", False)]
-    accepted = await svc.publish_post(SPACE_ID, _inner(), targets)
-    assert [c.id for c in accepted] == [f"listing:{GFS_ID}"]
-    assert identified.posts == [] and anon.posts == []
-    assert world["gfs"].subscribed == []
-    [(url, body)] = listing.posts
-    assert url.endswith("/gfs/member-publish-anon")
-    blob = json.dumps(body)
-    for leak in (world["me"].instance_id, b64url_encode(world["me"].pk)):
-        assert leak not in blob
-    for field_name in ("instance_id", "signature", "writer_cert"):
-        assert field_name not in body
-    [row] = await _queued(world)
-    assert "writer_cert" not in row.sealed
-
-
-@pytest.mark.security
-async def test_with_the_key_every_listed_server_gets_the_same_anonymous_item(world):
-    """Registered and listing targets alike get the anonymous form; nothing
-    goes identified anywhere — one ciphertext, every server."""
-    await _gfs_trusted_pin(world)
-    identified, anon, listing = _multi_world(world)
-    world["gfs"].targets = [world["conn"], _listing(world)]
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    assert [c.id for c in targets] == ["conn-1", f"listing:{GFS_ID}"]
-    await svc.publish_post(SPACE_ID, _inner(), targets)
-    assert identified.posts == []
-    assert _tail(anon.posts) == ["member-publish-anon"]
-    assert _tail(listing.posts) == ["member-publish-anon"]
-    assert anon.posts[0][1]["payload"] == listing.posts[0][1]["payload"]
-
-
-@pytest.mark.security
-async def test_with_the_key_a_server_without_the_strict_capability_gets_nothing(
-    world,
-):
-    identified, anon, listing = _multi_world(world)
-    world["gfs"].targets = [world["conn"], _listing(world)]
-    world["gfs"].strict_capable = False
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-    assert identified.posts == [] and anon.posts == [] and listing.posts == []
-
-
-@pytest.mark.security
-async def test_without_the_key_nothing_goes_to_any_gfs(world):
-    """A household without the writer key (below v_90, or before the key
-    arrived): no server at all — never an identified publish — the host
-    path carries the item."""
-    identified, anon, listing = _multi_world(world, key=False)
-    world["gfs"].targets = [world["conn"], _listing(world)]
-    svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
-    assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
-    assert identified.posts == [] and anon.posts == [] and listing.posts == []
-
-
-@pytest.mark.security
-async def test_a_queued_item_whose_key_is_gone_is_dropped(world):
-    """An attempt re-reads the writer key: once it is gone the item is
-    dropped — never downgraded to an identified request."""
-    identified, anon, listing = _multi_world(world, key=False)
-    svc = world["svc"]
-    data = {"epoch": 3, "payload": "Y3Q"}
-    outcome = await svc._post_anon_item(_listing(world), SPACE_ID, data)
-    assert outcome.kind == "permanent"
-    assert identified.posts == [] and anon.posts == [] and listing.posts == []
-
-
-@pytest.mark.security
-async def test_a_retry_for_a_delisted_server_is_dropped(world):
-    await _gfs_trusted_pin(world)
-    identified, _anon, listing = _multi_world(world)
-    svc = world["svc"]
-    item = GfsPublish(
-        space_id=SPACE_ID,
-        event_type="space_item_anon",
-        payload={"epoch": 3, "payload": "Y3Q"},
+    """v_96 — our follower household's reader cert is not used for an item
+    the receivers would refuse under the space's follower switches."""
+    seed = os.urandom(32)
+    cert = bind_writer_users(
+        sign_writer_cert(
+            space_seed=seed,
+            space_id=SPACE_ID,
+            epoch=1,
+            instance_pk=ed25519_public_key(os.urandom(32)),
+            scope="comment",
+            reader=True,
+        ),
+        space_seed=seed,
+        user_ids=[AUTHOR],
+    ).to_wire()
+    features = SpaceFeatures(
+        allow_subscriber_comment=comment, allow_subscriber_react=react
     )
-    world["gfs"].targets = []
-    assert (await svc._retry_send(f"listing:{GFS_ID}", item)).kind == "permanent"
-    assert listing.posts == []
-    # Still listed: re-resolved and sent over the listing target's session.
-    world["gfs"].targets = [_listing(world)]
-    await svc._retry_send(f"listing:{GFS_ID}", item)
-    assert _tail(listing.posts) == ["member-publish-anon"]
-    # An identified item for our own connection the owner delisted: dropped.
-    data = {
-        "epoch": 3,
-        "payload": "Y3Q",
-    }
-    ident = GfsPublish(space_id=SPACE_ID, event_type="space_item_anon", payload=data)
-    assert (await svc._retry_send("conn-1", ident)).kind == "permanent"
-    assert identified.posts == []
-
-
-@pytest.mark.security
-async def test_a_refused_listing_address_is_never_retried_elsewhere(world):
-    _identified, anon, _listing_rec = _multi_world(world)
-    world["gfs"].listing_session = OutboundFetchRefused("private_address")
-    svc = world["svc"]
-    accepted = await svc.publish_post(SPACE_ID, _inner(), [_listing(world)])
-    assert accepted == []
-    assert anon.posts == []
-    assert not svc._retry.pending(f"listing:{GFS_ID}")
-
-
-async def test_a_delegated_admin_notice_reaches_every_listed_server(world):
-    """The seed-only notice is anonymous: it goes to the listing target too,
-    over its own session — the owner's (identified) one never does."""
-    world["spaces"].seeds[SPACE_ID] = SPACE_SEED
-    world["spaces"].spaces[SPACE_ID] = _space(owner="someone-else")
-    identified, _anon, listing = _multi_world(world)
-    svc = world["svc"]
-    svc._writer_certs.pin_epochs.add(3)
-    await svc.announce_epoch(SPACE_ID)
-    [(url, body)] = listing.posts
-    assert url.endswith(f"/gfs/spaces/{SPACE_ID}/epoch")
-    assert "owning_instance" not in body and "writer_key_cert" in body
-    assert identified.posts == []
-    outcome = await svc._post_notice(
-        _listing(world), SPACE_ID, {"epoch": 3, "owner": True}
-    )
-    assert outcome.kind == "permanent"
-
-
-async def test_the_owner_notice_goes_only_to_its_own_connections(world):
-    identified, _anon, listing = _multi_world(world)
-    owner = _owner_svc(world)
-    await owner.announce_epoch(SPACE_ID)
-    assert listing.posts == []
-    assert _tail(identified.posts) == ["epoch"]
-
-
-async def test_auto_subscribe_never_goes_to_a_listing_target(world):
-    svc = world["svc"]
-    assert await svc._subscribe([_listing(world)], SPACE_ID) == 0
-    assert world["gfs"].subscribed == []
-
-
-class _OldSuiteNode:
-    """An older node of a cluster mid-upgrade: 400 to any body carrying
-    ``payload_suite`` (an unknown field there), 200 otherwise."""
-
-    def __init__(self) -> None:
-        self.bodies: list[dict] = []
-
-    def app(self) -> web.Application:
-        async def handler(request: web.Request) -> web.Response:
-            body = await request.json()
-            self.bodies.append(body)
-            if "payload_suite" in body:
-                raise web.HTTPBadRequest(reason="unexpected or missing fields")
-            return web.json_response({"status": "published"})
-
-        app = web.Application()
-        app.router.add_post("/gfs/member-publish-anon", handler)
-        return app
-
-
-async def test_an_older_node_refusing_the_suite_gets_the_json_item(world):
-    """The capability came from a newer node; the balancer sent the
-    compressed request to an older one, which refuses the unknown field. The
-    JSON item goes out at once, and that space stays on JSON there."""
-    svc = world["svc"]
-    world["gfs"].zlib = True
-    old = _OldSuiteNode()
-    async with TestServer(old.app()) as server:
-        conn = replace(world["conn"], inbox_url=str(server.make_url("")).rstrip("/"))
-        data = {
-            "epoch": 3,
-            "payload": "anNvbg",
-            "compressed_payloads": {"zlib1": "emxpYg"},
-        }
-        item = GfsPublish(space_id=SPACE_ID, event_type="space_item_anon", payload=data)
-        outcome = await svc._send(conn, item)
-    assert outcome.kind == "delivered"
-    assert [b.get("payload_suite") for b in old.bodies] == ["zlib1", None]
-    assert [b["payload"] for b in old.bodies] == ["emxpYg", "anNvbg"]
-    assert world["gfs"].suite_refused == {(conn.id, SPACE_ID, "zlib1")}
-
-
-class _NoDictFollowerNode:
-    """A GFS where one follower reads zlib1 but not the dictionary: 409
-    ``payload_suite_unsupported`` to ``zlib1+dict1``, 200 otherwise."""
-
-    def __init__(self) -> None:
-        self.bodies: list[dict] = []
-
-    def app(self) -> web.Application:
-        async def handler(request: web.Request) -> web.Response:
-            body = await request.json()
-            self.bodies.append(body)
-            if body.get("payload_suite") == "zlib1+dict1":
-                return web.json_response(
-                    {"error": "payload_suite_unsupported"}, status=409
-                )
-            return web.json_response({"status": "published"})
-
-        app = web.Application()
-        app.router.add_post("/gfs/member-publish-anon", handler)
-        return app
-
-
-async def _send_both_copies(world, node) -> tuple[object, object]:
-    svc = world["svc"]
-    async with TestServer(node.app()) as server:
-        conn = replace(world["conn"], inbox_url=str(server.make_url("")).rstrip("/"))
-        data = {
-            "epoch": 3,
-            "payload": "anNvbg",
-            "compressed_payloads": {"zlib1+dict1": "ZGljdA", "zlib1": "emxpYg"},
-        }
-        item = GfsPublish(space_id=SPACE_ID, event_type="space_item_anon", payload=data)
-        return conn, await svc._send(conn, item)
-
-
-async def test_a_dictionary_refusal_falls_back_to_zlib1_not_json(world):
-    """The server proved both suites, but a follower there reads plain
-    zlib1 only: the dictionary copy is refused (409), the zlib1 copy goes
-    at once — not JSON — and the dictionary is skipped there for an hour."""
-    world["gfs"].zlib = True
-    world["gfs"].dict1 = True
-    node = _NoDictFollowerNode()
-    conn, outcome = await _send_both_copies(world, node)
-    assert outcome.kind == "delivered"
-    assert [b.get("payload_suite") for b in node.bodies] == ["zlib1+dict1", "zlib1"]
-    assert [b["payload"] for b in node.bodies] == ["ZGljdA", "emxpYg"]
-    assert world["gfs"].suite_refused == {(conn.id, SPACE_ID, "zlib1+dict1")}
-
-
-async def test_a_server_without_the_dictionary_gets_the_zlib1_copy(world):
-    world["gfs"].zlib = True
-    node = _NoDictFollowerNode()
-    _conn, outcome = await _send_both_copies(world, node)
-    assert outcome.kind == "delivered"
-    assert [b.get("payload_suite") for b in node.bodies] == ["zlib1"]
-
-
-async def test_an_old_node_refusing_both_suites_ends_on_json(world):
-    """An older node that knows neither suite (400): dictionary, then zlib1,
-    then JSON — each refusal noted, the item delivered."""
-    world["gfs"].zlib = True
-    world["gfs"].dict1 = True
-    old = _OldSuiteNode()
-    conn, outcome = await _send_both_copies(world, old)
-    assert outcome.kind == "delivered"
-    assert [b.get("payload_suite") for b in old.bodies] == [
-        "zlib1+dict1",
-        "zlib1",
-        None,
-    ]
-    assert world["gfs"].suite_refused == {
-        (conn.id, SPACE_ID, "zlib1+dict1"),
-        (conn.id, SPACE_ID, "zlib1"),
-    }
+    assert _cert_lets(cert, AUTHOR, item_type, features) is ok
+    assert not _cert_lets({"scope": "comment"}, AUTHOR, "comment", features)

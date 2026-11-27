@@ -84,6 +84,14 @@ FOLLOWER_COUNT_SQL = """(
           AND rf.role = 'subscriber')
 )"""
 
+#: The follower count a space's listing declares: :data:`FOLLOWER_COUNT_SQL`
+#: while the space takes followers (``allow_subscribers``), else ``NULL`` —
+#: a space without followers declares no follower count at all, so every
+#: surface (GFS pages, Discover, the space page) shows only its members.
+LISTED_FOLLOWER_COUNT_SQL = (
+    f"(CASE WHEN s.allow_subscribers = 1 THEN {FOLLOWER_COUNT_SQL} END)"
+)
+
 
 @runtime_checkable
 class AbstractSpaceRepo(Protocol):
@@ -130,16 +138,6 @@ class AbstractSpaceRepo(Protocol):
         older_than: int | None = None,
     ) -> bool: ...
     async def mark_seed_shared(self, space_id: str) -> None: ...
-    async def set_mirror_provenance(
-        self, space_id: str, *, gfs_id: str, rotation_seq: int
-    ) -> None: ...
-    async def get_mirror_provenance(self, space_id: str) -> tuple[str | None, int]: ...
-    async def rebind_mirror_provenance(
-        self, space_id: str, *, from_gfs_id: str, to_gfs_id: str
-    ) -> bool: ...
-    async def adopt_gfs_pin(
-        self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
-    ) -> bool: ...
     async def get_seed_shared_epoch(self, space_id: str) -> int | None: ...
     async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None: ...
     async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None: ...
@@ -241,7 +239,6 @@ class AbstractSpaceRepo(Protocol):
         picture_hash: str | None | object = None,
     ) -> None: ...
     async def list_local_member_user_ids(self, space_id: str) -> list[str]: ...
-    async def list_subscribed_space_ids(self) -> list[str]: ...
 
     # ── Instances that mirror this space ───────────────────────────────
     async def add_space_instance(self, space_id: str, instance_id: str) -> None: ...
@@ -271,10 +268,30 @@ class AbstractSpaceRepo(Protocol):
         *,
         identity_pk: str | None = None,
         reason: str | None = None,
+        owner_ban: bool = False,
     ) -> None: ...
     async def unban_member(self, space_id: str, user_id: str) -> None: ...
     async def is_banned(self, space_id: str, user_id: str) -> bool: ...
     async def list_bans(self, space_id: str) -> list[dict]: ...
+    async def ban_household(
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        reason: str | None = None,
+        banned_by: str | None = None,
+        owner_ban: bool = False,
+    ) -> None: ...
+    async def unban_household(self, space_id: str, instance_id: str) -> None: ...
+    async def ban_banned_by(
+        self,
+        space_id: str,
+        *,
+        user_id: str | None = None,
+        instance_id: str | None = None,
+    ) -> str | None: ...
+    async def is_household_banned(self, space_id: str, instance_id: str) -> bool: ...
+    async def list_household_bans(self, space_id: str) -> list[dict]: ...
 
     # ── Moderation queue ──────────────────────────────────────────────
     async def insert_moderation_item(self, item: SpaceModerationItem) -> None: ...
@@ -435,7 +452,7 @@ class AbstractSpaceRepo(Protocol):
         user_id: str,
         *,
         message: str | None = None,
-        ttl_days: int = 7,
+        ttl_days: float = 7,
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
@@ -445,6 +462,13 @@ class AbstractSpaceRepo(Protocol):
     ) -> str: ...
     async def get_join_request(self, request_id: str) -> dict | None: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
+    async def has_live_pending_join_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_applicant_instance_id: str,
+    ) -> bool: ...
     async def has_approved_join_request(
         self,
         space_id: str,
@@ -474,6 +498,7 @@ class AbstractSpaceRepo(Protocol):
         reviewed_by: str | None = None,
     ) -> bool: ...
     async def list_expired_join_requests(self) -> list[dict]: ...
+    async def prune_settled_remote_approvals(self, *, older_than_days: int) -> int: ...
     async def set_join_request_gfs_relay(
         self, request_id: str, gfs_relay: str
     ) -> None: ...
@@ -1119,55 +1144,6 @@ class SqliteSpaceRepo:
             (space_id,),
         )
 
-    async def set_mirror_provenance(
-        self, space_id: str, *, gfs_id: str, rotation_seq: int
-    ) -> None:
-        """Record which GFS connection seated this follower mirror, and the
-        ``authority_rotation_seq`` it showed then (v_44)."""
-        await self._db.enqueue(
-            "UPDATE spaces SET mirror_gfs_id=?, gfs_rotation_seq=? WHERE id=?",
-            (gfs_id, rotation_seq, space_id),
-        )
-
-    async def get_mirror_provenance(self, space_id: str) -> tuple[str | None, int]:
-        row = await self._db.fetchone(
-            "SELECT mirror_gfs_id, gfs_rotation_seq FROM spaces WHERE id=?",
-            (space_id,),
-        )
-        if row is None:
-            return None, 0
-        return row["mirror_gfs_id"], int(row["gfs_rotation_seq"] or 0)
-
-    async def rebind_mirror_provenance(
-        self, space_id: str, *, from_gfs_id: str, to_gfs_id: str
-    ) -> bool:
-        """Move a mirror's provenance to a re-paired connection of the SAME
-        server (v_44 pin-heal anchor). Compare-and-set on the old connection
-        id; ``gfs_rotation_seq`` is kept, so the heal still only moves to a
-        strictly higher seq. The caller proves same server + same key."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE spaces SET mirror_gfs_id=? WHERE id=? AND mirror_gfs_id=?",
-            (to_gfs_id, space_id, from_gfs_id),
-        )
-        return changed > 0
-
-    async def adopt_gfs_pin(
-        self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
-    ) -> bool:
-        """A FOLLOWER re-pins from the GFS that seated its mirror (v_44).
-
-        Compare-and-set: only that connection (``mirror_gfs_id``), only to a
-        strictly higher ``rotation_seq``. Clears any seed held. Never touches
-        ``authority_key_epoch`` — that orders owner-certified epochs.
-        """
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE spaces SET identity_public_key=?, gfs_rotation_seq=?,"
-            " identity_private_key=NULL WHERE id=? AND mirror_gfs_id=?"
-            " AND gfs_rotation_seq < ?",
-            (public_key_hex, rotation_seq, space_id, gfs_id, rotation_seq),
-        )
-        return changed > 0
-
     async def mark_seed_shared(self, space_id: str) -> None:
         """Owner side: the signing seed for the CURRENT key was just shared
         with an admin household."""
@@ -1390,7 +1366,7 @@ class SqliteSpaceRepo:
             f"""
             SELECT s.*,
                    {MEMBER_COUNT_SQL} AS listing_member_count,
-                   {FOLLOWER_COUNT_SQL} AS listing_follower_count,
+                   {LISTED_FOLLOWER_COUNT_SQL} AS listing_follower_count,
                    (SELECT m.role FROM space_members m
                      WHERE m.space_id = s.id AND m.user_id = ?)
                        AS listing_caller_role,
@@ -1414,7 +1390,7 @@ class SqliteSpaceRepo:
                 HostedSpaceListing(
                     space=space,
                     member_count=int(d["listing_member_count"] or 0),
-                    follower_count=int(d["listing_follower_count"] or 0),
+                    follower_count=_opt_count(d["listing_follower_count"]),
                     caller_role=d["listing_caller_role"],
                     caller_banned=bool(d["listing_caller_banned"]),
                 )
@@ -1460,18 +1436,21 @@ class SqliteSpaceRepo:
 
     async def listing_counts(self, space_id: str) -> SpaceListingCounts | None:
         """The space's listing counts — members (:data:`MEMBER_COUNT_SQL`)
-        and followers (:data:`FOLLOWER_COUNT_SQL`) in one query; ``None`` for
-        an unknown id. The one builder every listing path shares (the GFS
-        publish, the paired-household directory, the space page)."""
+        and followers (:data:`LISTED_FOLLOWER_COUNT_SQL`: ``None`` for a
+        space that takes no followers) in one query; ``None`` for an unknown
+        id. The one builder every listing path shares (the GFS publish, the
+        paired-household directory, the space page)."""
         row = await self._db.fetchone(
-            f"SELECT {MEMBER_COUNT_SQL} AS members, {FOLLOWER_COUNT_SQL} AS followers"
+            f"SELECT {MEMBER_COUNT_SQL} AS members,"
+            f" {LISTED_FOLLOWER_COUNT_SQL} AS followers"
             " FROM spaces s WHERE s.id = ?",
             (space_id,),
         )
         if row is None:
             return None
         return SpaceListingCounts(
-            member_count=int(row["members"]), follower_count=int(row["followers"])
+            member_count=int(row["members"]),
+            follower_count=_opt_count(row["followers"]),
         )
 
     async def holds_roster(self, space_id: str) -> bool:
@@ -1604,7 +1583,7 @@ class SqliteSpaceRepo:
         first. Dissolved spaces excluded.
 
         Subscriptions are read-only memberships for public / global
-        spaces — see :class:`SpaceService.subscribe_to_space` for the
+        spaces — see :meth:`SpaceService.follow_space` for the
         write path. Distinct from the
         ``preferences_json['followed_space_ids']`` dashboard pin list
         used by :mod:`corner_service`, which is a per-user UI pin
@@ -1626,28 +1605,6 @@ class SqliteSpaceRepo:
             {"space_id": r["space_id"], "subscribed_at": r["subscribed_at"]}
             for r in rows
         ]
-
-    async def list_subscribed_space_ids(self) -> list[str]:
-        """Return every space id this HOUSEHOLD holds a subscription on.
-
-        Household-wide (any local user with ``role='subscriber'``), unlike
-        :meth:`list_subscriptions_for_user` which answers per user. The GFS
-        seat is registered once per household, not per user, so the reconnect
-        self-heal (``GfsSpaceMirrorService.resubscribe_all``) needs the
-        household view. Dissolved spaces excluded.
-        """
-        rows = await self._db.fetchall(
-            """
-            SELECT DISTINCT m.space_id AS space_id
-              FROM space_members m
-              JOIN users u ON u.user_id = m.user_id
-              JOIN spaces s ON s.id = m.space_id
-             WHERE m.role = 'subscriber'
-               AND s.dissolved = 0
-             ORDER BY m.space_id
-            """,
-        )
-        return [r["space_id"] for r in rows]
 
     async def list_all(self) -> list[Space]:
         """Return every active space hosted on this instance (admin).
@@ -2072,7 +2029,12 @@ class SqliteSpaceRepo:
         *,
         identity_pk: str | None = None,
         reason: str | None = None,
+        owner_ban: bool = False,
     ) -> None:
+        """Ban ``user_id`` and drop its seat. A re-ban keeps the first
+        banner (P7b Fable review I1 — an admin's re-ban never turns the
+        owner's ban into its own) unless ``owner_ban``: the OWNER's ban
+        always becomes the owner's (re-review I-B)."""
         # One transaction: the ban row and the seat delete land together
         # or not at all. Two ``enqueue`` calls were two transactions (each
         # awaited its own commit, and the writer isolates statements in
@@ -2087,10 +2049,12 @@ class SqliteSpaceRepo:
                 VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(space_id, user_id) DO UPDATE SET
                     identity_pk=excluded.identity_pk,
-                    banned_by=excluded.banned_by,
+                    banned_by=CASE WHEN ? THEN excluded.banned_by
+                        ELSE COALESCE(space_bans.banned_by, excluded.banned_by)
+                    END,
                     reason=excluded.reason
                 """,
-                (space_id, user_id, identity_pk, banned_by, reason),
+                (space_id, user_id, identity_pk, banned_by, reason, int(owner_ban)),
             )
             await uow.exec(
                 "DELETE FROM space_members WHERE space_id=? AND user_id=?",
@@ -2113,6 +2077,80 @@ class SqliteSpaceRepo:
     async def list_bans(self, space_id: str) -> list[dict]:
         rows = await self._db.fetchall(
             "SELECT * FROM space_bans WHERE space_id=? ORDER BY banned_at",
+            (space_id,),
+        )
+        return rows_to_dicts(rows)
+
+    # A household ban (``space_instance_bans``, 0001) covers every person of
+    # that household. The §24.11 ban step and the space fan-out read the
+    # same table (``federation_repo``); seat removal is the service's job.
+
+    async def ban_household(
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        reason: str | None = None,
+        banned_by: str | None = None,
+        owner_ban: bool = False,
+    ) -> None:
+        """Ban a whole household; the banner rule of :meth:`ban_member`."""
+        await self._db.enqueue(
+            """
+            INSERT INTO space_instance_bans(space_id, instance_id, reason, banned_by)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(space_id, instance_id) DO UPDATE SET
+                reason=excluded.reason,
+                -- An unknown banner (NULL, before 0157) takes the first named.
+                banned_by=CASE WHEN ? THEN excluded.banned_by
+                    ELSE COALESCE(space_instance_bans.banned_by, excluded.banned_by)
+                END
+            """,
+            (space_id, instance_id, reason, banned_by, int(owner_ban)),
+        )
+
+    async def ban_banned_by(
+        self,
+        space_id: str,
+        *,
+        user_id: str | None = None,
+        instance_id: str | None = None,
+    ) -> str | None:
+        """Who banned the person ``user_id`` or the household
+        ``instance_id`` (P7b: only the owner lifts the owner's ban);
+        ``None`` for no ban or an unknown banner."""
+        if user_id:
+            row = await self._db.fetchone(
+                "SELECT banned_by FROM space_bans WHERE space_id=? AND user_id=?",
+                (space_id, user_id),
+            )
+        elif instance_id:
+            row = await self._db.fetchone(
+                "SELECT banned_by FROM space_instance_bans"
+                " WHERE space_id=? AND instance_id=?",
+                (space_id, instance_id),
+            )
+        else:
+            return None
+        return str(row[0]) if row is not None and row[0] else None
+
+    async def unban_household(self, space_id: str, instance_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+
+    async def is_household_banned(self, space_id: str, instance_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+        return row is not None
+
+    async def list_household_bans(self, space_id: str) -> list[dict]:
+        rows = await self._db.fetchall(
+            "SELECT space_id, instance_id, banned_at, reason, banned_by"
+            " FROM space_instance_bans WHERE space_id=? ORDER BY banned_at",
             (space_id,),
         )
         return rows_to_dicts(rows)
@@ -2577,7 +2615,8 @@ class SqliteSpaceRepo:
 
         Returns ``None`` if the token does not exist, has expired, has
         already been fully consumed, or — when ``redeemer_user_id`` is
-        given — that user is banned from the token's space.
+        given — that user is banned from the token's space, or (with
+        ``redeemer_instance_id``) that household is (P7b household ban).
 
         **``redeemer_user_id`` folds the §13.7 ban into the same atomic
         UPDATE.** The cross-instance redeem used to consume first and check
@@ -2619,6 +2658,15 @@ class SqliteSpaceRepo:
                                AND space_bans.user_id = ?
                         )
                    )
+                   AND (
+                        ? IS NULL
+                        OR NOT EXISTS (
+                            SELECT 1 FROM space_instance_bans
+                             WHERE space_instance_bans.space_id
+                                   = space_invite_tokens.space_id
+                               AND space_instance_bans.instance_id = ?
+                        )
+                   )
                    AND (bound_instance_id IS NULL OR bound_instance_id IS ?)
                    AND (bound_user_id IS NULL OR bound_user_id IS ?)
                 """,
@@ -2626,6 +2674,8 @@ class SqliteSpaceRepo:
                     token,
                     redeemer_user_id,
                     redeemer_user_id,
+                    redeemer_instance_id,
+                    redeemer_instance_id,
                     redeemer_instance_id,
                     redeemer_user_id,
                 ),
@@ -2635,7 +2685,7 @@ class SqliteSpaceRepo:
             row = conn.execute(
                 """
                 SELECT space_id, created_by, uses_remaining, expires_at, role,
-                       via, gfs_id
+                       via, gfs_id, bound_instance_id
                   FROM space_invite_tokens WHERE token=?
                 """,
                 (token,),
@@ -2659,6 +2709,9 @@ class SqliteSpaceRepo:
                 # grandfathered link that unlocks ``private_gfs`` makes it
                 # the space's channel server.
                 "gfs_id": row[6],
+                # Migration 0143 — the household an approval's token is
+                # bound to (``None`` for an ordinary link).
+                "bound_instance_id": row[7],
             }
 
         return await self._db.transact(_run)
@@ -2707,7 +2760,8 @@ class SqliteSpaceRepo:
 
         Expired and exhausted tokens are excluded: they are not links any
         more, and listing them would invite an owner to "revoke" rows that
-        already grant nothing. The expiry comparison wraps both sides in
+        already grant nothing. So are tokens bound to one household and
+        person — an approval's answer, never a link. The expiry comparison wraps both sides in
         ``datetime()`` for the same reason
         :meth:`consume_invite_token` does — the two stored shapes
         (``…T…+00:00`` and ``… …``) do not compare lexically.
@@ -2724,6 +2778,9 @@ class SqliteSpaceRepo:
                     expires_at IS NULL
                     OR datetime(expires_at) > datetime('now')
                )
+               -- A bound token answers one approval (an admin's or a
+               -- follow's, v_96); it is not a link the admins share.
+               AND bound_instance_id IS NULL
              ORDER BY created_at DESC, token DESC
             """,
             (space_id,),
@@ -3008,16 +3065,15 @@ class SqliteSpaceRepo:
         """Stubs a cross-household invitation seated before migration 0093
         that nobody here ever joined: a space we do not own, with no local
         member and at least one received invitation, none of them accepted.
-        Never a GFS-mirror stub (``mirror_gfs_id`` or a recorded
-        ``gfs_space_seats`` row — those are torn down through the mirror's
-        own path, with the GFS unsubscribe); invite-link stubs have no
-        invitation row."""
+        A follower is a member (read-only role), so its space is never
+        matched; a row left from a GFS follow-only mirror (``mirror_gfs_id``)
+        is never matched either — migration 0155 owns those. Invite-link
+        stubs have no invitation row."""
         rows = await self._db.fetchall(
             """
             SELECT s.id FROM spaces s
              WHERE s.owner_instance_id != ?
                AND s.mirror_gfs_id IS NULL
-               AND NOT EXISTS (SELECT 1 FROM gfs_space_seats g WHERE g.space_id = s.id)
                AND NOT EXISTS (SELECT 1 FROM space_members m WHERE m.space_id = s.id)
                AND EXISTS (
                    SELECT 1 FROM space_invitations i
@@ -3070,7 +3126,7 @@ class SqliteSpaceRepo:
         user_id: str,
         *,
         message: str | None = None,
-        ttl_days: int = 7,
+        ttl_days: float = 7,
         remote_applicant_instance_id: str | None = None,
         remote_applicant_pk: str | None = None,
         request_id: str | None = None,
@@ -3143,6 +3199,33 @@ class SqliteSpaceRepo:
                 return str(row["id"])
         return rid
 
+    async def has_live_pending_join_request(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        remote_applicant_instance_id: str,
+    ) -> bool:
+        """Is ``user_id``'s request to the household
+        ``remote_applicant_instance_id`` for ``space_id`` still pending AND
+        not past its ``expires_at``? The applicant's "already asked" check
+        for a follow (v_96): a request the host dropped without a word is
+        asked again once it expired, before the sweep marks it. A pending
+        admin elevation is not a join request."""
+        row = await self._db.fetchone(
+            """
+            SELECT 1 FROM space_join_requests
+             WHERE space_id=? AND user_id=?
+               AND remote_applicant_instance_id=?
+               AND status='pending'
+               AND IFNULL(requested_role, '') != 'admin'
+               AND datetime(expires_at) > datetime('now')
+             LIMIT 1
+            """,
+            (space_id, user_id, remote_applicant_instance_id),
+        )
+        return row is not None
+
     async def has_approved_join_request(
         self,
         space_id: str,
@@ -3154,7 +3237,11 @@ class SqliteSpaceRepo:
         """Did an admin approve ``user_id`` of ``remote_applicant_instance_id``
         joining ``space_id`` in the last ``within_days`` days? (A local
         community seats such a person on their redeem without another
-        check: the approval was the decision.)"""
+        check: the approval was the decision.) An auto-approved follow
+        (v_96, ``reviewed_by`` NULL) counts too: it is approved only after
+        the same area check said inside (an edge or outside follow is
+        refused — following a local community is inside only), so it
+        stands for that decision."""
         row = await self._db.fetchone(
             """
             SELECT 1 FROM space_join_requests
@@ -3335,6 +3422,71 @@ class SqliteSpaceRepo:
         )
         return rows_to_dicts(rows)
 
+    async def prune_settled_remote_approvals(self, *, older_than_days: int) -> int:
+        """Delete what a remote approval leaves behind once nothing can use
+        it any more (v_96: GFS follows add up to 120 of each per hour per
+        space). Returns how many rows went.
+
+        * An automatic (follow) approval — ``approved``, ``reviewed_by``
+          NULL, a remote household — answered more than
+          ``older_than_days`` ago (past the window
+          :meth:`has_approved_join_request` honours it for), with no live
+          token bound to that household and person left. An admin's
+          approval stays (the admins' record).
+        * A token bound to one household and person (an approval's answer,
+          never a link) created more than ``older_than_days`` ago and spent
+          or expired: a lost ACK's retry reads a spent one
+          (:meth:`get_invite_token_space_id`) only while the relay queue
+          holds it, a day.
+
+        ``expires_at`` comparisons go through ``datetime()``
+        (:meth:`consume_invite_token`); an unreadable one reads as expired.
+        """
+        window = f"-{int(older_than_days)} days"
+
+        def _run(conn) -> int:
+            rows = conn.execute(
+                """
+                DELETE FROM space_join_requests
+                 WHERE status='approved'
+                   AND reviewed_by IS NULL
+                   AND requested_role IS NULL
+                   AND remote_applicant_instance_id IS NOT NULL
+                   AND datetime(reviewed_at) < datetime('now', ?)
+                   AND NOT EXISTS (
+                        SELECT 1 FROM space_invite_tokens AS t
+                         WHERE t.space_id = space_join_requests.space_id
+                           AND t.bound_instance_id
+                               = space_join_requests.remote_applicant_instance_id
+                           AND t.bound_user_id = space_join_requests.user_id
+                           AND t.uses_remaining > 0
+                           AND (
+                                t.expires_at IS NULL
+                                OR datetime(t.expires_at) > datetime('now')
+                           )
+                   )
+                """,
+                (window,),
+            ).rowcount
+            tokens = conn.execute(
+                """
+                DELETE FROM space_invite_tokens
+                 WHERE bound_instance_id IS NOT NULL
+                   AND datetime(created_at) < datetime('now', ?)
+                   AND (
+                        uses_remaining <= 0
+                        OR (
+                            expires_at IS NOT NULL
+                            AND IFNULL(datetime(expires_at) <= datetime('now'), 1)
+                        )
+                   )
+                """,
+                (window,),
+            ).rowcount
+            return int(rows) + int(tokens)
+
+        return await self._db.transact(_run)
+
     # ── Sidebar + aliases ──────────────────────────────────────────────
 
     async def pin_sidebar(
@@ -3448,6 +3600,13 @@ class SqliteSpaceRepo:
 
 
 # ─── Row → domain mapping ─────────────────────────────────────────────────
+
+
+def _opt_count(value: int | None) -> int | None:
+    """A count column that may be ``NULL`` (no number declared). Only the
+    follower count can be (``LISTED_FOLLOWER_COUNT_SQL``); a member count
+    always has a number."""
+    return None if value is None else int(value)
 
 
 def _row_to_space(row: dict | None) -> Space | None:

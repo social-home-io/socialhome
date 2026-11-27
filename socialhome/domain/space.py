@@ -22,7 +22,7 @@ import copy
 import math
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -191,6 +191,11 @@ def role_change_allowed(
     except ValueError:
         return False
     if current is SpaceRole.OWNER or new is SpaceRole.OWNER:
+        return False
+    # A follower seat moves only through an approved join or redeem of that
+    # person's own (step up, owner 2026-11-26) — never an admin's promote of
+    # someone who did not ask — and no role change makes a follower.
+    if current is SpaceRole.SUBSCRIBER or new is SpaceRole.SUBSCRIBER:
         return False
     if actor is SpaceRole.OWNER:
         return new in (SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER)
@@ -1289,6 +1294,28 @@ class SubscribeNotAllowedError(CodedError, SpacePermissionError):
     detail = "this space does not allow subscribers"
 
 
+class BanNotAllowedError(CodedError, SpacePermissionError):
+    """A ban that may not be made: the owner, the owner household's people
+    (only the owner household decides about them) or a household that can't
+    be banned (the owner's, our own). ``params.target`` is ``person`` or
+    ``household``."""
+
+    status = 403
+    code = "BAN_NOT_ALLOWED"
+
+    def __init__(self, detail: str, *, target: str) -> None:
+        super().__init__(detail, params={"target": target})
+
+
+class OwnerBanError(CodedError, SpacePermissionError):
+    """An admin tried to lift a ban the space owner made — only the owner
+    lifts the owner's ban."""
+
+    status = 403
+    code = "OWNER_BAN"
+    detail = "only the owner can lift the owner's ban"
+
+
 class SubscriberReadOnlyError(CodedError, SpacePermissionError):
     """A subscriber (follower) tried to post, comment or react where
     followers may only read. ``params.action`` is the attempted action."""
@@ -1513,6 +1540,11 @@ class HostTooOldError(Exception):
       forwarded to the host, which must apply ``set_member_role`` (v_47).
     * ``"invite_link"`` — an invite link minted on a member household is
       forwarded to the host, which must mint it and answer (v_52).
+    * ``"ban"`` — a household ban (or its unban) made on a member
+      household is forwarded to the host, which must know household bans
+      (P7b, the follower-seats version).
+    * ``"follow"`` — a follow is a join request for the read-only role,
+      which the host must approve on its own (v_96).
     """
 
     def __init__(self, host_instance_id: str, *, feature: str = "moderation") -> None:
@@ -1523,6 +1555,9 @@ class HostTooOldError(Exception):
             else "the space's home household needs an update before its "
             "invite links can be managed from another household"
             if feature == "invite_link"
+            else "the space's home household must be updated before the "
+            "space can be followed"
+            if feature == "follow"
             else "the space's host household must be updated before roles "
             "can be changed from another household"
         )
@@ -1735,6 +1770,31 @@ class Space:
     owner_statement: str | None = None
 
 
+def takes_follows(space: Space | None, own_instance_id: str) -> bool:
+    """May another household's person follow ``space`` here (v_96)? Only a
+    live (not dissolved, not archived) ``public`` / ``global`` space THIS
+    household hosts with ``allow_subscribers`` on — whatever its join mode.
+    The one gate every remote follow path checks (paired / mesh inbound, the
+    GFS bootstrap, the approver)."""
+    return (
+        space is not None
+        and bool(own_instance_id)
+        and space.owner_instance_id == own_instance_id
+        and not space.dissolved
+        and not space.archived
+        and space.space_type in PUBLIC_SPACE_TIERS
+        and space.features.allow_subscribers
+    )
+
+
+#: The host's automatic approval of a remote follow (v_96) —
+#: ``SpaceService.approve_remote_follow``: keyword-only ``space_id``,
+#: ``instance_id``, ``user_id``, ``request_id``, ``applicant_identity_pk``,
+#: ``applicant_anchor`` (the P5 person-ID proof), ``applicant_pk``,
+#: ``area_verdict``, ``gfs_relay``; ``True`` when it approved.
+FollowApprover = Callable[..., Awaitable[bool]]
+
+
 @dataclass(slots=True, frozen=True)
 class HostedSpaceListing:
     """A space THIS household hosts, as one local user sees it in the
@@ -1746,8 +1806,9 @@ class HostedSpaceListing:
     member_count: int
     caller_role: str | None = None
     caller_banned: bool = False
-    #: Live follower seats (``space_repo.FOLLOWER_COUNT_SQL``).
-    follower_count: int = 0
+    #: Live follower seats (``space_repo.LISTED_FOLLOWER_COUNT_SQL``);
+    #: ``None`` for a space that takes no followers.
+    follower_count: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -75,7 +75,7 @@ INVITE_BLOB_MAX_BYTES: int = 4096
 #: moved on. The issuing household may always mint a fresh one.
 INVITE_MAX_TTL_SECONDS: int = 30 * 24 * 60 * 60
 
-#: Per-INSTANCE mint cap per minute. Unlike ``/gfs/publish`` and
+#: Per-INSTANCE mint cap per minute. Unlike the anonymous channel publish and
 #: ``/gfs/envelope``, the mint is signature-authenticated, so the accountable
 #: identity is known before anything is written and the limiter keys on the
 #: household rather than on an address it can rotate. 20/min is far above a

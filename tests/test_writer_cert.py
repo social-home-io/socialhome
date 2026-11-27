@@ -284,3 +284,62 @@ def test_too_many_users_cannot_be_bound():
         bind_writer_users(
             _issue(), space_seed=SPACE_SEED, user_ids=[f"u{i}" for i in range(65)]
         )
+
+
+# ── v_96 reader flag ──────────────────────────────────────────────────────
+
+
+def test_a_reader_cert_round_trips_and_verifies():
+    cert = _issue(scope=WRITER_SCOPE_COMMENT, reader=True)
+    assert cert.reader is True
+    _verify(cert, required_scope=WRITER_SCOPE_COMMENT)
+    again = WriterCert.from_wire(cert.to_wire())
+    assert again.reader is True
+    _verify(again, required_scope=WRITER_SCOPE_COMMENT)
+    bound = bind_writer_users(cert, space_seed=SPACE_SEED, user_ids=["u-1"])
+    assert bound.reader is True
+    parsed = WriterCert.from_wire(bound.to_wire())
+    _verify(parsed, required_scope=WRITER_SCOPE_COMMENT)
+    verify_writer_users(parsed, space_pubkey=SPACE_PK, author_user_id="u-1")
+
+
+def test_a_reader_cert_needs_comment_scope_to_issue():
+    with pytest.raises(ValueError):
+        _issue(scope=WRITER_SCOPE_WRITE, reader=True)
+
+
+def test_stripping_reader_breaks_the_signature():
+    wire = _issue(scope=WRITER_SCOPE_COMMENT, reader=True).to_wire()
+    del wire["reader"]
+    with pytest.raises(InvalidWriterCert):
+        _verify(WriterCert.from_wire(wire), required_scope=WRITER_SCOPE_COMMENT)
+
+
+def test_adding_reader_to_a_non_reader_cert_breaks_the_signature():
+    wire = _issue(scope=WRITER_SCOPE_COMMENT).to_wire()
+    wire["reader"] = True
+    with pytest.raises(InvalidWriterCert):
+        _verify(WriterCert.from_wire(wire), required_scope=WRITER_SCOPE_COMMENT)
+
+
+def test_flipping_a_reader_cert_to_write_is_refused():
+    wire = _issue(scope=WRITER_SCOPE_COMMENT, reader=True).to_wire()
+    wire["scope"] = WRITER_SCOPE_WRITE
+    with pytest.raises(ValueError):
+        WriterCert.from_wire(wire)
+    # With the reader flag stripped too, the signature no longer holds.
+    del wire["reader"]
+    with pytest.raises(InvalidWriterCert):
+        _verify(WriterCert.from_wire(wire))
+
+
+def test_non_reader_signing_bytes_are_unchanged():
+    """A pre-v_96 cert keeps byte-identical signing bytes: pinned against the
+    body exactly as v_49 built it (no ``reader`` key)."""
+    cert = _issue(scope=WRITER_SCOPE_COMMENT, issued_at=1_700_000_000)
+    v49_body = (
+        b'{"cert_suite":"ed25519","epoch":4,"instance_pk":"'
+        + b64url_encode(AUTHOR_PK).encode()
+        + b'","issued_at":1700000000,"scope":"comment","space_id":"sp-1"}'
+    )
+    assert writer_cert_signing_bytes(cert) == b"space-writer-cert:v1:" + v49_body

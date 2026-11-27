@@ -43,7 +43,7 @@ import logging
 import secrets
 import uuid
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -63,6 +63,7 @@ from ..domain.member_card import MemberCard
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
+    PUBLIC_SPACE_TIERS,
     JoinOwner,
     JoinRequestSentError,
     LocalAreaRateLimitedError,
@@ -87,6 +88,7 @@ from ..services.space_authority_pin import (
     owner_authority_cert_via,
     owner_statement_via,
 )
+from ..services.space_member_guard import banned_from_space, user_id_proven
 from ..services.space_service import (
     UnfittableImages,
     _coerce_min_age,
@@ -102,12 +104,17 @@ from .invite_bootstrap import (
     KIND_REDEEM_DENY,
     BootstrapEnvelopeTooLarge,
     InviteBootstrapHint,
+    body_identity_pk,
     derive_space_session_keys,
     seal_bootstrap_envelope,
     validate_bootstrap_body,
     verify_peer_keywrap,
 )
-from .mesh_member_claim import mesh_member_claim, parse_mesh_member_claim
+from .mesh_member_claim import (
+    mesh_member_claim,
+    parse_mesh_member_claim,
+    sender_identity_pk,
+)
 from .pairing_coordinator import PAIRING_TTL_SECONDS
 
 if TYPE_CHECKING:
@@ -344,6 +351,10 @@ class _SeatReservation:
     display_name: str | None
     seat: str
     pending_admin: bool
+    #: Owner 2026-11-26 (step up): the role of the live seat this redeem
+    #: replaced — ``subscriber`` when a follower redeemed a writer token —
+    #: so a rollback restores it instead of un-seating the household.
+    prior_role: str | None = None
     #: A grandfathered (``gfs_legacy``) link seated this household over the
     #: relay into a private space whose ``private_gfs`` is OFF: the commit
     #: turns the option ON (the owner's normal ON path).
@@ -617,21 +628,6 @@ class SpaceInviteTokenRedeemCoordinator:
         if cert is None:
             return
         meta["writer_cert"] = cert
-        # v_50 — the epoch's writer group key too (a v_90 publisher).
-        try:
-            key = await self._writer_certs.writer_key_for_peer(
-                str(ack_body.get("space_id") or ""),
-                redeemer_instance_id,
-                epoch=cert.get("epoch"),
-            )
-        except Exception:
-            log.exception(
-                "invite redeem: writer key for %s could not be issued",
-                redeemer_instance_id,
-            )
-            return
-        if key is not None:
-            meta["writer_key"] = key
 
     def attach_bootstrap(
         self,
@@ -850,6 +846,10 @@ class SpaceInviteTokenRedeemCoordinator:
             "redeem_nonce": nonce,
             "invite_token": token,
             "redeemer_user_id": viewer_user_id,
+            # P5 — the person's identity anchor: the host seats us only when
+            # ``derive_user_id(our identity key, anchor) == redeemer_user_id``.
+            # Inside the encrypted payload (SPACE_ROUTED: sealed end to end).
+            "redeemer_anchor": user.person_anchor,
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }
@@ -1151,14 +1151,27 @@ class SpaceInviteTokenRedeemCoordinator:
                     and self._writer_certs is not None
                 ):
                     await self._writer_certs.accept(space_id, meta.get("writer_cert"))
-                if (
-                    meta.get("writer_key") is not None
-                    and self._writer_certs is not None
-                ):
-                    await self._writer_certs.accept_writer_key(
-                        space_id, meta.get("writer_key")
+                held = await self._spaces.get_member(space_id, viewer_user_id)
+                member = (
+                    # A step up over our follower seat keeps its per-space
+                    # name, picture, location opt-in and history window.
+                    replace(held, role=role_str)
+                    if held is not None
+                    else SpaceMember(
+                        space_id=space_id,
+                        user_id=viewer_user_id,
+                        role=role_str,
+                        joined_at=datetime.now(UTC).isoformat(),
                     )
-                # v_51 — our private-space channel grant for that epoch.
+                )
+                await self._spaces.save_member(member)
+                if held is None or held.role != role_str:
+                    # A new seat, or a follower stepping up: what a new
+                    # member needs at once hangs off the joined event.
+                    joined = member
+                # v_51 — our private-space channel grant for that epoch, taken
+                # only now that our person is seated: taking it subscribes at
+                # once, and a household with no seat asks for none.
                 if (
                     meta.get("gfs_channel") is not None
                     and self._writer_certs is not None
@@ -1166,18 +1179,6 @@ class SpaceInviteTokenRedeemCoordinator:
                     await self._writer_certs.accept_channel_grant(
                         space_id, meta.get("gfs_channel")
                     )
-                was_member = (
-                    await self._spaces.get_member(space_id, viewer_user_id) is not None
-                )
-                member = SpaceMember(
-                    space_id=space_id,
-                    user_id=viewer_user_id,
-                    role=role_str,
-                    joined_at=datetime.now(UTC).isoformat(),
-                )
-                await self._spaces.save_member(member)
-                if not was_member:
-                    joined = member
                 # A pending private invitation from another household for
                 # this space can no longer be joined (migration 0093).
                 await expire_superseded_invitations(
@@ -1281,6 +1282,9 @@ class SpaceInviteTokenRedeemCoordinator:
         sender = await self._federation_repo.get_instance(event.from_instance)
         over_gfs = sender is not None and sender.source is InstanceSource.SPACE_SESSION
         may_moderate = await self._redeemer_may_moderate(event, sender)
+        # P5 — the key the person's id must derive from: the sender's pinned
+        # key, or a mesh-only sender's routed claim (derives to the sender).
+        redeemer_identity_pk = await sender_identity_pk(self._federation, event)
         async with self._redeem_lock(event.from_instance):
             (
                 ack_payload,
@@ -1290,6 +1294,8 @@ class SpaceInviteTokenRedeemCoordinator:
                 token=token,
                 redeemer_instance_id=event.from_instance,
                 redeemer_user_id=redeemer_user_id,
+                redeemer_identity_pk=redeemer_identity_pk,
+                redeemer_anchor=p.get("redeemer_anchor"),
                 redeemer_pk=redeemer_pk,
                 redeemer_display=redeemer_display,
                 over_gfs=over_gfs,
@@ -1403,6 +1409,8 @@ class SpaceInviteTokenRedeemCoordinator:
         token: str,
         redeemer_instance_id: str,
         redeemer_user_id: str,
+        redeemer_identity_pk: bytes | None,
+        redeemer_anchor: object,
         redeemer_pk: str | None,
         redeemer_display: str | None,
         bootstrap: bool = False,
@@ -1411,6 +1419,20 @@ class SpaceInviteTokenRedeemCoordinator:
         join_location: tuple[float, float] | None = None,
     ) -> tuple[dict | None, str | _Deny | None, _SeatReservation | None]:
         """Issuer-side authorization + seating for one redeem.
+
+        ``redeemer_identity_pk`` / ``redeemer_anchor`` — P5 person-ID
+        anchor: the redeeming household's identity key as we hold it (the
+        §D2 sender's pinned key or mesh claim, the §D2b body's key bound to
+        its instance id) and the anchor the redeem carried. Checked FIRST
+        (:func:`~socialhome.services.space_member_guard.user_id_proven`),
+        before the re-ACK, the consume, the ban and every roster read, and
+        refused with the same opaque :data:`REDEEM_DENY_REASON` and an
+        untouched link — so the answer depends only on the requester's own
+        anchor, never on whether the id is seated, was seated or is banned.
+        A household can therefore only ever seat ids derived from its own
+        key: an earlier squat by someone else no longer blocks the real
+        person, and our own people (whose ids derive from OUR key) can never
+        be claimed.
 
         ``redeemer_may_moderate`` is whether the redeeming household runs
         v_41+ and can store a ``moderator`` seat; the caller decides it (a
@@ -1463,6 +1485,14 @@ class SpaceInviteTokenRedeemCoordinator:
         a surface anybody holding a link can reach. The detail lives in
         ``log.exception`` on the issuer, where it belongs.
         """
+        if not user_id_proven(redeemer_identity_pk, redeemer_anchor, redeemer_user_id):
+            log.warning(
+                "invite redeem from %s refused: user id %s is not proven by "
+                "the household's identity key",
+                redeemer_instance_id,
+                redeemer_user_id,
+            )
+            return None, REDEEM_DENY_REASON, None
         reack = await self._reack_seated_redeemer(
             token,
             redeemer_instance_id=redeemer_instance_id,
@@ -1549,6 +1579,26 @@ class SpaceInviteTokenRedeemCoordinator:
                 seat,
             )
             return None, REDEEM_DENY_REASON, None
+        if (
+            seat == SpaceRole.SUBSCRIBER
+            and row.get("bound_instance_id")
+            and space is not None
+            and space.space_type in PUBLIC_SPACE_TIERS
+            and not space.features.allow_subscribers
+        ):
+            # A follow's seat (the approval's token, bound to the
+            # household) of a public / global space is written only while
+            # the space takes followers (v_96): the switch may have gone off
+            # between the approval and this redeem. The use is handed back.
+            # An explicit follower link (unbound) is the owner's own grant
+            # and works whatever the switch (invites.md).
+            log.info(
+                "invite redeem: refused a follower seat for space %s — it "
+                "takes no followers",
+                space_id,
+            )
+            await self._release_token_use(token, space_id)
+            return None, REDEEM_DENY_REASON, None
 
         # An admin/mod link does NOT grant admin straight through (owner
         # decision, 2026-09-19). The redeeming household is seated as a
@@ -1586,6 +1636,22 @@ class SpaceInviteTokenRedeemCoordinator:
 
         # Seat the remote redeemer + register their instance so the
         # issuer's outbound fan-outs reach them.
+        held = await self._remote_members.get(
+            space_id, redeemer_instance_id, redeemer_user_id
+        )
+        if held is not None and held.role != SpaceRole.SUBSCRIBER.value:
+            # Seated another way between the re-ACK check and here (a
+            # promotion): never overwrite it — hand the use back and answer
+            # from the seat it holds.
+            await self._release_token_use(token, space_id)
+            reack = await self._reack_seated_redeemer(
+                token,
+                redeemer_instance_id=redeemer_instance_id,
+                redeemer_user_id=redeemer_user_id,
+            )
+            ack, reason = reack if reack is not None else (None, REDEEM_DENY_REASON)
+            return ack, reason, None
+        prior_role = held.role if held is not None else None
         try:
             # The seat lands in the SAME write as the row. It used to be
             # an ``add`` (always ``member``) followed by a ``set_role``,
@@ -1627,6 +1693,7 @@ class SpaceInviteTokenRedeemCoordinator:
             display_name=redeemer_display,
             seat=seat,
             pending_admin=pending_admin,
+            prior_role=prior_role,
             unlock_private_gfs=unlock,
             via_gfs_id=(str(row["gfs_id"]) if unlock and row.get("gfs_id") else None),
         )
@@ -1803,11 +1870,24 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             if seat is None:
                 return None
-            if await self._spaces.is_banned(space_id, redeemer_user_id):
+            if await banned_from_space(
+                self._spaces,
+                space_id,
+                user_id=redeemer_user_id,
+                instance_id=redeemer_instance_id,
+            ):
                 return None, REDEEM_DENY_REASON
             role = str(seat.role or SpaceRole.MEMBER.value)
             if role not in REACKABLE_REMOTE_ROLES:
                 return None, REDEEM_DENY_REASON
+            if role == SpaceRole.SUBSCRIBER.value and (
+                await self._spaces.get_invite_token_role(space_id, token)
+            ) not in (None, SpaceRole.SUBSCRIBER.value):
+                # Step up (owner 2026-11-26): a follower redeeming a writer
+                # token — the bound member token an approval of its request
+                # minted, or a member link — spends it like any redeem and
+                # is seated with that role over its follower seat.
+                return None
             ack_body = await self._build_ack_body(
                 space_id,
                 seat=role,
@@ -1950,11 +2030,17 @@ class SpaceInviteTokenRedeemCoordinator:
             res.space_id,
         )
         try:
-            await self._remote_members.remove(
-                res.space_id,
-                res.instance_id,
-                res.user_id,
-            )
+            if res.prior_role is not None:
+                # A step up whose ACK never left: the follower seat it was.
+                await self._remote_members.set_role(
+                    res.space_id, res.instance_id, res.user_id, res.prior_role
+                )
+            else:
+                await self._remote_members.remove(
+                    res.space_id,
+                    res.instance_id,
+                    res.user_id,
+                )
         except Exception:
             log.exception(
                 "invite redeem: un-seating %s in space %s failed",
@@ -2134,6 +2220,8 @@ class SpaceInviteTokenRedeemCoordinator:
             "display_name": own_display_name,
             "proto_version": OURS,
             "redeemer_user_id": viewer_user_id,
+            # P5 — proves ``redeemer_user_id`` against ``identity_pk``.
+            "redeemer_anchor": user.person_anchor,
             "redeemer_display_name": (user.display_name or user.username),
             "redeemer_public_key": getattr(user, "public_key", None),
         }
@@ -2338,6 +2426,11 @@ class SpaceInviteTokenRedeemCoordinator:
             token=str(body.get("invite_token") or ""),
             redeemer_instance_id=redeemer_instance_id,
             redeemer_user_id=redeemer_user_id,
+            # The sealed body's key — ``open_bootstrap_envelope`` bound it
+            # to ``instance_id`` (``derive_instance_id``) and verified the
+            # body's signature under it.
+            redeemer_identity_pk=body_identity_pk(body),
+            redeemer_anchor=body.get("redeemer_anchor"),
             redeemer_pk=(
                 str(body["redeemer_public_key"])
                 if body.get("redeemer_public_key")

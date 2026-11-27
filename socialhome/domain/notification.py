@@ -130,10 +130,8 @@ def default_space_notif_level(
     """The level of someone who never chose one for this space (D5).
 
     "Everything" in a household or private space; "Replies and mentions" in
-    a public or global one, and in any space they only follow (a
-    subscriber seat)."""
-    if role == SpaceRole.SUBSCRIBER:
-        return SpaceNotifLevel.MENTIONS
+    a public or global one — whatever the seat's role (P10: a follower is
+    notified like a member). *role* is kept for the callers' shape."""
     try:
         kind = SpaceType(space_type)
     except ValueError:

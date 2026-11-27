@@ -124,6 +124,21 @@ async def test_parse_json_rejects_unknown_event_type():
         await step(ctx)
 
 
+async def test_parse_json_rejects_the_retired_subscriber_key_handoff():
+    """v_96 retired ``space_subscriber_key_handoff`` (a follower is a member
+    and gets the key by federation). An envelope still naming it — an old
+    queued row, a hostile peer — is refused at the parse step like any
+    unknown type: a clean ``ValueError``, never a crash further in."""
+    step = make_parse_json(loads=_loads)
+    ctx = InboundContext(
+        raw_body=orjson.dumps(
+            _minimal_envelope(event_type="space_subscriber_key_handoff")
+        ),
+    )
+    with pytest.raises(ValueError, match="Unknown event_type"):
+        await step(ctx)
+
+
 async def test_parse_json_accepts_space_route_stale():
     """The route-stale nack is a first-class ``FederationEventType`` —
     the §24.11 parse step must let it through to instance lookup /
@@ -1639,30 +1654,47 @@ async def test_space_writer_allows_a_comment_only_with_the_opt_in():
     assert allowed.early_response is None
 
 
-@pytest.mark.parametrize(
-    "event_type",
-    [
-        FederationEventType.SPACE_COMMENT_UPDATED,
-        FederationEventType.SPACE_COMMENT_DELETED,
-    ],
-)
-async def test_a_follower_edits_or_deletes_its_comment_only_with_the_opt_in(
-    event_type,
-):
-    """S2 (#1375 review): a follower's own comment edit / delete follows the
-    comment switch exactly like its create, on the direct path as on the GFS
-    path — refused with the switch off, allowed with it on (the handler
-    still checks the comment is the sender household's own)."""
-    payload = {
-        "id": "c-1",
-        "comment_id": "c-1",
-        "post_id": "p1",
-        "author": "u-follower",
-    }
-    blocked = await _run(_writer_step(allow_comment=False), event_type, payload)
+_OWN_COMMENT = {
+    "id": "c-1",
+    "comment_id": "c-1",
+    "post_id": "p1",
+    "author": "u-follower",
+}
+
+
+async def test_a_follower_edits_its_comment_only_with_the_opt_in():
+    """S2 (#1375 review): a follower's own comment edit follows the comment
+    switch exactly like its create, on the direct path as on the GFS path —
+    refused with the switch off, allowed with it on (the handler still
+    checks the comment is the sender household's own)."""
+    event_type = FederationEventType.SPACE_COMMENT_UPDATED
+    blocked = await _run(_writer_step(allow_comment=False), event_type, _OWN_COMMENT)
     assert blocked.drop_reason == REFUSED
-    allowed = await _run(_writer_step(allow_comment=True), event_type, payload)
+    allowed = await _run(_writer_step(allow_comment=True), event_type, _OWN_COMMENT)
     assert allowed.early_response is None
+
+
+@pytest.mark.parametrize("allow_comment", [False, True])
+@pytest.mark.parametrize("allow_react", [False, True])
+async def test_a_follower_deletes_its_own_comment_whatever_the_switches(
+    allow_comment, allow_react
+):
+    """Owner decision F6 (2026-11-23): an author may always delete their own
+    comment, a follower included, with the comment switch off. The gate
+    still binds the named author to a live follower seat of the sender; the
+    handler checks the stored comment is that author's (authorship proof)."""
+    allowed = await _run(
+        _writer_step(allow_comment=allow_comment, allow_react=allow_react),
+        FederationEventType.SPACE_COMMENT_DELETED,
+        _OWN_COMMENT,
+    )
+    assert allowed.early_response is None
+    spoof = await _run(
+        _writer_step(allow_comment=allow_comment, allow_react=allow_react),
+        FederationEventType.SPACE_COMMENT_DELETED,
+        {**_OWN_COMMENT, "author": "u-somebody-else"},
+    )
+    assert spoof.drop_reason == REFUSED
 
 
 async def test_space_writer_binds_the_comment_opt_in_to_a_real_seat():

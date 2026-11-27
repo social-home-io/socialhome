@@ -241,6 +241,9 @@ class GfsServerSelectionService:
             space = await self._spaces.get(space_id)
             if space is not None and (
                 space.space_type is SpaceType.PRIVATE
+                # v_96 — a global space's channel lives on its listing
+                # servers that prove ``subscriber_seats``.
+                or space.space_type is SpaceType.GLOBAL
                 or await self._spaces.get_gfs_channel(space_id) is not None
             ):
                 if background and self._follow_later is not None:
@@ -407,7 +410,8 @@ class GfsServerSelectionService:
             return
         kept = (
             {s.public_key.lower() for s in servers}
-            if is_channel_space(space)
+            # v_96 — a global space's channel follows its listing list.
+            if is_channel_space(space) or space.space_type is SpaceType.GLOBAL
             else set()
         )
         conns = await self._gfs.list_all()

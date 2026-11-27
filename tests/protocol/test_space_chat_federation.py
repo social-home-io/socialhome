@@ -16,7 +16,7 @@ loopback HTTPS inbox that hands each envelope to the addressed household's
 ``handle_inbound_envelope`` and records what crossed the wire.
 
 Proves: a create / edit / reaction / moderator delete round-trips between
-the writer households; the follower-only household and the older one get
+the seated households — the follower-only one too (P10); the older one gets
 nothing; no message text, author or conversation id ever rides outside
 the ciphertext; and every forged or misplaced chat write is refused.
 """
@@ -346,15 +346,17 @@ async def test_a_space_chat_round_trips_between_its_writer_households(world):
     # mia moderates bob's message on a; the delete reaches b.
     await a.dm.delete_message(reply.id, actor_username="mia")
     assert [m[3] for m in await _messages(b) if m[0] == reply.id] == [1]
-    # The follower-only household and the pre-v_55 one got nothing at all —
-    # and stored nothing.
+    # P10 (owner 2026-11-26): the follower-only household reads the chat
+    # like a member household; the pre-v_55 one got nothing at all — and
+    # stored nothing.
     traffic = _chat_traffic(world)
     assert traffic
-    assert {to for _frm, to, _env in traffic} == {"a", "b"}
-    assert await _messages(c) == [] and await c.chat.get_chat(SP) is None
+    assert {to for _frm, to, _env in traffic} == {"a", "b", "c"}
+    assert [m[0] for m in await _messages(c) if m[0] == sent.id] == [sent.id]
     assert await _messages(d) == [] and await d.chat.get_chat(SP) is None
-    # Nothing was echoed back: each event crossed the wire exactly once.
-    assert len(traffic) == 6
+    # Nothing was echoed back: each event crossed the wire exactly once per
+    # recipient household (6 between a and b, the same 6 to c).
+    assert len(traffic) == 12
 
 
 async def test_no_chat_field_rides_outside_the_ciphertext(world):

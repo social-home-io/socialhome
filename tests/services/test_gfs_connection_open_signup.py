@@ -482,7 +482,7 @@ async def test_insecure_or_malformed_url_sends_nothing(repo, url):
 
 
 async def test_seeds_the_capability_cache_from_the_verified_block(repo):
-    caps = {"anonymous_publish": True, "open_signup": True}
+    caps = {"envelope_relay": True, "open_signup": True}
     stub = _Stub(
         {
             "/gfs/info": _Resp(200, _info(caps)),
@@ -492,7 +492,7 @@ async def test_seeds_the_capability_cache_from_the_verified_block(repo):
     )
     svc = _svc(repo, stub)
     conn = await svc.pair_open_signup(GFS_URL, **OWN)
-    assert await svc._anonymous_publish_supported(conn) is True
+    assert await svc.envelope_relay_supported(conn) is True
     assert len(stub.calls) == 3
 
 

@@ -13,8 +13,10 @@ inbound handler can authenticate the event without ever holding the seed.
 
 This module depends ONLY on :mod:`socialhome.crypto` (Ed25519 sign/verify +
 base64url helpers) so it can be imported by the content-blind GFS process
-(:mod:`socialhome.global_server.federation`) WITHOUT dragging in the HFS
-federation/crypto stack (AESGCM, KeyManager). The HFS-side
+(the authority cert and join contact checks on a listing publish) WITHOUT
+dragging in the HFS federation/crypto stack (AESGCM, KeyManager). Since v_96
+no GFS route authorizes a space-keyed relay, notice or media upload with it:
+those event types went with the space-keyed paths. The HFS-side
 :mod:`socialhome.services.space_crypto_service` re-exports every name here, so
 existing importers keep working unchanged.
 """
@@ -46,95 +48,19 @@ class UnsupportedAuthoritySuite(ValueError):
     doesn't know. Receivers MUST reject rather than fall back to a default."""
 
 
-#: Authority event-type for a public/global space-content relay through the
-#: GFS (Phase 5a). The HFS signs the relayed payload with the space seed under
-#: this event type (:func:`sign_authority_event`); the GFS authorizes the relay
-#: by verifying it with the SAME event type against the TOFU-pinned space
-#: public key (``global_spaces.identity_public_key``). Naming it once keeps the
-#: signer (HFS) and verifier (GFS) in lock-step — a mismatch would make every
-#: legitimate signature fail.
-AUTHORITY_EVENT_SPACE_POST_PUBLIC: str = "space_post_public"
-
-
-#: Authority event-type for the Phase-5b subscriber content-key handoff: a
-#: seed-holder seals the per-space content key to a new GFS subscriber's
-#: key-wrap pubkey and authority-signs the (opaque) sealed envelope so the GFS
-#: authorizes the relay against the same TOFU-pinned space public key — without
-#: ever learning the key. The signer (``space_subscriber_key_outbound``) and
-#: verifier (GFS + ``space_subscriber_key_inbound``) reference this one name so
-#: the canonical signing bytes stay in lock-step.
-AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF: str = "space_subscriber_key_handoff"
-
-
-#: Authority event-type for the v_61 new-follower author-profile bundle: a
-#: seed-holder seals its cached, author-signed ``author_profile`` items to ONE
-#: new subscriber's key-wrap pubkey (like the key handoff) and relays it
-#: TARGETED (``POST /gfs/publish`` with ``to``) so the GFS hands it to that
-#: subscriber only. Target-only: a GFS refuses it without ``to``
-#: (:data:`AUTHORITY_TARGET_ONLY_EVENT_TYPES`), so it is never fanned out.
-AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE: str = "space_author_profiles_bundle"
-
-
-#: Authority event-type for the Phase-5b-c subscriber-list RECONCILE query: a
-#: seed-holder proves it holds the space seed by signing ``{space_id, ts}`` with
-#: it, so the GFS will release the space's subscriber list (instance ids + their
-#: already-registered identity / key-wrap pubkeys) to a verified owner OR
-#: delegated admin. This is a READ, NOT a relay — it is deliberately kept OUT of
-#: ``AUTHORITY_RELAY_EVENT_TYPES`` so a query-signed payload can never be
-#: replayed onto the relay fan-out (the signing bytes bind the event type).
-AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY: str = "space_subscribers_query"
-
-
-#: Authority event-type for the v_49 content-epoch NOTICE: a seed-holder
-#: signs ``{space_id, epoch}`` with the space seed when the space content key
-#: rotates and posts it to ``POST /gfs/spaces/{id}/epoch``, so the GFS stops
-#: relaying member items under the old epoch's writer certs even while nobody
-#: else publishes. Like the subscribers query it is NOT a relay — kept out of
-#: ``AUTHORITY_RELAY_EVENT_TYPES`` so a notice can never be fanned out, and a
-#: relay payload can never be accepted as a notice (the signing bytes bind the
-#: event type).
-AUTHORITY_EVENT_SPACE_EPOCH_NOTICE: str = "space_epoch_notice"
-
-
-#: Authority event-types for the space media cache on a GFS: a seed-holder
-#: signs the claim ``{scope: "space", scope_id, blob_id, size, expires_at,
-#: ts}`` to upload one encrypted blob (``PUT /gfs/media/{blob_id}``)
-#: and ``{scope, scope_id, blob_id, ts}`` to withdraw it (``POST …/delete``;
-#: :mod:`socialhome.domain.gfs_space_media`). The GFS verifies both against the
-#: space's TOFU-pinned key. Like the subscribers query these are NOT relays —
-#: kept out of ``AUTHORITY_RELAY_EVENT_TYPES``, so a media signature can never
-#: be fanned out and a relay payload can never authorize an upload.
-AUTHORITY_EVENT_SPACE_MEDIA_PUT: str = "space_media_put"
-AUTHORITY_EVENT_SPACE_MEDIA_DELETE: str = "space_media_delete"
+#: v_96 — an authority-only item (a removal, an approved post, a member's
+#: post the host puts on the channel for its author) sealed into a space's
+#: opaque channel: the space authority signs the INNER, inside the channel
+#: ciphertext — the channel frame itself carries no authority signature (the
+#: GFS never sees it).
+AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY: str = "space_channel_authority"
 
 
 #: Authority event-type for a sync page (``docs/protocol/sync-pages.md``): a
 #: seed-holder acting as host signs its commitment to the space's state
 #: (:mod:`socialhome.sync_page`). Members verify it against the space key they
-#: pin. NOT a relay — kept out of ``AUTHORITY_RELAY_EVENT_TYPES``: a page
-#: travels only inside a §25.6 session, never through a GFS.
+#: pin. A page travels only inside a §25.6 session, never through a GFS.
 AUTHORITY_EVENT_SPACE_SYNC_PAGE: str = "space_sync_page"
-
-
-#: The set of event types the GFS will authorize on the space-authority relay
-#: path (a NON-owner seed-holder relaying content the GFS stays blind to). Both
-#: are space-authority-signed and content-blind to the GFS; anything else is
-#: rejected (no default fan-out for an unknown type). The signature is always
-#: verified under the caller's WIRE event type, which MUST be in this set, so a
-#: payload signed for one type can't be replayed under another.
-AUTHORITY_RELAY_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-        AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE,
-    }
-)
-
-#: Relay event types the GFS accepts ONLY with a routing target (``to``, a
-#: subscriber of the space): meant for one subscriber, never fanned out.
-AUTHORITY_TARGET_ONLY_EVENT_TYPES: frozenset[str] = frozenset(
-    {AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE}
-)
 
 
 #: The two wire fields :func:`sign_authority_event` produces and the sender
@@ -233,3 +159,31 @@ def verify_authority_event(
         ),
         sig,
     )
+
+
+def authority_payload_verified(
+    *,
+    event_type: str,
+    space_id: str,
+    payload: dict,
+    space_public_key_hex: str,
+) -> bool:
+    """Whether ``payload`` carries a valid space-authority signature (its
+    ``authority_sig`` / ``authority_sig_suite`` over the payload without
+    them) under the pinned ``space_public_key_hex``. Fail closed: a missing
+    field, an unknown suite or a bad key is ``False``."""
+    sig = payload.get("authority_sig")
+    suite = payload.get("authority_sig_suite")
+    if not isinstance(sig, str) or not sig or not isinstance(suite, str):
+        return False
+    try:
+        return verify_authority_event(
+            event_type=event_type,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(payload),
+            authority_sig=sig,
+            authority_sig_suite=suite,
+            space_public_key=bytes.fromhex(space_public_key_hex),
+        )
+    except UnsupportedAuthoritySuite, ValueError, TypeError:
+        return False

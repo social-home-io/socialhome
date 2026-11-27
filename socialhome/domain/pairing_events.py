@@ -216,7 +216,6 @@ CONFIRMS_PAIRING_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
         FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
         FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
-        FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
         FederationEventType.SPACE_REPORT,
         FederationEventType.SPACE_REPORT_DECIDED,
         FederationEventType.SPACE_REPORT_ANSWERED,

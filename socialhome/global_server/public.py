@@ -105,16 +105,6 @@ ICE_SERVERS_ROUTE: str = "/gfs/highlights/ice-servers"
 #: viewers share one address hits the offer cap first.
 ICE_SERVERS_MAX_PER_MINUTE: int = 30
 
-#: Per-IP/minute cap on ``POST /gfs/publish``. Since the relay is authorized by
-#: the space-authority signature alone, the request carries no household
-#: identity — the client IP is the only handle left for shedding a flood, so
-#: this limiter replaces the per-instance accountability the old
-#: ``from_instance`` check implied. 120/min = 2/s sustained per IP: orders of
-#: magnitude above a real household (one publish per public post or subscriber
-#: key handoff, per GFS) while still bounding how much unauthenticated
-#: signature-verification + fan-out work one source can force.
-PUBLISH_MAX_PER_MINUTE: int = 120
-
 #: Per-IP/minute cap on ``POST /gfs/signup-token`` (open sign-up). A real
 #: household asks once, during onboarding — but several households on one
 #: network (a community event) ask within the same minute, so there is no
@@ -161,16 +151,15 @@ RATE_LIMIT_MAX_TRACKED_IPS: int = 10_000
 #: Sliding-window length for every per-IP limiter in this module, in seconds.
 RATE_LIMIT_WINDOW_SECONDS: float = 60.0
 
-#: Hard body cap on ``POST /gfs/publish`` — the endpoint is unauthenticated
-#: until the authority signature inside the payload is verified, so the bytes
-#: must be bounded BEFORE they are buffered or parsed. Sized from the largest
-#: legitimate relay payload: a ``space_post_public`` envelope carries one
-#: AES-GCM ciphertext over a single post (``MAX_POST_LENGTH`` is 10 000 chars
-#: → ≤ 40 KiB UTF-8, plus author signature, media references and an optional
-#: 4-decimal location; media bytes ride separate blobs, never this body) and a
-#: ``space_subscriber_key_handoff`` is a few hundred bytes of sealed key. Even
-#: base64-expanded that is ~55 KiB, so 256 KiB leaves ~5× headroom while
-#: keeping a flood's per-request memory cost trivial.
+#: Hard body cap on ``POST /gfs/channels/publish-anon`` — the endpoint is
+#: anonymous until the writer signature is verified, so the bytes must be
+#: bounded BEFORE they are buffered or parsed. Sized from the largest
+#: legitimate item: one AES-GCM ciphertext over a single post
+#: (``MAX_POST_LENGTH`` is 10 000 chars → ≤ 40 KiB UTF-8, plus author
+#: signature, media references and an optional 4-decimal location; media
+#: bytes ride separate blobs, never this body). Even base64-expanded that is
+#: ~55 KiB, so 256 KiB leaves ~5× headroom while keeping a flood's
+#: per-request memory cost trivial.
 PUBLISH_MAX_BODY_BYTES: int = 256 * 1024
 
 #: Hard body cap on ``POST /gfs/spaces/{id}/publish``, enforced by a bounded
@@ -329,7 +318,7 @@ class SlidingWindowCounter:
     """Per-key sliding-window hit counter with a bounded key space.
 
     Shared by every per-IP limiter in this module (listing, public RTC entry
-    points, ``/gfs/publish``) — they differ only in which paths they gate and
+    points, the anonymous relays) — they differ only in which paths they gate and
     how many hits they allow.
 
     Two bounds keep an anonymous flood from growing the process: the hit list
@@ -370,6 +359,11 @@ class SlidingWindowCounter:
         self._hits[key] = hits
         self._evict()
         return True
+
+    @property
+    def limit(self) -> int:
+        """Hits per window this counter allows unless a call overrides it."""
+        return self._limit
 
     def exhausted(self, key: str, *, now: float | None = None) -> bool:
         """Whether the next :meth:`allow` for *key* would be refused.
@@ -488,7 +482,7 @@ def build_window_limiter(
     """Build a middleware that sheds >*limit* hits/minute per client IP.
 
     One implementation for every per-IP limiter on this server (the three
-    below, ``envelope_relay`` and ``member_publish``): they differ only in
+    below and ``envelope_relay``): they differ only in
     which paths they gate (*applies*) and the *limit*. The client address comes from
     *resolver*, which is the only component allowed to look at
     ``X-Forwarded-For`` (see :class:`ClientIpResolver`). With *nodes* (the
@@ -637,19 +631,6 @@ def build_ice_servers_rate_limit(
         ICE_SERVERS_MAX_PER_MINUTE,
         lambda path: path == ICE_SERVERS_ROUTE,
         nodes=nodes,
-    )
-
-
-def build_publish_rate_limit(resolver: ClientIpResolver):
-    """Per-IP rate limiter for ``POST /gfs/publish``.
-
-    The relay is authorized by the space-authority signature alone, so the GFS
-    cannot (and must not) identify the publishing household — per-IP is the
-    only rate handle available."""
-    return build_window_limiter(
-        resolver,
-        PUBLISH_MAX_PER_MINUTE,
-        lambda path: path == "/gfs/publish",
     )
 
 

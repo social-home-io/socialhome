@@ -33,6 +33,7 @@ from socialhome.domain.events import (
     PeerUnpaired,
 )
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_HOST_HOP,
     DELIVERY_ERROR_MESH_DEFER_FULL,
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
@@ -334,13 +335,9 @@ class InMemoryFederationRepo(SavesPendingMixin):
         self._instances[inst.id] = inst
         return True
 
-    async def ban_instance_from_space(
-        self,
-        space_id: str,
-        instance_id: str,
-        *,
-        reason: str | None = None,
-    ) -> None:
+    def ban(self, space_id: str, instance_id: str) -> None:
+        """Test helper: a ``space_instance_bans`` row (the one writer in
+        production is ``SpaceRepo.ban_household``)."""
         self._bans.add((space_id, instance_id))
 
     async def is_instance_banned_from_space(
@@ -1868,7 +1865,7 @@ async def test_broadcast_to_space_members_skips_banned():
     space_id = "space-y"
     fed_repo.add_space_member(space_id, banned_inst.id)
     fed_repo.add_space_member(space_id, ok_inst.id)
-    await fed_repo.ban_instance_from_space(space_id, banned_inst.id)
+    fed_repo.ban(space_id, banned_inst.id)
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
@@ -4947,9 +4944,7 @@ async def test_a_deferred_snapshot_event_skips_a_household_banned_meanwhile(
             event_type=FederationEventType.SPACE_DISSOLVED,
             payload={"space_id": space_id},
         )
-        await svc._federation_repo.ban_instance_from_space(
-            space_id, "mesh-only-peer", reason="test"
-        )
+        svc._federation_repo.ban(space_id, "mesh-only-peer")
         await _drain_deferred(svc)
 
     assert len(calls) == 1
@@ -6854,7 +6849,7 @@ async def test_https_frame_for_an_unknown_inbox_is_refused():
 @pytest.mark.asyncio
 async def test_https_frame_from_a_banned_household_is_dropped():
     p = _paired_https()
-    await p.repo_b.ban_instance_from_space("sp1", p.a_id)
+    p.repo_b.ban("sp1", p.a_id)
     header, sealed = _make_frame(
         p,
         event_type=FederationEventType.SPACE_MEDIA_BLOB,
@@ -7186,6 +7181,247 @@ async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
         new.id: {"id": "p", "files": files, "files_suite": "sha256"},
         old.id: {"id": "p"},
     }
+
+
+class _Seats:
+    """The roster mirror as the fan-out sees it: who holds a writer seat."""
+
+    def __init__(self, writers: set[str]) -> None:
+        self.writers = writers
+
+    async def list_instances_with_roles(self, space_id, roles):
+        return sorted(self.writers)
+
+
+class _ChannelSpaces:
+    """The space repo as the fan-out sees it: a channel or not, and who
+    hosts the space (``host``; ``None`` — hosted here)."""
+
+    def __init__(self, channel: bool, host: str | None = None) -> None:
+        self.channel = channel
+        self.host = host
+
+    async def get(self, space_id):
+        return types.SimpleNamespace(id=space_id, owner_instance_id=self.host)
+
+    async def get_invited_by(self, space_id):
+        return None
+
+    async def get_gfs_channel(self, space_id):
+        return ("c" * 32, "pk") if self.channel else None
+
+
+async def _fan_out(
+    monkeypatch,
+    *,
+    channel: bool,
+    event_type=FederationEventType.SPACE_POST_CREATED,
+    host: str | None = None,
+    rows: tuple[str, ...] = (),
+    targets: tuple[str, ...] = ("gfs-follower", "gfs-member", "mesh-follower"),
+    claims: dict[str, int] | None = None,
+) -> tuple[list[str], BroadcastResult]:
+    """Fan out over *targets* (none with a row of ours unless in *rows*;
+    ``mesh-follower`` claimed a version over the mesh by default); returns
+    the households tried, in order, and the broadcast result."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = {"mesh-follower": 96} if claims is None else claims
+    for iid in rows:
+        row, _ = _make_remote_instance(km)
+        await fed_repo.save_instance(dataclasses.replace(row, id=iid))
+    for iid in targets:
+        fed_repo.add_space_member("sp", iid)
+    svc, _ = _make_service(federation_repo=fed_repo)
+    svc.attach_space_write_gate(
+        _ChannelSpaces(channel, host=host),
+        _Seats({"gfs-member", "row-member"}),
+    )
+    tried: list[str] = []
+
+    async def _send(self, *, to_instance_id, **_kw):
+        tried.append(to_instance_id)
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    monkeypatch.setattr(type(svc), "send_with_mesh_fallback", _send)
+    result = await svc.broadcast_to_space_members("sp", event_type, {"space_id": "sp"})
+    return tried, result
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_MEMBER_JOINED,
+    ],
+)
+@pytest.mark.parametrize("channel", [True, False])
+async def test_a_household_with_no_path_is_left_to_the_host_member_or_follower(
+    monkeypatch, event_type, channel
+):
+    """P10 H1 (role-neutral): in a space another household hosts, a
+    household we hold no row for that never claimed a version over the mesh
+    is not tried — no route discovery flood — the host holds its seat and
+    serves its catch-up; a member there exactly like a follower. One that
+    claimed over the mesh is tried. Not a loss: nothing terminal."""
+    tried, result = await _fan_out(
+        monkeypatch, channel=channel, host="host-x", event_type=event_type
+    )
+    assert tried == ["mesh-follower"]
+    skipped = {r.instance_id: r.error for r in result.results if not r.ok}
+    assert skipped == {
+        "gfs-follower": DELIVERY_ERROR_HOST_HOP,
+        "gfs-member": DELIVERY_ERROR_HOST_HOP,
+    }
+    assert result.terminal_failures == ()
+
+
+@pytest.mark.parametrize("channel", [True, False])
+async def test_the_host_tries_every_household(monkeypatch, channel):
+    """Hosted here (a channel or not — the channel carries posts only):
+    nobody else reaches them, so every household is tried, row or not."""
+    tried, _ = await _fan_out(monkeypatch, channel=channel, host=None)
+    assert sorted(tried) == ["gfs-follower", "gfs-member", "mesh-follower"]
+
+
+async def test_the_host_itself_is_never_left_out(monkeypatch):
+    """Fable round 2 (H-1): the host is the one everyone relies on — a
+    member that has no row and no claim for it yet still sends to it."""
+    tried, result = await _fan_out(
+        monkeypatch,
+        channel=False,
+        host="host-x",
+        targets=("host-x", "gfs-follower"),
+        claims={},
+    )
+    assert tried == ["host-x"]
+    assert {r.instance_id: r.error for r in result.results if not r.ok} == {
+        "gfs-follower": DELIVERY_ERROR_HOST_HOP
+    }
+
+
+async def test_a_delegated_admin_serving_as_host_tries_everyone(monkeypatch):
+    """Fable round 3 (L-B): a household serving as the space's host (a
+    delegated admin holding the seed) leaves nobody to another host."""
+
+    async def _serves(*_a, **_kw):
+        return True
+
+    monkeypatch.setattr(federation_service_mod, "serves_as_host", _serves)
+    tried, _ = await _fan_out(monkeypatch, channel=False, host="host-x")
+    assert sorted(tried) == ["gfs-follower", "gfs-member", "mesh-follower"]
+
+
+@pytest.mark.parametrize(
+    ("host", "row_source", "claim", "want"),
+    [
+        (None, None, None, True),  # we host it
+        ("host-x", InstanceSource.MANUAL, None, True),  # paired with the host
+        ("host-x", None, {"host-x": 96}, True),  # the host claimed over the mesh
+        ("host-x", InstanceSource.SPACE_SESSION, None, False),  # only a GFS seat
+        ("host-x", None, None, False),  # no path of our own at all
+    ],
+)
+async def test_reaches_host_directly_is_decided_by_path(host, row_source, claim, want):
+    """P10 (coordinator 2026-11-27): the media fetch path is decided by the
+    path to the host — paired or mesh → ask the host; only a GFS seat →
+    the GFS on-demand fetch — never by role."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = claim or {}
+    if row_source is not None:
+        row, _ = _make_remote_instance(km)
+        await fed_repo.save_instance(
+            dataclasses.replace(row, id="host-x", source=row_source)
+        )
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    svc.attach_space_write_gate(_ChannelSpaces(True, host=host), _Seats(set()))
+    assert await svc.reaches_host_directly("sp") is want
+
+
+async def test_households_with_a_row_go_before_mesh_discoveries(monkeypatch):
+    """P10 H1: the households we hold a row for are sent to first; the
+    ones that need a mesh discovery come after, whatever their ids."""
+    tried, _ = await _fan_out(
+        monkeypatch,
+        channel=False,
+        targets=("a-mesh", "z-row"),
+        rows=("z-row",),
+        claims={"a-mesh": 96},
+    )
+    assert tried == ["z-row", "a-mesh"]
+
+
+async def test_mesh_discoveries_per_broadcast_are_capped(monkeypatch):
+    """P10 H1: at most MAX_MESH_DISCOVERIES_PER_BROADCAST row-less
+    households are tried in one broadcast; the rest wait in their deferred
+    queue (not a loss)."""
+    monkeypatch.setattr(federation_service_mod, "MAX_MESH_DISCOVERIES_PER_BROADCAST", 1)
+    tried, result = await _fan_out(
+        monkeypatch,
+        channel=False,
+        targets=("m-1", "m-2"),
+        claims={"m-1": 96, "m-2": 96},
+    )
+    assert len(tried) == 1
+    other = ({"m-1", "m-2"} - set(tried)).pop()
+    deferred = [r for r in result.results if r.instance_id == other]
+    assert deferred and deferred[0].error == DELIVERY_ERROR_MESH_DEFERRED
+    assert result.terminal_failures == ()
+
+
+async def test_the_cap_window_moves_on_each_broadcast(monkeypatch):
+    """Fable round 2 (M-2): the cap's window starts elsewhere on the next
+    broadcast, so the same household is never always past it."""
+    monkeypatch.setattr(federation_service_mod, "MAX_MESH_DISCOVERIES_PER_BROADCAST", 1)
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = {"m-1": 96, "m-2": 96}
+    for iid in ("m-1", "m-2"):
+        fed_repo.add_space_member("sp", iid)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    svc.attach_space_write_gate(_ChannelSpaces(False), _Seats(set()))
+    tried: list[str] = []
+
+    async def _send(self, *, to_instance_id, **_kw):
+        tried.append(to_instance_id)
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    def _defer(self, result, **_kw):
+        return result
+
+    monkeypatch.setattr(type(svc), "send_with_mesh_fallback", _send)
+    monkeypatch.setattr(type(svc), "_defer_mesh_send", _defer)
+    for _ in range(2):
+        await svc.broadcast_to_space_members(
+            "sp", FederationEventType.SPACE_POST_CREATED, {"space_id": "sp"}
+        )
+    assert sorted(tried) == ["m-1", "m-2"]
+
+
+async def test_gfs_reached_followers_names_follower_only_seat_households():
+    """v_96 (P5) — the households only the owner reaches (it holds their
+    space-session row): follower-only ones seated through a GFS. A paired
+    follower, a seat household holding a writer seat, one we hold no row
+    for, and ourselves are not in it."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    rows = {}
+    for name in ("gfs-fan", "gfs-writer", "paired-fan"):
+        row, _ = _make_remote_instance(km, session_key=b"\x01" * 32)
+        if name != "paired-fan":
+            row = dataclasses.replace(row, source=InstanceSource.SPACE_SESSION)
+        await fed_repo.save_instance(row)
+        rows[name] = row.id
+    svc, _ = _make_service(federation_repo=fed_repo)
+    svc.attach_space_write_gate(_ChannelSpaces(False), _Seats({rows["gfs-writer"]}))
+    got = await svc.gfs_reached_followers(
+        "sp", [*rows.values(), "unknown-house", svc.own_instance_id]
+    )
+    assert got == frozenset({rows["gfs-fan"]})
 
 
 # ─── peer moment look (v_96 decision C, in memory) ────────────────────────

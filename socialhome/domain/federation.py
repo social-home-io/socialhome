@@ -300,8 +300,8 @@ class FederationEventType(str, enum.Enum):
     # ── Space chat (v_55) — the space's own group chat (a system
     # conversation on group-DM storage, one per space). Each household
     # keeps its own chat for the space; the wire names the space, never a
-    # conversation id. Fanned out only to households holding at least one
-    # WRITER seat (never a follower-only household). Message ids are
+    # conversation id. Fanned out to every household holding a seat, a
+    # follower-only one included (P10: it reads the chat). Message ids are
     # owner-bound (``space-chat-message``) to the author. Read receipts,
     # delivery state and typing are never federated. See
     # ``docs/protocol/space-chat.md``.
@@ -390,9 +390,9 @@ class FederationEventType(str, enum.Enum):
     #: wins, a removal is final. See ``docs/protocol/bazaar.md``.
     BAZAAR_LISTING_FAQ_UPDATED = "bazaar_listing_faq_updated"
     #: v_77 — a game table opened in a space: its *card* (upsert by
-    #: ``rev``). From the table's host household to the member households
-    #: holding a writer seat (``broadcast_to_space_members`` narrowed with
-    #: ``only_instances``) — never a follower-only household, never a GFS.
+    #: ``rev``). From the table's host household to every seated household
+    #: (``broadcast_to_space_members`` narrowed with ``only_instances``) —
+    #: a follower-only one included (P10: it sees, never joins), never a GFS.
     #: ``space_id`` is the only routing field; the card (table id, app,
     #: host, note, players, seats taken, state, expiry) is encrypted. See
     #: ``docs/protocol/app-groups.md``.
@@ -421,8 +421,8 @@ class FederationEventType(str, enum.Enum):
     #: key card (identity + key-wrap keys, its ONE mailbox at the space's
     #: GFS or none). Routing ``space_id``; encrypted payload ``{"card"}``.
     SPACE_MEMBER_CARD = "space_member_card"
-    #: v_89 — the host's member directory for one space, to WRITER-seat
-    #: member households only (never followers): ``{"cards": [card…],
+    #: v_89 — the host's member directory for one space, to every seated
+    #: household (followers too since v_96, same path): ``{"cards": [card…],
     #: "removed": [instance_id…], "snapshot": bool}`` in the encrypted
     #: payload; one bounded snapshot to a newcomer, deltas after that.
     #: Taken from the space's host only.
@@ -441,8 +441,8 @@ class FederationEventType(str, enum.Enum):
     #: v_95 sync pages: the space authority's newest signed page and its
     #: bucket vector (``docs/protocol/sync-pages.md``), ``{page_sealed:
     #: {epoch, payload}}`` — sealed under the space content key inside the
-    #: encrypted payload. Pushed by the signer to every member household
-    #: (never a follower) at most hourly, and sent to ONE household whose
+    #: encrypted payload. Pushed by the signer to every seated household
+    #: (a follower's included, P10) at most hourly, and sent to ONE household whose
     #: BEGIN names an older page than the one last pushed.
     SPACE_SYNC_PAGE = "space_sync_page"
     SPACE_SYNC_DIRECT_FAILED = "space_sync_direct_failed"
@@ -506,15 +506,6 @@ class FederationEventType(str, enum.Enum):
     SPACE_PRIVATE_INVITE_ACCEPT = "space_private_invite_accept"
     SPACE_PRIVATE_INVITE_DECLINE = "space_private_invite_decline"
     SPACE_REMOTE_MEMBER_REMOVED = "space_remote_member_removed"
-
-    # ── GFS subscriber content-key handoff (Phase 5b-b) ──
-    # A seed-holder seals the per-space content key to a new GFS subscriber's
-    # published key-wrap pubkey and relays it through the content-blind GFS
-    # (authorized by the space-authority signature, like ``space_post_public``).
-    # Rides the GFS relay rather than a direct peer event — so no proto-version
-    # bump (the OURS gate is for direct-peer fields an older peer can't
-    # fail-soft against; a non-subscriber simply never receives this frame).
-    SPACE_SUBSCRIBER_KEY_HANDOFF = "space_subscriber_key_handoff"
 
     # ── Moderation ──
     SPACE_REPORT = "space_report"
@@ -729,6 +720,12 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: self-certifying; neither grants a right.
         FederationEventType.SPACE_MEMBER_CARD,
         FederationEventType.SPACE_MAILBOX_DIRECTORY,
+        #: v_96 — the host's capacity refusal of our sync BEGIN
+        #: (``too_many_sessions`` / ``node_capacity`` / ``rate_limited``), so
+        #: we ask again shortly instead of at the next periodic sync. Its
+        #: handler ignores every other DIRECT_FAILED from such a household:
+        #: the pair negotiates no direct connection.
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
         # ── Content ──
         #: The space's own posts, comments and every pillar rendered
         #: inside it. This is what "joined the space" means.
@@ -844,10 +841,11 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         # ── Catch-up sync (§25.6) ──
         #: The chunked backfill that populates a fresh seat. The RTC
         #: *signalling* half of sync (``SPACE_SYNC_OFFER`` / ``_ANSWER`` /
-        #: ``_ICE`` / ``_DIRECT_READY`` / ``_DIRECT_FAILED``) is
-        #: deliberately absent: it exists to negotiate a DIRECT peer
-        #: connection, and the whole point of §D2b is that these two
-        #: households never learn each other's address.
+        #: ``_ICE`` / ``_DIRECT_READY``) is deliberately absent: it exists to
+        #: negotiate a DIRECT peer connection, and the whole point of §D2b
+        #: is that these two households never learn each other's address.
+        #: ``_DIRECT_FAILED`` is listed above only for a BEGIN's capacity
+        #: refusal (v_96); its handler ignores anything else from a seat.
         #: v_95: the signed sync page pushed to every member household —
         #: a GFS-seated one included (members equal on any path).
         FederationEventType.SPACE_SYNC_PAGE,
@@ -897,8 +895,7 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 #: ``SPACE_PRIVATE_INVITE*`` and ``SPACE_INVITE*`` (§D1b social invites);
 #: ``SPACE_CREATED`` (the shared space is seated by the redeem ACK — a
 #: ``SPACE_CREATED`` from this peer class would seat an unrelated one);
-#: ``SPACE_SUBSCRIBER_KEY_HANDOFF`` (a GFS relay frame, never a §24.11
-#: envelope); and the four mesh-routing types above.
+#: and the four mesh-routing types above.
 
 
 #: v_91 — the members of :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES` that never
@@ -953,6 +950,8 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SYNC_COMPLETE,
         FederationEventType.SPACE_SYNC_REQUEST_MORE,
         FederationEventType.SPACE_SYNC_REJECTED,
+        #: v_96 — the capacity refusal of one household's BEGIN.
+        FederationEventType.SPACE_SYNC_DIRECT_FAILED,
         FederationEventType.SPACE_PARTITION_GAP,
         # ── Not one space's content ──
         #: Mesh routing (an inner envelope sealed to one target) and the
@@ -1192,7 +1191,6 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
         FederationEventType.SPACE_ADMIN_KEY_SHARE,
         FederationEventType.SPACE_AUTHORITY_ROTATED,
-        FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
         FederationEventType.SPACE_SESSION_CLEANUP,
         FederationEventType.SPACE_MEMBER_CARD,
         FederationEventType.SPACE_MAILBOX_DIRECTORY,
@@ -1695,6 +1693,13 @@ DELIVERY_ERROR_MESH_DEFERRED: str = "mesh_retry_scheduled"
 #: miss, reported by ``broadcast_to_space_members``' WARNING.
 DELIVERY_ERROR_MESH_DEFER_FULL: str = "mesh_retry_queue_full"
 
+#: :attr:`DeliveryResult.error` value meaning "not tried: this household
+#: has no path of ours (no ``remote_instances`` row, no mesh claim) and
+#: another household hosts the space" — the host holds its seat and serves
+#: its catch-up. Role-neutral (P10, H1): a member and a follower in that
+#: position alike. NOT a loss.
+DELIVERY_ERROR_HOST_HOP: str = "reached_by_host"
+
 
 @dataclass(slots=True, frozen=True)
 class DeliveryResult:
@@ -1866,6 +1871,7 @@ class BroadcastResult:
                 DELIVERY_ERROR_QUEUED,
                 DELIVERY_ERROR_SUPERSEDED,
                 DELIVERY_ERROR_MESH_DEFERRED,
+                DELIVERY_ERROR_HOST_HOP,
             )
         )
 

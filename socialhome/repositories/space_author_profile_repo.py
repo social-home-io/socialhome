@@ -1,4 +1,4 @@
-"""A space's cache of its authors' profiles (v_60/v_61).
+"""A space's cache of its authors' profiles (v_60).
 
 One row per ``(space_id, author_user_id)``: the newest verified
 ``author_profile`` item (``ts``, normalised to UTC by the caller).
@@ -6,8 +6,8 @@ One row per ``(space_id, author_user_id)``: the newest verified
 - ``picture_hash`` is the author's SIGNED hash.
 - ``picture_webp`` is our own re-encode of that picture. It survives a newer
   item that names the same hash.
-- ``signed_item`` is kept only where a new-follower bundle can be built; the
-  caller decides, and only a seed holder keeps it.
+- ``signed_item`` / ``item_epoch`` (the v_61 new-follower bundle's copy)
+  are no longer written; the columns stay, inert, and an update clears them.
 
 At most :data:`MAX_CACHED_AUTHORS_PER_SPACE` other households' rows per
 space; the least recently stamped are pruned (in a space with more authors,
@@ -27,21 +27,15 @@ import builtins
 from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
-import orjson
-
 from ..db import AsyncDatabase
 from ..domain.space_author_profile import (
-    PROFILE_PICTURE_FIELD,
     CachedAuthorProfile,
     SpaceAuthorProfile,
 )
-from ..domain.space_author_profile_bundle import BundleEntry
 from .base import rows_to_dicts
 
-#: The most authors cached per space; the most recently stamped are kept.
-#: That is four bundles' worth, so a host always has the newest
-#: :data:`~socialhome.domain.space_author_profile_bundle.MAX_BUNDLE_AUTHORS`,
-#: and a reader can name the people it is likely to see.
+#: The most authors cached per space; the most recently stamped are kept,
+#: so a reader can name the people it is likely to see.
 MAX_CACHED_AUTHORS_PER_SPACE: int = 200
 
 _COLS = (
@@ -51,8 +45,8 @@ _COLS = (
 
 #: The display reads (:meth:`SqliteSpaceAuthorProfileRepo.list_for`,
 #: :meth:`~SqliteSpaceAuthorProfileRepo.list_for_space`) name a picture only
-#: once its bytes are held: a row from a bundle's names part knows the
-#: signed hash before the picture part arrives, and a picture URL then
+#: once its bytes are held: a row whose sidecar was refused (or never
+#: arrived) knows the signed hash without the bytes, and a picture URL then
 #: would 404.
 _DISPLAY_COLS = (
     "space_id, author_user_id, author_pk, display_name, bio, "
@@ -68,22 +62,10 @@ class AbstractSpaceAuthorProfileRepo(Protocol):
         profile: SpaceAuthorProfile,
         *,
         picture_webp: bytes | None,
-        signed_item: dict | None = None,
-        item_epoch: int | None = None,
-    ) -> bool: ...
-    async def set_picture(
-        self,
-        space_id: str,
-        author_user_id: str,
-        picture_hash: str,
-        picture_webp: bytes,
     ) -> bool: ...
     async def get(
         self, space_id: str, author_user_id: str
     ) -> CachedAuthorProfile | None: ...
-    async def list_signed_items(
-        self, space_id: str, *, limit: int
-    ) -> builtins.list[BundleEntry]: ...
     async def list_spaces_for_author(
         self, author_user_id: str
     ) -> builtins.list[str]: ...
@@ -110,23 +92,19 @@ class SqliteSpaceAuthorProfileRepo:
         profile: SpaceAuthorProfile,
         *,
         picture_webp: bytes | None,
-        signed_item: dict | None = None,
-        item_epoch: int | None = None,
     ) -> bool:
         """Store ``profile`` unless a row with a newer-or-equal ``ts`` is
         held. Returns ``True`` when it was stored.
 
         Without ``picture_webp``, the bytes already held are kept if the
         signed ``picture_hash`` is unchanged. Otherwise the row holds no
-        picture until one arrives through :meth:`set_picture`.
-        ``signed_item`` is the author-signed item and ``item_epoch`` its
-        epoch, as a bundle forwards them. The space's oldest rows past
+        picture until a newer item brings one. The space's oldest rows past
         :data:`MAX_CACHED_AUTHORS_PER_SPACE` are pruned."""
         changed = await self._db.enqueue_rowcount(
             "INSERT INTO space_author_profiles(space_id, author_user_id, "
             "author_pk, display_name, bio, picture_webp, picture_hash, "
-            "profile_rev, ts, signed_item, item_epoch) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "profile_rev, ts) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(space_id, author_user_id) DO UPDATE SET "
             "author_pk=excluded.author_pk, display_name=excluded.display_name, "
             "bio=excluded.bio, "
@@ -137,7 +115,7 @@ class SqliteSpaceAuthorProfileRepo:
             "ELSE NULL END, "
             "picture_hash=excluded.picture_hash, "
             "profile_rev=excluded.profile_rev, ts=excluded.ts, "
-            "signed_item=excluded.signed_item, item_epoch=excluded.item_epoch "
+            "signed_item=NULL, item_epoch=NULL "
             "WHERE excluded.ts > space_author_profiles.ts",
             (
                 profile.space_id,
@@ -149,8 +127,6 @@ class SqliteSpaceAuthorProfileRepo:
                 profile.picture_hash,
                 profile.profile_rev,
                 profile.ts,
-                orjson.dumps(signed_item).decode() if signed_item is not None else None,
-                item_epoch,
             ),
         )
         if changed:
@@ -168,66 +144,22 @@ class SqliteSpaceAuthorProfileRepo:
             )
         return bool(changed)
 
-    async def set_picture(
-        self,
-        space_id: str,
-        author_user_id: str,
-        picture_hash: str,
-        picture_webp: bytes,
-    ) -> bool:
-        """Attach picture bytes to the held row, but only while its signed
-        hash is ``picture_hash``. Returns ``True`` when a row took them."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE space_author_profiles SET picture_webp=? "
-            "WHERE space_id=? AND author_user_id=? AND picture_hash=?",
-            (picture_webp, space_id, author_user_id, picture_hash),
-        )
-        return bool(changed)
-
     async def get(
         self, space_id: str, author_user_id: str
     ) -> CachedAuthorProfile | None:
         """The held row with its picture state, or ``None``."""
         row = await self._db.fetchone(
-            f"SELECT {_COLS}, picture_webp IS NOT NULL AS has_picture, signed_item "
+            f"SELECT {_COLS}, picture_webp IS NOT NULL AS has_picture "
             "FROM space_author_profiles WHERE space_id=? AND author_user_id=?",
             (space_id, author_user_id),
         )
         if row is None:
             return None
         data = dict(row)
-        item = _load_item(data.get("signed_item"))
-        sidecar = item.get(PROFILE_PICTURE_FIELD) if item is not None else None
         return CachedAuthorProfile(
             profile=_to_profile(data),
             has_picture=bool(data["has_picture"]),
-            picture_sidecar=sidecar if isinstance(sidecar, str) and sidecar else None,
         )
-
-    async def list_signed_items(
-        self, space_id: str, *, limit: int
-    ) -> builtins.list[BundleEntry]:
-        """The author-signed items held for ``space_id``, at most ``limit``,
-        the most recently stamped first. Each comes with its own epoch and
-        its signed picture hash."""
-        rows = await self._db.fetchall(
-            "SELECT signed_item, item_epoch, picture_hash FROM space_author_profiles "
-            "WHERE space_id=? AND signed_item IS NOT NULL AND item_epoch IS NOT NULL "
-            "ORDER BY ts DESC LIMIT ?",
-            (space_id, limit),
-        )
-        out: builtins.list[BundleEntry] = []
-        for row in rows:
-            item = _load_item(row["signed_item"])
-            if item is not None:
-                out.append(
-                    BundleEntry(
-                        epoch=int(row["item_epoch"]),
-                        item=item,
-                        picture_hash=row["picture_hash"],
-                    )
-                )
-        return out
 
     async def list_spaces_for_author(self, author_user_id: str) -> builtins.list[str]:
         """The spaces holding a profile of this author — for one of our own
@@ -278,16 +210,6 @@ class SqliteSpaceAuthorProfileRepo:
         if row is None:
             return None
         return bytes(row["picture_webp"]), str(row["picture_hash"])
-
-
-def _load_item(raw: object) -> dict | None:
-    if not isinstance(raw, str):
-        return None
-    try:
-        item = orjson.loads(raw)
-    except ValueError:
-        return None
-    return item if isinstance(item, dict) else None
 
 
 def _to_profile(row: dict) -> SpaceAuthorProfile:

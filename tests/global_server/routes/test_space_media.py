@@ -19,18 +19,12 @@ import orjson
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
-    sign_authority_event,
-)
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from socialhome.domain.gfs_space_media import (
-    AUTH_AUTHORITY,
     AUTH_CHANNEL,
     CHANNEL_MEDIA_DELETE_PREFIX,
     SCOPE_CHANNEL,
-    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_HEADER,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
@@ -61,12 +55,16 @@ from socialhome.global_server.space_media_auth import (
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS
 
-SPACE = "sp-media"
-SEED = os.urandom(32)
-PK = ed25519_public_key(SEED)
 SMALL = PAD_BUCKETS[1] + BLOB_OVERHEAD
 CHANNEL = "0f" * 16
 CHANNEL_SEED = os.urandom(32)
+#: Since v_96 the cache takes only the channel scope (owner decision Q5):
+#: the tests' default scope is the channel.
+SPACE = CHANNEL
+#: The listed space's authority seed — it authorizes nothing here any more.
+SEED = os.urandom(32)
+PK = ed25519_public_key(SEED)
+SCOPE_SPACE = "space"
 _REFUSED = {"error": "not authorized for this scope"}
 
 
@@ -136,18 +134,18 @@ async def gfs(tmp_dir, request):
 _ADDR: dict[bytes, str] = {}
 
 
-def _addr(data: bytes, space: str = SPACE, scope: str = SCOPE_SPACE) -> str:
+def _addr(data: bytes, space: str = SPACE, scope: str = SCOPE_CHANNEL) -> str:
     """The blob's scope-bound address (security review v2, N1)."""
     _ADDR[data] = space_media_address(scope, space, data)
     return _ADDR[data]
 
 
 def _bid(data: bytes) -> str:
-    return _ADDR.get(data) or space_media_address(SCOPE_SPACE, SPACE, data)
+    return _ADDR.get(data) or space_media_address(SCOPE_CHANNEL, SPACE, data)
 
 
 def _claim(
-    data: bytes, *, space=SPACE, ts=None, expires=None, size=None, scope=SCOPE_SPACE
+    data: bytes, *, space=SPACE, ts=None, expires=None, size=None, scope=SCOPE_CHANNEL
 ):
     now = int(time.time())
     return SpaceMediaClaim(
@@ -160,10 +158,11 @@ def _claim(
     )
 
 
-def _authority_header(claim: SpaceMediaClaim, seed: bytes = SEED) -> dict:
-    sig = sign_ed25519(seed, claim.authority_signing_bytes())
+def _authority_header(claim: SpaceMediaClaim, seed: bytes = CHANNEL_SEED) -> dict:
+    """The seed holder's upload header — since v_96 the channel key's."""
+    sig = sign_ed25519(seed, claim.channel_signing_bytes())
     auth = SpaceMediaUploadAuth(
-        claim=claim, kind=AUTH_AUTHORITY, sig=b64url_encode(sig), sig_suite="ed25519"
+        claim=claim, kind=AUTH_CHANNEL, sig=b64url_encode(sig), sig_suite="ed25519"
     )
     return {
         SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
@@ -269,16 +268,14 @@ async def test_a_non_address_is_not_routed_to_the_cache(gfs):
 
 
 @pytest.mark.parametrize(
-    "case", ["wrong_key", "unknown_space", "banned", "stale_ts", "future_ts", "path"]
+    "case", ["wrong_key", "unknown_channel", "stale_ts", "future_ts", "path"]
 )
 async def test_every_auth_failure_is_the_same_403(gfs, case):
     data = os.urandom(SMALL)
     if case == "wrong_key":
         headers = _authority_header(_claim(data), seed=os.urandom(32))
-    elif case == "unknown_space":
-        headers = _authority_header(_claim(data, space="sp-nope"))
-    elif case == "banned":
-        headers = _authority_header(_claim(data, space="sp-banned"))
+    elif case == "unknown_channel":
+        headers = _authority_header(_claim(data, space="1f" * 16))
     elif case == "stale_ts":
         headers = _authority_header(_claim(data, ts=int(time.time()) - 301))
     elif case == "future_ts":
@@ -452,25 +449,10 @@ async def test_a_body_that_makes_no_progress_is_cut_and_refunds_its_slot(
 # ── Delete ───────────────────────────────────────────────────────────────
 
 
-def _delete_body(data: bytes, *, seed: bytes = SEED, ts: int | None = None) -> dict:
+def _channel_delete_body(
+    data: bytes, *, seed: bytes = CHANNEL_SEED, ts: int | None = None
+) -> dict:
     ts = int(time.time()) if ts is None else ts
-    sig = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
-        space_id=SPACE,
-        payload=media_delete_payload(SCOPE_SPACE, SPACE, _bid(data), ts),
-        space_seed=seed,
-    )
-    return {
-        "scope": SCOPE_SPACE,
-        "scope_id": SPACE,
-        "ts": ts,
-        "sig": sig["authority_sig"],
-        "sig_suite": sig["authority_sig_suite"],
-    }
-
-
-def _channel_delete_body(data: bytes, *, seed: bytes = CHANNEL_SEED) -> dict:
-    ts = int(time.time())
     body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, _bid(data), ts)
     sig = sign_ed25519(seed, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, body))
     return {
@@ -480,20 +462,6 @@ def _channel_delete_body(data: bytes, *, seed: bytes = CHANNEL_SEED) -> dict:
         "sig": b64url_encode(sig),
         "sig_suite": "ed25519",
     }
-
-
-async def test_the_space_authority_deletes_a_blob(gfs):
-    data = os.urandom(SMALL)
-    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
-    bad = await gfs.post(
-        _put_url(data) + "/delete", json=_delete_body(data, seed=os.urandom(32))
-    )
-    assert bad.status == 403
-    assert await bad.json() == _REFUSED
-    r = await gfs.post(_put_url(data) + "/delete", json=_delete_body(data))
-    assert r.status == 200
-    assert await r.json() == {"deleted": True}
-    assert (await gfs.get(_get_url(data))).status == 404
 
 
 async def test_a_malformed_delete_body_is_400(gfs):
@@ -512,7 +480,7 @@ async def test_info_advertises_the_cache_in_the_signed_block(gfs):
         "ttl_s": 3 * 86_400,
         "space_max_bytes": 256 * 1024**2,
         "space_uploads_per_hour": 300,
-        "scopes": ["channel", "space"],
+        "scopes": ["channel"],
         # v_83 — a reader may ask for a blob it missed, waiting this long.
         "on_demand": {"wait_s": 25},
     }
@@ -619,30 +587,6 @@ async def test_the_scoped_write_paths_are_gone(gfs):
     assert (await gfs.get(_get_url(data))).status == 404
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        {},
-        {"scope": SCOPE_SPACE, "scope_id": 5},
-        {"scope": "room", "scope_id": SPACE},
-    ],
-)
-async def test_a_delete_names_its_scope_in_the_signed_body(gfs, body):
-    """The scope rides in the body the signature covers; without a usable
-    one the delete is the uniform 403."""
-    data = os.urandom(SMALL)
-    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
-    signed = _delete_body(data)
-    r = await gfs.post(
-        _put_url(data) + "/delete",
-        json={**signed, **body}
-        if body
-        else {k: v for k, v in signed.items() if k not in ("scope", "scope_id")},
-    )
-    assert r.status == 403
-    assert (await gfs.get(_get_url(data))).status == 200
-
-
 @pytest.mark.parametrize("gfs", [{"space_media_space_max_bytes": SMALL}], indirect=True)
 async def test_a_full_channel_evicts_its_oldest_not_refuses(gfs):
     first, second = os.urandom(SMALL), os.urandom(SMALL)
@@ -659,17 +603,12 @@ async def test_a_full_channel_evicts_its_oldest_not_refuses(gfs):
     "gfs", [{"space_media_space_uploads_per_hour": 1}], indirect=True
 )
 async def test_the_upload_rate_is_per_channel(gfs):
-    first, second, third = (os.urandom(SMALL) for _ in range(3))
+    first, second = (os.urandom(SMALL) for _ in range(2))
     await gfs.put(_ch_url(first), data=first, headers=_channel_header(_ch_claim(first)))
     r = await gfs.put(
         _ch_url(second), data=second, headers=_channel_header(_ch_claim(second))
     )
     assert r.status == 429
-    # A space's budget is its own.
-    r = await gfs.put(
-        _put_url(third), data=third, headers=_authority_header(_claim(third))
-    )
-    assert r.status == 201
 
 
 async def test_the_channel_key_deletes_a_blob(gfs):
@@ -727,11 +666,45 @@ async def test_space_blobs_are_not_served_by_the_public_media_mount(gfs, tmp_dir
 async def test_a_replayed_delete_is_the_uniform_403(gfs):
     data = os.urandom(SMALL)
     await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
-    body = _delete_body(data)
+    body = _channel_delete_body(data)
     assert (await gfs.post(_put_url(data) + "/delete", json=body)).status == 200
     r = await gfs.post(_put_url(data) + "/delete", json=body)
     assert r.status == 403
     assert await r.json() == _REFUSED
+
+
+async def test_the_space_scope_is_refused(gfs):
+    """v_96 (P7, owner decision Q5) — the retired ``space`` scope takes no
+    upload (the codec refuses it: 400) and no delete (403)."""
+    data = os.urandom(SMALL)
+    body = {
+        "scope": "space",
+        "scope_id": "sp-1",
+        "blob_id": "ab" * 32,
+        "addr_suite": "sm1",
+        "size": len(data),
+        "expires_at": int(time.time()) + 3600,
+        "ts": int(time.time()),
+        "auth": "authority",
+        "sig": "x" * 86,
+        "sig_suite": "ed25519",
+    }
+    raw = base64.urlsafe_b64encode(orjson.dumps(body)).rstrip(b"=").decode()
+    r = await gfs.put(
+        "/gfs/media/" + "ab" * 32, data=data, headers={SPACE_MEDIA_AUTH_HEADER: raw}
+    )
+    assert r.status == 400
+    r = await gfs.post(
+        "/gfs/media/" + "ab" * 32 + "/delete",
+        json={
+            "scope": "space",
+            "scope_id": "sp-1",
+            "ts": int(time.time()),
+            "sig": "x" * 86,
+            "sig_suite": "ed25519",
+        },
+    )
+    assert r.status == 403
 
 
 # ── Security review F1: an anonymous channel can't flush the cache ───────
@@ -775,26 +748,6 @@ async def test_an_anonymous_unused_channel_cannot_upload_or_flush(gfs):
 
 
 @pytest.mark.parametrize(
-    "gfs",
-    [{"space_media_max_bytes": 4 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
-    indirect=True,
-)
-async def test_a_seated_channel_flooding_evicts_its_own(gfs):
-    """Even a channel in use can't flush another scope: eviction is fair."""
-    victim = os.urandom(SMALL)
-    await gfs.put(
-        _put_url(victim), data=victim, headers=_authority_header(_claim(victim))
-    )
-    for _ in range(6):
-        junk = os.urandom(SMALL)
-        r = await gfs.put(
-            _ch_url(junk), data=junk, headers=_channel_header(_ch_claim(junk))
-        )
-        assert r.status == 201
-    assert (await gfs.get(_get_url(victim))).status == 200
-
-
-@pytest.mark.parametrize(
     "gfs", [{"space_media_ip_bytes_per_hour": SMALL}], indirect=True
 )
 async def test_an_address_over_its_byte_budget_is_429(gfs):
@@ -812,114 +765,10 @@ async def test_an_address_over_its_byte_budget_is_429(gfs):
     # The scope's own slot was given back with it.
     store = gfs.app_[gfs_space_media_store_key]
     bucket = int(time.time()) // 3600
-    assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (1, 0)
+    assert await store._repo.upload_counts("channel", SPACE, bucket=bucket) == (1, 0)
 
 
 # ── Security review v2, N1: the address is bound to the scope ────────────
-
-
-async def test_another_scope_cannot_squat_or_touch_a_spaces_blob(gfs):
-    """R8: a follower fetched the space's ciphertext and stores it first,
-    under its own channel. With the scope-bound address it can't use the
-    space's address (422), its own upload is a separate blob, and nothing
-    it does — its delete included — changes the space's blob: the
-    household's upload is 201, keeps its full expiry, and stays served."""
-    data = os.urandom(SMALL)
-    space_addr = space_media_address(SCOPE_SPACE, SPACE, data)
-    # At the space's address under the channel's scope: a mismatch.
-    claim = SpaceMediaClaim(
-        scope=SCOPE_CHANNEL,
-        scope_id=CHANNEL,
-        blob_id=space_addr,
-        size=len(data),
-        expires_at=int(time.time()) + 2,
-        ts=int(time.time()),
-    )
-    r = await gfs.put(
-        f"/gfs/media/{space_addr}", data=data, headers=_channel_header(claim)
-    )
-    assert r.status == 422
-    assert (await r.json())["error"] == "blob_id_mismatch"
-    # Under its own address: its own blob.
-    r = await gfs.put(
-        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
-    )
-    assert r.status == 201
-    channel_addr = _bid(data)
-    assert channel_addr != space_addr
-    # The household's upload is a new blob with its own full expiry.
-    r = await gfs.put(
-        _put_url(data), data=data, headers=_authority_header(_claim(data))
-    )
-    assert r.status == 201
-    store = gfs.app_[gfs_space_media_store_key]
-    held = await store._repo.get_blob(space_addr)
-    assert (held.scope_kind, held.scope_id) == (SCOPE_SPACE, SPACE)
-    assert held.expires_at >= int(time.time()) + 86_000
-    # The channel deletes "its" blob — the space's is not its to delete.
-    _ADDR[data] = channel_addr
-    r = await gfs.post(
-        f"/gfs/media/{channel_addr}/delete", json=_channel_delete_body(data)
-    )
-    assert await r.json() == {"deleted": True}
-    ts = int(time.time()) + 1
-    body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, space_addr, ts)
-    sig = sign_ed25519(CHANNEL_SEED, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, body))
-    r = await gfs.post(
-        f"/gfs/media/{space_addr}/delete",
-        json={
-            "scope": SCOPE_CHANNEL,
-            "scope_id": CHANNEL,
-            "ts": ts,
-            "sig": b64url_encode(sig),
-            "sig_suite": "ed25519",
-        },
-    )
-    assert await r.json() == {"deleted": False}
-    g = await gfs.get(f"/gfs/media/{space_addr}")
-    assert g.status == 200
-    assert await g.read() == data
-
-
-async def test_a_banned_other_space_cannot_touch_the_blob(gfs):
-    """R9: another listed space uploads the same ciphertext (its own address)
-    and is banned — the space's blob is untouched and stays served."""
-    fed = gfs.app_[gfs_fed_repo_key]
-    evil_seed = os.urandom(32)
-    await fed.upsert_space(
-        GlobalSpace(
-            space_id="sp-evil",
-            owning_instance="owner",
-            status="active",
-            identity_public_key=ed25519_public_key(evil_seed).hex(),
-        )
-    )
-    data = os.urandom(SMALL)
-    r = await gfs.put(
-        _put_url(data), data=data, headers=_authority_header(_claim(data))
-    )
-    assert r.status == 201
-    space_addr = _bid(data)
-    r = await gfs.put(
-        _put_url(data, "sp-evil"),
-        data=data,
-        headers=_authority_header(_claim(data, space="sp-evil"), seed=evil_seed),
-    )
-    assert r.status == 201
-    evil_addr = _bid(data)
-    assert evil_addr != space_addr
-    await fed.set_space_status("sp-evil", "banned")
-    assert (await gfs.get(f"/gfs/media/{evil_addr}")).status == 404
-    g = await gfs.get(f"/gfs/media/{space_addr}")
-    assert g.status == 200
-    assert await g.read() == data
-
-
-async def test_a_ban_hides_the_spaces_blobs(gfs):
-    data = os.urandom(SMALL)
-    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
-    await gfs.app_[gfs_fed_repo_key].set_space_status(SPACE, "banned")
-    assert (await gfs.get(_get_url(data))).status == 404
 
 
 # ── Security re-attack N2: cheap channels can't game fair eviction ───────
@@ -1157,114 +1006,7 @@ async def _space_put(gfs, data: bytes, sid: str, seed: bytes) -> int:
     return r.status
 
 
-async def test_a_pending_space_gets_no_media(gfs):
-    """Only an ACTIVE listed space takes uploads — a pending one (published,
-    not yet accepted) is the uniform 403."""
-    await _active(gfs, "evil")
-    seed = await _own_space(gfs, "sp-pending", household="evil", status="pending")
-    assert await _space_put(gfs, os.urandom(SMALL), "sp-pending", seed) == 403
-
-
-@pytest.mark.parametrize(
-    "gfs",
-    [{"space_media_max_bytes": 6 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
-    indirect=True,
-)
-async def test_six_self_published_spaces_buy_one_household_share(gfs):
-    """A3 probe: a household publishes 6 spaces of its own and uploads to
-    each. Fairness groups all of them behind that household, so the real
-    space (another household) keeps its share — half the cache — whatever
-    the attacker does."""
-    await _active(gfs, "evil")
-    victim = [os.urandom(SMALL) for _ in range(4)]
-    for v in victim:
-        assert await _space_put(gfs, v, SPACE, SEED) == 201
-    victim_urls = [f"/gfs/media/{_bid(v)}" for v in victim]
-    for i in range(6):
-        sid = f"sp-evil-{i}"
-        seed = await _own_space(gfs, sid, household="evil")
-        for _ in range(2):
-            assert await _space_put(gfs, os.urandom(SMALL), sid, seed) == 201
-    alive = [(await gfs.get(u)).status for u in victim_urls]
-    assert alive.count(200) >= 3, alive
-
-
-@pytest.mark.parametrize(
-    "gfs",
-    [{"space_media_max_bytes": 6 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
-    indirect=True,
-)
-async def test_six_self_seated_channels_buy_one_household_share(gfs):
-    """The same with channels: one household seats itself in 6 channels of
-    its own — they all count as that household."""
-    await _active(gfs, "evil")
-    victim = [os.urandom(SMALL) for _ in range(4)]
-    for v in victim:
-        assert await _space_put(gfs, v, SPACE, SEED) == 201
-    victim_urls = [f"/gfs/media/{_bid(v)}" for v in victim]
-    now = int(time.time())
-    for i in range(6):
-        cid, seed = await _seated_channel(gfs, ["evil"], joined=now + i)
-        for _ in range(2):
-            junk = os.urandom(SMALL)
-            claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
-            r = await gfs.put(
-                _ch_url(junk, cid), data=junk, headers=_channel_header(claim, seed=seed)
-            )
-            assert r.status == 201
-    alive = [(await gfs.get(u)).status for u in victim_urls]
-    assert alive.count(200) >= 3, alive
-
-
 # ── Fourth review G1: channel blobs count against the uploader ───────────
-
-
-@pytest.mark.parametrize(
-    "gfs",
-    [{"space_media_max_bytes": 6 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
-    indirect=True,
-)
-async def test_a_hostile_channel_owner_cannot_evict_its_members_own_blobs(gfs):
-    """G1 probe: a hostile private-space owner invites the victim household
-    (its only seat — the owner never takes one) and fills the channel. The
-    channel's blobs count against the UPLOADER's address bucket, not the
-    seated victim, so the owner's flood evicts its own blobs and the
-    victim's own space keeps its pictures."""
-    await _active(gfs, "victim")
-    victim_seed = await _own_space(gfs, "sp-victim", household="victim")
-    victim_xff = {"X-Forwarded-For": "198.51.100.20"}
-    mine = [os.urandom(SMALL) for _ in range(2)]
-    for v in mine:
-        r = await gfs.put(
-            _put_url(v, "sp-victim"),
-            data=v,
-            headers={
-                **_authority_header(_claim(v, space="sp-victim"), victim_seed),
-                **victim_xff,
-            },
-        )
-        assert r.status == 201
-    mine_urls = [f"/gfs/media/{_bid(v)}" for v in mine]
-    for v in [os.urandom(SMALL) for _ in range(2)]:
-        await gfs.put(
-            _put_url(v),
-            data=v,
-            headers={**_authority_header(_claim(v)), "X-Forwarded-For": "192.0.2.30"},
-        )
-    cid, seed = await _seated_channel(gfs, ["victim"], joined=int(time.time()))
-    for _ in range(4):
-        junk = os.urandom(SMALL)
-        claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
-        r = await gfs.put(
-            _ch_url(junk, cid),
-            data=junk,
-            headers={
-                **_channel_header(claim, seed=seed),
-                "X-Forwarded-For": "203.0.113.40",
-            },
-        )
-        assert r.status == 201
-    assert [(await gfs.get(u)).status for u in mine_urls] == [200, 200]
 
 
 # ── Final check N4: one network prefix is one owner and one budget ───────

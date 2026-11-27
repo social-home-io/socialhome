@@ -1215,20 +1215,20 @@ async def test_a_recipient_that_connected_during_the_enqueue_is_drained(wiring):
     assert await queue_repo.count_for(RECIPIENT) == 0
 
 
-# ── queue_relay: a targeted relay whose socket is on another node ────────
+# ── queue_relay_many: a channel item whose seat's socket is elsewhere ────
 
 
-async def test_queue_relay_queues_a_relay_row_and_hints_the_cluster(wiring):
+async def test_queue_relay_many_queues_a_relay_row_and_hints_the_cluster(wiring):
     _fed, queue_repo, registry, relay = wiring
     cluster = _FakeCluster()
     relay.attach_cluster(cluster)
     frame = {
-        "space_id": "sp-1",
-        "event_type": "space_subscriber_key_handoff",
+        "channel_id": "c" * 32,
+        "event_type": "space_item",
         "payload": {"sealed": "x"},
     }
 
-    assert await relay.queue_relay(RECIPIENT, frame) is True
+    assert await relay.queue_relay_many([RECIPIENT], frame) == 1
 
     [queued] = await queue_repo.list_for(RECIPIENT, now=0)
     assert queued.frame_type == QUEUE_KIND_RELAY
@@ -1239,13 +1239,15 @@ async def test_queue_relay_queues_a_relay_row_and_hints_the_cluster(wiring):
     assert registry.sent == [(RECIPIENT, {"type": RELAY_FRAME_TYPE, **frame})]
 
 
-async def test_queue_relay_refuses_a_frame_over_the_cap(wiring, monkeypatch, caplog):
+async def test_queue_relay_many_refuses_a_frame_over_the_cap(
+    wiring, monkeypatch, caplog
+):
     _fed, queue_repo, _registry, relay = wiring
     cluster = _FakeCluster()
     relay.attach_cluster(cluster)
     monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT", 10)
     with caplog.at_level(logging.WARNING):
-        assert await relay.queue_relay(RECIPIENT, _item("x" * 64)) is False
+        assert await relay.queue_relay_many([RECIPIENT], _item("x" * 64)) == 0
     assert await queue_repo.count_for(RECIPIENT) == 0
     assert cluster.hinted == []
     assert "exceeds the relay queue caps" in caplog.text

@@ -13,7 +13,6 @@ import pytest
 from socialhome.domain.federation import GfsConnection
 from socialhome.infrastructure.gfs_ws_supervisor import (
     GfsWebSocketSupervisor,
-    _relay_for,
 )
 
 # ── Fakes ──────────────────────────────────────────────────────────────────────
@@ -629,104 +628,6 @@ async def test_supervisor_binds_envelope_handler_per_connection(http_session):
             supervisor.attach_envelope_handler(later)
             await captured["http://gfs2.test"]({"sealed": {"ciphertext": "three"}})
             assert late == [("three", "http://gfs2.test")]
-        finally:
-            await supervisor.stop()
-
-
-# ── relay observer (seat self-heal) ──────────────────────────────────────
-
-
-async def test_relay_observer_is_told_the_server_after_the_consumer():
-    order: list[tuple] = []
-
-    async def _consume(frame):
-        order.append(("consume", frame["space_id"]))
-
-    async def _seen(frame, *, gfs_id):
-        order.append(("seen", frame["space_id"], gfs_id))
-
-    await _relay_for(_consume, _seen, "gfs-1")({"space_id": "sp"})
-    assert order == [("consume", "sp"), ("seen", "sp", "gfs-1")]
-
-
-async def test_without_an_observer_the_consumer_is_used_as_is():
-    consume = AsyncMock()
-    assert _relay_for(consume, None, "gfs-1") is consume
-
-
-async def test_a_failing_observer_never_costs_the_frame(caplog):
-    consume = AsyncMock()
-
-    async def _boom(frame, *, gfs_id):
-        raise RuntimeError("bug")
-
-    await _relay_for(consume, _boom, "gfs-1")({"space_id": "sp"})
-    consume.assert_awaited_once()
-    assert "relay observer failed" in caplog.text
-
-
-async def test_a_frame_the_consumer_rejected_never_reaches_the_observer():
-    seen = AsyncMock()
-
-    async def _reject(frame):
-        raise ValueError("bad frame")
-
-    with pytest.raises(ValueError):
-        await _relay_for(_reject, seen, "gfs-1")({"space_id": "sp"})
-    seen.assert_not_awaited()
-
-
-async def test_supervisor_tells_new_subscriber_which_connection(http_session):
-    """v_61: the subscriber lives on the connection its ``new_subscriber``
-    arrived on — the targeted handoff and the profiles bundle go back there.
-    Bound at start and on a late attach alike."""
-    repo = _FakeRepo(
-        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
-    )
-    seen: list[tuple[str, str]] = []
-
-    async def on_new_subscriber(frame: dict, *, gfs_id: str | None = None) -> None:
-        seen.append((frame["space_id"], gfs_id or ""))
-
-    captured: dict[str, object] = {}
-
-    class _StubClient:
-        def __init__(self, *, gfs_url, on_new_subscriber=None, **_kwargs):
-            self.url = gfs_url
-            captured[gfs_url] = on_new_subscriber
-
-        def attach_new_subscriber_handler(self, handler):
-            captured[self.url] = handler
-
-        def is_alive(self) -> bool:
-            return True
-
-        async def start(self):
-            return None
-
-        async def stop(self):
-            return None
-
-    with patch(
-        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
-        _StubClient,
-    ):
-        supervisor = GfsWebSocketSupervisor(
-            repo=repo,
-            instance_id="sh-1",
-            signing_key=b"\x00" * 32,
-            session_factory=lambda: http_session,
-            on_relay=AsyncMock(),
-            on_new_subscriber=on_new_subscriber,
-            reconcile_interval_seconds=0.05,
-        )
-        await supervisor.start()
-        try:
-            await captured["http://gfs1.test"]({"space_id": "a"})
-            await captured["http://gfs2.test"]({"space_id": "b"})
-            supervisor.attach_new_subscriber_handler(on_new_subscriber)
-            await captured["http://gfs2.test"]({"space_id": "c"})
-            assert seen == [("a", "g1"), ("b", "g2"), ("c", "g2")]
         finally:
             await supervisor.stop()
 

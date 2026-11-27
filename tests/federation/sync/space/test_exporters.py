@@ -140,15 +140,19 @@ class _FakeSpacePostRepo:
 
 
 class _FakeSpaceRepo:
-    def __init__(self, members=None, bans=None):
+    def __init__(self, members=None, bans=None, household_bans=None):
         self._members = members or []
         self._bans = bans or []
+        self._household_bans = household_bans or []
 
     async def list_members(self, space_id):
         return self._members
 
     async def list_bans(self, space_id):
         return self._bans
+
+    async def list_household_bans(self, space_id):
+        return self._household_bans
 
 
 async def test_members_exporter():
@@ -290,6 +294,19 @@ async def test_bans_exporter():
         )
     )
     assert (await ex.list_records("sp-1"))[0]["user_id"] == "u-x"
+
+
+async def test_bans_exporter_ships_household_bans_too():
+    """P7b — household bans ride the same resource, without a user id."""
+    ex = BansExporter(
+        _FakeSpaceRepo(
+            bans=[{"user_id": "u-x", "banned_by": "admin"}],
+            household_bans=[{"space_id": "sp-1", "instance_id": "peer-bad"}],
+        )
+    )
+    records = await ex.list_records("sp-1")
+    assert [r.get("user_id") for r in records] == ["u-x", None]
+    assert records[1]["instance_id"] == "peer-bad"
 
 
 async def test_posts_exporter_serialises_enums_and_datetimes():

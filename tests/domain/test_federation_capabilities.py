@@ -58,6 +58,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
@@ -96,6 +97,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(60) == [
         "Names for new followers right away",
@@ -133,6 +135,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(61) == [
         "Public moments encrypted from the GFS",
@@ -169,6 +172,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(62) == [
         "Photos and videos in public moments",
@@ -204,6 +208,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(63) == [
         "Time-stamped public moments",
@@ -238,6 +243,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
@@ -271,6 +277,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(65) == [
         "Deletes reach every copy of a moment",
@@ -303,6 +310,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(66) == [
         "Reactions reach authors further away",
@@ -334,6 +342,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(67) == [
         "Reactions reach authors you follow through a GFS",
@@ -364,6 +373,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(68) == [
         "Everyone sees the full reaction count",
@@ -393,6 +403,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(69) == [
         "A highlight taken away stays away",
@@ -421,6 +432,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(70) == [
         "Reporters in other households hear their report was reviewed",
@@ -448,6 +460,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -474,6 +487,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -499,6 +513,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -523,6 +538,7 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -546,8 +562,9 @@ def test_local_community_area_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
+    assert "local_communities" in _slugs_at(59)
 
 
 def test_member_picture_reset_sync_capability_threshold():
@@ -599,6 +616,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
@@ -638,8 +656,9 @@ def test_member_picture_reset_sync_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
+    assert "synced_picture_resets" in _slugs_at(58)
 
 
 def test_multi_gfs_publish_capability_threshold():
@@ -691,11 +710,12 @@ def test_multi_gfs_publish_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
     )
-    assert fc.CAPABILITY_FEATURE_KEYS[57] == "multi_gfs_posting"
+    assert "multi_gfs_posting" in _slugs_at(57)
 
 
 def test_sync_series_rows_capability_threshold():
@@ -748,8 +768,9 @@ def test_sync_series_rows_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
+    assert "synced_recurring_events" in _slugs_at(56)
 
 
 def test_space_chat_capability_threshold():
@@ -800,6 +821,7 @@ def test_space_chat_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -842,6 +864,7 @@ def test_space_chat_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -857,6 +880,7 @@ def test_space_chat_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.space_feature_keys_missing_below(54) == [
         "space_chat",
@@ -872,8 +896,9 @@ def test_space_chat_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[55] == "space_chat"
+    assert "space_chat" in _slugs_at(55)
 
 
 def test_gfs_relay_key_exchange_capability_threshold():
@@ -927,6 +952,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -970,6 +996,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1025,6 +1052,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -1069,6 +1097,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1123,6 +1152,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1155,6 +1185,7 @@ def test_space_authority_rotation_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(45) == [
         "Catching up on missed security updates",
@@ -1207,6 +1238,7 @@ def test_space_authority_rotation_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -1258,6 +1290,7 @@ def test_space_authority_rotation_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1287,6 +1320,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -1338,6 +1372,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1366,6 +1401,7 @@ def test_space_report_scope_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1398,6 +1434,7 @@ def test_federated_moderation_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert "Reviewing posts from other households" not in fc.features_missing_below(43)
 
@@ -1432,6 +1469,7 @@ def test_content_access_enforcement_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -1467,6 +1505,7 @@ def test_space_moderator_role_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -1503,6 +1542,7 @@ def test_task_priority_labels_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -1579,6 +1619,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1617,6 +1658,7 @@ def test_moment_origin_signature_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -1628,7 +1670,7 @@ def test_remote_subscriber_role_capability_threshold():
     of the space."""
     assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE == 30
     assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE <= fc.OURS
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Followers from other households" in labels
     assert "Followers from other households" in fc.features_missing_below(29)
     assert "Followers from other households" not in fc.features_missing_below(30)
@@ -1648,7 +1690,7 @@ def test_routed_origin_signature_capability_threshold():
     the mesh carries space content."""
     assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE == 31
     assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE <= fc.OURS
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Checking who sent a passed-on message" in labels
     assert "Checking who sent a passed-on message" in fc.features_missing_below(30)
     assert "Checking who sent a passed-on message" not in fc.features_missing_below(31)
@@ -1672,7 +1714,7 @@ def test_route_stale_nack_capability_threshold():
 
 
 def test_route_stale_nack_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Noticing when a path through other households breaks" in labels
     assert (
         "Noticing when a path through other households breaks"
@@ -1714,7 +1756,7 @@ def test_user_identity_key_capability_threshold():
 
 
 def test_user_identity_key_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Checking each person's identity" in labels
     assert "Checking each person's identity" in fc.features_missing_below(24)
     assert "Checking each person's identity" not in fc.features_missing_below(25)
@@ -1729,7 +1771,7 @@ def test_admin_authoritative_ops_capability_threshold():
 
 
 def test_admin_authoritative_ops_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Admins changing settings while the owner is away" in labels
     assert (
         "Admins changing settings while the owner is away"
@@ -1753,7 +1795,7 @@ def test_space_roster_gossip_capability_threshold():
 
 
 def test_space_roster_gossip_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Member lists shared between households" in labels
     assert "Member lists shared between households" in fc.features_missing_below(22)
     assert "Member lists shared between households" not in fc.features_missing_below(23)
@@ -1769,7 +1811,7 @@ def test_space_admin_key_share_capability_threshold():
 
 
 def test_space_admin_key_share_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Admins running a space without the owner" in labels
     assert "Admins running a space without the owner" in fc.features_missing_below(21)
     assert "Admins running a space without the owner" not in fc.features_missing_below(
@@ -1788,7 +1830,7 @@ def test_authenticated_route_discovery_capability_threshold():
 
 
 def test_authenticated_route_discovery_feature_label():
-    labels = dict(fc.CAPABILITY_FEATURES).values()
+    labels = [label for _ver, label in fc.CAPABILITY_FEATURES]
     assert "Finding a safe path through other households" in labels
     assert "Finding a safe path through other households" in fc.features_missing_below(
         20
@@ -1810,7 +1852,9 @@ def test_space_sync_rejected_capability_threshold():
 
 
 def test_space_sync_rejected_feature_label():
-    assert "Fixing spaces that got out of step" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Fixing spaces that got out of step" in [
+        label for _ver, label in fc.CAPABILITY_FEATURES
+    ]
     assert "Fixing spaces that got out of step" in fc.features_missing_below(19)
     assert "Fixing spaces that got out of step" not in fc.features_missing_below(20)
 
@@ -1890,7 +1934,7 @@ def test_gallery_album_sync_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Shared gallery albums" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Shared gallery albums" in [label for _ver, label in fc.CAPABILITY_FEATURES]
 
 
 def test_owner_bound_album_id_capability_threshold():
@@ -1901,7 +1945,9 @@ def test_owner_bound_album_id_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Albums tied to their creator" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Albums tied to their creator" in [
+        label for _ver, label in fc.CAPABILITY_FEATURES
+    ]
     assert "Albums tied to their creator" in fc.features_missing_below(33)
     assert "Albums tied to their creator" not in fc.features_missing_below(34)
 
@@ -1931,6 +1977,7 @@ def test_forwarded_role_change_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(47) == [
         "Shared pages without lost edits",
@@ -1981,6 +2028,7 @@ def test_forwarded_role_change_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -2007,6 +2055,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(48) == [
         "Members can post without the host",
@@ -2056,6 +2105,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -2114,6 +2164,7 @@ def test_member_gfs_publish_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -2171,6 +2222,7 @@ def test_strict_member_publish_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -2228,116 +2280,130 @@ def test_private_channels_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
 
 
 #: The pinned slug set. These are an API contract (``lacking_feature_keys`` /
 #: ``lagging_feature_keys``) and SPA translation keys (``capability.<slug>``):
 #: never rename one. A new feature appends a slug here AND in the module.
-_PINNED_FEATURE_KEYS = {
-    2: "calendar_time_zones",
-    3: "photos_in_dms",
-    5: "home_location_sharing",
-    6: "invite_links_other_households",
-    7: "space_rekey_on_leave",
-    8: "remote_member_roles",
-    9: "remote_member_removal",
-    10: "bazaar_listings",
-    11: "bazaar_sold_status",
-    12: "bazaar_bids",
-    13: "sync_https_fallback",
-    14: "fast_media_transfer",
-    15: "remote_admin_actions",
-    16: "admin_proposals",
-    17: "cross_household_apps",
-    18: "app_user_routing",
-    19: "household_resync",
-    20: "space_sync_repair",
-    21: "safe_route_discovery",
-    22: "admin_key_share",
-    23: "roster_gossip",
-    24: "admin_ops_without_owner",
-    25: "user_identity_keys",
-    26: "identity_anchor",
-    27: "user_move",
-    28: "route_break_notice",
-    29: "invite_link_bootstrap",
-    30: "remote_followers",
-    31: "routed_origin_check",
-    32: "roster_snapshot",
-    33: "gallery_albums",
-    34: "album_owner_binding",
-    35: "moment_origin_check",
-    36: "content_owner_binding",
-    37: "cross_household_group_chats",
-    38: "moment_no_relay",
-    39: "space_timetables",
-    40: "task_priority_labels",
-    41: "space_moderators",
-    42: "admin_only_features",
-    43: "federated_moderation",
-    44: "removed_admin_lockout",
-    45: "space_reports",
-    46: "security_update_catch_up",
-    47: "forwarded_role_changes",
-    48: "shared_pages_no_lost_edits",
-    49: "member_publish",
-    50: "anonymous_gfs_posting",
-    51: "private_gfs_spaces",
-    52: "forwarded_invite_links",
-    53: "shared_gfs_relay",
-    54: "gfs_fallback_later",
-    55: "space_chat",
-    56: "synced_recurring_events",
-    57: "multi_gfs_posting",
-    58: "synced_picture_resets",
-    59: "local_communities",
-    60: "follower_author_names",
-    61: "follower_names_on_join",
-    62: "encrypted_public_moments",
-    63: "public_moment_media",
-    64: "public_moment_sent_at",
-    65: "follower_moment_retention",
-    66: "late_moment_deletes",
-    67: "routed_moment_reactions",
-    68: "gfs_moment_reactions",
-    69: "moment_reaction_counts",
-    70: "highlight_audience_change",
-    71: "remote_report_answers",
-    72: "app_games_end_on_uninstall",
-    73: "bazaar_offers",
-    74: "bazaar_ask_the_seller",
-    75: "bazaar_listing_faq",
-    76: "app_groups",
-    77: "space_app_tables",
-    78: "app_engines",
-    79: "space_gallery_item_edits",
-    80: "space_media_refs",
-    81: "lighter_media_transfers",
-    82: "space_page_media",
-    83: "space_media_on_demand",
-    84: "gfs_join_requests",
-    85: "content_file_hashes",
-    86: "trusted_file_fills",
-    87: "relay_media",
-    89: "mailbox_member_mesh",
-    90: "anonymous_gfs_posting_only",
-    91: "multi_mailbox",
-    92: "space_media_wanted",
-    93: "space_post_reactions",
-    94: "poll_vote_stamps",
-    95: "sync_pages",
-    96: "moment_reach",
-}
+_PINNED_FEATURE_KEYS = [
+    (2, "calendar_time_zones"),
+    (3, "photos_in_dms"),
+    (5, "home_location_sharing"),
+    (6, "invite_links_other_households"),
+    (7, "space_rekey_on_leave"),
+    (8, "remote_member_roles"),
+    (9, "remote_member_removal"),
+    (10, "bazaar_listings"),
+    (11, "bazaar_sold_status"),
+    (12, "bazaar_bids"),
+    (13, "sync_https_fallback"),
+    (14, "fast_media_transfer"),
+    (15, "remote_admin_actions"),
+    (16, "admin_proposals"),
+    (17, "cross_household_apps"),
+    (18, "app_user_routing"),
+    (19, "household_resync"),
+    (20, "space_sync_repair"),
+    (21, "safe_route_discovery"),
+    (22, "admin_key_share"),
+    (23, "roster_gossip"),
+    (24, "admin_ops_without_owner"),
+    (25, "user_identity_keys"),
+    (26, "identity_anchor"),
+    (27, "user_move"),
+    (28, "route_break_notice"),
+    (29, "invite_link_bootstrap"),
+    (30, "remote_followers"),
+    (31, "routed_origin_check"),
+    (32, "roster_snapshot"),
+    (33, "gallery_albums"),
+    (34, "album_owner_binding"),
+    (35, "moment_origin_check"),
+    (36, "content_owner_binding"),
+    (37, "cross_household_group_chats"),
+    (38, "moment_no_relay"),
+    (39, "space_timetables"),
+    (40, "task_priority_labels"),
+    (41, "space_moderators"),
+    (42, "admin_only_features"),
+    (43, "federated_moderation"),
+    (44, "removed_admin_lockout"),
+    (45, "space_reports"),
+    (46, "security_update_catch_up"),
+    (47, "forwarded_role_changes"),
+    (48, "shared_pages_no_lost_edits"),
+    (49, "member_publish"),
+    (50, "anonymous_gfs_posting"),
+    (51, "private_gfs_spaces"),
+    (52, "forwarded_invite_links"),
+    (53, "shared_gfs_relay"),
+    (54, "gfs_fallback_later"),
+    (55, "space_chat"),
+    (56, "synced_recurring_events"),
+    (57, "multi_gfs_posting"),
+    (58, "synced_picture_resets"),
+    (59, "local_communities"),
+    (60, "follower_author_names"),
+    (61, "follower_names_on_join"),
+    (62, "encrypted_public_moments"),
+    (63, "public_moment_media"),
+    (64, "public_moment_sent_at"),
+    (65, "follower_moment_retention"),
+    (66, "late_moment_deletes"),
+    (67, "routed_moment_reactions"),
+    (68, "gfs_moment_reactions"),
+    (69, "moment_reaction_counts"),
+    (70, "highlight_audience_change"),
+    (71, "remote_report_answers"),
+    (72, "app_games_end_on_uninstall"),
+    (73, "bazaar_offers"),
+    (74, "bazaar_ask_the_seller"),
+    (75, "bazaar_listing_faq"),
+    (76, "app_groups"),
+    (77, "space_app_tables"),
+    (78, "app_engines"),
+    (79, "space_gallery_item_edits"),
+    (80, "space_media_refs"),
+    (81, "lighter_media_transfers"),
+    (82, "space_page_media"),
+    (83, "space_media_on_demand"),
+    (84, "gfs_join_requests"),
+    (85, "content_file_hashes"),
+    (86, "trusted_file_fills"),
+    (87, "relay_media"),
+    (89, "mailbox_member_mesh"),
+    (90, "anonymous_gfs_posting_only"),
+    (91, "multi_mailbox"),
+    (92, "space_media_wanted"),
+    (93, "space_post_reactions"),
+    (94, "poll_vote_stamps"),
+    (95, "sync_pages"),
+    (96, "subscriber_seats"),
+    (96, "moment_reach"),
+]
+
+
+def _slugs_at(version: int) -> list[str]:
+    """The slugs of every feature introduced at ``version`` (v_96 has two)."""
+    return [
+        fc.CAPABILITY_FEATURE_KEYS[label]
+        for ver, label in fc.CAPABILITY_FEATURES
+        if ver == version
+    ]
 
 
 def test_every_feature_has_exactly_one_stable_key():
     """Each ``CAPABILITY_FEATURES`` entry carries a slug, and the slugs are
     the pinned set — renaming one breaks the SPA's translations and any
     client matching on it."""
-    versions = {ver for ver, _label in fc.CAPABILITY_FEATURES}
-    assert set(fc.CAPABILITY_FEATURE_KEYS) == versions
-    assert fc.CAPABILITY_FEATURE_KEYS == _PINNED_FEATURE_KEYS
+    labels = {label for _ver, label in fc.CAPABILITY_FEATURES}
+    assert set(fc.CAPABILITY_FEATURE_KEYS) == labels
+    assert sorted(
+        (ver, fc.CAPABILITY_FEATURE_KEYS[label])
+        for ver, label in fc.CAPABILITY_FEATURES
+    ) == sorted(_PINNED_FEATURE_KEYS)
 
 
 def test_feature_keys_are_unique_snake_case():
@@ -2350,7 +2416,8 @@ def test_feature_keys_are_unique_snake_case():
 def test_feature_keys_missing_below_parallels_the_labels():
     """Same order and length as the English labels, at every version."""
     labels_by_key = {
-        fc.CAPABILITY_FEATURE_KEYS[ver]: label for ver, label in fc.CAPABILITY_FEATURES
+        fc.CAPABILITY_FEATURE_KEYS[label]: label
+        for _ver, label in fc.CAPABILITY_FEATURES
     }
     for version in range(fc.OURS + 2):
         keys = fc.feature_keys_missing_below(version)
@@ -2409,6 +2476,7 @@ def test_space_author_profile_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.space_feature_keys_missing_below(59) == [
         "follower_author_names",
@@ -2423,8 +2491,9 @@ def test_space_author_profile_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[60] == "follower_author_names"
+    assert "follower_author_names" in _slugs_at(60)
 
 
 def test_follower_profile_bundle_capability_threshold():
@@ -2472,8 +2541,9 @@ def test_follower_profile_bundle_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
+    assert "follower_names_on_join" in _slugs_at(61)
 
 
 def test_encrypted_public_moments_capability_threshold():
@@ -2520,8 +2590,9 @@ def test_encrypted_public_moments_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
+    assert "encrypted_public_moments" in _slugs_at(62)
 
 
 def test_encrypted_moment_media_capability_threshold():
@@ -2566,8 +2637,9 @@ def test_encrypted_moment_media_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
+    assert "public_moment_media" in _slugs_at(63)
 
 
 def test_public_moment_sent_at_capability_threshold():
@@ -2579,7 +2651,7 @@ def test_public_moment_sent_at_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(63)[0] == "Time-stamped public moments"
-    assert fc.CAPABILITY_FEATURE_KEYS[64] == "public_moment_sent_at"
+    assert "public_moment_sent_at" in _slugs_at(64)
 
 
 def test_long_lived_moments_capability_threshold():
@@ -2622,8 +2694,9 @@ def test_long_lived_moments_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
+    assert "follower_moment_retention" in _slugs_at(65)
 
 
 def test_late_moment_deletes_capability_threshold():
@@ -2637,7 +2710,7 @@ def test_late_moment_deletes_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(65)[0] == "Deletes reach every copy of a moment"
-    assert fc.CAPABILITY_FEATURE_KEYS[66] == "late_moment_deletes"
+    assert "late_moment_deletes" in _slugs_at(66)
 
 
 def test_routed_moment_reactions_capability_threshold():
@@ -2650,7 +2723,7 @@ def test_routed_moment_reactions_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(66)[0] == "Reactions reach authors further away"
-    assert fc.CAPABILITY_FEATURE_KEYS[67] == "routed_moment_reactions"
+    assert "routed_moment_reactions" in _slugs_at(67)
 
 
 def test_gfs_moment_reactions_capability_threshold():
@@ -2665,7 +2738,7 @@ def test_gfs_moment_reactions_capability_threshold():
     assert fc.features_missing_below(67)[0] == (
         "Reactions reach authors you follow through a GFS"
     )
-    assert fc.CAPABILITY_FEATURE_KEYS[68] == "gfs_moment_reactions"
+    assert "gfs_moment_reactions" in _slugs_at(68)
 
 
 def test_moment_reaction_counts_capability_threshold():
@@ -2705,8 +2778,9 @@ def test_moment_reaction_counts_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[69] == "moment_reaction_counts"
+    assert "moment_reaction_counts" in _slugs_at(69)
 
 
 def test_highlight_audience_change_capability_threshold():
@@ -2746,8 +2820,9 @@ def test_highlight_audience_change_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[70] == "highlight_audience_change"
+    assert "highlight_audience_change" in _slugs_at(70)
 
 
 def test_remote_report_answer_capability_threshold():
@@ -2785,6 +2860,7 @@ def test_remote_report_answer_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -2811,6 +2887,7 @@ def test_remote_report_answer_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -2836,6 +2913,7 @@ def test_remote_report_answer_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -2860,6 +2938,7 @@ def test_remote_report_answer_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -2883,8 +2962,9 @@ def test_remote_report_answer_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[71] == "remote_report_answers"
+    assert "remote_report_answers" in _slugs_at(71)
 
 
 def test_app_session_ended_capability_threshold():
@@ -2916,8 +2996,9 @@ def test_app_session_ended_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[72] == "app_games_end_on_uninstall"
+    assert "app_games_end_on_uninstall" in _slugs_at(72)
     assert 72 not in fc.SPACE_SCOPED_MIN_VERSIONS
 
 
@@ -2951,8 +3032,9 @@ def test_bazaar_offers_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[73] == "bazaar_offers"
+    assert "bazaar_offers" in _slugs_at(73)
     assert 73 in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(72) == [
         "bazaar_offers",
@@ -2966,6 +3048,7 @@ def test_bazaar_offers_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
 
 
@@ -2998,6 +3081,7 @@ def test_bazaar_thread_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -3021,8 +3105,9 @@ def test_bazaar_thread_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[74] == "bazaar_ask_the_seller"
+    assert "bazaar_ask_the_seller" in _slugs_at(74)
     assert 74 not in fc.SPACE_SCOPED_MIN_VERSIONS
 
 
@@ -3054,6 +3139,7 @@ def test_bazaar_faq_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(75) == [
         "Games for groups of players",
@@ -3076,8 +3162,9 @@ def test_bazaar_faq_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[75] == "bazaar_listing_faq"
+    assert "bazaar_listing_faq" in _slugs_at(75)
     assert 75 in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(74) == [
         "bazaar_listing_faq",
@@ -3090,6 +3177,7 @@ def test_bazaar_faq_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
 
 
@@ -3120,6 +3208,7 @@ def test_app_groups_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(76) == [
         "Games in a space",
@@ -3141,8 +3230,9 @@ def test_app_groups_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[76] == "app_groups"
+    assert "app_groups" in _slugs_at(76)
     assert 76 not in fc.SPACE_SCOPED_MIN_VERSIONS
 
 
@@ -3172,6 +3262,7 @@ def test_space_app_tables_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(77) == [
         "Gift draws",
@@ -3192,6 +3283,7 @@ def test_space_app_tables_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.FederationCapability.MIN_FOR_SPACE_APP_TABLES in (
         fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3206,6 +3298,7 @@ def test_space_app_tables_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
 
 
@@ -3234,6 +3327,7 @@ def test_app_draw_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(78) == [
         "Edit photos in a space",
@@ -3253,8 +3347,9 @@ def test_app_draw_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[78] == "app_engines"
+    assert "app_engines" in _slugs_at(78)
     assert 78 not in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(77) == [
         "space_gallery_item_edits",
@@ -3265,6 +3360,7 @@ def test_app_draw_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
 
 
@@ -3292,8 +3388,9 @@ def test_space_gallery_item_edit_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[79] == "space_gallery_item_edits"
+    assert "space_gallery_item_edits" in _slugs_at(79)
     assert 79 in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(78) == [
         "space_gallery_item_edits",
@@ -3304,6 +3401,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
     assert fc.space_feature_keys_missing_below(79) == [
         "space_media_refs",
@@ -3313,6 +3411,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
     assert fc.space_feature_keys_missing_below(80) == [
         "space_page_media",
@@ -3321,6 +3420,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
     assert fc.space_feature_keys_missing_below(81) == [
         "space_page_media",
@@ -3329,6 +3429,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
     assert fc.space_feature_keys_missing_below(82) == [
         "content_file_hashes",
@@ -3336,6 +3437,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "space_media_wanted",
         "space_post_reactions",
         "poll_vote_stamps",
+        "subscriber_seats",
     ]
 
 
@@ -3353,7 +3455,7 @@ def test_space_media_refs_capability_threshold():
     label = "Pictures in a space for members who joined by link"
     assert label in fc.features_missing_below(79)
     assert label not in fc.features_missing_below(80)
-    assert fc.CAPABILITY_FEATURE_KEYS[80] == "space_media_refs"
+    assert "space_media_refs" in _slugs_at(80)
 
 
 def test_media_https_capability_threshold():
@@ -3382,6 +3484,7 @@ def test_media_https_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(81) == [
         "Pictures in a space's pages",
@@ -3398,8 +3501,9 @@ def test_media_https_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[81] == "lighter_media_transfers"
+    assert "lighter_media_transfers" in _slugs_at(81)
 
 
 def test_page_media_capability_threshold():
@@ -3414,7 +3518,7 @@ def test_page_media_capability_threshold():
     label = "Pictures in a space's pages"
     assert label in fc.features_missing_below(80)
     assert label not in fc.features_missing_below(82)
-    assert fc.CAPABILITY_FEATURE_KEYS[82] == "space_page_media"
+    assert "space_page_media" in _slugs_at(82)
 
 
 def test_space_media_on_demand_capability_threshold():
@@ -3431,7 +3535,7 @@ def test_space_media_on_demand_capability_threshold():
     label = "Older space pictures come back on view"
     assert label in fc.features_missing_below(82)
     assert label not in fc.features_missing_below(83)
-    assert fc.CAPABILITY_FEATURE_KEYS[83] == "space_media_on_demand"
+    assert "space_media_on_demand" in _slugs_at(83)
 
 
 def test_gfs_join_request_capability_threshold():
@@ -3447,7 +3551,7 @@ def test_gfs_join_request_capability_threshold():
     label = "Ask to join a global space through the GFS"
     assert fc.features_missing_below(83)[0] == label
     assert label not in fc.features_missing_below(84)
-    assert fc.CAPABILITY_FEATURE_KEYS[84] == "gfs_join_requests"
+    assert "gfs_join_requests" in _slugs_at(84)
 
 
 def test_content_file_hashes_capability_threshold():
@@ -3479,6 +3583,7 @@ def test_content_file_hashes_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(85) == [
         fills,
@@ -3491,6 +3596,7 @@ def test_content_file_hashes_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.space_features_missing_below(84) == [
         label,
@@ -3498,8 +3604,9 @@ def test_content_file_hashes_capability_threshold():
         wanted,
         reactions,
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[85] == "content_file_hashes"
+    assert "content_file_hashes" in _slugs_at(85)
 
 
 def test_trusted_file_fills_capability_threshold():
@@ -3519,8 +3626,9 @@ def test_trusted_file_fills_capability_threshold():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[86] == "trusted_file_fills"
+    assert "trusted_file_fills" in _slugs_at(86)
 
 
 def test_relay_media_capability_threshold():
@@ -3535,7 +3643,7 @@ def test_relay_media_capability_threshold():
     label = "Members reached through a GFS get pictures in full-size pieces"
     assert fc.features_missing_below(86)[0] == label
     assert label not in fc.features_missing_below(87)
-    assert fc.CAPABILITY_FEATURE_KEYS[87] == "relay_media"
+    assert "relay_media" in _slugs_at(87)
 
 
 def test_mailbox_member_mesh_capability_threshold():
@@ -3552,8 +3660,8 @@ def test_mailbox_member_mesh_capability_threshold():
     label = "Every member reaches households that reach a space through a GFS"
     assert fc.features_missing_below(88)[0] == label
     assert label not in fc.features_missing_below(89)
-    assert fc.CAPABILITY_FEATURE_KEYS[89] == "mailbox_member_mesh"
-    assert 88 not in fc.CAPABILITY_FEATURE_KEYS
+    assert "mailbox_member_mesh" in _slugs_at(89)
+    assert not _slugs_at(88)
 
 
 def test_anon_member_publish_only_capability_threshold():
@@ -3579,6 +3687,7 @@ def test_anon_member_publish_only_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(90) == [
         multi,
@@ -3587,8 +3696,9 @@ def test_anon_member_publish_only_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[90] == "anonymous_gfs_posting_only"
+    assert "anonymous_gfs_posting_only" in _slugs_at(90)
 
 
 def test_multi_mailbox_capability_threshold():
@@ -3611,6 +3721,7 @@ def test_multi_mailbox_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(91) == [
         wanted,
@@ -3618,8 +3729,9 @@ def test_multi_mailbox_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[91] == "multi_mailbox"
+    assert "multi_mailbox" in _slugs_at(91)
 
 
 def test_space_media_wanted_capability_threshold():
@@ -3642,19 +3754,22 @@ def test_space_media_wanted_capability_threshold():
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.features_missing_below(92) == [
         reactions,
         "Poll votes count the same in every household",
         "Space sync status, even without the host",
         "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
     ]
     assert fc.space_features_missing_below(91) == [
         label,
         reactions,
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
-    assert fc.CAPABILITY_FEATURE_KEYS[92] == "space_media_wanted"
+    assert "space_media_wanted" in _slugs_at(92)
 
 
 def test_space_post_reactions_capability_threshold():
@@ -3672,11 +3787,12 @@ def test_space_post_reactions_capability_threshold():
     label = "Reactions on space posts reach every household"
     votes = "Poll votes count the same in every household"
     pages = "Space sync status, even without the host"
+    seats = "Follow spaces with one seat on every path"
     reach = "Choose how far your moments go"
-    assert fc.features_missing_below(92) == [label, votes, pages, reach]
-    assert fc.features_missing_below(93) == [votes, pages, reach]
-    assert fc.space_features_missing_below(92) == [label, votes]
-    assert fc.CAPABILITY_FEATURE_KEYS[93] == "space_post_reactions"
+    assert fc.features_missing_below(92) == [label, votes, pages, reach, seats]
+    assert fc.features_missing_below(93) == [votes, pages, reach, seats]
+    assert fc.space_features_missing_below(92) == [label, votes, seats]
+    assert "space_post_reactions" in _slugs_at(93)
 
 
 def test_item_merge_stamps_capability_threshold():
@@ -3691,10 +3807,25 @@ def test_item_merge_stamps_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     label = "Poll votes count the same in every household"
-    assert fc.features_missing_below(93)[0] == label
-    assert label not in fc.features_missing_below(94)
-    assert fc.space_features_missing_below(93) == [label]
-    assert fc.CAPABILITY_FEATURE_KEYS[94] == "poll_vote_stamps"
+    assert fc.features_missing_below(93) == [
+        label,
+        "Space sync status, even without the host",
+        "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.features_missing_below(94) == [
+        "Space sync status, even without the host",
+        "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.space_features_missing_below(93) == [
+        label,
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.space_features_missing_below(94) == [
+        "Follow spaces with one seat on every path"
+    ]
+    assert "poll_vote_stamps" in _slugs_at(94)
 
 
 def test_sync_pages_capability_threshold():
@@ -3703,14 +3834,41 @@ def test_sync_pages_capability_threshold():
     Not space-scoped (an older member only lacks its own status), no sync
     line (no record changes shape), labelled."""
     assert fc.FederationCapability.MIN_FOR_SYNC_PAGES == 95
+    assert fc.OURS == 96
     assert fc.OURS >= 95
     assert fc.FederationCapability.MIN_FOR_SYNC_PAGES not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     label = "Space sync status, even without the host"
-    assert fc.features_missing_below(94)[0] == label
-    assert label not in fc.features_missing_below(95)
-    assert fc.CAPABILITY_FEATURE_KEYS[95] == "sync_pages"
+    assert fc.features_missing_below(94) == [
+        label,
+        "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
+    ]
+    assert fc.features_missing_below(95) == [
+        "Choose how far your moments go",
+        "Follow spaces with one seat on every path",
+    ]
+    assert "sync_pages" in _slugs_at(95)
+
+
+def test_subscriber_seats_capability_threshold():
+    """v_96 — subscriber seats (``docs/protocol/spaces.md`` "Followers
+    (v_96)"): a follow is an auto-approved join with role ``subscriber``,
+    seen only by the acting host and admin households; a writer cert's
+    ``reader`` field is signed. Space-scoped (a behind member still sees
+    followers in its roster and its people cannot follow), a sync line
+    (the follower stream and members-only roster), labelled."""
+    assert fc.FederationCapability.MIN_FOR_SUBSCRIBER_SEATS == 96
+    assert fc.OURS == 96
+    assert fc.FederationCapability.MIN_FOR_SUBSCRIBER_SEATS in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    label = "Follow spaces with one seat on every path"
+    assert label in fc.features_missing_below(95)
+    assert fc.features_missing_below(96) == []
+    assert fc.space_features_missing_below(95) == [label]
+    assert "subscriber_seats" in _slugs_at(96)
 
 
 def test_moment_reach_capability_threshold():
@@ -3722,13 +3880,14 @@ def test_moment_reach_capability_threshold():
     moments), labelled."""
     assert fc.FederationCapability.MIN_FOR_MOMENT_REACH == 96
     assert fc.OURS == 96
-    assert fc.FederationCapability.MIN_FOR_MOMENT_REACH not in (
-        fc.SPACE_SCOPED_MIN_VERSIONS
-    )
+    # v_96 also brought subscriber seats (space-scoped), so the threshold
+    # is in the space set; moment reach itself stays out of the banner.
+    assert "moment_reach" in fc.HOUSEHOLD_FEATURE_KEYS
     label = "Choose how far your moments go"
-    assert fc.features_missing_below(95) == [label]
+    assert label in fc.features_missing_below(95)
+    assert label not in fc.space_features_missing_below(1)
     assert fc.features_missing_below(96) == []
-    assert fc.CAPABILITY_FEATURE_KEYS[96] == "moment_reach"
+    assert "moment_reach" in _slugs_at(96)
 
 
 def test_capped_space_images_capability_threshold():
@@ -3738,5 +3897,19 @@ def test_capped_space_images_capability_threshold():
     from any later sender. v_81–v_94 are unreleased and ship together: no
     bump, no new label (v_81 is labelled already)."""
     assert fc.FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES == 81
+    assert fc.OURS == 96
     assert fc.OURS >= 95
-    assert 81 in fc.CAPABILITY_FEATURE_KEYS
+    assert _slugs_at(81)
+
+
+def test_two_features_sharing_v96_keep_both_slugs():
+    """Regression (merge of moment reach into subscriber seats): the slug map
+    was keyed by threshold, so the second v_96 feature silently replaced
+    the first's slug, and the space banner would have listed moment reach
+    (a household feature) as a space feature."""
+    assert sorted(_slugs_at(96)) == ["moment_reach", "subscriber_seats"]
+    assert fc.feature_keys_missing_below(95) == ["moment_reach", "subscriber_seats"]
+    assert fc.space_feature_keys_missing_below(95) == ["subscriber_seats"]
+    assert fc.space_features_missing_below(95) == [
+        "Follow spaces with one seat on every path"
+    ]

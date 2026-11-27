@@ -77,6 +77,9 @@ GATED_METHODS: frozenset[str] = frozenset(
         "ownership_candidates",
         "ban",
         "unban",
+        # P7b — household bans: owner / admin, like a person's ban.
+        "ban_household",
+        "unban_household",
         "create_invite_token",
         "create_invite_link",
         "list_invite_links",
@@ -139,6 +142,11 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # Read-only: the owner's user_id (the members route's ``is_owner``
         # flag). Mutates nothing.
         "owner_user_id",
+        # Read-only: the ban list route's hints (whether a ban is the
+        # owner's, a banned person's household); the route gates on
+        # ``_require_admin_or_owner`` first. Mutate nothing.
+        "ban_made_by_owner",
+        "banned_household_of",
         # Pure reads.
         # Deliberately ungated and reachable with NO session: the invite
         # token IS the credential, so whoever holds it can already redeem
@@ -160,7 +168,12 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_joining_space_ids",  # caller's own approved-and-joining GFS requests
         "list_busy_join_request_space_ids",  # caller's own GFS requests answered "busy"
         "expire_due_join_requests",  # system sweep, no actor
-        "is_subscribed",
+        # The owed-rotation sweep (system, no actor) and its reads.
+        "list_spaces_owing_rotation",
+        "pay_owed_rotation",
+        "rotation_owed",
+        # Federation inbound (owner side): an authority-verified admin rekey.
+        "relay_admin_rekey_to_followers",
         # Self-service joins / leaves — gate is on the *invite* / *request*,
         # not the join action itself.
         "create_space",  # creator becomes owner
@@ -173,10 +186,14 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_pending_local_invites",  # own user — the invitee's inbox
         "request_join",  # any user may request; gate is on approval
         "request_join_remote",  # cross-instance request
-        "subscribe_to_space",  # public-space follow-only
-        "unsubscribe_from_space",  # own subscription only
+        "follow_space",  # public-space follow-only
+        "unfollow_space",  # own subscription only
         # Federation inbound hooks — validated by the §24.11 inbound pipeline.
         "on_remote_join_request_approved",
+        # v_96 host side of SPACE_JOIN_REQUEST for the subscriber role: no
+        # actor — it re-checks the space (hosted here, public, followers
+        # on), the ban and the seat itself, failing closed.
+        "approve_remote_follow",
         # Waits for the approval redeems that hook starts; mutates nothing.
         "wait_join_approvals",
         # §D2b space-session teardown. No actor to gate: both are driven by
@@ -187,10 +204,6 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "revoke_space_session_if_orphaned",
         "apply_space_session_cleanup",
         "end_space_session_if_unused",
-        # The GFS mirror's post-grace re-check — no actor; the teardown it
-        # runs is driven by the ABSENCE of any local member (re-read from
-        # our own rows) and refuses owned / seed-held / unproven spaces.
-        "release_gfs_mirror_if_unused",
         # Federation inbound hook — the actor's role is validated inside
         # the method itself by looking up ``space_remote_members.role``;
         # there is no actor-username to thread through ``_require_admin``.
@@ -583,7 +596,7 @@ def test_assert_writable_member_allows_non_subscriber(role):
 
 async def test_subscriber_cannot_post(stack):
     """Subscribing then attempting to post raises via _assert_writable_member."""
-    await stack.space_svc.subscribe_to_space(stack.bob.user_id, stack.public_space.id)
+    await stack.space_svc.follow_space(stack.bob.user_id, stack.public_space.id)
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.create_post(
             stack.public_space.id,
@@ -602,7 +615,7 @@ async def test_subscriber_cannot_comment(stack):
         content="anchor",
     )
     assert post is not None
-    await stack.space_svc.subscribe_to_space(stack.bob.user_id, stack.public_space.id)
+    await stack.space_svc.follow_space(stack.bob.user_id, stack.public_space.id)
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.add_comment(
             post.id,
@@ -655,7 +668,7 @@ async def test_subscriber_cannot_react(stack):
         content="anchor",
     )
     assert post is not None
-    await stack.space_svc.subscribe_to_space(stack.bob.user_id, stack.public_space.id)
+    await stack.space_svc.follow_space(stack.bob.user_id, stack.public_space.id)
     with pytest.raises(SpacePermissionError):
         await stack.space_svc.add_reaction(
             post.id,

@@ -884,38 +884,15 @@ async def _gfs_world(gfs):
     return owner, owner_id, k1, k2, cert
 
 
-async def test_gfs_refuses_old_key_relays_handoffs_and_queries_after_rotation(gfs):
-    from socialhome.authority_sig import (
-        AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-        AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-    )
-
-    owner, owner_id, k1, k2, cert = await _gfs_world(gfs)
+async def test_gfs_pins_the_rotated_key_and_takes_no_space_keyed_request(gfs):
+    """After the owner's certified re-pin the GFS pins K2. Since v_96 (P7)
+    it takes no space-authority-signed relay, key handoff or roster query
+    at all — the paths an old key could have used are gone."""
+    owner, owner_id, _k1, k2, cert = await _gfs_world(gfs)
     await _gfs_publish(gfs, owner, owner_id, "sp-g", k2.public_key.hex(), cert)
-    for event_type in (
-        AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-    ):
-        payload = _signed(k1.private_key, event_type, "sp-g", {"blob": "x"})
-        with pytest.raises(PermissionError):
-            await gfs.publish_event("sp-g", event_type, payload)
-        ok = _signed(k2.private_key, event_type, "sp-g", {"blob": event_type})
-        assert await gfs.publish_event("sp-g", event_type, ok) == []
-    ts = datetime.now(UTC).isoformat()
-    q = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-        space_id="sp-g",
-        payload={"space_id": "sp-g", "ts": ts},
-        space_seed=k1.private_key,
-    )
-    with pytest.raises(PermissionError):
-        await gfs.list_subscribers_with_keys(
-            "sp-g",
-            ts=ts,
-            authority_sig=q["authority_sig"],
-            authority_sig_suite=q["authority_sig_suite"],
-        )
+    assert (await gfs.get_space("sp-g")).identity_public_key == k2.public_key.hex()
+    for gone in ("publish_event", "list_subscribers_with_keys", "subscribe"):
+        assert not hasattr(gfs, gone)
 
 
 @pytest.mark.parametrize(
@@ -1278,25 +1255,17 @@ async def test_k1_seed_share_cannot_be_stored_after_the_pin_moved(world, monkeyp
     assert await m_spaces.get_space_seed(w.space_id) is None
 
 
-async def test_a_hostile_gfs_cannot_move_a_private_stubs_pin(world, monkeypatch):
-    """N2: the GFS-trust heal is only for a follower of a PUBLIC space,
-    and only from the GFS that seated the mirror — never a private stub with
-    no local member (a pending invite), never from another GFS."""
+async def test_a_gfs_can_never_move_a_spaces_pin(world):
+    """N2 (was: a hostile GFS cannot move a private stub's pin). The v_44
+    GFS-trust heal served only follow-only GFS mirrors, which v_96 removed:
+    a follower is a member and gets every authority cert by federation. So
+    no household path adopts a key from a GFS listing at all — the repo
+    write and the space service's mirror hook are gone."""
     w = world
-    mirror = w.m_app[space_service_key]._gfs_mirror
-    evil = generate_identity_keypair().public_key.hex()
-
-    class _Conn:
-        id = "evil-gfs"
-        inbox_url = "https://evil.invalid"
-
-    async def _fetch(self, conn, space_id):
-        return {"identity_public_key": evil, "authority_rotation_seq": 5}
-
-    monkeypatch.setattr(type(mirror), "_fetch_listing", _fetch)
     spaces = w.m_app[space_repo_key]
-    await spaces.delete_member(w.space_id, "um")
-    assert not await mirror._refresh_from([_Conn()], w.space_id)
+    assert not hasattr(spaces, "adopt_gfs_pin")
+    assert not hasattr(spaces, "set_mirror_provenance")
+    assert not hasattr(w.m_app[space_service_key], "_gfs_mirror")
     assert (await w.m_space()).identity_public_key == w.k1_pk
 
 
@@ -2073,6 +2042,24 @@ async def test_echo_from_a_subscriber_or_seatless_household_is_ignored(
     await _echo_to_owner(w, sender=A_ID, echo=proof)
     await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
     assert (await w.o_space()).authority_key_epoch == e2
+
+
+async def test_a_followers_proof_rotates_only_when_no_writer_household_exists(
+    world, monkeypatch
+):
+    """Fable P10 round 2 (M-4): with owner + followers only, no writer
+    household could ever prove a forgotten epoch — a follower's proof (the
+    owner's own signed cert) then starts the rotation; while a writer
+    household exists it does not (above)."""
+    w = world
+    e1, e2 = await _forget_e1(w, monkeypatch, inflate=False)
+    proof = {"forgotten_epoch": e1, "forgotten_cert": _cert_of(w, e1)}
+    o_rm = w.o_app[space_remote_member_repo_key]
+    await o_rm.set_role(w.space_id, w.m_id, "um", SpaceRole.SUBSCRIBER.value)
+    await o_rm.remove(w.space_id, A_ID, "ua")
+    await o_rm.remove(w.space_id, B_ID, "ub")
+    await _echo_to_owner(w, sender=w.m_id, echo=proof)
+    assert (await w.o_space()).authority_key_epoch != e2
 
 
 async def test_old_peer_without_the_echo_changes_nothing(world):

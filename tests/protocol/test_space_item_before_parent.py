@@ -87,6 +87,16 @@ from .test_space_content_authorship import (
 
 pytestmark = pytest.mark.security
 
+
+async def _relay(inbound, frame: dict) -> None:
+    """Hand an item to the reader the way it arrives since v_96: through the
+    space's opaque channel (the channel id already mapped to the space
+    locally). Space-keyed relay frames are no longer taken."""
+    await inbound.handle_channel_item(
+        frame["space_id"], epoch=frame["epoch"], payload=frame["payload"]
+    )
+
+
 FET = FederationEventType
 SPACE = "sp-late"
 
@@ -197,7 +207,8 @@ async def _send(env, signer: _Author, scope: str, item_type: str, inner: dict):
         for k, v in cert.items()
         if k not in ("writer_user_ids", "users_sig", "users_sig_suite")
     }
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         {
             "type": "relay",
             "space_id": SPACE,
@@ -205,7 +216,7 @@ async def _send(env, signer: _Author, scope: str, item_type: str, inner: dict):
             "epoch": epoch,
             "writer_cert": v1,
             "payload": ct,
-        }
+        },
     )
 
 

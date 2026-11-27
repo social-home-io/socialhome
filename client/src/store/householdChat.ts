@@ -14,8 +14,11 @@ import { api } from '@/api'
 /** A system chat's summary for the viewer (``GET /api/household/chat``,
  *  ``GET /api/spaces/{id}/chat``). */
 export interface SystemChatSummary {
-  /** ``false`` while the chat is off (or, in a space, for a follower). */
+  /** ``false`` while the chat is off. */
   enabled: boolean
+  /** May the viewer write to it? ``false`` for a space's follower (it
+   *  reads the chat, P10) and while the chat is off. */
+  can_post: boolean
   conversation_id: string | null
   unread: number
   notif_level: 'all' | 'mentions' | null
@@ -31,6 +34,7 @@ export type HouseholdChatSummary = SystemChatSummary
 export function parseChatSummary(body: Partial<SystemChatSummary> | null): SystemChatSummary {
   return {
     enabled: body?.enabled === true,
+    can_post: body?.can_post !== false && body?.enabled === true,
     conversation_id: body?.conversation_id ?? null,
     unread: Math.max(0, body?.unread ?? 0),
     notif_level: body?.notif_level === 'mentions'

@@ -108,6 +108,32 @@ async def test_a_contact_the_reader_would_refuse_is_not_served(
     assert (await _listed(gfs_client, "sp-2"))["join_contact"] is None
 
 
+@pytest.mark.parametrize(
+    ("join_mode", "allow_subscribers", "served"),
+    [
+        # v_96 — takes follows but no requests: a follower needs the contact.
+        ("invite_only", True, True),
+        ("invite_only", False, False),
+        ("request", True, True),
+    ],
+)
+async def test_a_space_that_takes_follows_serves_its_contact(
+    gfs_client, join_mode, allow_subscribers, served
+):
+    app = gfs_client.server.app
+    owner_seed, _ = await _register_owner(app, instance_id="owner.home")
+    space = generate_identity_keypair()
+    contact = _contact(space.private_key, "sp-f", "owner.home")
+    body = {
+        **_base("sp-f", "owner.home", join_mode, space.public_key.hex()),
+        "allow_subscribers": allow_subscribers,
+        "join_contact": contact,
+    }
+    assert await _publish(gfs_client, owner_seed, body) == 200
+    row = await _listed(gfs_client, "sp-f")
+    assert row["join_contact"] == (contact if served else None)
+
+
 async def test_the_contact_is_inside_the_owners_signature(gfs_client):
     """Bolted on after signing (by a relay), the publish fails."""
     app = gfs_client.server.app
@@ -143,6 +169,8 @@ async def test_the_server_says_it_serves_join_contacts(gfs_client):
     caps = info.get("capabilities") or {}
     if caps:  # only when a signing key is wired
         assert caps["join_contact"] is True
+        # v_96 — the contact of a space that takes follows only.
+        assert caps["subscriber_seats"] is True
 
 
 async def test_the_owners_rotation_cert_travels_with_a_contact_only(gfs_client):

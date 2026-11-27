@@ -7,7 +7,7 @@ import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
-import { loadSpaceMembers, setSpaceHereAllowed, spaceMembers } from '@/store/spaceMembers'
+import { loadSpaceMembers, setSpaceFollowerWrites, setSpaceHereAllowed, spaceMembers } from '@/store/spaceMembers'
 import { useTitle, useTitleGlyph } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
 import type { FeedPost, Space, SpaceGfsServer } from '@/types'
@@ -125,6 +125,9 @@ interface SpaceDetail {
     allowed_apps?: string[]
     /** The space takes followers. */
     allow_subscribers?: boolean
+    /** Followers may comment / react (only with ``allow_subscribers``). */
+    allow_subscriber_comment?: boolean
+    allow_subscriber_react?: boolean
     /** Owner opt-in: admins act for the owner while they're offline (an
      *  admin's household then holds the signing seed). Absent → off. */
     delegated_admin_authority?: boolean
@@ -237,6 +240,12 @@ async function loadSpaceHeader(spaceId: string) {
       detailFailed.value = false
       setSpaceHereAllowed(spaceId, detail.allow_here_mention === true)
       viewerRole.value = parseSpaceRole(detail.my_role)
+      // What a follower may write here: the thread and the post card read it.
+      setSpaceFollowerWrites(spaceId, {
+        role: viewerRole.value,
+        comment: detail.features?.allow_subscriber_comment === true,
+        react: detail.features?.allow_subscriber_react === true,
+      })
       setSpaceAttention(spaceId, detail.attention)
       roleKnown.value = true
     }).catch(() => {
@@ -247,8 +256,8 @@ async function loadSpaceHeader(spaceId: string) {
     }),
     api.get(`/api/spaces/${spaceId}/members`)
       .then((rows: MemberRow[]) => {
-        // Members only: followers aren't members (a follower's roster
-        // lists the members alone anyway).
+        // Members only: followers aren't members (they have their own
+        // count, ``follower_count``).
         const members = rows.filter((m) => m.role !== 'subscriber')
         memberCount.value = members.length
         memberSummary.value = {
@@ -415,9 +424,9 @@ export default function SpaceFeedPage() {
   }, [spaceId, params.section, params.sub, query?.tab, query?.view]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const features = spaceDetail.value?.features
-  // The space chat is a section for a member (never a follower) while
-  // the space keeps chat on and the server agrees.
-  const chatEligible = features?.chat !== false && isWriterRole(viewerRole.value)
+  // The space chat is a section for every seat (a follower reads it, P10)
+  // while the space keeps chat on and the server agrees.
+  const chatEligible = features?.chat !== false && viewerRole.value !== undefined
   // A space of one has nobody to chat with: Chat appears when the second
   // member joins (an unknown count doesn't hide it, so the section never
   // falls back to the feed while the roster loads).
@@ -427,7 +436,7 @@ export default function SpaceFeedPage() {
   const detailCount = spaceDetail.value?.member_count
   const membersShown = detailCount !== undefined ? detailCount : memberCount.value
   const followerCount = spaceDetail.value?.follower_count
-  const followersOnHero = followersShown(followerCount, features?.allow_subscribers)
+  const followersOnHero = followersShown(followerCount)
     ? followerCount
     : null
   const soloSpace = membersShown === 1
@@ -435,31 +444,32 @@ export default function SpaceFeedPage() {
   const follower = isFollower(viewerRole.value)
   const canModerateHere = roleCanModerate(viewerRole.value)
   // Games (group play): the people who choose them (owner / admins /
-  // moderators, D9) see the section even before any game is allowed;
-  // never a follower, never a global space.
+  // moderators, D9) see the section even before any game is allowed; a
+  // follower sees the tables but never joins one (P10); never a global
+  // space.
   const globalSpace = spaceDetail.value?.space_type === 'global'
   const gamesViewer = {
     choosesGames: canModerateHere,
     global: globalSpace,
-    writer: roleKnown.value && isWriterRole(viewerRole.value),
+    seated: roleKnown.value,
   }
-  const gamesOn = gamesSectionShown(features, { chat: chatOn, follower, ...gamesViewer })
+  const gamesOn = gamesSectionShown(features, { chat: chatOn, ...gamesViewer })
   const games = useSpaceGames(spaceId, gamesOn, (features?.allowed_apps ?? []).join(','))
   useGameApps(gamesOn)
-  // A section the viewer can't have here (feature off, a follower on the
-  // Map, Moderation without content authority) falls back to the feed —
+  // A section the viewer can't have here (feature off, Moderation without
+  // content authority) falls back to the feed —
   // once the space and the viewer's role are known, and again if an
   // admin turns the section off while it's open. An old Calendar link in
   // a space that keeps only a timetable opens the Timetable section.
   useEffect(() => {
     if (!loc || !spaceDetail.value || !roleKnown.value) return
-    const viewer = { chat: chatOn, follower, canModerate: canModerateHere, ...gamesViewer }
+    const viewer = { chat: chatOn, canModerate: canModerateHere, ...gamesViewer }
     if (!sectionAllowed(section, features, viewer)) {
       const moved = redirectedSection(section, features)
       const target = moved && sectionAllowed(moved, features, viewer) ? moved : 'feed'
       loc.route(spaceSectionPath(spaceId, target), true)
     }
-  }, [spaceId, section, features, roleKnown.value, chatOn, follower, canModerateHere, globalSpace, gamesViewer.writer]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [spaceId, section, features, roleKnown.value, chatOn, canModerateHere, globalSpace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const chatOpen = section === 'chat'
   useSpaceChatSummary(spaceId, chatEligible, chatOpen)
@@ -603,6 +613,9 @@ export default function SpaceFeedPage() {
   const ownerId = spaceDetail.value?.owner_instance_id ?? null
   const syncLive = useSpaceSync(spaceId, spaceDetail.value?.sync)
   const hostedHere = !!ownerId && ownerId === instanceConfig.value?.instance_id
+  // Known to be hosted on another household (unknown → no: nothing hidden
+  // on a guess; the server refuses what it must).
+  const hostedElsewhere = !!ownerId && !!instanceConfig.value?.instance_id && !hostedHere
   const notSent = (author: string, postId: string) =>
     author === currentUser.value?.user_id && !!syncLive?.unsent_posts.includes(postId)
       ? <NotSentMark hostName={syncHostName(spaceMembers.value[spaceId]?.values(), ownerId)} hostedHere={hostedHere} />
@@ -658,7 +671,7 @@ export default function SpaceFeedPage() {
 
   // Per-space feature toggles hide their section when off (``spaceTabs``).
   const f = s?.features
-  const sections = visibleSpaceSections(f, { chat: chatOn, follower, ...gamesViewer })
+  const sections = visibleSpaceSections(f, { chat: chatOn, ...gamesViewer })
   const attention = spaceAttention.value
   const chatSummary = spaceChatOf(spaceId)
   // A muted chat keeps its count on the server but raises no badge — the
@@ -703,7 +716,7 @@ export default function SpaceFeedPage() {
         sections={sections}
         active={section}
         chatUnread={chatUnread}
-        gamesOpen={joinableCount(games.games?.tables ?? [])}
+        gamesOpen={follower ? 0 : joinableCount(games.games?.tables ?? [])}
         members={memberSummary.value && membersShown != null
           ? { ...memberSummary.value, count: membersShown }
           : memberSummary.value}
@@ -797,7 +810,7 @@ export default function SpaceFeedPage() {
 
       {/* "Open games" on top of the feed — only while a game waits for
        *  people (group play D5); nothing at all otherwise. */}
-      {s && feedList && gamesOn && (
+      {s && feedList && gamesOn && !follower && (
         <SpaceOpenGamesStrip spaceId={spaceId} games={games.games}
                              onChanged={() => { void games.reload() }} />
       )}
@@ -951,6 +964,9 @@ export default function SpaceFeedPage() {
       {section === 'members' && (
         <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value}
                          adminsActForOwner={features?.delegated_admin_authority === true}
+                         takesFollowers={features?.allow_subscribers === true}
+                         ownerInstanceId={spaceDetail.value?.owner_instance_id ?? null}
+                         hostedElsewhere={hostedElsewhere}
                          joinRequests={attention?.spaceId === spaceId ? attention.joinRequests : 0} />
       )}
 
@@ -969,7 +985,7 @@ export default function SpaceFeedPage() {
       )}
 
       {section === 'games' && sections.includes('games') && (
-        <SpaceGamesSection spaceId={spaceId} state={games} />
+        <SpaceGamesSection spaceId={spaceId} state={games} watchOnly={follower} />
       )}
       {section === 'calendar' && sections.includes('calendar') && (
         <SpaceCalendarSection
@@ -1031,9 +1047,14 @@ export default function SpaceFeedPage() {
         // chip + button at the top of the map. Without it the share
         // surface stays hidden (the card otherwise renders the map
         // read-only for spectators).
+        // A follower reads the map (P10) but never shares: no chip.
         <SpaceLocationCard
           spaceId={spaceId}
-          currentUserId={currentUser.value?.user_id}
+          currentUserId={follower ? undefined : currentUser.value?.user_id}
+          // Followers already seated still see the pins after the switch
+          // goes off: say so whenever there are any.
+          takesFollowers={features?.allow_subscribers === true || (followerCount ?? 0) > 0}
+          followerCount={followersOnHero}
         />
       )}
 

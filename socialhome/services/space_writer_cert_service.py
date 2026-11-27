@@ -7,8 +7,9 @@ service is the one place that
 * **derives** what a household is entitled to from the roster the issuer
   already holds — owner / admin / moderator / member seats → ``write``; a
   follower (subscriber) seat → ``comment`` only while the space has
-  ``allow_subscriber_comment`` on; several seats → ONE cert at the
-  strongest scope. Nothing about issued certs is stored: a seed holder
+  ``allow_subscriber_comment`` or ``allow_subscriber_react`` on, marked
+  ``reader`` (v_96, and only for a v_96 household) so receivers apply those
+  switches to it; several seats → ONE cert at the strongest scope. Nothing about issued certs is stored: a seed holder
   re-derives them from the roster at every epoch rotation;
 * **issues** them — only a household holding the space seed (the owner, or a
   delegated admin), and only while that seed still matches the pinned space
@@ -30,19 +31,13 @@ service is the one place that
   newest epoch we hold, or at the previous one for
   :data:`WRITER_CERT_EPOCH_GRACE_S` after the newest key arrived).
 
-**Writer group key (v_50; every publicly readable space, one mode since
-v_90).** In a publicly readable space (a public tier with followers — members
-publish anonymously to every GFS on the owner's list; there is no other way
-to publish over a GFS) the same per-peer channels also carry the epoch's
-writer GROUP key (:mod:`socialhome.writer_key`) under ``writer_key``, next to
-the cert — only to a household at v_90 (:func:`writer_key_min_version`)
-that holds a publishing scope (``write`` OR ``comment``: the connection server must not
-be able to tell the two apart), never to a non-publisher. Seed holders derive
-it from the space seed and store nothing; every other household verifies a
-delivered grant against the pinned space key and keeps it KEK-wrapped on that
-epoch's ``space_keys`` row (migration 0076). The key rotates with every
-content epoch, so the revocation that retires a writer cert (a rotation)
-retires the writer key with it.
+**No space writer group key since v_96.** The per-epoch writer GROUP key of
+a publicly readable space (v_50) authorized the space-keyed anonymous member
+publish and the space-scope media upload on a GFS; both went with the GFS's
+space-keyed routes, so the key is no longer derived, delivered or kept (a
+``writer_key`` an older peer still sends is ignored; ``space_keys
+.writer_key`` from migration 0076 is inert). A space's opaque channel has its
+own writer key, delivered inside the channel grant.
 """
 
 from __future__ import annotations
@@ -57,7 +52,8 @@ import orjson
 from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import GFS_CHANNEL_FIELD
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
+from ..domain.space import SpaceFeatureAccess, SpaceRole
+from ..domain.space_item import reader_cert_permits
 from ..domain.writer_cert import (
     MAX_WRITER_USERS,
     WRITER_SCOPE_COMMENT,
@@ -67,7 +63,6 @@ from ..domain.writer_cert import (
     scope_permits,
     strongest_scope,
 )
-from ..domain.writer_key import WRITER_KEY_FIELD, WriterKeyGrant
 from ..writer_cert import (
     InvalidWriterCert,
     UnsupportedWriterCertSuite,
@@ -75,16 +70,10 @@ from ..writer_cert import (
     sign_writer_cert,
     verify_writer_cert,
 )
-from ..writer_key import (
-    derive_writer_seed,
-    issue_writer_key_grant,
-    verify_writer_key_grant,
-)
 
 if TYPE_CHECKING:
     from ..domain.space import Space
     from ..federation.federation_service import FederationService
-    from ..infrastructure.key_manager import KeyManager
     from ..repositories.space_key_repo import AbstractSpaceKeyRepo
     from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -142,7 +131,11 @@ def scope_weakened(
     """True when ``after`` grants less than ``before``: a weaker scope
     (write→comment, any→none), or — for entitlements — the same scope held
     by fewer users (a user's seat ended, or the access level stopped letting
-    them post, while the household keeps other seats)."""
+    them post, while the household keeps other seats), or a plain cert that
+    becomes a follower's ``reader`` cert over no more users (v_96: a member
+    demoted to follower keeps the same comment set, but its old plain cert
+    would still let it comment / react whatever the follower switches say;
+    a set that GREW by a follower is a gain, not a loss)."""
     b_scope = before.scope if isinstance(before, WriterEntitlement) else before
     a_scope = after.scope if isinstance(after, WriterEntitlement) else after
     if _SCOPE_RANK[a_scope] < _SCOPE_RANK[b_scope]:
@@ -152,7 +145,13 @@ def scope_weakened(
         and isinstance(after, WriterEntitlement)
         and a_scope == b_scope
     ):
-        return bool(before.user_ids - after.user_ids)
+        # Becoming a reader weakens only when nobody joined the set: a
+        # follower switch turning ON grows a member's plain comment set by
+        # its household's follower — nothing is taken, the household just
+        # needs its new cert (no rekey).
+        return bool(before.user_ids - after.user_ids) or (
+            after.reader and not before.reader and after.user_ids <= before.user_ids
+        )
     return False
 
 
@@ -177,7 +176,6 @@ class SpaceWriterCertService:
     __slots__ = (
         "_channels",
         "_federation",
-        "_kek",
         "_keys",
         "_own_instance_id",
         "_own_pk",
@@ -194,12 +192,8 @@ class SpaceWriterCertService:
         space_key_repo: AbstractSpaceKeyRepo,
         own_instance_id: str,
         own_identity_pk: bytes,
-        key_manager: KeyManager | None = None,
     ) -> None:
         self._spaces = space_repo
-        #: KEK that wraps a held writer group key at rest (v_50). Without one
-        #: this household neither stores nor uses a delivered writer key.
-        self._kek = key_manager
         self._remote_members = remote_member_repo
         self._keys = space_key_repo
         self._federation: FederationService | None = None
@@ -267,7 +261,7 @@ class SpaceWriterCertService:
         return (await self.entitlement_for_instance(space, instance_id)).scope
 
     async def entitlement_for_instance(
-        self, space: Space, instance_id: str
+        self, space: Space, instance_id: str, *, followers: bool = True
     ) -> WriterEntitlement:
         """Household ``instance_id``'s scope AND the users holding it (the
         v2 user binding), by our roster and the space's ``posts`` access
@@ -277,7 +271,20 @@ class SpaceWriterCertService:
         going through the host's review queue; ``OPEN``: every writer role.
         A seat that may not post keeps ``comment`` (comments are judged per
         item by the receivers); a follower seat gets ``comment`` only while
-        ``allow_subscriber_comment`` is on."""
+        ``allow_subscriber_comment`` or ``allow_subscriber_react`` is on
+        (v_96).
+
+        ``reader`` (v_96) is set when the scope is ``comment`` and at least
+        one bound user holds only a follower seat. It is per household, not
+        per user — the cert has one flag — so a household whose comment set
+        mixes plain commenters (a member under ``MODERATED``) with a follower
+        is flag-gated as a whole: conservative — its members can only lose
+        what a follower switch turns off over the relay (they keep the host
+        path), the follower never gains a member's rights. A ``write``
+        entitlement is never a reader: it binds only the users that may
+        post, never a follower. ``followers=False`` leaves follower seats
+        out entirely — what a household below v_96, which cannot verify a
+        reader cert, is issued."""
         if instance_id == self._own_instance_id:
             # Our own people only: ``space_members`` on a member household
             # (a seed-holding delegated admin) also mirrors the host's —
@@ -296,22 +303,31 @@ class SpaceWriterCertService:
                 )
             ]
         posting = _POSTING_ROLES[space.features.access_level("posts")]
+        follower_may_publish = followers and (
+            space.features.allow_subscriber_comment
+            or space.features.allow_subscriber_react
+        )
         by_scope: dict[str, set[str]] = {
             WRITER_SCOPE_WRITE: set(),
             WRITER_SCOPE_COMMENT: set(),
         }
+        #: Users holding a seat above follower — never a reader.
+        seated: set[str] = set()
         for user_id, role in seats:
+            if role in _WRITE_ROLES:
+                seated.add(user_id)
             if role in posting:
                 by_scope[WRITER_SCOPE_WRITE].add(user_id)
             elif role in _WRITE_ROLES or (
-                role == SpaceRole.SUBSCRIBER.value
-                and space.features.allow_subscriber_comment
+                role == SpaceRole.SUBSCRIBER.value and follower_may_publish
             ):
                 by_scope[WRITER_SCOPE_COMMENT].add(user_id)
         scope = strongest_scope(k for k, v in by_scope.items() if v)
         if scope is None:
             return WriterEntitlement(None)
-        return WriterEntitlement(scope, frozenset(by_scope[scope]))
+        users = frozenset(by_scope[scope])
+        reader = scope == WRITER_SCOPE_COMMENT and bool(users - seated)
+        return WriterEntitlement(scope, users, reader=reader)
 
     async def verified_instance_pk(
         self, instance_id: str, *, claimed: bytes | None = None
@@ -358,6 +374,33 @@ class SpaceWriterCertService:
 
     # ── Issuing ──────────────────────────────────────────────────────────
 
+    async def issuable_entitlement(
+        self, space: Space, instance_id: str, *, followers: bool = True
+    ) -> WriterEntitlement:
+        """What a cert for ``instance_id`` may carry — and so who may hold
+        the credentials that come with one (the writer group key, a channel
+        writer key): its entitlement, except that a ``reader`` cert goes
+        only to a household at v_96 (``MIN_FOR_SUBSCRIBER_SEATS``; a
+        mesh-only one by its mesh claim, an unknown one never). An older
+        household ignores ``reader`` on parse, so the signature would fail
+        there — it is issued the entitlement without its follower seats
+        instead (none at all for a follower-only household).
+        ``followers=False`` leaves follower seats out for everyone (a plain
+        cert binding only seated users)."""
+        entitlement = await self.entitlement_for_instance(
+            space, instance_id, followers=followers
+        )
+        if not entitlement.reader or instance_id == self._own_instance_id:
+            return entitlement
+        if self._federation is not None and (
+            await self._federation.space_member_supports(
+                instance_id,
+                min_version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+            )
+        ):
+            return entitlement
+        return await self.entitlement_for_instance(space, instance_id, followers=False)
+
     async def issue_for_instance(
         self,
         space_id: str,
@@ -365,10 +408,15 @@ class SpaceWriterCertService:
         *,
         epoch: int | None = None,
         instance_pk_hint: bytes | None = None,
+        followers: bool = True,
     ) -> WriterCert | None:
         """Sign a cert for household ``instance_id`` at ``epoch`` (default:
         our current content epoch). ``instance_pk_hint`` is the key a
-        mesh-only household's item names (see :meth:`verified_instance_pk`). ``None`` when we are not a seed holder,
+        mesh-only household's item names (see :meth:`verified_instance_pk`).
+        ``followers=False`` issues a plain cert binding only the household's
+        seated users (never a ``reader`` cert) — the re-stamp of an item a
+        reader cert may not carry, e.g. a member's approved post.
+        ``None`` when we are not a seed holder,
         our seed no longer matches the pin, there is no epoch, the household
         holds no entitled seat, or its identity key is unknown to us."""
         space = await self._spaces.get(space_id)
@@ -385,7 +433,9 @@ class SpaceWriterCertService:
             if latest is None:
                 return None
             epoch = latest.epoch
-        entitlement = await self.entitlement_for_instance(space, instance_id)
+        entitlement = await self.issuable_entitlement(
+            space, instance_id, followers=followers
+        )
         if entitlement.scope is None:
             return None
         pk = await self.verified_instance_pk(instance_id, claimed=instance_pk_hint)
@@ -397,6 +447,7 @@ class SpaceWriterCertService:
             epoch=epoch,
             instance_pk=pk,
             scope=entitlement.scope,
+            reader=entitlement.reader,
         )
         # v2: bind the household's users holding that scope (a second
         # signature — v1 verifiers still accept the cert unchanged).
@@ -461,7 +512,7 @@ class SpaceWriterCertService:
         latest = await self._keys.get_latest(space_id)
         if latest is None:
             return None
-        entitlement = await self.entitlement_for_instance(space, instance_id)
+        entitlement = await self.issuable_entitlement(space, instance_id)
         if entitlement.scope is None:
             return None
         pk = await self.verified_instance_pk(instance_id)
@@ -503,163 +554,9 @@ class SpaceWriterCertService:
             if wire is None:
                 return out
             out[WRITER_CERT_FIELD] = wire
-            try:
-                key = await self.writer_key_for_peer(
-                    space_id, instance_id, epoch=wire.get("epoch")
-                )
-            except Exception:
-                log.exception(
-                    "writer key: issuing for %s in %s failed", instance_id, space_id
-                )
-                key = None
-            if key is not None:
-                out[WRITER_KEY_FIELD] = key
             return out
 
         return _hook
-
-    # ── Writer group key (v_50) ──────────────────────────────────────────
-
-    async def _matching_seed(self, space: Space) -> bytes | None:
-        """Our space seed iff it still matches the pinned authority key."""
-        seed = await self._spaces.get_space_seed(space.id)
-        if seed is None or ed25519_public_key(seed).hex() != space.identity_public_key:
-            return None
-        return seed
-
-    async def writer_key_for_peer(
-        self,
-        space_id: str,
-        instance_id: str,
-        *,
-        epoch: int | None = None,
-    ) -> dict | None:
-        """The writer group key grant to deliver to peer ``instance_id`` at
-        ``epoch`` (default: our current content epoch), or ``None``.
-
-        Only from a seed holder whose seed matches the pin, only to a peer
-        that holds a publishing scope (``write`` or ``comment`` alike) — never
-        to a non-publisher — and only where the peer can use it: in a
-        publicly readable space (the key is how a member publishes, always
-        anonymously, to every server on the owner's list) to a v_90 peer. An
-        older household gets no key: its items take the host path."""
-        if self._federation is None or instance_id == self._own_instance_id:
-            return None
-        space = await self._spaces.get(space_id)
-        min_version = writer_key_min_version(space)
-        if space is None or min_version is None:
-            return None
-        if not await self._federation.space_member_supports(
-            instance_id, min_version=min_version
-        ):
-            return None
-        seed = await self._matching_seed(space)
-        if seed is None:
-            return None
-        if epoch is None:
-            latest = await self._keys.get_latest(space_id)
-            if latest is None:
-                return None
-            epoch = latest.epoch
-        if (await self.entitlement_for_instance(space, instance_id)).scope is None:
-            return None
-        return issue_writer_key_grant(
-            space_seed=seed, space_id=space_id, epoch=int(epoch)
-        ).to_wire()
-
-    @staticmethod
-    def _writer_key_aad(space_id: str, epoch: int) -> bytes:
-        return f"socialhome-writer-key:{space_id}:{epoch}".encode()
-
-    async def accept_writer_key(self, space_id: str, raw: object) -> bool:
-        """Verify + store a writer key grant a seed holder delivered to us
-        (v_50). It must verify against the pinned space key (its authority
-        cert, and the seed matching the pinned writer key) for an epoch we
-        hold a content key for; it is stored KEK-wrapped on that epoch's key
-        row. ``True`` when stored. WARNING on a bad grant."""
-        if raw is None or self._kek is None:
-            return False
-        space = await self._spaces.get(space_id)
-        if space is None:
-            return False
-        try:
-            grant = WriterKeyGrant.from_wire(raw)
-            verify_writer_key_grant(
-                grant,
-                space_pubkey=bytes.fromhex(space.identity_public_key),
-                space_id=space_id,
-            )
-        except ValueError as exc:
-            # UnsupportedWriterKeySuite / InvalidWriterKey are ValueErrors.
-            log.warning("writer key for space %s refused: %s", space_id, exc)
-            return False
-        wrapped = self._kek.encrypt(
-            orjson.dumps(grant.to_wire(), option=orjson.OPT_SORT_KEYS),
-            associated_data=self._writer_key_aad(space_id, grant.epoch),
-        )
-        stored = await self._keys.set_writer_key(space_id, grant.epoch, wrapped)
-        if not stored:
-            log.info(
-                "writer key for space %s epoch %d: no key for that epoch — dropped",
-                space_id,
-                grant.epoch,
-            )
-        return stored
-
-    async def own_writer_key(self, space_id: str, epoch: int) -> bytes | None:
-        """The writer group key seed our household signs anonymous publishes
-        with at ``epoch``, or ``None``: derived when we hold the matching
-        seed and the space has a writer key; else the stored grant while it still
-        verifies against the CURRENT pin (a v_44 re-pin retires it)."""
-        space = await self._spaces.get(space_id)
-        if space is None:
-            return None
-        seed = await self._matching_seed(space)
-        if seed is not None:
-            if writer_key_min_version(space) is None:
-                return None
-            return derive_writer_seed(seed, space_id, epoch)
-        if self._kek is None:
-            return None
-        wrapped = await self._keys.get_writer_key(space_id, epoch)
-        if wrapped is None:
-            return None
-        try:
-            raw = self._kek.decrypt(
-                wrapped, associated_data=self._writer_key_aad(space_id, epoch)
-            )
-            grant = WriterKeyGrant.from_wire(orjson.loads(raw))
-            if grant.epoch != epoch:
-                return None
-            return verify_writer_key_grant(
-                grant,
-                space_pubkey=bytes.fromhex(space.identity_public_key),
-                space_id=space_id,
-            )
-        except Exception as exc:
-            log.info(
-                "stored writer key for space %s epoch %d no longer holds: %s",
-                space_id,
-                epoch,
-                exc,
-                exc_info=True,
-            )
-            return None
-
-    async def writer_key_cert_wire(self, space_id: str, epoch: int) -> dict | None:
-        """The authority-signed ``writer_key_cert`` a seed holder pins at the
-        GFS for ``epoch`` (v_50) — for a space whose writers get a writer key
-        (every publicly readable space) and while our seed matches the pin;
-        else ``None``."""
-        space = await self._spaces.get(space_id)
-        if space is None or writer_key_min_version(space) is None:
-            return None
-        seed = await self._matching_seed(space)
-        if seed is None:
-            return None
-        return issue_writer_key_grant(
-            space_seed=seed, space_id=space_id, epoch=epoch
-        ).writer_key_cert.to_wire()
 
     # ── Holding ──────────────────────────────────────────────────────────
 
@@ -769,12 +666,17 @@ class SpaceWriterCertService:
         epoch: int,
         author_pk: bytes,
         required_scope: str,
+        item_type: str,
         space_pubkey_hex: str | None = None,
     ) -> bool:
         """True iff ``raw`` is a valid cert for ``author_pk`` at
         ``required_scope`` in ``space`` / ``epoch`` against the pinned space
-        key (``space_pubkey_hex`` overrides the space row's pin). Logs the
-        reason at WARNING on failure."""
+        key (``space_pubkey_hex`` overrides the space row's pin), and — for
+        a follower's ``reader`` cert (v_96) — the space's follower switches
+        in OUR pinned config let it carry an ``item_type`` item
+        (:func:`~socialhome.domain.space_item.reader_cert_permits`). Every
+        cert-authorized item passes here, whether or not we hold a seat for
+        its author. Logs the reason at WARNING on failure."""
         try:
             cert = WriterCert.from_wire(raw)
             verify_writer_cert(
@@ -791,50 +693,15 @@ class SpaceWriterCertService:
             # UnsupportedWriterCertSuite / InvalidWriterCert are ValueErrors.
             log.warning("writer cert check failed for space %s: %s", space.id, exc)
             return False
-        return True
-
-    async def current_item_cert(
-        self, space: Space, item: dict, *, epoch: int, required_scope: str
-    ) -> dict | None:
-        """A cert for a cached, author-signed ``item`` (published at
-        ``epoch``) that verifies against the space's CURRENT pin.
-
-        The item's own cert while it still verifies; after an authority
-        rotation (v_44) it was signed by the old key and no receiver accepts
-        it, so a seed holder re-issues one for the item's origin household
-        at the same epoch — the re-stamp the relay path does for a remote
-        author's post (the cert sits outside the author signature). ``None``
-        when neither works (not a seed holder, the household no longer holds
-        a seat that permits ``required_scope``, or the author is no longer
-        one of its writers): such an item would be refused anyway."""
-        try:
-            author_pk = bytes.fromhex(str(item.get("author_pk") or ""))
-        except ValueError:
-            return None
-        raw = item.get(WRITER_CERT_FIELD)
-        try:
-            verify_writer_cert(
-                WriterCert.from_wire(raw),
-                space_pubkey=bytes.fromhex(space.identity_public_key),
-                space_id=space.id,
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=required_scope,
+        if not reader_cert_permits(cert, item_type, space.features):
+            log.warning(
+                "writer cert check failed for space %s: a follower's reader "
+                "cert may not carry %r here",
+                space.id,
+                item_type,
             )
-            return raw if isinstance(raw, dict) else None
-        except ValueError:
-            pass
-        origin = str(item.get("origin_instance_id") or "")
-        cert = await self.issue_for_instance(
-            space.id, origin, epoch=epoch, instance_pk_hint=author_pk
-        )
-        if (
-            cert is None
-            or not scope_permits(cert.scope, required_scope)
-            or str(item.get("author_user_id") or "") not in cert.writer_user_ids
-        ):
-            return None
-        return cert.to_wire()
+            return False
+        return True
 
     async def epoch_is_fresh(
         self, space_id: str, epoch: int, *, now: datetime | None = None
@@ -866,6 +733,7 @@ class SpaceWriterCertService:
         epoch: int,
         author_pk: bytes,
         required_scope: str,
+        item_type: str,
         space_pubkey_hex: str | None = None,
     ) -> bool:
         """:meth:`check_item_cert` plus epoch freshness (WARNING on a stale
@@ -876,6 +744,7 @@ class SpaceWriterCertService:
             epoch=epoch,
             author_pk=author_pk,
             required_scope=required_scope,
+            item_type=item_type,
             space_pubkey_hex=space_pubkey_hex,
         ):
             return False
@@ -901,26 +770,12 @@ class SpaceWriterCertService:
             return None
 
 
-def writer_key_min_version(space: Space | None) -> int | None:
-    """The ``proto_version`` a member household needs to be handed the
-    space's writer group key, or ``None`` when the space has none.
-
-    * publicly readable (a public tier with followers) → v_90: the key is
-      the one way to publish over a connection server — anonymously, to
-      EVERY server on the owner's signed list, including ones it never
-      connected to;
-    * anything else (a private space — its channel has its own key — or a
-      space nobody may follow) → none."""
-    if space is None:
-        return None
-    if space.space_type in PUBLIC_SPACE_TIERS and space.features.allow_subscribers:
-        return FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY
-    return None
-
-
 def _supersedes(new: WriterCert, held: WriterCert) -> bool:
     """A received cert replaces the one we hold only when it is newer, or as
-    new and at least as strong (``write`` wins a tie)."""
+    new and at least as strong (``write`` wins a tie, and a plain cert wins
+    a tie against a follower's ``reader`` cert of the same scope)."""
     if new.issued_at != held.issued_at:
         return new.issued_at > held.issued_at
+    if new.scope == held.scope:
+        return held.reader or not new.reader
     return scope_permits(new.scope, held.scope)

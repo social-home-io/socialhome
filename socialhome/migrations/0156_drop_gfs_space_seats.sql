@@ -1,0 +1,24 @@
+-- 0156 — drop ``gfs_space_seats`` (0092).
+--
+-- The table recorded which connection servers held an identity-bound
+-- ``POST /gfs/subscribe`` seat of this household per space (GFS follow-only
+-- mirrors and members' space-keyed auto-subscribe). From v_96 a follower is
+-- a member with the read-only role and every GFS-borne space delivery rides
+-- the opaque channel (``/gfs/channels/*``, seats keyed by channel id, not by
+-- this household's identity); the household no longer subscribes by space
+-- id, so nothing reads or writes these rows. 0155 used them as mirror
+-- evidence and ran first.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited: the only reader/writer was ``repositories/gfs_space_seat_repo``
+--       (used by ``GfsSpaceMirrorService``, the member auto-subscribe and
+--       the invitation-stub sweep's exclusion in ``space_repo``) — all removed
+--       with this release; no backup / export / recovery-kit dump names it.
+--   (2) Alternative rejected: leaving it inert — an identity-bound record of
+--       which GFS operators know this household follows which space, kept at
+--       rest (and in backups) with no reader; the owner asked to remove it.
+--       Seats still held on a GFS die with that GFS's own table (GFS 0033).
+--   (3) Smallest change: one DROP (its index goes with it); no column drops
+--       on ``spaces`` (``mirror_gfs_id`` / ``gfs_rotation_seq`` stay inert).
+
+DROP TABLE IF EXISTS gfs_space_seats;

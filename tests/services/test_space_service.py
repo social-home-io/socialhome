@@ -35,6 +35,7 @@ from socialhome.domain.errors import (
     TierChangeRequiredError,
 )
 from socialhome.domain.events import (
+    CommentDeleted,
     PeerProtoVersionRaised,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
@@ -73,6 +74,7 @@ from socialhome.domain.space import (
     HostTooOldError,
     HostUnreachableError,
     HouseholdUpgradeRequiredError,
+    InviteOnlyError,
     JoinMode,
     OwnerStillActiveError,
     OwnerTransferFollowerError,
@@ -98,7 +100,6 @@ from socialhome.domain.space_roster_digest import (
     roster_digest_wire,
 )
 from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
-from socialhome.domain.writer_key import WriterKeyGrant
 from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -1081,7 +1082,7 @@ async def test_transfer_ownership_refuses_follower(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(OwnerTransferFollowerError):
         await stack.space_svc.transfer_ownership(
             space.id, actor_username="anna", to_user_id=fan.user_id
@@ -1195,7 +1196,7 @@ async def test_reassign_keeps_the_transfer_rules(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     remote = SqliteSpaceRemoteMemberRepo(stack.db)
     stack.space_svc._remote_members = remote
     await remote.add(
@@ -2481,15 +2482,12 @@ async def _follower_with_a_comment(stack):
     return s, anna, fan, c
 
 
-async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(stack):
-    """One rule for a comment, its edit and its delete: the author's seat
-    must hold the comment right (a follower's is the space's switch). The
-    local path let a follower edit or delete its own comment with the switch
-    off — every other household refuses that change, so the copies diverged
-    (and on the host it went out as the host's). A moderator's delete is
-    content authority and still works."""
+async def test_a_follower_edits_its_comment_only_under_the_switch(stack):
+    """One rule for a comment and its edit: the author's seat must hold the
+    comment right (a follower's is the space's switch) — every other
+    household refuses the edit otherwise, so the copies would diverge. A
+    moderator's delete is content authority and still works."""
     s, anna, fan, c = await _follower_with_a_comment(stack)
-    # Switch on: both work for the follower's own comment.
     edited = await stack.space_svc.edit_comment(
         c.id, editor_user_id=fan.user_id, new_content="hello"
     )
@@ -2501,14 +2499,33 @@ async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(sta
         await stack.space_svc.edit_comment(
             c.id, editor_user_id=fan.user_id, new_content="again"
         )
-    with pytest.raises(SpacePermissionError):
-        await stack.space_svc.delete_comment(c.id, actor_user_id=fan.user_id)
     held = await stack.space_post_repo.get_comment(c.id)
     assert held is not None and not held.deleted and held.content == "hello"
     # The owner still removes it.
     await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
     held = await stack.space_post_repo.get_comment(c.id)
     assert held is not None and held.deleted
+
+
+async def test_a_follower_deletes_its_own_comment_with_the_switch_off(stack):
+    """Owner decision F6 (2026-11-23): an author may ALWAYS delete their own
+    comment, a follower included, with the comment switch off — the same
+    rule every other household applies (authorship, not the switch). The
+    delete goes out bound to the author, like a member's."""
+    s, _anna, fan, c = await _follower_with_a_comment(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=0, allow_subscriber_react=0 "
+        "WHERE id=?",
+        (s.id,),
+    )
+    seen: list[CommentDeleted] = []
+    stack.bus.subscribe(CommentDeleted, seen.append)
+    await stack.space_svc.delete_comment(c.id, actor_user_id=fan.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and held.deleted
+    assert [(e.actor_user_id, e.author_user_id) for e in seen] == [
+        (fan.user_id, fan.user_id)
+    ]
 
 
 async def test_an_author_without_a_seat_cannot_change_their_comment(stack):
@@ -2750,9 +2767,8 @@ async def test_subscribe_public_space_adds_subscriber_member(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
 
-    assert await stack.space_svc.is_subscribed(fan.user_id, space.id) is True
     member = await stack.space_repo.get_member(space.id, fan.user_id)
     assert member is not None
     assert member.role == "subscriber"
@@ -2772,11 +2788,11 @@ async def test_subscribe_private_space_rejected(stack):
         owner_username="owner2", name="Priv", space_type=SpaceType.PRIVATE
     )
     with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+        await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "0" * 32)
+        await stack.space_svc.follow_space(fan.user_id, "0" * 32)
     with pytest.raises(SpacePermissionError, match="public / global"):
-        await stack.space_svc.subscribe_to_space(owner.user_id, space.id)
+        await stack.space_svc.follow_space(owner.user_id, space.id)
 
 
 async def test_subscribe_is_idempotent(stack):
@@ -2789,8 +2805,8 @@ async def test_subscribe_is_idempotent(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     follows = await stack.space_svc.list_subscriptions(fan.user_id)
     assert len(follows) == 1
 
@@ -2809,7 +2825,7 @@ async def test_subscribe_does_not_demote_existing_member(stack):
     await stack.space_svc.add_member(
         space.id, actor_username="owner4", user_id=real.user_id
     )
-    await stack.space_svc.subscribe_to_space(real.user_id, space.id)
+    await stack.space_svc.follow_space(real.user_id, space.id)
     member = await stack.space_repo.get_member(space.id, real.user_id)
     assert member.role == "member"
     # Not listed as a subscriber.
@@ -2828,15 +2844,15 @@ async def test_unsubscribe_removes_subscriber_only(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_svc.add_member(
         space.id, actor_username="owner5", user_id=real.user_id
     )
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, space.id)
+    await stack.space_svc.unfollow_space(fan.user_id, space.id)
     assert await stack.space_repo.get_member(space.id, fan.user_id) is None
 
-    await stack.space_svc.unsubscribe_from_space(real.user_id, space.id)
+    await stack.space_svc.unfollow_space(real.user_id, space.id)
     still = await stack.space_repo.get_member(space.id, real.user_id)
     assert still is not None
     assert still.role == "member"
@@ -2859,7 +2875,7 @@ async def test_turning_followers_off_drops_local_subscriber_rows(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_svc.add_member(
         space.id, actor_username="owner_off", user_id=real.user_id
     )
@@ -2890,7 +2906,7 @@ async def test_turning_followers_on_leaves_members_alone(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_svc.update_config(
         space.id,
         actor_username="owner_on",
@@ -2916,7 +2932,7 @@ async def test_list_subscriptions_only_returns_subscribers(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(u.user_id, pub.id)
+    await stack.space_svc.follow_space(u.user_id, pub.id)
     await stack.space_svc.add_member(
         mem_space.id, actor_username="owner6", user_id=u.user_id
     )
@@ -2934,7 +2950,7 @@ async def test_subscriber_cannot_create_post(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
         await stack.space_svc.create_post(
             space.id,
@@ -2959,7 +2975,7 @@ async def test_subscriber_cannot_comment(stack):
         type=PostType.TEXT,
         content="hi",
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
         await stack.space_svc.add_comment(
             post.id, author_user_id=fan.user_id, content="reply"
@@ -2981,7 +2997,7 @@ async def test_subscriber_cannot_react(stack):
         type=PostType.TEXT,
         content="hi",
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     with pytest.raises(SpacePermissionError, match="subscribers can only read"):
         await stack.space_svc.add_reaction(
             post.id, space_id=space.id, user_id=fan.user_id, emoji="👍"
@@ -3003,20 +3019,20 @@ async def test_subscribe_no_ops_for_an_existing_member_after_followers_off(stack
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     await stack.space_repo.save(
         replace(space, features=SpaceFeatures(allow_subscribers=False))
     )
 
     # No raise, and the existing subscriber row is untouched.
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
     member = await stack.space_repo.get_member(space.id, fan.user_id)
     assert member is not None and member.role == "subscriber"
 
     # …but a NEW follower is refused.
     newcomer = await stack.provision_user("newcomer")
     with pytest.raises(SpacePermissionError, match="does not allow subscribers"):
-        await stack.space_svc.subscribe_to_space(newcomer.user_id, space.id)
+        await stack.space_svc.follow_space(newcomer.user_id, space.id)
 
 
 async def test_subscribe_banned_user_rejected(stack):
@@ -3033,7 +3049,7 @@ async def test_subscribe_banned_user_rejected(stack):
         space.id, fan.user_id, banned_by="owner10-uid", reason="test"
     )
     with pytest.raises(SpacePermissionError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+        await stack.space_svc.follow_space(fan.user_id, space.id)
 
 
 async def test_update_config_publishes_location_mode_changed(stack):
@@ -3272,74 +3288,10 @@ async def test_ban_rotates_and_distributes_key(stack):
     )
 
 
-async def test_remove_member_reseals_key_to_gfs_subscribers(stack):
-    """REGRESSION: a rotation must also reach GFS subscribers. They aren't
-    member households (never in ``space_instances``), so the
-    ``broadcast_to_space_members`` fan-out skips them and every relayed frame
-    they get stops decrypting until the next GFS reconnect. The rotation now
-    re-runs the per-space subscriber reconcile."""
-    from unittest.mock import AsyncMock
-
-    _anna = await stack.provision_user("anna")
-    bob = await stack.provision_user("bob")
-    space = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_svc.add_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto = AsyncMock()
-    space_crypto.rotate_epoch = AsyncMock(return_value=7)
-    space_crypto.export_current_key = AsyncMock(return_value=(7, bytes(range(32))))
-    federation = AsyncMock()
-    federation.broadcast_to_space_members = AsyncMock()
-    subscriber_keys = AsyncMock()
-    stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
-    stack.space_svc._federation = federation
-
-    await stack.space_svc.remove_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto.rotate_epoch.assert_awaited_once_with(space.id)
-    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
-
-
-async def test_rotation_reseal_failure_does_not_break_removal(stack):
-    """Fail-soft: a GFS that is down must not turn a successful kick into an
-    error — the member is still removed."""
-    from unittest.mock import AsyncMock
-
-    _anna = await stack.provision_user("anna")
-    bob = await stack.provision_user("bob")
-    space = await stack.space_svc.create_space(owner_username="anna", name="S")
-    await stack.space_svc.add_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    space_crypto = AsyncMock()
-    space_crypto.rotate_epoch = AsyncMock(return_value=3)
-    space_crypto.export_current_key = AsyncMock(return_value=(3, bytes(range(32))))
-    federation = AsyncMock()
-    federation.broadcast_to_space_members = AsyncMock()
-    subscriber_keys = AsyncMock()
-    subscriber_keys.reconcile_space_everywhere = AsyncMock(
-        side_effect=RuntimeError("gfs down")
-    )
-    stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
-    stack.space_svc._federation = federation
-
-    await stack.space_svc.remove_member(
-        space.id, actor_username="anna", user_id=bob.user_id
-    )
-
-    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
-    subscriber_keys.reconcile_space_everywhere.assert_awaited_once_with(space.id)
-
-
-async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
-    """No GFS paired → nothing attached → rotation still completes."""
+async def test_rotation_without_a_gfs_attached_completes(stack):
+    """No GFS paired → nothing attached → rotation still completes. Since
+    v_96 there is no GFS subscriber re-seal to attach at all: followers are
+    member households and the rekey broadcast reaches them."""
     from unittest.mock import AsyncMock
 
     _anna = await stack.provision_user("anna")
@@ -3362,6 +3314,7 @@ async def test_rotation_without_subscriber_outbound_attached_is_noop(stack):
     )
 
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+    assert not hasattr(stack.space_svc, "attach_subscriber_key_outbound")
 
 
 async def test_remove_member_without_crypto_attached_is_noop(stack):
@@ -4514,6 +4467,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -4559,6 +4513,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     )
 
 
@@ -4633,6 +4588,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4705,6 +4661,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features
@@ -5374,7 +5331,7 @@ async def test_subscriber_roster_gossip_is_gated_on_v30(stack):
     fed = _roster_gossip_fed()
     stack.space_svc._federation = fed
 
-    await stack.space_svc.subscribe_to_space(bob.user_id, space.id)
+    await stack.space_svc.follow_space(bob.user_id, space.id)
     # Subscribing does not gossip; removing the follower does — and that
     # LEFT is the event carrying role='subscriber' on the wire.
     await stack.space_svc.remove_member(
@@ -6198,6 +6155,113 @@ async def test_remote_admin_action_executes_when_delegation_on(stack):
     assert refreshed.name == "From Remote Admin"
 
 
+async def test_a_forwarded_ban_never_names_the_owner_households_people(stack):
+    """P7b Fable re-review I-A: on the host, a remote admin's forwarded
+    ``ban`` / ``unban`` naming one of the owner household's people (not only
+    the owner) is refused — only the owner decides about its own people."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    spouse = await stack.provision_user("ownerspouse")
+    await stack.space_svc.add_member(
+        space.id, actor_username="alicehost", user_id=spouse.user_id, role="member"
+    )
+    unseated = await stack.provision_user("ownerkid")
+    for uid in (spouse.user_id, unseated.user_id):
+        outcome = await stack.space_svc.apply_remote_admin_action(
+            space.id,
+            actor_instance_id="instance-A",
+            actor_user_id="u-admin",
+            action="ban",
+            params={"user_id": uid},
+        )
+        assert outcome is RemoteAdminOutcome.DROPPED
+        assert await stack.space_repo.is_banned(space.id, uid) is False
+    assert await stack.space_repo.get_member(space.id, spouse.user_id) is not None
+    # The owner bans one of them; the admin can't lift it either.
+    await stack.space_svc.ban(
+        space.id, actor_username="alicehost", user_id=unseated.user_id
+    )
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="unban",
+        params={"user_id": unseated.user_id},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert await stack.space_repo.is_banned(space.id, unseated.user_id) is True
+    # Another household's person is still the admin's to ban.
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"user_id": "u-stranger"},
+    )
+    assert outcome is RemoteAdminOutcome.EXECUTED
+
+
+async def test_a_forwarded_ban_of_an_unseated_person_or_household_lands(stack):
+    """Owner fork B: a forwarded ban names someone with no seat here (a
+    household that only asked to join, a person who already left) — it
+    lands on the host; the owner household stays refused."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    for params in ({"user_id": "u-gone"}, {"instance_id": "h-asking"}):
+        outcome = await stack.space_svc.apply_remote_admin_action(
+            space.id,
+            actor_instance_id="instance-A",
+            actor_user_id="u-admin",
+            action="ban",
+            params=params,
+        )
+        assert outcome is RemoteAdminOutcome.EXECUTED, params
+    assert await stack.space_repo.is_banned(space.id, "u-gone") is True
+    assert await stack.space_repo.is_household_banned(space.id, "h-asking") is True
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"instance_id": space.owner_instance_id},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert (
+        await stack.space_repo.is_household_banned(space.id, space.owner_instance_id)
+        is False
+    )
+
+
+async def test_the_owners_re_ban_makes_the_ban_the_owners(stack):
+    """P7b Fable re-review I-B: an admin banned X first; the owner bans X
+    too — the ban is now the owner's, so the admin can no longer lift it."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True)
+    await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"user_id": "u-x"},
+    )
+    assert await stack.space_repo.ban_banned_by(space.id, user_id="u-x") == "u-admin"
+    await stack.space_svc.ban(space.id, actor_username="alicehost", user_id="u-x")
+    owner = await stack.space_svc.owner_user_id(space)
+    assert await stack.space_repo.ban_banned_by(space.id, user_id="u-x") == owner
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="unban",
+        params={"user_id": "u-x"},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert await stack.space_repo.is_banned(space.id, "u-x") is True
+
+
 async def test_remote_admin_action_needs_approval_when_delegation_off(stack):
     """Delegation OFF + a valid remote admin → NEEDS_OWNER_APPROVAL and the
     action did NOT run (config unchanged)."""
@@ -6626,316 +6690,82 @@ async def test_accept_remote_invite_kicks_mesh_catchup_sync(stack):
     )
 
 
-# ── GFS-discovered space on-ramp (mirror → subscribe) ─────────────────────
+# ── Follow / unfollow of a space hosted elsewhere ─────────────────────────
 
 
-_MIRROR_PIN = "aa" * 32
+_REMOTE_PIN = "aa" * 32
 
 
-class _FakeGfsMirror:
-    """Stand-in for :class:`GfsSpaceMirrorService` — seats a real stub row
-    (via the production helper) and records the GFS-side calls."""
+async def _seat_remote_follower(stack, user_id: str, space_id: str) -> None:
+    """A follower of a GLOBAL space hosted elsewhere: the stub row plus a
+    local ``subscriber`` seat, as the host's approval leaves them."""
+    from socialhome.services.space_service import stub_space_from_metadata
 
-    def __init__(
-        self,
-        space_repo,
-        *,
-        gfs_id: str = "gfs-1",
-        min_age: int = 0,
-        ban_user_id: str | None = None,
-        found: bool = True,
-        gfs_listed: bool = True,
-    ):
-        self._spaces = space_repo
-        self._gfs_id = gfs_id
-        self._min_age = min_age
-        self._ban_user_id = ban_user_id
-        self._found = found
-        # Mirrors ``GfsSpaceMirrorService.was_gfs_listed`` — whether a
-        # ``public_space_cache`` row proves a GFS directory advertised this
-        # space. Default True: rows this fake seats came from a GFS.
-        self._gfs_listed = gfs_listed
-        self.ensure_calls: list[str] = []
-        self.subscribes: list[tuple[str, str]] = []
-        self.unsubscribes: list[str] = []
-        # ``seat_in_grace``: a subscribe of this space is in flight.
-        self.in_grace = False
-
-    async def ensure_mirror(self, space_id):
-        from socialhome.services.space_service import stub_space_from_metadata
-
-        self.ensure_calls.append(space_id)
-        if not self._found:
-            return None
-        space = stub_space_from_metadata(
-            space_id,
-            host_instance_id="remote-host",
-            meta={
-                "name": "Remote Global",
-                "identity_public_key": _MIRROR_PIN,
-                "space_type": "global",
-                "join_mode": "invite_only",
-                # Invite-only AND readable — the two dials are independent,
-                # and this is exactly the broadcast shape a stranger
-                # subscribes to through a GFS directory.
-                "features": {"allow_subscribers": True},
-                "owner_username": "",
-                "min_age": self._min_age,
-                "category": "gaming",
-            },
-        )
-        await self._spaces.save(space)
-        # Like the real ``ensure_mirror``: remember which GFS seated it (the
-        # teardown unsubscribe targets that server only).
-        await self._spaces.set_mirror_provenance(
-            space_id, gfs_id=self._gfs_id, rotation_seq=0
-        )
-        if self._ban_user_id is not None:
-            await self._spaces.ban_member(
-                space_id, self._ban_user_id, banned_by="remote", reason="t"
+    if await stack.space_repo.get(space_id) is None:
+        await stack.space_repo.save(
+            stub_space_from_metadata(
+                space_id,
+                host_instance_id="remote-host",
+                meta={
+                    "name": "Remote Global",
+                    "identity_public_key": _REMOTE_PIN,
+                    "space_type": "global",
+                    "join_mode": "invite_only",
+                    "features": {"allow_subscribers": True},
+                    "owner_username": "",
+                },
             )
-        return space, self._gfs_id
-
-    async def subscribe_to_gfs(self, space_id, gfs_id):
-        self.subscribes.append((space_id, gfs_id))
-
-    async def was_gfs_listed(self, space_id):
-        return self._gfs_listed
-
-    async def seat_in_grace(self, space_id):
-        return self.in_grace
-
-    async def unsubscribe(self, space_id):
-        self.unsubscribes.append(space_id)
-
-
-async def test_subscribe_mirrors_gfs_space_then_subscribes(stack):
-    """A space with no local row is mirrored from the GFS, the subscriber is
-    seated, and the GFS-side registration fires exactly once."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-
-    assert mirror.ensure_calls == ["remote-sp"]
-    assert mirror.subscribes == [("remote-sp", "gfs-1")]
-    member = await stack.space_repo.get_member("remote-sp", fan.user_id)
-    assert member is not None and member.role == "subscriber"
-    stored = await stack.space_repo.get("remote-sp")
-    assert stored is not None
-    assert stored.identity_public_key == _MIRROR_PIN
-
-
-async def test_subscribe_without_mirror_keeps_legacy_404(stack):
-    """No mirror attached (no GFS paired) → unchanged behaviour."""
-    fan = await stack.provision_user("fan")
-    with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-
-
-async def test_subscribe_when_mirror_finds_nothing_still_404s(stack):
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo, found=False)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    with pytest.raises(KeyError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    assert mirror.subscribes == []
-
-
-async def test_subscribe_to_local_space_skips_the_mirror(stack):
-    """An already-local space never triggers a GFS round-trip."""
-    await stack.provision_user("owner_m")
-    fan = await stack.provision_user("fan")
-    space = await stack.space_svc.create_space(
-        owner_username="owner_m",
-        name="P",
-        space_type=SpaceType.GLOBAL,
-        features=SpaceFeatures(allow_subscribers=True),
-    )
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
-    assert mirror.ensure_calls == []
-    assert mirror.subscribes == []
-
-
-async def test_banned_user_never_reaches_the_gfs(stack):
-    """Ordering regression: the local ban refusal runs BEFORE the GFS-side
-    subscribe, so a banned user is never registered on the relay."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo, ban_user_id=fan.user_id)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    with pytest.raises(SpacePermissionError):
-        await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    assert mirror.subscribes == []
-    assert await stack.space_repo.get_member("remote-sp", fan.user_id) is None
-
-
-async def test_age_gated_user_never_reaches_the_gfs(stack):
-    """Same ordering regression for the §CP.F1 age gate."""
-    anna = await stack.provision_user("anna", is_admin=True)
-    kid = await stack.provision_user("kid")
-    cp = await _attach_cp(stack)
-    await cp.enable_protection(
-        minor_username="kid",
-        declared_age=8,
-        actor_user_id=anna.user_id,
-    )
-    mirror = _FakeGfsMirror(stack.space_repo, min_age=18)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-
-    with pytest.raises(SpacePermissionError, match="18"):
-        await stack.space_svc.subscribe_to_space(kid.user_id, "remote-sp")
-    assert mirror.subscribes == []
-    assert await stack.space_repo.get_member("remote-sp", kid.user_id) is None
-
-
-async def _seed_space_key(stack, space_id: str) -> None:
-    from socialhome.domain.space_key import SpaceKey
-    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
-
-    await SqliteSpaceKeyRepo(stack.db).save(
-        SpaceKey(space_id=space_id, epoch=1, content_key_hex="ab" * 16)
-    )
-
-
-async def test_unsubscribe_last_subscriber_purges_the_mirror(stack):
-    """Last local subscriber leaves → GFS unsubscribe + the stub row and its
-    content key are dropped."""
-    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
-
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    await _seed_space_key(stack, "remote-sp")
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == ["remote-sp"]
-    assert await stack.space_repo.get("remote-sp") is None
-    keys = SqliteSpaceKeyRepo(stack.db)
-    assert await keys.get_latest("remote-sp") is None
-
-
-async def test_unsubscribe_purges_the_mirror_though_the_hosts_people_stay(stack):
-    """``space_members`` may also hold the host's people, mirrored by the
-    §25.6 ``members`` sync (no ``users`` row). Our last subscriber leaving
-    still tears the mirror down: those seats are not ours."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    await stack.db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role)"
-        " VALUES('remote-sp', 'u-host-owner', 'owner')"
-    )
-    # Ours only: the household-wide subscription list skips the host's.
-    assert await stack.space_repo.list_subscribed_space_ids() == ["remote-sp"]
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == ["remote-sp"]
-
-
-async def test_the_subscription_list_counts_only_our_own_followers(stack):
-    """A mirrored host follower (members sync, no ``users`` row) is no
-    subscription of this household."""
-    await stack.provision_user("anna")
-    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
-    await stack.db.enqueue(
-        "INSERT INTO space_members(space_id, user_id, role)"
-        " VALUES(?, 'u-host-fan', 'subscriber')",
-        (space.id,),
-    )
-    assert await stack.space_repo.list_subscribed_space_ids() == []
-
-
-async def test_unsubscribe_keeps_mirror_while_a_subscribe_is_in_flight(stack):
-    """L5: another user's subscribe just took the GFS seat and has not
-    written its member row yet — no teardown pulls it out from under it."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    mirror.in_grace = True
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
-
-
-async def test_the_mirrors_post_grace_recheck_runs_the_same_teardown(stack):
-    """L3: once the seat grace has passed, the mirror asks the service to
-    tear down an unused mirror — the proven-mirror path an unsubscribe
-    takes."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    await stack.space_repo.delete_member("remote-sp", fan.user_id)
-
-    await stack.space_svc.release_gfs_mirror_if_unused("remote-sp")
-
-    assert mirror.unsubscribes == ["remote-sp"]
-    assert await stack.space_repo.get("remote-sp") is None
-
-
-async def test_the_mirror_teardown_waits_for_a_subscribe_in_progress(stack):
-    """L2: the teardown takes the space's subscribe lock and re-reads the
-    members inside it — a subscribe that was in progress is seen, nothing
-    is purged out from under it."""
-    fan = await stack.provision_user("fan")
-    other = await stack.provision_user("other")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-
-    lock = stack.space_svc._mirror_lock("remote-sp")
-    await lock.acquire()  # a subscribe of `other` is in progress
-    leave = asyncio.create_task(
-        stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
-    )
-    await asyncio.sleep(0.3)  # ample time to finish, were it not waiting
-    assert not leave.done()
+        )
     await stack.space_repo.save_member(
         SpaceMember(
-            space_id="remote-sp",
-            user_id=other.user_id,
+            space_id=space_id,
+            user_id=user_id,
             role=SpaceRole.SUBSCRIBER,
             joined_at="2026-10-10T00:00:00+00:00",
         )
     )
-    lock.release()
-    await leave
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
 
 
-async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):
+async def test_follow_of_an_unknown_space_is_not_found(stack):
+    """No row, no listing, no GFS listing → 404 (v_96: a follow is a join
+    request to the host, nothing is mirrored)."""
     fan = await stack.provision_user("fan")
-    other = await stack.provision_user("other")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    await stack.space_svc.subscribe_to_space(other.user_id, "remote-sp")
-    await _seed_space_key(stack, "remote-sp")
+    with pytest.raises(KeyError):
+        await stack.space_svc.follow_space(fan.user_id, "remote-sp")
+    assert await stack.space_repo.get("remote-sp") is None
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
 
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
+async def test_unfollow_ends_the_seat_and_keeps_the_stub(stack):
+    """Unfollow is a self-leave of the read-only seat: the member row goes;
+    the space row and its content key stay (they are a member stub like
+    any other — nothing is purged and no GFS is told)."""
+    from socialhome.domain.space_key import SpaceKey
     from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 
-    assert await SqliteSpaceKeyRepo(stack.db).get_latest("remote-sp") is not None
+    fan = await stack.provision_user("fan")
+    await _seat_remote_follower(stack, fan.user_id, "remote-sp")
+    keys = SqliteSpaceKeyRepo(stack.db)
+    await keys.save(SpaceKey(space_id="remote-sp", epoch=1, content_key_hex="ab" * 16))
+
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
+
+    assert await stack.space_repo.get_member("remote-sp", fan.user_id) is None
+    assert await stack.space_repo.get("remote-sp") is not None
+    assert await keys.get_latest("remote-sp") is not None
 
 
-async def test_unsubscribe_never_purges_an_owned_space(stack):
-    """An owned (or seed-held) space is not a mirror — never purged."""
+async def test_unfollow_never_demotes_a_real_member(stack):
+    fan = await stack.provision_user("fan")
+    await _seat_remote_follower(stack, fan.user_id, "remote-sp")
+    await stack.space_repo.set_role("remote-sp", fan.user_id, SpaceRole.MEMBER)
+
+    await stack.space_svc.unfollow_space(fan.user_id, "remote-sp")
+
+    member = await stack.space_repo.get_member("remote-sp", fan.user_id)
+    assert member is not None and member.role == SpaceRole.MEMBER
+
+
+async def test_unfollow_of_an_owned_space_keeps_the_space(stack):
     await stack.provision_user("owner_p")
     fan = await stack.provision_user("fan")
     space = await stack.space_svc.create_space(
@@ -6944,187 +6774,12 @@ async def test_unsubscribe_never_purges_an_owned_space(stack):
         space_type=SpaceType.GLOBAL,
         features=SpaceFeatures(allow_subscribers=True),
     )
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, space.id)
+    await stack.space_svc.follow_space(fan.user_id, space.id)
 
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, space.id)
+    await stack.space_svc.unfollow_space(fan.user_id, space.id)
 
-    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get_member(space.id, fan.user_id) is None
     assert await stack.space_repo.get(space.id) is not None
-
-
-async def test_unsubscribe_leaves_a_peer_discovered_stub_alone(stack):
-    """A public/global stub learned from a **direct peer** matches every
-    structural test for a mirror (remote-owned, no seed, no members left) but
-    has nothing to do with any GFS.
-
-    Two things must therefore NOT happen: the signed, identity-bound GFS
-    unsubscribe (which would tell every paired GFS operator this household
-    had a relationship with a space they never knew about — third-party
-    metadata disclosure the user never opted into), and the purge (which
-    would destroy a space nobody asked us to forget). Only the local member
-    row goes.
-    """
-    fan = await stack.provision_user("fan")
-    # No ``public_space_cache`` row → no GFS directory ever listed this id.
-    mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=False)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "peer-sp")
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "peer-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("peer-sp") is not None
-    assert await stack.space_repo.get_member("peer-sp", fan.user_id) is None
-
-
-async def test_unsubscribe_leaves_a_non_global_remote_stub_alone(stack):
-    """The mirror only ever seats ``space_type=global``; a remote PUBLIC
-    stub is some other trust path's row."""
-    from socialhome.services.space_service import stub_space_from_metadata
-
-    fan = await stack.provision_user("fan")
-    await stack.space_repo.save(
-        stub_space_from_metadata(
-            "public-sp",
-            host_instance_id="remote-host",
-            meta={
-                "name": "Peer public",
-                "identity_public_key": _MIRROR_PIN,
-                "space_type": "public",
-                "join_mode": "open",
-                "features": {"allow_subscribers": True},
-                "owner_username": "",
-            },
-        )
-    )
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "public-sp")
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "public-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("public-sp") is not None
-
-
-async def test_unsubscribe_purges_a_proven_gfs_mirror(stack):
-    """The positive case, alongside the two refusals above: a global stub a
-    GFS directory really did list is unsubscribed and purged."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo, gfs_listed=True)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == ["remote-sp"]
-    assert await stack.space_repo.get("remote-sp") is None
-
-
-async def test_unsubscribe_skips_the_purge_when_the_seed_is_unreadable(stack):
-    """Failing to determine whether we hold space authority must SUPPRESS
-    the purge, not permit it — the old ``except RuntimeError: pass`` failed
-    open on a destructive path."""
-    fan = await stack.provision_user("fan")
-    mirror = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(mirror)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-
-    async def _boom(space_id):
-        raise RuntimeError("space seed access requires a key_manager")
-
-    stack.space_repo.get_space_seed = _boom
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
-
-    assert mirror.unsubscribes == []
-    assert await stack.space_repo.get("remote-sp") is not None
-
-
-async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
-    """A GFS that refuses / is down must never block the local unsubscribe —
-    exercised against the REAL mirror service so the swallow is verified."""
-    from socialhome.domain.federation import GfsConnection
-    from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
-    from socialhome.services.gfs_connection_service import GfsConnectionError
-    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
-
-    fan = await stack.provision_user("fan")
-    conn_repo = SqliteGfsConnectionRepo(stack.db)
-    await conn_repo.save(
-        GfsConnection(
-            id="gfs-1",
-            gfs_instance_id="inst-1",
-            display_name="G",
-            public_key="pk",
-            inbox_url="https://gfs.test",
-            status="active",
-            paired_at="2025-01-01T00:00:00+00:00",
-        )
-    )
-
-    class _DownGfs:
-        def __init__(self):
-            self.calls = []
-
-        async def unsubscribe_from_gfs_space(self, space_id, gfs_id):
-            self.calls.append((space_id, gfs_id))
-            raise GfsConnectionError("down")
-
-    from socialhome.domain.public_space import PublicSpaceListing
-    from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
-
-    public_repo = SqlitePublicSpaceRepo(stack.db)
-    # The directory row is what proves this stub is a GFS mirror.
-    await public_repo.upsert(
-        PublicSpaceListing(
-            space_id="remote-sp",
-            instance_id="remote-host",
-            name="Remote Global",
-            description=None,
-            emoji=None,
-            lat=None,
-            lon=None,
-            radius_km=None,
-            member_count=1,
-        )
-    )
-    down = _DownGfs()
-    from socialhome.repositories.gfs_space_seat_repo import (
-        GfsSpaceSeat,
-        SqliteGfsSpaceSeatRepo,
-    )
-
-    seats = SqliteGfsSpaceSeatRepo(stack.db)
-    real_mirror = GfsSpaceMirrorService(
-        space_repo=stack.space_repo,
-        gfs_connection_repo=conn_repo,
-        gfs_connection_service=down,
-        seat_repo=seats,
-        public_space_repo=public_repo,
-    )
-    # Seat the stub the way ensure_mirror would, then subscribe locally.
-    seeder = _FakeGfsMirror(stack.space_repo)
-    stack.space_svc.attach_gfs_space_mirror(seeder)
-    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
-    # What ``take_seat`` records for the GFS subscribe the fake stood in for.
-    await seats.record(
-        GfsSpaceSeat(
-            space_id="remote-sp",
-            gfs_instance_id="inst-1",
-            gfs_connection_id="gfs-1",
-            gfs_public_key="pk",
-            gfs_inbox_url="https://gfs.test",
-        )
-    )
-    stack.space_svc.attach_gfs_space_mirror(real_mirror)
-
-    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
-
-    assert down.calls == [("remote-sp", "gfs-1")]
-    assert await stack.space_repo.get("remote-sp") is None
 
 
 # ── Public-tier content key (epoch 0) at creation / tier change ────────
@@ -12065,7 +11720,9 @@ async def test_comment_rights_off_without_followers_does_not_rotate(stack, monke
 
 
 async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
-    space, fed, remote, _pks = await _cert_space(stack)
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
     await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
     await _seat(remote, space.id, "peer-b", "u-b", role="member")
     fed.send_with_mesh_fallback.reset_mock()
@@ -12080,17 +11737,41 @@ async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
         if "writer_cert" in c.kwargs.get("payload", {})
     ]
     assert [k["to_instance_id"] for k in sent] == ["peer-a"]
-    assert _cert_of(sent[0]["payload"]).scope == "comment"
+    cert = _cert_of(sent[0]["payload"])
+    assert cert.scope == "comment" and cert.reader is True
+
+
+async def test_comment_rights_on_gives_a_follower_below_v96_no_cert(stack):
+    """v_96 (D10): a follower household that cannot verify a reader cert
+    gets no cert at all — never the old plain comment cert."""
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS - 1
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if "writer_cert" in c.kwargs.get("payload", {})
+    ]
+    assert sent == []
 
 
 async def test_comment_rights_on_sends_followers_their_credentials_alone(stack):
     """Owner decision 2026-11-17 — followers are members with a read-only
     role: turning "followers may comment" on gives each follower household
-    the SAME ``comment`` cert a comment-only member holds, in a snapshot
+    a ``comment`` cert (since v_96 marked ``reader``), in a snapshot
     with NO roster entry (it used to be the whole roster to every follower
     household — ~5.5 MB each at 11 000 seats). It never drops a roster
     snapshot still queued for that household."""
-    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
     await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
     await _seat(remote, space.id, "peer-b", "u-b", role="member")
     fed.send_with_mesh_fallback.reset_mock()
@@ -12140,20 +11821,122 @@ async def test_a_gain_and_a_loss_in_one_change_rotate_once(stack, monkeypatch):
     ] == []
 
 
-async def test_comment_rights_off_rotates_only_if_a_household_loses_a_right(
+def _snapshot_kwargs(fed):
+    return [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ]
+
+
+async def test_the_react_switch_on_sends_a_follower_its_reader_cert(stack, monkeypatch):
+    """I2 (v_96): "followers may react" alone puts a follower seat in the
+    comment set — turning it on hands the follower household its reader
+    cert at once (credentials only, no rekey)."""
+    space, fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=True),
+    )
+    assert rekeys == []
+    sent = _snapshot_kwargs(fed)
+    assert [k["to_instance_id"] for k in sent] == ["peer-a"]
+    cert = _cert_of(sent[0]["payload"])
+    assert cert.scope == "comment" and cert.reader is True
+
+
+async def test_the_react_switch_off_rotates_for_a_follower_household(
     stack, monkeypatch
 ):
-    """A household with a member seat next to its follower seat keeps its
-    cert when "followers may comment" goes off: nobody's entitlement
-    shrinks, so nothing rotates."""
-    space, _fed, remote, _pks = await _cert_space(stack, version=94)
+    """I2 (owner design, spaces.md "Followers (v_96)"): a follower switch
+    turning OFF rotates the content key at once, the react switch too."""
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=False),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_comment_off_with_react_on_still_rotates(stack, monkeypatch):
+    """I1: comment OFF while react stays ON leaves a follower's entitlement
+    unchanged (still in the comment set, still reader) — but a plain comment
+    cert issued before v_96 (or by a v_95 delegated admin) would keep
+    commenting. Any follower switch turning off rotates."""
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(
+            allow_subscriber_comment=True, allow_subscriber_react=True
+        ),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(
+            allow_subscriber_comment=False, allow_subscriber_react=True
+        ),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_a_switch_off_rotates_for_a_follower_in_a_writer_household(
+    stack, monkeypatch
+):
+    """A household that holds a member's seat and a follower's: its cert is
+    a write cert (never reader), yet a plain comment cert that bound the
+    follower earlier in the epoch (while the household only followed, at
+    v_95) would survive the switch — so any follower seat counts."""
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
     await stack.space_svc.update_config(
         space.id,
         actor_username="hosty",
         features=SpaceFeatures(allow_subscriber_comment=True),
     )
-    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
-    await _seat(remote, space.id, "peer-a", "u-a2", role="member")
+    await _seat(remote, space.id, "peer-a", "u-m", role="member")
+    await _seat(remote, space.id, "peer-a", "u-f", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_a_switch_off_without_followers_rotates_nothing(stack, monkeypatch):
+    space, _fed, remote, _pks = await _cert_space(
+        stack, version=FederationCapability.MIN_FOR_SUBSCRIBER_SEATS
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-m", role="member")
     rekeys = await _rekeys(stack, monkeypatch)
     await stack.space_svc.update_config(
         space.id,
@@ -12163,28 +11946,18 @@ async def test_comment_rights_off_rotates_only_if_a_household_loses_a_right(
     assert rekeys == []
 
 
-async def test_the_react_switch_changes_no_cert_and_sends_only_the_config(
-    stack, monkeypatch
-):
-    """The react right has no cert of its own (a ``comment`` cert carries
-    reactions, for members and followers alike): toggling it rotates
-    nothing and sends no credentials — the config event is all."""
+async def test_the_react_switch_on_sends_nothing_to_a_follower_below_v96(stack):
+    """A follower household that cannot verify a reader cert is issued
+    none, so switching a follower right on sends it no credentials."""
     space, fed, remote, _pks = await _cert_space(stack, version=94)
     await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
-    rekeys = await _rekeys(stack, monkeypatch)
     fed.send_with_mesh_fallback.reset_mock()
-    for on in (True, False):
-        await stack.space_svc.update_config(
-            space.id,
-            actor_username="hosty",
-            features=SpaceFeatures(allow_subscriber_react=on),
-        )
-    assert rekeys == []
-    assert [
-        c.kwargs
-        for c in fed.send_with_mesh_fallback.await_args_list
-        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
-    ] == []
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_react=True),
+    )
+    assert _snapshot_kwargs(fed) == []
 
 
 # ─── v_49: a member household's leave reaches the host ────────────────────
@@ -12460,12 +12233,6 @@ async def _removal_with_member_gfs(stack, member_gfs):
             order.append("rekey")
 
     federation.broadcast_to_space_members = AsyncMock(side_effect=_broadcast)
-    subscriber_keys = AsyncMock()
-
-    async def _reseal(space_id):
-        order.append("reseal")
-
-    subscriber_keys.reconcile_space_everywhere = AsyncMock(side_effect=_reseal)
 
     async def _announce(space_id):
         order.append("notice")
@@ -12480,7 +12247,6 @@ async def _removal_with_member_gfs(stack, member_gfs):
     gfs.announce_epoch = AsyncMock(side_effect=_announce)
     gfs.channel_rekey_sent = AsyncMock(side_effect=_seat)
     stack.space_svc.attach_space_crypto_service(space_crypto)
-    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
     stack.space_svc.attach_member_gfs(gfs)
     stack.space_svc._federation = federation
     await stack.space_svc.remove_member(
@@ -12489,13 +12255,13 @@ async def _removal_with_member_gfs(stack, member_gfs):
     return space, bob, order, gfs
 
 
-async def test_a_rotation_sends_the_gfs_epoch_notice_before_rekey_and_reseal(stack):
+async def test_a_rotation_sends_the_gfs_epoch_notice_before_the_rekey(stack):
     space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
     gfs.announce_epoch.assert_awaited_once_with(space.id)
     # A rotating admin's own channel seat is renewed once its rekey went
     # out — when the members renew theirs — never right after the notice.
     gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
-    assert order == ["notice", "rekey", "own seat", "reseal"]
+    assert order == ["notice", "rekey", "own seat"]
 
 
 async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
@@ -12504,14 +12270,14 @@ async def test_a_failing_own_seat_renewal_never_breaks_the_rotation(stack):
     order.clear()
     await stack.space_svc._rotate_and_distribute_space_key(space.id)
     gfs.channel_rekey_sent.assert_awaited_once_with(space.id)
-    assert order == ["notice", "rekey", "reseal"]
+    assert order == ["notice", "rekey"]
 
 
 async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
     space, bob, order, _gfs = await _removal_with_member_gfs(
         stack, RuntimeError("gfs down")
     )
-    assert order == ["notice", "rekey", "own seat", "reseal"]
+    assert order == ["notice", "rekey", "own seat"]
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
 
 
@@ -12674,7 +12440,7 @@ async def test_comment_and_post_events_name_the_actor_and_the_author(stack):
     )
 
 
-# ─── The writer group key: one anonymous GFS publish mode (v_90) ─────────
+# ─── No space writer group key since v_96 (P7) ───────────────────────────
 
 _V90 = FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY
 
@@ -12689,44 +12455,6 @@ async def _readable(stack, space_id: str) -> None:
 
 async def test_space_features_have_no_publish_mode():
     assert not hasattr(SpaceFeatures(), "gfs_publish_mode")
-
-
-async def test_readable_roster_snapshot_carries_the_writer_key(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await _readable(stack, space.id)
-    await _seat(remote, space.id, "peer-a", "u-a")
-    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
-    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
-    grant = WriterKeyGrant.from_wire(payload["writer_key"])
-    assert grant.epoch == _cert_of(payload).epoch == 0
-
-
-async def test_an_unreadable_space_roster_snapshot_carries_no_writer_key(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await _seat(remote, space.id, "peer-a", "u-a")
-    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
-    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
-    assert "writer_cert" in payload and "writer_key" not in payload
-
-
-async def test_rekey_delivers_the_new_writer_key_only_to_publishers(stack):
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await _readable(stack, space.id)
-    await _seat(remote, space.id, "peer-a", "u-a")
-    await _seat(remote, space.id, "peer-b", "u-b", role=SpaceRole.SUBSCRIBER.value)
-    stack.space_svc._space_crypto = SpaceContentEncryption(
-        SqliteSpaceKeyRepo(stack.db),
-        KeyManager(b"\x0a" * 32),
-        own_instance_id=stack.iid,
-    )
-    await stack.space_svc._rotate_and_distribute_space_key(space.id)
-    call = fed.broadcast_to_space_members.await_args
-    hook = call.kwargs["per_peer"]
-    a = await hook("peer-a", call.args[2])
-    assert WriterKeyGrant.from_wire(a["writer_key"]).epoch == 1
-    # A follower without comment rights publishes nothing: no key.
-    assert "writer_key" not in await hook("peer-b", call.args[2])
-    assert "writer_key" not in call.args[2]
 
 
 async def test_rotation_tells_the_gfs_before_the_members(stack):
@@ -12770,9 +12498,9 @@ async def test_a_forwarded_config_edit_naming_a_mode_changes_nothing_else(
     assert rekeys == []
 
 
-async def test_an_upgrade_to_v90_delivers_the_writer_key(stack):
-    """Re-sent at the upgrade, so the member publishes over the GFS without
-    waiting for the next rotation."""
+async def test_an_upgrade_re_sends_the_credentials_without_a_writer_key(stack):
+    """Re-sent at the upgrade (the writer cert, the channel grant) — and,
+    since v_96 (P7), never a space writer group key."""
     space, fed, remote, _pks = await _cert_space(stack, version=_V90)
     await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
@@ -12784,48 +12512,12 @@ async def test_an_upgrade_to_v90_delivers_the_writer_key(stack):
     )
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "peer-a"
-    assert "writer_key" in kw["payload"]
+    assert "writer_cert" in kw["payload"]
+    assert "writer_key" not in kw["payload"]
 
 
-async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
-    """A global space that just became publicly readable gets a writer key
-    at once — the owner's epoch notice pins it at its GFSs and each member
-    household gets it with its credentials alone, no roster entry (no
-    rotation needed)."""
+async def test_a_readable_space_roster_snapshot_carries_no_writer_key(stack):
     space, fed, remote, _pks = await _cert_space(stack, version=_V90)
-    await stack.db.enqueue(
-        "UPDATE spaces SET space_type='global', allow_subscribers=0 WHERE id=?",
-        (space.id,),
-    )
-    await _seat(remote, space.id, "peer-a", "u-a")
-    await stack.space_repo.add_space_instance(space.id, "peer-a")
-    member_gfs = SimpleNamespace(
-        announce_epoch=AsyncMock(return_value=1),
-        channel_space=AsyncMock(return_value=False),
-    )
-    stack.space_svc.attach_member_gfs(member_gfs)
-    fed.send_with_mesh_fallback.reset_mock()
-    current = (await stack.space_repo.get(space.id)).features
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=dataclasses.replace(current, allow_subscribers=True),
-    )
-    member_gfs.announce_epoch.assert_awaited_with(space.id)
-    sent = [
-        c.kwargs
-        for c in fed.send_with_mesh_fallback.await_args_list
-        if c.kwargs.get("to_instance_id") == "peer-a"
-    ]
-    assert any("writer_key" in kw["payload"] for kw in sent)
-    # Its credentials alone — never the whole roster to every household.
-    assert all(kw["payload"]["entries"] == [] for kw in sent)
-
-
-async def test_no_writer_key_below_v90(stack):
-    """BREAKING (v_90): a v_57..v_89 household no longer gets the key, so it
-    publishes nothing over a GFS (its posts take the host path)."""
-    space, fed, remote, _pks = await _cert_space(stack, version=_V90 - 1)
     await _readable(stack, space.id)
     await _seat(remote, space.id, "peer-a", "u-a")
     assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
@@ -13605,4 +13297,181 @@ async def test_a_share_built_earlier_is_not_due_after_a_rotation_or_demotion(sta
     )
     assert not await stack.space_svc.admin_seed_share_still_due(
         prepared, instance_id="relay-peer"
+    )
+
+
+# ── P9 step up (owner 2026-11-26): a follower may become a member ──────
+
+
+async def _follower(stack, join_mode: JoinMode):
+    await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="P",
+        space_type=SpaceType.PUBLIC,
+        join_mode=join_mode,
+        features=SpaceFeatures(allow_subscribers=True),
+    )
+    await stack.space_svc.follow_space(fan.user_id, space.id)
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+    return fan, space
+
+
+async def test_a_follower_joins_an_open_space_we_host_as_a_member(stack):
+    """Following then Join: the follower seat becomes a member seat at
+    once, like anyone's Join of an open space (it raised AlreadyMember)."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    assert await stack.space_svc.request_join(space.id, user_id=fan.user_id) is None
+    seat = await stack.space_repo.get_member(space.id, fan.user_id)
+    assert seat is not None and seat.role == SpaceRole.MEMBER
+
+
+async def test_a_followers_request_to_join_is_approved_as_a_member(stack):
+    """Request mode: the follower's ask is filed for the admins; approving
+    it makes the follower seat a member seat."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    request_id = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    assert request_id
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+    await stack.space_svc.approve_join_request(request_id, actor_username="anna")
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.MEMBER
+    )
+
+
+async def test_a_followers_join_of_a_space_hosted_elsewhere_goes_to_its_host(
+    stack, monkeypatch
+):
+    """A follower of another household's space asks that host (paired, or
+    through the GFS that lists it) — never a request filed here, where
+    nobody may answer it."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    await _hosted_elsewhere(stack, space.id)
+    asked: list = []
+
+    async def _remote(self, space_id, **kw):
+        asked.append((space_id, kw))
+        return "rq-remote"
+
+    monkeypatch.setattr(type(stack.space_svc), "request_join_remote", _remote)
+    assert (
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id, message="hi")
+        == "rq-remote"
+    )
+    assert asked == [
+        (
+            space.id,
+            {
+                "applicant_user_id": fan.user_id,
+                "host_instance_id": "another-household",
+                "message": "hi",
+                "share_location": False,
+            },
+        )
+    ]
+
+
+async def test_a_member_still_cannot_ask_to_join_again(stack):
+    """Only a follower steps up; a member's Join stays AlreadyMember."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    with pytest.raises(AlreadyMemberError):
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+
+
+@pytest.mark.parametrize("join_mode", [JoinMode.OPEN, JoinMode.REQUEST])
+async def test_a_follower_of_a_private_space_cannot_ask_its_way_in(stack, join_mode):
+    """Step-up review I-1: a private space's follower was seated by name
+    with the read-only role; its join mode is no way in for it."""
+    await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Priv", join_mode=join_mode
+    )
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id,
+            user_id=fan.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    with pytest.raises(AlreadyMemberError):
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
+    )
+
+
+async def test_approving_a_stale_request_never_overwrites_a_newer_seat(stack):
+    """Step-up review I-2: a follower with a request out is seated another
+    way meanwhile (here: an admin seat written directly — no role change
+    moves a follower seat since final-review M2); the later approval
+    changes nothing (no member written over an admin, by any admin)."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    request_id = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    held = await stack.space_repo.get_member(space.id, fan.user_id)
+    await stack.space_repo.save_member(dataclasses.replace(held, role="admin"))
+    await stack.space_svc.approve_join_request(request_id, actor_username="anna")
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == "admin"
+
+
+async def test_a_step_up_keeps_the_seats_own_name(stack):
+    """Step-up review M-1: the follower seat's per-space name survives."""
+    fan, space = await _follower(stack, JoinMode.OPEN)
+    await stack.space_repo.set_member_profile(
+        space.id, fan.user_id, space_display_name="Fanny"
+    )
+    await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    seat = await stack.space_repo.get_member(space.id, fan.user_id)
+    assert seat.role == SpaceRole.MEMBER and seat.space_display_name == "Fanny"
+
+
+async def test_a_followers_ask_elsewhere_checks_what_we_know_and_asks_once(
+    stack, monkeypatch
+):
+    """Step-up review I-3: before asking another household's host, an
+    invite-only space is refused here, and a request already out answers
+    the ask again (no second request)."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    await _hosted_elsewhere(stack, space.id)
+    asked: list = []
+
+    async def _remote(self, space_id, **kw):
+        asked.append(kw)
+        return await self._spaces.save_join_request(
+            space_id,
+            kw["applicant_user_id"],
+            remote_applicant_instance_id=kw["host_instance_id"],
+        )
+
+    monkeypatch.setattr(type(stack.space_svc), "request_join_remote", _remote)
+    first = await stack.space_svc.request_join(
+        space.id, user_id=fan.user_id, share_location=True
+    )
+    again = await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+    assert first == again and len(asked) == 1
+    assert asked[0]["share_location"] is True
+    await stack.db.enqueue(
+        "UPDATE spaces SET join_mode='invite_only' WHERE id=?", (space.id,)
+    )
+    with pytest.raises(InviteOnlyError):
+        await stack.space_svc.request_join(space.id, user_id=fan.user_id)
+
+
+async def test_no_role_change_promotes_a_follower(stack):
+    """Final review M2: a follower seat moves only through that person's
+    own approved join / redeem — the owner cannot promote it."""
+    fan, space = await _follower(stack, JoinMode.REQUEST)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_role(
+            space.id, actor_username="anna", user_id=fan.user_id, role="member"
+        )
+    assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
+        SpaceRole.SUBSCRIBER
     )

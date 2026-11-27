@@ -57,17 +57,14 @@ async def test_space_zones(setup):
     assert z.color == "#3b82f6"
 
 
-async def test_space_zones_never_land_on_a_follower_only_household(setup):
-    """The members' places are not a follower's (owner decision 13): an
-    older sender — or any provider — streaming ``space_zones`` /
-    ``space_zones_deleted`` to a household whose local users only follow
-    the space stores nothing, like the live ``SPACE_ZONE_UPSERTED`` (#1006)."""
+async def test_space_zones_land_on_a_follower_only_household(setup):
+    """P10 (owner 2026-11-26): a follower reads the members' places — a
+    household whose local users only follow the space stores the zones
+    like any member household (the live ``SPACE_ZONE_UPSERTED`` too)."""
     r, c, kp = setup
     c.follower_only = True
     await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD)])
-    assert c.zones == []
-    await _send(r, kp, "space_zones_deleted", [{"id": "z_ok"}], sync_id="sync-2")
-    assert c.zones == []
+    assert [z.id for z in c.zones] == [_GOOD_ZONE_RECORD["id"]]
 
 
 async def test_space_zones_malformed_record_dropped(setup):

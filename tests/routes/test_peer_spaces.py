@@ -66,3 +66,8 @@ async def test_rows_carry_the_hosts_member_and_follower_counts(client):
         3,
         None,
     )
+    # P9: a host declares a follower count exactly when the space takes
+    # followers (``space_listing_counts``), so that is what says Follow is
+    # offered for a paired household's public space — no other field.
+    assert rows["sp-new"]["allow_subscribers"] is True
+    assert rows["sp-old"]["allow_subscribers"] is False

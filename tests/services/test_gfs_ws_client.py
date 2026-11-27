@@ -17,7 +17,10 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from socialhome.crypto import b64url_decode, b64url_encode, verify_ed25519
 from socialhome.domain.ws_binary_frame import encode_binary_frame
-from socialhome.federation.inbound_validator import UnpairedPeerRefusedError
+from socialhome.federation.inbound_validator import (
+    NoMemberCardError,
+    UnpairedPeerRefusedError,
+)
 from socialhome.services.gfs_ws_client import (
     ENVELOPE_MEDIA_FRAME,
     GfsWebSocketClient,
@@ -244,7 +247,7 @@ async def test_client_sends_signed_hello(fake_gfs, http_session):
         assert verify_ed25519(pub, msg, sig)
         # #5b: we ask for a space key when we miss one, so the server need
         # not have every owner re-seal on each of our reconnects.
-        assert "space_key_pull" in hello["accepts"]
+        assert "space_key_pull" not in hello["accepts"]
     finally:
         await client.stop()
 
@@ -449,17 +452,19 @@ async def test_client_dispatches_moment_public_frames(fake_gfs, http_session):
         await client.stop()
 
 
-async def test_client_dispatches_new_subscriber_frames(fake_gfs, http_session):
-    """``new_subscriber`` frames (the Phase-5b GFS notify) go to the dedicated
-    handler so a seed-holder can seal the content key to the new subscriber."""
+async def test_client_ignores_a_legacy_new_subscriber_frame(
+    fake_gfs, http_session, caplog
+):
+    """v_96 — the household no longer answers the GFS's ``new_subscriber``
+    notify (no key handoff, no profiles bundle). A GFS still sending one
+    gets it ignored quietly: no relay consumer sees it, nothing above
+    DEBUG is logged, and the loop survives."""
+    caplog.set_level(logging.DEBUG, logger="socialhome")
     seed, _pub = _gen_keypair()
-    subs: list[dict] = []
+    relays: list[dict] = []
 
     async def on_relay(frame: dict) -> None:
-        pass
-
-    async def on_new_subscriber(frame: dict) -> None:
-        subs.append(frame)
+        relays.append(frame)
 
     client = GfsWebSocketClient(
         gfs_url=fake_gfs.url,
@@ -467,8 +472,8 @@ async def test_client_dispatches_new_subscriber_frames(fake_gfs, http_session):
         signing_key=seed,
         session_factory=lambda: http_session,
         on_relay=on_relay,
-        on_new_subscriber=on_new_subscriber,
     )
+    assert not hasattr(client, "attach_new_subscriber_handler")
     await client.start()
     try:
         for _ in range(100):
@@ -483,79 +488,14 @@ async def test_client_dispatches_new_subscriber_frames(fake_gfs, http_session):
             },
         )
         for _ in range(100):
-            if subs:
+            if any("new_subscriber" in r.getMessage() for r in caplog.records):
                 break
             await asyncio.sleep(0.02)
-        assert len(subs) == 1
-        assert subs[0]["space_id"] == "sp-1"
-        assert subs[0]["subscriber"]["instance_id"] == "sub-1"
-    finally:
-        await client.stop()
-
-
-async def test_client_attach_new_subscriber_handler_late_binds(fake_gfs, http_session):
-    """The handler can be attached after construction (startup wiring order)."""
-    seed, _pub = _gen_keypair()
-    subs: list[dict] = []
-
-    async def on_relay(frame: dict) -> None:
-        pass
-
-    async def on_new_subscriber(frame: dict) -> None:
-        subs.append(frame)
-
-    client = GfsWebSocketClient(
-        gfs_url=fake_gfs.url,
-        instance_id="sh-ns2",
-        signing_key=seed,
-        session_factory=lambda: http_session,
-        on_relay=on_relay,
-    )
-    client.attach_new_subscriber_handler(on_new_subscriber)
-    await client.start()
-    try:
-        for _ in range(100):
-            if client.connected:
-                break
-            await asyncio.sleep(0.02)
-        await fake_gfs.outbound.put(
-            {"type": "new_subscriber", "space_id": "sp-2", "subscriber": {}},
-        )
-        for _ in range(100):
-            if subs:
-                break
-            await asyncio.sleep(0.02)
-        assert len(subs) == 1
-    finally:
-        await client.stop()
-
-
-async def test_client_drops_new_subscriber_when_no_handler(fake_gfs, http_session):
-    """A ``new_subscriber`` frame with no handler attached is dropped, not
-    crashed."""
-    seed, _pub = _gen_keypair()
-
-    async def on_relay(frame: dict) -> None:
-        pass
-
-    client = GfsWebSocketClient(
-        gfs_url=fake_gfs.url,
-        instance_id="sh-ns3",
-        signing_key=seed,
-        session_factory=lambda: http_session,
-        on_relay=on_relay,
-    )
-    await client.start()
-    try:
-        for _ in range(100):
-            if client.connected:
-                break
-            await asyncio.sleep(0.02)
-        await fake_gfs.outbound.put(
-            {"type": "new_subscriber", "space_id": "sp-3", "subscriber": {}},
-        )
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.05)
         assert client.connected  # loop survived
+        assert relays == []
+        noted = [r for r in caplog.records if "new_subscriber" in r.getMessage()]
+        assert noted and all(r.levelno == logging.DEBUG for r in noted)
     finally:
         await client.stop()
 
@@ -1273,17 +1213,25 @@ async def test_on_text_swallows_envelope_handler_exception(caplog):
     assert "secret-blob" not in caplog.text
 
 
-async def test_on_text_is_quiet_about_a_household_unpaired_moments_ago(caplog):
-    """A relayed envelope from a household whose row we dropped moments ago
-    (it sealed the frame before it learned — e.g. the host's last frames to
-    a household it just removed from their only shared space) was already
-    logged by the pipeline step that refused it. The socket must not log it
-    again at WARNING with a traceback, exactly like the inbox route and the
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [
+        (UnpairedPeerRefusedError, "No instance found for instance_id='x'"),
+        # P9 (demo audit): a member that just learned our card sends before
+        # the host's directory brings us its card — a handled drop.
+        (NoMemberCardError, "no member card of this sender for this space"),
+    ],
+)
+async def test_on_text_is_quiet_about_a_refusal_already_logged(caplog, error, text):
+    """A relayed envelope its pipeline step refused and logged (a household
+    whose row we dropped moments ago; a sender whose member card has not
+    reached us yet) is a handled drop: the socket must not log it again at
+    WARNING with a traceback, exactly like the inbox route and the
     DataChannel."""
     seed, _pub = _gen_keypair()
 
     async def refuse(_frame: dict) -> None:
-        raise UnpairedPeerRefusedError("No instance found for instance_id='x'")
+        raise error(text)
 
     client = GfsWebSocketClient(
         gfs_url="https://gfs.test",
@@ -1296,7 +1244,7 @@ async def test_on_text_is_quiet_about_a_household_unpaired_moments_ago(caplog):
     with caplog.at_level(logging.DEBUG):
         await client._on_text(json.dumps({"type": "envelope", "sealed": {}}))
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert "No instance found" in caplog.text
+    assert text in caplog.text
 
 
 async def test_a_refused_media_frame_is_still_counted(monkeypatch):

@@ -7,7 +7,6 @@ import json
 import pytest
 
 from socialhome.services.gfs_http import (
-    MAX_GFS_BODY_BYTES,
     MAX_GFS_DIRECTORY_BODY_BYTES,
     MAX_GFS_DIRECTORY_ITEMS,
     gfs_server_address,
@@ -105,16 +104,10 @@ async def test_a_body_exactly_at_the_cap_is_accepted():
 
 @pytest.mark.parametrize(
     "cap",
-    [MAX_GFS_BODY_BYTES, MAX_GFS_DIRECTORY_BODY_BYTES, MAX_GFS_DIRECTORY_ITEMS],
+    [MAX_GFS_DIRECTORY_BODY_BYTES, MAX_GFS_DIRECTORY_ITEMS],
 )
 def test_caps_are_positive_and_ordered(cap):
     assert cap > 0
-
-
-def test_directory_cap_is_larger_than_the_single_space_cap():
-    """A directory carries the same per-space payload many times over —
-    including base64 icons — so it needs the more generous budget."""
-    assert MAX_GFS_DIRECTORY_BODY_BYTES > MAX_GFS_BODY_BYTES
 
 
 async def test_read_body_capped_returns_bytes_or_refuses():

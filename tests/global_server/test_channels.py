@@ -42,16 +42,24 @@ from socialhome.gfs_channel import (
     sign_register,
     sign_unregister,
 )
+from socialhome.global_server import envelope_relay
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_channel_service_key,
+    gfs_db_key,
     gfs_envelope_queue_repo_key,
+    gfs_fan_out_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
     gfs_ws_registry_key,
 )
 from socialhome.global_server.channels import (
+    CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS,
+    CHANNEL_PUBLISH_MAX_PER_MINUTE,
+    CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
     CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP,
+    CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP,
+    SUBSCRIBE_NOT_YET_RETRY_S,
+    ChannelRateLimited,
     _is_channel_path,
 )
 from socialhome.global_server.config import GfsConfig
@@ -222,7 +230,7 @@ async def _wait_connected(app, instance_id: str) -> None:
 
 
 async def _queued(gfs, h: _Household) -> list:
-    await gfs.app_[gfs_member_publish_key].wait_idle()
+    await gfs.app_[gfs_fan_out_key].wait_idle()
     return await gfs.app_[gfs_envelope_queue_repo_key].list_for(h.instance_id, now=0)
 
 
@@ -331,6 +339,33 @@ async def test_register_is_rate_limited_per_address(gfs) -> None:
         assert resp.status == 201
     resp = await gfs.post("/gfs/channels/register", json=_Channel().register())
     assert resp.status == 429
+
+
+@pytest.mark.security
+async def test_a_refresh_of_a_known_channel_spends_no_register_budget(gfs) -> None:
+    """An owner re-registers (refreshes) every channel it runs on a reconnect
+    or restart — many at once for a household with many channel spaces.
+    That is no new row: it does not spend the per-address register budget,
+    which bounds new channels only. A new one past the budget is still 429."""
+    known = [_Channel() for _ in range(CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP)]
+    for ch in known:
+        resp = await gfs.post("/gfs/channels/register", json=ch.register())
+        assert resp.status == 201
+    for ch in known:  # the burst of refreshes
+        resp = await gfs.post("/gfs/channels/register", json=ch.register())
+        assert resp.status == 200
+    resp = await gfs.post("/gfs/channels/register", json=_Channel().register())
+    assert resp.status == 429
+    # Past the spent budget a known id is still judged on its key: another
+    # key is 409 (no re-pin), a bad signature 403 — neither is a 429.
+    other = _Channel()
+    other.id = known[0].id
+    resp = await gfs.post("/gfs/channels/register", json=other.register())
+    assert resp.status == 409
+    body = known[1].register()
+    body["channel_sig"] = known[2].register()["channel_sig"]
+    resp = await gfs.post("/gfs/channels/register", json=body)
+    assert resp.status == 403
 
 
 async def test_a_body_naming_a_space_is_malformed(gfs) -> None:
@@ -467,6 +502,57 @@ async def test_subscribe_needs_a_pass_for_this_household_and_an_open_epoch(gfs) 
         )
     )
     await _seat(gfs, gfs.member, 3)
+
+
+async def test_a_pass_for_an_epoch_not_open_yet_is_a_429_not_a_refusal(gfs) -> None:
+    """The owner rotated twice within a minute: its notice for the newest
+    epoch waits out the one-epoch-a-minute bound (429) while members already
+    hold passes for it. Such a pass — valid, AHEAD of the open epochs, or
+    for a channel whose first notice has not landed — is "not yet": 429 with
+    ``Retry-After``, so the household retries, never a 403 it gives up on.
+    A closed (older) epoch stays a refusal."""
+    resp = await gfs.post("/gfs/channels/register", json=gfs.ch.register())
+    assert resp.status == 201
+    # No notice yet: nothing is open, the pass is not yet usable.
+    resp = await gfs.post(
+        "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 3)
+    )
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) == SUBSCRIBE_NOT_YET_RETRY_S
+    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3))
+    assert resp.status == 200
+    # Open: 3 and 4; 5 is ahead — not yet: open once the notice for 5 may
+    # land, two steps (2 x 60 s) after the raise to 3 just now.
+    resp = await gfs.post(
+        "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 5)
+    )
+    assert resp.status == 429
+    assert 110 <= int(resp.headers["Retry-After"]) <= 120
+    # "Not yet" creates nothing: no seat row.
+    repo = gfs.app_[gfs_channel_repo_key]
+    assert not await repo.has_subscription(gfs.ch.id, gfs.member.instance_id)
+    # A closed epoch: refused.
+    await _refused(
+        await gfs.post(
+            "/gfs/channels/subscribe", json=_subscribe_body(gfs.ch, gfs.member, 1)
+        )
+    )
+
+
+async def test_a_subscribe_to_a_channel_not_registered_here_is_not_yet(gfs) -> None:
+    """A fresh channel's grant can reach a member before the owner's
+    register lands on this server (or after the owner retired it): no 403
+    the member gives up on, but 429 + Retry-After — it retries, and drops
+    the retry once its grant moves on. Only after identity verification."""
+    body = _subscribe_body(gfs.ch, gfs.member, 3)  # gfs.ch never registered
+    resp = await gfs.post("/gfs/channels/subscribe", json=body)
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) == SUBSCRIBE_NOT_YET_RETRY_S
+    repo = gfs.app_[gfs_channel_repo_key]
+    assert await repo.get(gfs.ch.id) is None
+    # An unknown household still gets the plain refusal, never the 429.
+    stranger = _subscribe_body(gfs.ch, _Household(), 3)
+    await _refused(await gfs.post("/gfs/channels/subscribe", json=stranger))
 
 
 async def test_unsubscribe_drops_the_seat(gfs) -> None:
@@ -652,6 +738,159 @@ async def test_anonymous_publish_refusals(gfs) -> None:
     assert resp.status == 400
 
 
+# ── F5: a follower holding the writer key cannot flood a channel ─────────
+
+
+def _anon_req(ch: _Channel, epoch: int = 3) -> ChannelPublishAnonRequest:
+    """A fresh, validly signed request (new nonce, so never a replay)."""
+    return ChannelPublishAnonRequest.from_wire(_anon_body(ch, epoch))
+
+
+@pytest.mark.security
+async def test_one_address_is_bounded_per_channel(gfs) -> None:
+    """One client address gets CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
+    publishes a minute into a channel; another address still gets through."""
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    cap = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
+    for _ in range(cap):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.9")
+    assert cap < CHANNEL_PUBLISH_MAX_PER_MINUTE
+
+
+@pytest.mark.security
+async def test_one_key_holder_spreading_over_addresses_cannot_exceed_the_channel_cap(
+    gfs,
+) -> None:
+    """The channel as a whole takes CHANNEL_PUBLISH_MAX_PER_MINUTE a
+    minute whatever the addresses; another channel is unaffected."""
+    await _ready(gfs, epoch=3)
+    first = gfs.ch
+    gfs.ch = _Channel()
+    await _ready(gfs, epoch=3)
+    second = gfs.ch
+    svc = gfs.app_[gfs_channel_service_key]
+    cap = CHANNEL_PUBLISH_MAX_PER_MINUTE
+    per_ip = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
+    for i in range(cap):
+        # Every address stays under its own per-address bound.
+        await svc.publish_anon(
+            _anon_req(first), client_ip=f"10.{i // per_ip}.0.{i % per_ip}"
+        )
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(first), client_ip="192.0.2.250")
+    await svc.publish_anon(_anon_req(second), client_ip="192.0.2.250")
+
+
+@pytest.mark.security
+async def test_one_key_holder_needs_eight_addresses_to_fill_the_channel(gfs) -> None:
+    """F5-b: one writer-key holder spreading over addresses can no longer
+    spend the channel's whole minute from four of them — each address takes
+    an eighth, so seven leave an honest writer at least one address's share,
+    and only eight (IPv6: eight /64s) fill the channel."""
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    per_addr = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
+    cap = CHANNEL_PUBLISH_MAX_PER_MINUTE
+    assert per_addr * 8 == cap
+    for a in range(7):
+        for _ in range(per_addr):
+            await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.0.0.{a}")
+        with pytest.raises(ChannelRateLimited):
+            await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.0.0.{a}")
+    # The honest writer still gets its full share.
+    for _ in range(per_addr):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.9")
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.10")
+
+
+@pytest.mark.security
+async def test_channel_limits_are_cluster_wide(gfs) -> None:
+    """F5-a: the counters live in each node; with N live nodes each admits
+    ceil(L / N), so behind the round-robin balancer the cluster admits
+    about L into a channel, not N × L."""
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    svc._nodes = lambda: 4
+    per_addr = -(-CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS // 4)
+    for _ in range(per_addr):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    # The channel's own budget: this node's quarter of 120.
+    channel_share = CHANNEL_PUBLISH_MAX_PER_MINUTE // 4
+    admitted = per_addr
+    a = 0
+    while admitted < channel_share:
+        a += 1
+        for _ in range(min(per_addr, channel_share - admitted)):
+            await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.1.0.{a}")
+            admitted += 1
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="192.0.2.250")
+
+
+@pytest.mark.security
+async def test_the_writer_key_bound_is_per_channel_and_epoch(gfs) -> None:
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    # Lift the aggregate / address bounds so only the key bound can answer.
+    svc._channel_limiter._limit = 10 * CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+    svc._anon_ip_limiter._limit = 10 * CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+    for _ in range(CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+
+
+@pytest.mark.security
+async def test_a_refused_writer_signature_costs_no_budget(gfs) -> None:
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    cap = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
+    for _ in range(cap + 5):
+        bad = ChannelPublishAnonRequest.from_wire(
+            _anon_body(gfs.ch, 3, writer_seed=os.urandom(32))
+        )
+        with pytest.raises(PermissionError):
+            await svc.publish_anon(bad, client_ip="203.0.113.7")
+    # The address still has its whole budget.
+    for _ in range(cap):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+
+
+@pytest.mark.security
+async def test_the_route_answers_429_past_the_address_bound(gfs) -> None:
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    svc._anon_ip_limiter._limit = 1
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
+    assert resp.status == 200, await resp.text()
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
+    assert resp.status == 429
+
+
+@pytest.mark.security
+async def test_the_per_ip_route_limiter_covers_every_channel_route(gfs) -> None:
+    assert CHANNEL_ROUTES
+    for path in CHANNEL_ROUTES:
+        assert _is_channel_path(path), path
+    assert _is_channel_path("/gfs/channels/publish-anon")
+    # Wired into the real app: past the per-IP budget the route sheds a
+    # flood with 429 before any signature work.
+    last = 0
+    for _ in range(CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP + 1):
+        resp = await gfs.post("/gfs/channels/publish-anon", json={})
+        last = resp.status
+    assert last == 429
+
+
 # ── Unregister ───────────────────────────────────────────────────────────
 
 
@@ -690,7 +929,7 @@ async def test_the_server_stores_nothing_that_names_the_space(gfs, tmp_dir) -> N
     await _seat(gfs, gfs.other)
     resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     assert resp.status == 200
-    await gfs.app_[gfs_member_publish_key].wait_idle()
+    await gfs.app_[gfs_fan_out_key].wait_idle()
     dump = (tmp_dir / "gfs.db").read_bytes()
     for wal in tmp_dir.glob("gfs.db*"):
         dump += wal.read_bytes()
@@ -725,3 +964,122 @@ async def test_the_cluster_audience_of_a_channel_is_its_open_seats(gfs):
         [gfs.member.instance_id, gfs.other.instance_id]
     )
     assert await svc.audience_targets("no-such-channel") == []
+
+
+# ── T3.6: a global space's channel — 10 000 seats on one channel ─────────
+
+
+#: A global space with ~200 author households and ~10 000 followers puts
+#: every one of them on ONE channel (subscriber-seats plan §5).
+_SCALE_SEATS = 10_000
+
+
+async def _seat_many(gfs, n: int, epoch: int = 3) -> list[str]:
+    """Seat *n* active, recently seen households straight through the
+    database — the subscribe route's checks are covered above; this is
+    about what one publish costs once they hold seats."""
+    db = gfs.app_[gfs_db_key]
+    now = int(time.time())
+    ids = [f"{i:032x}" for i in range(n)]
+
+    def _insert(conn) -> None:
+        conn.executemany(
+            "INSERT INTO client_instances(instance_id, public_key, status,"
+            " relay_seen_at) VALUES(?, ?, 'active', ?)",
+            [(i, "00" * 32, now) for i in ids],
+        )
+        conn.executemany(
+            "INSERT INTO gfs_channel_subscribers(channel_id, instance_id,"
+            " pass_epoch, joined_at) VALUES(?, ?, ?, ?)",
+            [(gfs.ch.id, i, epoch, now) for i in ids],
+        )
+
+    await db.transact(_insert)
+    return ids
+
+
+class _FakeSocket:
+    """A live ``/gfs/ws`` session that records what it was sent."""
+
+    closed = False
+
+    def __init__(self, instance_id: str, pushed: list[str]) -> None:
+        self._id = instance_id
+        self._pushed = pushed
+
+    async def send_str(self, msg: str) -> None:
+        assert json.loads(msg)["type"] == "relay"
+        self._pushed.append(self._id)
+
+
+async def _queued_counts(gfs) -> dict[str, int]:
+    rows = await gfs.app_[gfs_db_key].fetchall(
+        "SELECT to_instance, COUNT(*) AS n FROM gfs_envelope_queue"
+        " WHERE frame_type='relay' GROUP BY to_instance"
+    )
+    return {r["to_instance"]: r["n"] for r in rows}
+
+
+async def _publish_and_wait(gfs) -> float:
+    started = time.monotonic()
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
+    assert resp.status == 200, await resp.text()
+    await gfs.app_[gfs_fan_out_key].wait_idle()
+    return time.monotonic() - started
+
+
+async def test_ten_thousand_seats_on_one_channel_all_get_the_item(gfs) -> None:
+    """One publish reaches all 10 000 seats: the per-instance seat cap is per
+    HOUSEHOLD (there is no per-channel seat cap), every seat is a fan-out
+    target, a connected seat is pushed live and every other (recently seen)
+    seat gets exactly one queued frame.
+
+    Timing guards the queue path: one transaction per offline seat, each
+    summing every live relay row for the server-wide cap, made an item to
+    10 000 offline seats cost ~5 s and every further item 5 s more (three
+    items: ~30 s). Batched it is a fraction of a second per item, so the
+    channel's 120 items a minute never back its fan-out worker up."""
+    await _ready(gfs)
+    ids = await _seat_many(gfs, _SCALE_SEATS)
+    svc = gfs.app_[gfs_channel_service_key]
+    assert len(await svc.audience_targets(gfs.ch.id)) == _SCALE_SEATS
+
+    # Half the seats hold a live socket on this node: stand-ins for 5 000
+    # ``/gfs/ws`` sessions, pushed through the real registry send path.
+    live = set(ids[::2])
+    pushed: list[str] = []
+    registry = gfs.app_[gfs_ws_registry_key]
+    for instance_id in live:
+        registry._by_instance[instance_id] = _FakeSocket(instance_id, pushed)
+    elapsed = [await _publish_and_wait(gfs) for _ in range(3)]
+    for instance_id in live:
+        registry._by_instance.pop(instance_id)
+    assert len(pushed) == 3 * len(live)
+    assert set(pushed) == live
+    queued = await _queued_counts(gfs)
+    assert set(queued) == set(ids) - live
+    assert set(queued.values()) == {3}
+    assert sum(elapsed) < 10, elapsed
+
+
+async def test_ten_thousand_offline_seats_at_a_full_relay_queue(gfs, monkeypatch):
+    """At the server-wide relay cap every offline copy makes room by fair-share
+    eviction (the largest holder's oldest row) — still bounded, still fast:
+    the holders are ranked once per batch, not per row."""
+    await _ready(gfs)
+    await _seat_many(gfs, _SCALE_SEATS)
+    await _publish_and_wait(gfs)
+    relay = gfs.app_[gfs_envelope_queue_repo_key]
+    full = await relay.relay_bytes(0)
+    # The cap is exactly what the first item filled.
+    monkeypatch.setattr(envelope_relay, "RELAY_QUEUE_MAX_TOTAL_BYTES", full)
+    elapsed = await _publish_and_wait(gfs)
+    assert await relay.relay_bytes(0) <= full
+    queued = await _queued_counts(gfs)
+    # The cap holds exactly as many copies as before; fair share keeps every
+    # holder within one row of the others (ties among equal holders are
+    # broken in id order, so one seat may hold both copies, one neither).
+    assert sum(queued.values()) == _SCALE_SEATS
+    assert max(queued.values()) <= 2
+    assert len(queued) >= _SCALE_SEATS - 1
+    assert elapsed < 10, elapsed

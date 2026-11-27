@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from socialhome.domain.federation_capabilities import (
+    CAPABILITY_FEATURE_KEYS,
     CAPABILITY_FEATURES,
+    HOUSEHOLD_FEATURE_KEYS,
     OURS,
     SPACE_SCOPED_MIN_VERSIONS,
     FederationCapability,
@@ -117,7 +119,9 @@ def test_features_built_from_min_for_constants():
     }
     feature_versions = {ver for ver, _ in CAPABILITY_FEATURES}
     assert feature_versions == declared
-    assert len(CAPABILITY_FEATURES) == len(declared)
+    # One label per threshold, except v_96: subscriber seats and moment
+    # reach share it.
+    assert len(CAPABILITY_FEATURES) == len(declared) + 1
 
 
 def test_features_missing_below_ours_is_empty():
@@ -155,6 +159,7 @@ def test_space_features_missing_below_v1_lists_only_space_scoped():
         label
         for ver, label in sorted(CAPABILITY_FEATURES)
         if ver in SPACE_SCOPED_MIN_VERSIONS
+        and CAPABILITY_FEATURE_KEYS[label] not in HOUSEHOLD_FEATURE_KEYS
     ]
     assert missing == expected
     # Non-space features are excluded even though a v1 peer lacks them too.
@@ -206,6 +211,7 @@ def test_space_features_missing_below_v13():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -249,6 +255,7 @@ def test_space_features_missing_below_v16():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -289,6 +296,7 @@ def test_space_features_missing_below_v22():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -327,6 +335,7 @@ def test_space_features_missing_below_v23():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -366,6 +375,7 @@ def test_space_features_missing_below_v24():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(27) == [
         "Noticing when a path through other households breaks",
@@ -399,6 +409,7 @@ def test_space_features_missing_below_v24():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 
@@ -440,6 +451,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(29) == [
         "Followers from other households",
@@ -471,6 +483,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(30) == [
         "Checking who sent a passed-on message",
@@ -501,6 +514,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(31) == [
         "Up-to-date member lists for every household",
@@ -530,6 +544,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
@@ -558,6 +573,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(33) == [
         "Albums tied to their creator",
@@ -585,6 +601,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(34) == [
         "Posts tied to their creator",
@@ -611,6 +628,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(35) == [
         "Posts tied to their creator",
@@ -637,6 +655,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(36) == [
         "Space timetables",
@@ -662,6 +681,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(38) == [
         "Space timetables",
@@ -687,6 +707,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(39) == [
         "Task priority and labels",
@@ -711,6 +732,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(40) == [
         "Space moderators",
@@ -734,6 +756,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(41) == [
         "Admin-only space features",
@@ -756,6 +779,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(42) == [
         "Reviewing posts from other households",
@@ -777,6 +801,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(43) == [
         "Locking out removed admins",
@@ -797,6 +822,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(44) == [
         "Space reports for moderators",
@@ -816,6 +842,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(45) == [
         "Catching up on missed security updates",
@@ -834,6 +861,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
     assert space_features_missing_below(46) == [
         "Role changes from member households",
@@ -851,6 +879,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
+        "Follow spaces with one seat on every path",
     ]
 
 

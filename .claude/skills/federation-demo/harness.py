@@ -92,6 +92,7 @@ def _received_name(space_id: str, sender: dict, filename: str) -> str:
         return space_content_media_name(space_id, digest, filename)
     return space_direct_media_name(space_id, sender["instance_id"], filename)
 
+
 #: Upper bound for :func:`cmd_replay`'s poll. The outbox schedule is
 #: ``(5, 10, 20, 40, …)`` s with ±30 % jitter and nothing flushes early on a
 #: peer's return, so the first retry that finds Carol alive lands within
@@ -688,7 +689,9 @@ def _content_addressed_failures(
     want = space_content_media_name(space_id, digest, sent_name)
     got = shown.rsplit("/", 1)[-1].split("?", 1)[0]
     if got != want:
-        return [f"{label}: stores {sent_name} as {got!r}, not its content name {want!r}"]
+        return [
+            f"{label}: stores {sent_name} as {got!r}, not its content name {want!r}"
+        ]
     path = _instance_dir(label) / "media" / got
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
         return [f"{label}: {got} on disk does not hash to {digest[:12]}…"]
@@ -756,9 +759,9 @@ def _all_log_lines_matching(label: str, needle: str) -> list[str]:
     d = _instance_dir(label)
     rotated = sorted(
         d.glob("log.*.txt"),
-        key=lambda p: int(p.stem.split(".", 1)[1])
-        if p.stem.split(".", 1)[1].isdigit()
-        else -1,
+        key=lambda p: (
+            int(p.stem.split(".", 1)[1]) if p.stem.split(".", 1)[1].isdigit() else -1
+        ),
     )
     lines: list[str] = []
     for path in [*rotated, d / "log.txt"]:
@@ -805,9 +808,7 @@ def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
     # checks that need evidence from before a respawn
     # (:func:`_all_log_lines_matching`).
     if (d / "log.txt").exists():
-        (d / "log.txt").rename(
-            d / f"log.{_log_generations().get(label, 0)}.txt"
-        )
+        (d / "log.txt").rename(d / f"log.{_log_generations().get(label, 0)}.txt")
     _bump_log_generation(label)
     log = open(d / "log.txt", "wb")
     env = {
@@ -1521,7 +1522,8 @@ def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
     leaked = _gfs_cluster_log_matches(spent[0][:43])
     if leaked:
         raise SystemExit(
-            "gfs-cluster: a GFS log line carries a ticket:\n  " + "\n  ".join(leaked[:5])
+            "gfs-cluster: a GFS log line carries a ticket:\n  "
+            + "\n  ".join(leaked[:5])
         )
     print("  no ticket appears in any GFS log line ✓")
 
@@ -1579,7 +1581,9 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
             await register_mailbox(http, urls[0], keys, gfs_id, tickets=tickets)
             print(f"  mailbox registered via node 0 (gfs {gfs_id}) ✓")
             async with MailboxClaim(http, urls[1], keys, gfs_id) as claim:
-                await _post(http, json={"to_instance": keys.mailbox_id, "sealed": sealed})
+                await _post(
+                    http, json={"to_instance": keys.mailbox_id, "sealed": sealed}
+                )
                 got = await _next(claim, "JSON envelope")
                 if got != {"type": "envelope", "sealed": sealed}:
                     raise SystemExit(f"gfs-cluster: mailbox envelope changed: {got!r}")
@@ -1698,9 +1702,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
 
         async def _run() -> None:
             async with aiohttp.ClientSession() as http:
-                tickets = await _gfs_cluster_ticket_cache(
-                    http, all_urls[0], household
-                )
+                tickets = await _gfs_cluster_ticket_cache(http, all_urls[0], household)
                 await tickets.refill()
                 await register_mailbox(http, all_urls[0], keys, id_0, tickets=tickets)
                 async with contextlib.aclosing(await _claim_when_known(http)) as claim:
@@ -1738,187 +1740,6 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError, PermissionError:
             pass
-
-
-def _gfs_cluster_cross_node_push(urls: list[str]) -> None:
-    """Step 3d of ``gfs-cluster``: the two single-recipient pushes reach a
-    socket held by ANOTHER node.
-
-    Behind a round-robin balancer a household's socket and its next request
-    usually land on different nodes. Before the fix a ``new_subscriber``
-    notice reached the space owner only when the follower's subscribe hit
-    the owner's node, and a targeted ``to`` relay (the key handoff, the
-    author-profiles bundle) only when the publish hit the follower's node —
-    on a 4-node cluster ~3 new followers in 4 got neither. Now:
-
-    * owner's socket on node 0, follower subscribes via node 1 → the owner
-      gets ``new_subscriber`` (``reason: subscribe``, ``accepts`` intact);
-    * follower's socket on node 1, owner's targeted handoff via node 0 →
-      the follower gets the ``relay`` frame.
-    """
-    import asyncio
-
-    import aiohttp
-
-    from socialhome.authority_sig import sign_authority_event
-    from socialhome.crypto import (
-        b64url_encode,
-        derive_instance_id,
-        generate_identity_keypair,
-        sign_ed25519,
-    )
-
-    def _canonical(body: dict) -> bytes:
-        return json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
-
-    def _register(url: str, *, keywrap: bool) -> tuple[str, bytes]:
-        kp = generate_identity_keypair()
-        iid = derive_instance_id(kp.public_key)
-        body: dict = {
-            "token": _gfs_landing_token(url),
-            "instance_id": iid,
-            "public_key": kp.public_key.hex(),
-            "display_name": f"cross-node-{iid[:6]}",
-        }
-        if keywrap:
-            body |= {
-                "keywrap_public_key": "cc" * 32,
-                "kem_suite": "x25519",
-                "keywrap_sig": "a2V5d3JhcHNpZw",
-            }
-        code, resp = _request(
-            f"{url}/gfs/register", method="POST", body=body, timeout=15.0
-        )
-        if code not in (200, 201) or (resp or {}).get("status") != "registered":
-            raise SystemExit(f"gfs-cluster: cross-node register → {code} {resp!r}")
-        return iid, kp.private_key
-
-    owner_id, owner_seed = _register(urls[0], keywrap=False)
-    follower_id, follower_seed = _register(urls[1], keywrap=True)
-    space = generate_identity_keypair()
-    space_id = generate_identity_keypair().public_key.hex()[:32]
-    publish = {
-        "space_id": space_id,
-        "owning_instance": owner_id,
-        "name": "Cross-node space",
-        "description": "",
-        "about_markdown": "",
-        "cover_url": "",
-        "icon_url": "",
-        "min_age": 0,
-        "category": "general",
-        "join_mode": "open",
-        "allow_subscribers": True,
-        "accent_color": "#C8902F",
-        "primary_color": "#D2542A",
-        "identity_public_key": space.public_key.hex(),
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }
-    publish["signature"] = b64url_encode(sign_ed25519(owner_seed, _canonical(publish)))
-    code, resp = _request(
-        f"{urls[2 % len(urls)]}/gfs/spaces/{space_id}/publish",
-        method="POST",
-        body=publish,
-        timeout=15.0,
-    )
-    if code not in (200, 201):
-        raise SystemExit(f"gfs-cluster: cross-node space publish → {code} {resp!r}")
-
-    def _hello(instance_id: str, seed: bytes) -> dict:
-        ts = int(time.time())
-        sig = sign_ed25519(seed, f"{instance_id}|{ts}".encode())
-        return {
-            "type": "hello",
-            "instance_id": instance_id,
-            "ts": ts,
-            "sig": b64url_encode(sig),
-        }
-
-    async def _next(ws, frame_type: str, timeout: float = 10.0) -> dict:
-        deadline = time.monotonic() + timeout
-        while (left := deadline - time.monotonic()) > 0:
-            try:
-                msg = await ws.receive(timeout=left)
-            except TimeoutError:
-                break
-            if msg.type != aiohttp.WSMsgType.TEXT:
-                break
-            frame = json.loads(msg.data)
-            if frame.get("type") == frame_type:
-                return frame
-        raise SystemExit(
-            f"gfs-cluster: no {frame_type!r} frame within {timeout:.0f} s on a "
-            "socket held by another node than the request — cross-node "
-            "delivery is broken (NODE_DRAIN_HINT notices / shared relay queue)."
-        )
-
-    async def _run() -> None:
-        async with aiohttp.ClientSession() as http:
-            owner_ws = await http.ws_connect(f"{urls[0]}/gfs/ws")
-            await owner_ws.send_json(_hello(owner_id, owner_seed))
-            await asyncio.sleep(0.5)  # registered before the subscribe lands
-            ts = datetime.now(timezone.utc).isoformat()
-            signed = {
-                "action": "subscribe",
-                "instance_id": follower_id,
-                "space_id": space_id,
-                "ts": ts,
-            }
-            body = signed | {
-                "signature": b64url_encode(
-                    sign_ed25519(follower_seed, _canonical(signed))
-                ),
-                "accepts": ["author_profiles_bundle"],
-            }
-            async with http.post(f"{urls[1]}/gfs/subscribe", json=body) as r:
-                if r.status != 200:
-                    raise SystemExit(f"gfs-cluster: subscribe → {r.status}")
-            notice = await _next(owner_ws, "new_subscriber")
-            sub = notice.get("subscriber") or {}
-            if (
-                notice.get("reason") != "subscribe"
-                or notice.get("space_id") != space_id
-                or sub.get("instance_id") != follower_id
-                or sub.get("accepts") != ["author_profiles_bundle"]
-            ):
-                raise SystemExit(f"gfs-cluster: wrong cross-node notice {notice!r}")
-            print(
-                "  subscribe via node 1 → new_subscriber on the owner's socket "
-                "on node 0 (reason subscribe, accepts intact) ✓"
-            )
-
-            follower_ws = await http.ws_connect(f"{urls[1]}/gfs/ws")
-            await follower_ws.send_json(_hello(follower_id, follower_seed))
-            await asyncio.sleep(0.5)
-            payload: dict = {"space_id": space_id, "sealed": {"ciphertext": "x:y"}}
-            payload |= sign_authority_event(
-                event_type="space_subscriber_key_handoff",
-                space_id=space_id,
-                payload=payload,
-                space_seed=space.private_key,
-            )
-            async with http.post(
-                f"{urls[0]}/gfs/publish",
-                json={
-                    "space_id": space_id,
-                    "event_type": "space_subscriber_key_handoff",
-                    "payload": payload,
-                    "to": follower_id,
-                },
-            ) as r:
-                if r.status != 200:
-                    raise SystemExit(f"gfs-cluster: targeted publish → {r.status}")
-            relay = await _next(follower_ws, "relay")
-            if relay.get("payload") != payload:
-                raise SystemExit(f"gfs-cluster: wrong cross-node relay {relay!r}")
-            print(
-                "  targeted key handoff via node 0 → the follower's socket on "
-                "node 1 (shared queue + drain hint) ✓"
-            )
-            await follower_ws.close()
-            await owner_ws.close()
-
-    asyncio.run(_run())
 
 
 def _gfs_cluster_register(url: str, label: str) -> tuple[str, bytes]:
@@ -2102,86 +1923,141 @@ def _gfs_cluster_cross_node_moment(urls: list[str]) -> None:
     asyncio.run(_run())
 
 
+def _gfs_cluster_channel(
+    urls: list[str],
+    seats: list[tuple[str, bytes]],
+    *,
+    register_via: int = 1,
+) -> dict:
+    """A space's opaque channel on the cluster (v_51 private / v_96 global —
+    since v_96 the ONLY way a space's content or media reaches a GFS):
+    registered via node ``register_via`` (anonymous, channel-key signed — the
+    GFS learns only a random id), its first epoch notice pinning a channel
+    writer key, and one seat per household of *seats*, each subscribed via
+    another node than the one before. Returns ``channel_id``,
+    ``channel_seed``, ``epoch``, ``gfs_id`` and ``writer_seed`` (the channel
+    writer key a publish-capable member is granted)."""
+    from socialhome.crypto import b64url_decode
+    from socialhome.gfs_channel import (
+        derive_channel_seed,
+        issue_channel_writer_key,
+        new_channel_id,
+        sign_notice,
+        sign_register,
+    )
+
+    _c, info = _request(f"{urls[register_via]}/gfs/info", timeout=10.0)
+    gfs_id = info["gfs_instance_id"]
+    space_seed = secrets.token_bytes(32)
+    space_id = secrets.token_hex(16)
+    channel_id = new_channel_id()
+    channel_seed = derive_channel_seed(space_seed, space_id, channel_id)
+    reg = sign_register(
+        channel_seed=channel_seed,
+        channel_id=channel_id,
+        gfs_instance_id=gfs_id,
+        ts=datetime.now(timezone.utc).isoformat(),
+    )
+    code, resp = _request(
+        f"{urls[register_via]}/gfs/channels/register",
+        method="POST",
+        body=reg.to_wire(),
+    )
+    if code not in (200, 201):
+        raise SystemExit(
+            f"gfs-cluster: channel register via node {register_via} → {code} {resp!r}"
+        )
+    epoch = 3
+    grant = issue_channel_writer_key(
+        space_seed=space_seed, space_id=space_id, channel_id=channel_id, epoch=epoch
+    )
+    notice = sign_notice(
+        channel_seed=channel_seed,
+        channel_id=channel_id,
+        gfs_instance_id=gfs_id,
+        ts=datetime.now(timezone.utc).isoformat(),
+        epoch=epoch,
+        writer_key_cert=grant.writer_key_cert,
+    )
+    code, resp = _request(
+        f"{urls[register_via]}/gfs/channels/epoch",
+        method="POST",
+        body=notice.to_wire(),
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: channel epoch notice → {code} {resp!r}")
+    channel = {
+        "channel_id": channel_id,
+        "channel_seed": channel_seed,
+        "epoch": epoch,
+        "gfs_id": gfs_id,
+        "writer_seed": b64url_decode(grant.writer_seed),
+    }
+    for index, seat in enumerate(seats):
+        _gfs_cluster_seat(urls[(register_via + 1 + index) % len(urls)], channel, seat)
+    return channel
+
+
+def _gfs_cluster_seat(url: str, channel: dict, seat: tuple[str, bytes]) -> None:
+    """*seat*'s household subscribes to *channel* via the node at *url*,
+    presenting the channel key's pass for it."""
+    from dataclasses import replace
+
+    from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
+    from socialhome.domain.gfs_channel import ChannelSubscribeRequest
+    from socialhome.gfs_channel import issue_channel_pass
+
+    iid, seed = seat
+    sub_req = ChannelSubscribeRequest(
+        instance_id=iid,
+        gfs_instance_id=channel["gfs_id"],
+        channel_id=channel["channel_id"],
+        ts=datetime.now(timezone.utc).isoformat(),
+        signature="",
+        channel_pass=issue_channel_pass(
+            channel_seed=channel["channel_seed"],
+            channel_id=channel["channel_id"],
+            epoch=channel["epoch"],
+            instance_pk=ed25519_public_key(seed),
+        ),
+    )
+    canonical = json.dumps(
+        sub_req.signing_payload(), separators=(",", ":"), sort_keys=True
+    ).encode()
+    sub_req = replace(sub_req, signature=b64url_encode(sign_ed25519(seed, canonical)))
+    code, resp = _request(
+        f"{url}/gfs/channels/subscribe", method="POST", body=sub_req.to_wire()
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: channel subscribe via {url} → {code} {resp!r}")
+
+
 def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
-    """Step 3e of ``gfs-cluster``: a BROADCAST reaches every follower on
+    """Step 3e of ``gfs-cluster``: a channel item reaches every seat on
     every node, exactly once.
 
-    Before the fix a broadcast ``/gfs/publish`` (``space_post_public`` and
-    every other broadcast space event, member publishes, channel items)
-    reached only the sockets of the node that took the request — on 4 nodes
-    behind the round-robin balancer ~3 followers in 4 missed each post. Now
-    the accepting node forwards each item ONCE per peer node inside the
-    coalesced ``NODE_DRAIN_HINT`` and every node pushes it to the sockets it
-    holds. One follower per node; the post is published via node 0; each
-    follower must get exactly one ``relay`` frame (a further 2 s window
-    must stay empty — no duplicate).
+    Behind the round-robin balancer a household's socket and the publish
+    usually land on different nodes. The accepting node forwards each item
+    ONCE per peer node inside the coalesced ``NODE_DRAIN_HINT`` and every
+    node pushes it to the sockets it holds. One seated household per node;
+    the item is published anonymously (``POST /gfs/channels/publish-anon``,
+    the channel writer key) via node 0; each seat must get exactly one
+    ``relay`` frame naming the channel — never a space (a further 2 s window
+    must stay empty — no duplicate). (Since v_96 the space-keyed
+    ``/gfs/publish`` and ``/gfs/subscribe`` this step used are gone; the
+    channel is the one fan-out.)
     """
     import asyncio
 
     import aiohttp
 
-    from socialhome.authority_sig import sign_authority_event
-    from socialhome.crypto import (
-        b64url_encode,
-        generate_identity_keypair,
-        sign_ed25519,
-    )
+    from socialhome.crypto import b64url_encode, sign_ed25519
+    from socialhome.domain.gfs_channel import ChannelPublishAnonRequest
+    from socialhome.gfs_channel import sign_publish_anon
 
-    def _canonical(body: dict) -> bytes:
-        return json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
-
-    def _register(url: str) -> tuple[str, bytes]:
-        return _gfs_cluster_register(url, "broadcast")
-
-    owner_id, owner_seed = _register(urls[0])
-    followers = [_register(url) for url in urls]
-    space = generate_identity_keypair()
-    space_id = generate_identity_keypair().public_key.hex()[:32]
-    publish = {
-        "space_id": space_id,
-        "owning_instance": owner_id,
-        "name": "Broadcast space",
-        "description": "",
-        "about_markdown": "",
-        "cover_url": "",
-        "icon_url": "",
-        "min_age": 0,
-        "category": "general",
-        "join_mode": "open",
-        "allow_subscribers": True,
-        "accent_color": "#C8902F",
-        "primary_color": "#D2542A",
-        "identity_public_key": space.public_key.hex(),
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }
-    publish["signature"] = b64url_encode(sign_ed25519(owner_seed, _canonical(publish)))
-    code, resp = _request(
-        f"{urls[1 % len(urls)]}/gfs/spaces/{space_id}/publish",
-        method="POST",
-        body=publish,
-        timeout=15.0,
-    )
-    if code not in (200, 201):
-        raise SystemExit(f"gfs-cluster: broadcast space publish → {code} {resp!r}")
-    for index, (iid, seed) in enumerate(followers):
-        ts = datetime.now(timezone.utc).isoformat()
-        signed = {
-            "action": "subscribe",
-            "instance_id": iid,
-            "space_id": space_id,
-            "ts": ts,
-        }
-        body = signed | {
-            "signature": b64url_encode(sign_ed25519(seed, _canonical(signed)))
-        }
-        code, resp = _request(
-            f"{urls[(index + 2) % len(urls)]}/gfs/subscribe",
-            method="POST",
-            body=body,
-            timeout=15.0,
-        )
-        if code != 200:
-            raise SystemExit(f"gfs-cluster: broadcast subscribe → {code} {resp!r}")
+    seats = [_gfs_cluster_register(url, "broadcast") for url in urls]
+    channel = _gfs_cluster_channel(urls, seats)
+    channel_id = channel["channel_id"]
 
     def _hello(instance_id: str, seed: bytes) -> dict:
         ts = int(time.time())
@@ -2204,7 +2080,7 @@ def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
             if msg.type != aiohttp.WSMsgType.TEXT:
                 break
             frame = json.loads(msg.data)
-            if frame.get("type") == "relay" and frame.get("space_id") == space_id:
+            if frame.get("type") == "relay" and frame.get("channel_id") == channel_id:
                 frames.append(frame)
                 if first:
                     break
@@ -2213,47 +2089,52 @@ def _gfs_cluster_cross_node_broadcast(urls: list[str]) -> None:
     async def _run() -> None:
         async with aiohttp.ClientSession() as http:
             sockets = []
-            for url, (iid, seed) in zip(urls, followers, strict=True):
+            for url, (iid, seed) in zip(urls, seats, strict=True):
                 ws = await http.ws_connect(f"{url}/gfs/ws")
                 await ws.send_json(_hello(iid, seed))
                 sockets.append(ws)
             await asyncio.sleep(1.0)  # every socket registered on its node
-            payload: dict = {
-                "space_id": space_id,
-                "epoch": 1,
-                "ciphertext": "broadcast-across-nodes",
-            }
-            payload |= sign_authority_event(
-                event_type="space_post_public",
-                space_id=space_id,
-                payload=payload,
-                space_seed=space.private_key,
+            payload = b64url_encode(secrets.token_bytes(96))
+            req = sign_publish_anon(
+                ChannelPublishAnonRequest(
+                    gfs_instance_id=channel["gfs_id"],
+                    channel_id=channel_id,
+                    ts=datetime.now(timezone.utc).isoformat(),
+                    nonce=b64url_encode(secrets.token_bytes(16)),
+                    epoch=channel["epoch"],
+                    payload=payload,
+                    writer_sig="",
+                    writer_sig_suite="ed25519",
+                ),
+                writer_seed=channel["writer_seed"],
             )
             async with http.post(
-                f"{urls[0]}/gfs/publish",
-                json={
-                    "space_id": space_id,
-                    "event_type": "space_post_public",
-                    "payload": payload,
-                },
+                f"{urls[0]}/gfs/channels/publish-anon", json=req.to_wire()
             ) as r:
-                if r.status != 200:
-                    raise SystemExit(f"gfs-cluster: broadcast publish → {r.status}")
+                if r.status not in (200, 202):
+                    raise SystemExit(
+                        f"gfs-cluster: channel publish-anon → {r.status} "
+                        f"{await r.text()}"
+                    )
             for index, ws in enumerate(sockets):
                 got = await _relays(ws, 10.0, first=True)
                 got += await _relays(ws, 2.0, first=False)
-                if len(got) != 1 or got[0].get("payload") != payload:
+                if (
+                    len(got) != 1
+                    or got[0].get("payload") != payload
+                    or "space_id" in got[0]
+                ):
                     raise SystemExit(
-                        f"gfs-cluster: the follower on node {index} got "
-                        f"{len(got)} copies of a post published via node 0 "
-                        "(want exactly 1) — the broadcast fan-out is not "
-                        "cluster-wide (NODE_DRAIN_HINT.relays)."
+                        f"gfs-cluster: the seat on node {index} got "
+                        f"{len(got)} copies of a channel item published via "
+                        "node 0 (want exactly 1, naming no space) — the channel "
+                        "fan-out is not cluster-wide (NODE_DRAIN_HINT.relays)."
                     )
             for ws in sockets:
                 await ws.close()
             print(
-                f"  public post via node 0 → exactly one copy on the follower "
-                f"socket of each of the {len(urls)} nodes ✓"
+                f"  channel item via node 0 → exactly one copy on the seat "
+                f"socket of each of the {len(urls)} nodes, naming no space ✓"
             )
 
     asyncio.run(_run())
@@ -2612,378 +2493,197 @@ def _gfs_cluster_highlight_link(urls: list[str], tags: list[str]) -> None:
     )
 
 
-def _gfs_cluster_publish_media_space(
-    url: str, owner: tuple[str, bytes]
-) -> tuple[str, bytes]:
-    """*owner* lists a fresh space via the node at *url*, pinning an
-    authority key whose seed this returns: ``(space_id, authority seed)``."""
-    from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
-
-    iid, seed = owner
-    authority_seed = secrets.token_bytes(32)
-    space_id = secrets.token_hex(16)
-    body = {
-        "space_id": space_id,
-        "owning_instance": iid,
-        "name": "Cluster media space",
-        "description": "",
-        "about_markdown": "",
-        "cover_url": "",
-        "icon_url": "",
-        "min_age": 0,
-        "category": "general",
-        "join_mode": "open",
-        "allow_subscribers": True,
-        "accent_color": "#C8902F",
-        "primary_color": "#D2542A",
-        "identity_public_key": ed25519_public_key(authority_seed).hex(),
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }
-    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
-    body["signature"] = b64url_encode(sign_ed25519(seed, canonical))
-    code, resp = _request(f"{url}/gfs/spaces/{space_id}/publish", method="POST", body=body)
-    if code not in (200, 201):
-        raise SystemExit(f"gfs-cluster: media space publish → {code} {resp!r}")
-    return space_id, authority_seed
-
-
-def _gfs_cluster_space_media(
-    urls: list[str], owner: tuple[str, bytes]
-) -> tuple[str, bytes, bytes]:
-    """Step 3h of ``gfs-cluster``: the space media cache on a shared data dir.
-
-    The owner publishes a space (pinning an authority key whose seed this
-    step holds), uploads one encrypted, padded blob via node 0 under that
-    authority, and node 1 must serve the SAME bytes (``immutable``, an hour
-    in a CDN) — files and rows live in the shared data dir / DB. The same
-    upload via node 1 then coalesces (``200 already_stored``), and a miss
-    via node 1 is ``404`` with ``no-store``."""
+def _gfs_channel_media_put(url: str, channel: dict, data: bytes) -> tuple[int, Any]:
+    """``PUT /gfs/media/{blob}`` of *data* under *channel* (the channel key
+    signs the claim — what a seed holder's upload carries)."""
     from socialhome.crypto import b64url_encode, sign_ed25519
     from socialhome.domain.gfs_space_media import (
-        AUTH_AUTHORITY,
+        AUTH_CHANNEL,
+        SCOPE_CHANNEL,
         SPACE_MEDIA_AUTH_HEADER,
         SpaceMediaClaim,
         SpaceMediaUploadAuth,
+        space_media_address,
     )
-    from socialhome.domain.gfs_space_media import space_media_address
+
+    blob_id = space_media_address(SCOPE_CHANNEL, channel["channel_id"], data)
+    claim = SpaceMediaClaim(
+        scope=SCOPE_CHANNEL,
+        scope_id=channel["channel_id"],
+        blob_id=blob_id,
+        size=len(data),
+        expires_at=int(time.time()) + 86_400,
+        ts=int(time.time()),
+    )
+    auth = SpaceMediaUploadAuth(
+        claim=claim,
+        kind=AUTH_CHANNEL,
+        sig=b64url_encode(
+            sign_ed25519(channel["channel_seed"], claim.channel_signing_bytes())
+        ),
+        sig_suite="ed25519",
+    )
+    req = urllib.request.Request(
+        # ONE scope-free path: the scope rides only in the signed claim.
+        f"{url}/gfs/media/{blob_id}",
+        data=data,
+        method="PUT",
+        headers={
+            SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+def _gfs_channel_media_get(url: str, blob_id: str) -> tuple[int, bytes, dict[str, str]]:
+    try:
+        with urllib.request.urlopen(f"{url}/gfs/media/{blob_id}", timeout=15) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as exc:
+        return exc.code, b"", dict(exc.headers)
+
+
+def _gfs_cluster_channel_media(
+    urls: list[str], members: list[tuple[str, bytes]]
+) -> None:
+    """Steps 3h + 3i of ``gfs-cluster``: the space media cache on a shared
+    data dir, for a space's opaque channel (since v_96 its only scope — the
+    ``space`` scope went with the space-keyed relay, owner decision Q5).
+
+    A channel is registered via node 1 (anonymous, channel-key signed — the
+    GFS learns only its random id). While nobody holds a seat it gets no
+    media (uniform 403 — junk channels can't fill the cache). With ONE
+    member household's seat (the owner never subscribes to its own channel)
+    a blob uploaded via node 0 under the channel key is served byte-identical
+    by node 1 (``immutable``, an hour in a CDN) — files and rows live in the
+    shared data dir / DB; the same upload via node 1 coalesces (``200
+    already_stored``) and a miss is ``404`` ``no-store``. Finally the
+    scope-bound address (security review v2): the same ciphertext under a
+    SECOND channel is another blob at another address; that channel can't
+    delete the first one's blob; the first channel's delete via node 1
+    removes only its own blob on every node."""
+    from socialhome.crypto import b64url_encode, sign_ed25519
+    from socialhome.domain.gfs_space_media import (
+        CHANNEL_MEDIA_DELETE_PREFIX,
+        SCOPE_CHANNEL,
+        media_delete_payload,
+        space_media_address,
+    )
+    from socialhome.gfs_channel import signing_bytes
     from socialhome.moment_public_media import PAD_BUCKETS
 
-    space_id, authority_seed = _gfs_cluster_publish_media_space(urls[0], owner)
-
+    channel = _gfs_cluster_channel(urls, [])
+    channel_id = channel["channel_id"]
     blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)  # a 64 KiB padded bucket
-    # The address is bound to the scope (address suite sm1).
-    blob_id = space_media_address("space", space_id, blob)
-    now = int(time.time())
-
-    def _put(url: str) -> tuple[int, Any]:
-        claim = SpaceMediaClaim(
-            scope="space",
-            scope_id=space_id,
-            blob_id=blob_id,
-            size=len(blob),
-            expires_at=now + 86_400,
-            ts=int(time.time()),
+    blob_id = space_media_address(SCOPE_CHANNEL, channel_id, blob)
+    code, resp = _gfs_channel_media_put(urls[0], channel, blob)
+    if code != 403:
+        raise SystemExit(
+            f"gfs-cluster: a channel nobody holds a seat in → {code} {resp!r}; "
+            "want the uniform 403"
         )
-        auth = SpaceMediaUploadAuth(
-            claim=claim,
-            kind=AUTH_AUTHORITY,
-            sig=b64url_encode(
-                sign_ed25519(authority_seed, claim.authority_signing_bytes())
-            ),
-            sig_suite="ed25519",
-        )
-        req = urllib.request.Request(
-            # ONE scope-free path: the scope rides only in the signed claim.
-            f"{url}/gfs/media/{blob_id}",
-            data=blob,
-            method="PUT",
-            headers={
-                SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
-                "Content-Type": "application/octet-stream",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                return r.status, json.loads(r.read() or b"null")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace")
-
-    def _get(url: str, bid: str) -> tuple[int, bytes, dict[str, str]]:
-        try:
-            with urllib.request.urlopen(
-                f"{url}/gfs/media/{bid}", timeout=15
-            ) as r:
-                return r.status, r.read(), dict(r.headers)
-        except urllib.error.HTTPError as exc:
-            return exc.code, b"", dict(exc.headers)
-
-    code, resp = _put(urls[0])
+    _gfs_cluster_seat(urls[0], channel, members[0])
+    code, resp = _gfs_channel_media_put(urls[0], channel, blob)
     if code != 201:
-        raise SystemExit(f"gfs-cluster: space media upload via node 0 → {code} {resp!r}")
-    code, got, headers = _get(urls[1], blob_id)
+        raise SystemExit(
+            f"gfs-cluster: channel media upload via node 0 → {code} {resp!r}"
+        )
+    code, got, headers = _gfs_channel_media_get(urls[1], blob_id)
     if code != 200 or got != blob:
         raise SystemExit(
-            f"gfs-cluster: space media fetch via node 1 → HTTP {code}, "
+            f"gfs-cluster: channel media fetch via node 1 → HTTP {code}, "
             f"{len(got)} bytes (want the {len(blob)} uploaded via node 0) — "
             "the nodes do not share the media dir / DB."
         )
     if headers.get("Cache-Control") != "public, max-age=3600, immutable":
         raise SystemExit(
-            f"gfs-cluster: space media fetch Cache-Control {headers.get('Cache-Control')!r}"
+            "gfs-cluster: channel media fetch Cache-Control "
+            f"{headers.get('Cache-Control')!r}"
         )
-    code, resp = _put(urls[1])
+    code, resp = _gfs_channel_media_put(urls[1], channel, blob)
     if code != 200 or (resp or {}).get("status") != "already_stored":
         raise SystemExit(
             f"gfs-cluster: the same upload via node 1 → {code} {resp!r}; want "
             "200 already_stored (one file, one blob, whichever node)."
         )
-    code, _got, headers = _get(urls[1], "0" * 64)
+    code, _got, headers = _gfs_channel_media_get(urls[1], "0" * 64)
     if code != 404 or headers.get("Cache-Control") != "no-store":
         raise SystemExit(
             f"gfs-cluster: a space media miss → {code} "
             f"{headers.get('Cache-Control')!r}; want 404 no-store"
         )
     print(
-        "  space media uploaded via node 0 is served byte-identical by node 1 "
-        "(immutable, 1 h); a re-upload via node 1 coalesces; a miss is no-store ✓"
-    )
-    return space_id, authority_seed, blob
-
-
-def _gfs_cluster_channel_media(
-    urls: list[str],
-    shared: tuple[str, bytes, bytes],
-    members: list[tuple[str, bytes]],
-) -> None:
-    """Step 3i of ``gfs-cluster``: the space media cache for a PRIVATE space's
-    opaque channel. A channel is registered via node 1 (anonymous, channel-key
-    signed — the GFS learns only its random id). While nobody holds a seat it
-    gets no media (uniform 403 — junk channels can't fill the cache). Then
-    its first epoch notice, a pass for ONE member household and its seat —
-    enough, the owner household never subscribes to its own channel; now one blob uploaded via node 0 under the channel key
-    is fetched byte-identical via node 1 at the scope-free
-    ``/gfs/media/{blob}``. Finally the scope-bound address (security review
-    v2): the space step's ciphertext uploaded under the channel is ANOTHER
-    blob at another address; the channel can't delete the space's blob; the
-    space's delete removes only its own blob on every node."""
-    from dataclasses import replace
-
-    from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
-    from socialhome.domain.gfs_channel import ChannelSubscribeRequest
-    from socialhome.domain.gfs_space_media import (
-        AUTH_CHANNEL,
-        CHANNEL_MEDIA_DELETE_PREFIX,
-        SCOPE_CHANNEL,
-        SPACE_MEDIA_AUTH_HEADER,
-        SpaceMediaClaim,
-        SpaceMediaUploadAuth,
-    )
-    from socialhome.gfs_channel import (
-        issue_channel_pass,
-        new_channel_id,
-        sign_notice,
-        sign_register,
-        signing_bytes,
-    )
-    from socialhome.domain.gfs_space_media import space_media_address
-    from socialhome.moment_public_media import PAD_BUCKETS
-
-    _c, info = _request(f"{urls[1]}/gfs/info", timeout=10.0)
-    gfs_id = info["gfs_instance_id"]
-    channel_seed = secrets.token_bytes(32)
-    channel_id = new_channel_id()
-    reg = sign_register(
-        channel_seed=channel_seed,
-        channel_id=channel_id,
-        gfs_instance_id=gfs_id,
-        ts=datetime.now(timezone.utc).isoformat(),
-    )
-    code, resp = _request(
-        f"{urls[1]}/gfs/channels/register", method="POST", body=reg.to_wire()
-    )
-    if code not in (200, 201):
-        raise SystemExit(f"gfs-cluster: channel register via node 1 → {code} {resp!r}")
-
-    def _channel_put(url: str, data: bytes) -> tuple[int, Any]:
-        claim = SpaceMediaClaim(
-            scope=SCOPE_CHANNEL,
-            scope_id=channel_id,
-            blob_id=space_media_address(SCOPE_CHANNEL, channel_id, data),
-            size=len(data),
-            expires_at=int(time.time()) + 86_400,
-            ts=int(time.time()),
-        )
-        auth = SpaceMediaUploadAuth(
-            claim=claim,
-            kind=AUTH_CHANNEL,
-            sig=b64url_encode(
-                sign_ed25519(channel_seed, claim.channel_signing_bytes())
-            ),
-            sig_suite="ed25519",
-        )
-        req = urllib.request.Request(
-            f"{url}/gfs/media/{space_media_address(SCOPE_CHANNEL, channel_id, data)}",
-            data=data,
-            method="PUT",
-            headers={
-                SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
-                "Content-Type": "application/octet-stream",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                return r.status, json.loads(r.read() or b"null")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", "replace")
-
-    def _get(url: str, bid: str) -> tuple[int, bytes]:
-        try:
-            with urllib.request.urlopen(f"{url}/gfs/media/{bid}", timeout=15) as r:
-                return r.status, r.read()
-        except urllib.error.HTTPError as exc:
-            return exc.code, b""
-
-    blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
-    blob_id = space_media_address(SCOPE_CHANNEL, channel_id, blob)
-    # Nobody holds a seat yet: no media (security review F1).
-    code, resp = _channel_put(urls[0], blob)
-    if code != 403:
-        raise SystemExit(
-            f"gfs-cluster: a channel nobody holds a seat in → {code} {resp!r}; "
-            "want the uniform 403"
-        )
-    # First epoch notice, then passes and seats for the member households.
-    epoch = 3
-    notice = sign_notice(
-        channel_seed=channel_seed,
-        channel_id=channel_id,
-        gfs_instance_id=gfs_id,
-        ts=datetime.now(timezone.utc).isoformat(),
-        epoch=epoch,
-    )
-    code, resp = _request(
-        f"{urls[1]}/gfs/channels/epoch", method="POST", body=notice.to_wire()
-    )
-    if code not in (200, 201):
-        raise SystemExit(f"gfs-cluster: channel epoch notice → {code} {resp!r}")
-    def _seat(member: tuple[str, bytes]) -> None:
-        member_iid, member_seed = member
-        sub_req = ChannelSubscribeRequest(
-            instance_id=member_iid,
-            gfs_instance_id=gfs_id,
-            channel_id=channel_id,
-            ts=datetime.now(timezone.utc).isoformat(),
-            signature="",
-            channel_pass=issue_channel_pass(
-                channel_seed=channel_seed,
-                channel_id=channel_id,
-                epoch=epoch,
-                instance_pk=ed25519_public_key(member_seed),
-            ),
-        )
-        canonical = json.dumps(
-            sub_req.signing_payload(), separators=(",", ":"), sort_keys=True
-        ).encode()
-        sub_req = replace(
-            sub_req, signature=b64url_encode(sign_ed25519(member_seed, canonical))
-        )
-        code, resp = _request(
-            f"{urls[0]}/gfs/channels/subscribe", method="POST", body=sub_req.to_wire()
-        )
-        if code not in (200, 201):
-            raise SystemExit(
-                f"gfs-cluster: channel subscribe via node 0 → {code} {resp!r}"
-            )
-
-    # ONE member household's seat is enough (the owner never subscribes to
-    # its own channel — the typical invite-link private space; third
-    # review A4).
-    _seat(members[0])
-
-    code, resp = _channel_put(urls[0], blob)
-    if code != 201:
-        raise SystemExit(f"gfs-cluster: channel media upload via node 0 → {code} {resp!r}")
-    code, got = _get(urls[1], blob_id)
-    if code != 200 or got != blob:
-        raise SystemExit(
-            f"gfs-cluster: channel media fetch via node 1 → {code}, {len(got)} bytes"
-        )
-    print(
-        "  a private space's channel gets no media until a member household "
-        "holds a seat (403); with ONE seat its upload via node 0 (channel key, "
-        "opaque id) is served byte-identical by node 1 ✓"
+        "  a channel gets no media until a member household holds a seat (403); "
+        "with ONE seat its upload via node 0 (channel key, opaque id) is served "
+        "byte-identical by node 1 (immutable, 1 h); a re-upload via node 1 "
+        "coalesces; a miss is no-store ✓"
     )
 
     # The scope-bound address (security review v2) across nodes.
-    from socialhome.authority_sig import (
-        AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
-        sign_authority_event,
-    )
-    from socialhome.domain.gfs_space_media import SCOPE_SPACE, media_delete_payload
-
-    space_id, authority_seed, shared_blob = shared
-    space_addr = space_media_address(SCOPE_SPACE, space_id, shared_blob)
-    channel_addr = space_media_address(SCOPE_CHANNEL, channel_id, shared_blob)
-    code, body = _channel_put(urls[1], shared_blob)
-    if code != 201 or channel_addr == space_addr:
+    other = _gfs_cluster_channel(urls, members[:1])
+    other_addr = space_media_address(SCOPE_CHANNEL, other["channel_id"], blob)
+    code, body = _gfs_channel_media_put(urls[1], other, blob)
+    if code != 201 or other_addr == blob_id:
         raise SystemExit(
-            f"gfs-cluster: the space's ciphertext under a channel via node 1 → "
-            f"{code} {body!r}; want 201 — another blob at another address"
+            f"gfs-cluster: the same ciphertext under another channel via node 1 "
+            f"→ {code} {body!r}; want 201 — another blob at another address"
         )
-    ts = int(time.time())
-    ch_body = media_delete_payload(SCOPE_CHANNEL, channel_id, space_addr, ts)
-    code, resp = _request(
-        f"{urls[0]}/gfs/media/{space_addr}/delete",
-        method="POST",
-        body={
-            "scope": SCOPE_CHANNEL,
-            "scope_id": channel_id,
-            "ts": ts,
-            "sig": b64url_encode(
-                sign_ed25519(
-                    channel_seed, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, ch_body)
-                )
-            ),
-            "sig_suite": "ed25519",
-        },
-    )
+
+    def _delete(url: str, by: dict, addr: str) -> tuple[int, Any]:
+        ts = int(time.time())
+        payload = media_delete_payload(SCOPE_CHANNEL, by["channel_id"], addr, ts)
+        return _request(
+            f"{url}/gfs/media/{addr}/delete",
+            method="POST",
+            body={
+                "scope": SCOPE_CHANNEL,
+                "scope_id": by["channel_id"],
+                "ts": ts,
+                "sig": b64url_encode(
+                    sign_ed25519(
+                        by["channel_seed"],
+                        signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, payload),
+                    )
+                ),
+                "sig_suite": "ed25519",
+            },
+        )
+
+    code, resp = _delete(urls[0], other, blob_id)
     if code != 200 or (resp or {}).get("deleted") is not False:
         raise SystemExit(
-            f"gfs-cluster: the channel deleting the SPACE's blob → {code} {resp!r}; "
-            "want deleted: false (not its scope's blob)"
+            f"gfs-cluster: another channel deleting this channel's blob → "
+            f"{code} {resp!r}; want deleted: false (not its scope's blob)"
         )
-    code, still = _get(urls[1], space_addr)
-    if code != 200 or still != shared_blob:
-        raise SystemExit(f"gfs-cluster: the space's blob after the channel's try → {code}")
-    signed = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
-        space_id=space_id,
-        payload=media_delete_payload(SCOPE_SPACE, space_id, space_addr, ts),
-        space_seed=authority_seed,
-    )
-    code, resp = _request(
-        f"{urls[1]}/gfs/media/{space_addr}/delete",
-        method="POST",
-        body={
-            "scope": SCOPE_SPACE,
-            "scope_id": space_id,
-            "ts": ts,
-            "sig": signed["authority_sig"],
-            "sig_suite": signed["authority_sig_suite"],
-        },
-    )
+    code, still, _h = _gfs_channel_media_get(urls[1], blob_id)
+    if code != 200 or still != blob:
+        raise SystemExit(
+            f"gfs-cluster: the blob after the other channel's try → {code}"
+        )
+    code, resp = _delete(urls[1], channel, blob_id)
     if code != 200 or (resp or {}).get("deleted") is not True:
-        raise SystemExit(f"gfs-cluster: the space's delete via node 1 → {code} {resp!r}")
-    code, _gone = _get(urls[0], space_addr)
+        raise SystemExit(
+            f"gfs-cluster: the channel's own delete via node 1 → {code} {resp!r}"
+        )
+    code, _gone, _h = _gfs_channel_media_get(urls[0], blob_id)
     if code != 404:
-        raise SystemExit(f"gfs-cluster: after the space's delete node 0 still serves it ({code})")
-    code, kept = _get(urls[0], channel_addr)
-    if code != 200 or kept != shared_blob:
-        raise SystemExit(f"gfs-cluster: the channel's own blob after the space's delete → {code}")
+        raise SystemExit(
+            f"gfs-cluster: after the channel's delete node 0 still serves it ({code})"
+        )
+    code, kept, _h = _gfs_channel_media_get(urls[0], other_addr)
+    if code != 200 or kept != blob:
+        raise SystemExit(
+            f"gfs-cluster: the other channel's own blob after the delete → {code}"
+        )
     print(
-        "  the same ciphertext under a channel is another blob at another "
-        "address; the channel can't delete the space's; the space's delete via "
-        "node 1 removes only its own on every node ✓"
+        "  the same ciphertext under another channel is another blob at another "
+        "address; that channel can't delete this one's; this channel's delete "
+        "via node 1 removes only its own on every node ✓"
     )
 
 
@@ -3042,7 +2742,7 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
     """Step 3j of ``gfs-cluster``: space media on demand (v_83) across nodes.
 
     A fake holder household (a real Ed25519 key, registered via node 0)
-    owns a listed space and holds its socket on node 0 with ``accepts:
+    holds the one seat of a channel and its socket on node 0 with ``accepts:
     ["space_media_serve"]``. Ten readers (distinct client prefixes) POST
     ``/gfs/media/{blob}/wanted`` at once, DIRECTLY to node 1, for a blob the
     cache never held: node 1 asks the holder through the cluster (the
@@ -3064,7 +2764,8 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
     from socialhome.canonical_json import canonical_bytes
     from socialhome.crypto import b64url_encode, sign_ed25519
     from socialhome.domain.gfs_space_media import (
-        AUTH_AUTHORITY,
+        AUTH_CHANNEL,
+        SCOPE_CHANNEL,
         SPACE_MEDIA_AUTH_HEADER,
         SpaceMediaClaim,
         SpaceMediaUploadAuth,
@@ -3080,13 +2781,13 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
     lb = f"http://127.0.0.1:{GFS_CLUSTER_LB_PORT}"
     node_b = urls[1]
     holder_id, holder_seed = _gfs_cluster_register(urls[0], "media-holder")
-    space_id, authority_seed = _gfs_cluster_publish_media_space(
-        urls[0], (holder_id, holder_seed)
-    )
+    # The holder holds the channel's one seat: the GFS asks only seats.
+    channel = _gfs_cluster_channel(urls, [(holder_id, holder_seed)])
+    channel_id = channel["channel_id"]
     stream_blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
-    stream_id = space_media_address("space", space_id, stream_blob)
+    stream_id = space_media_address(SCOPE_CHANNEL, channel_id, stream_blob)
     cache_blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
-    cache_id = space_media_address("space", space_id, cache_blob)
+    cache_id = space_media_address(SCOPE_CHANNEL, channel_id, cache_blob)
     # The cache stored ``cache_blob`` a minute ago and it left — the row the
     # store's ``_remember_left`` writes on expiry / eviction: fresh → cache.
     now = int(time.time())
@@ -3094,8 +2795,8 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
     try:
         db.execute(
             "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
-            " stored_at, touched_at) VALUES(?, 'space', ?, ?, ?)",
-            (cache_id, space_id, now - 60, now),
+            " stored_at, touched_at) VALUES(?, 'channel', ?, ?, ?)",
+            (cache_id, channel_id, now - 60, now),
         )
         db.commit()
     finally:
@@ -3105,8 +2806,8 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
         # Any key: the GFS can't open it, it only hands it to the holder.
         return seal_space_media_hint(
             media_key=secrets.token_bytes(32),
-            scope="space",
-            scope_id=space_id,
+            scope=SCOPE_CHANNEL,
+            scope_id=channel_id,
             blob_id=blob_id,
             epoch=0,
             locator=SpaceMediaLocator(
@@ -3130,8 +2831,8 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
     def _upload_auth(blob: bytes, blob_id: str) -> str:
         wall = int(time.time())
         claim = SpaceMediaClaim(
-            scope="space",
-            scope_id=space_id,
+            scope=SCOPE_CHANNEL,
+            scope_id=channel_id,
             blob_id=blob_id,
             size=len(blob),
             expires_at=wall + 86_400,
@@ -3139,9 +2840,9 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
         )
         return SpaceMediaUploadAuth(
             claim=claim,
-            kind=AUTH_AUTHORITY,
+            kind=AUTH_CHANNEL,
             sig=b64url_encode(
-                sign_ed25519(authority_seed, claim.authority_signing_bytes())
+                sign_ed25519(channel["channel_seed"], claim.channel_signing_bytes())
             ),
             sig_suite="ed25519",
         ).to_header()
@@ -3170,7 +2871,11 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
         # proxy's X-Forwarded-For, and allows 4 waiting readers per client.
         async with http.post(
             f"{node_b}/gfs/media/{blob_id}/wanted",
-            json={"scope": "space", "scope_id": space_id, "hint": _hint(blob_id)},
+            json={
+                "scope": SCOPE_CHANNEL,
+                "scope_id": channel_id,
+                "hint": _hint(blob_id),
+            },
             headers={"X-Forwarded-For": f"10.{40 + n}.{secrets.randbelow(250)}.7"},
         ) as r:
             return r.status, await r.read(), r.headers.get("Cache-Control", "")
@@ -3180,7 +2885,9 @@ def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
 
     async def _run() -> dict:
         out: dict = {}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as http:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as http:
             ws = await http.ws_connect(f"{urls[0]}/gfs/ws")
             ts = int(time.time())
             await ws.send_json(
@@ -3682,12 +3389,12 @@ def cmd_gfs_cluster() -> None:
             )
     print("  ~1.5 MiB cover publishes stored intact, served by another node ✓")
 
-    # 3d. Single-recipient pushes reach a socket held by another node.
-    # 3e. A broadcast reaches the followers on EVERY node, exactly once.
+    # 3e. A channel item reaches the seats on EVERY node, exactly once.
+    # (3d, the cross-node ``new_subscriber`` notice and targeted
+    # ``/gfs/publish``, went with the space-keyed relay in v_96.)
     # 3f. So does a public moment, and its tombstone.
     # 3g. A public-highlight session sticks to the node that started it.
     try:
-        _gfs_cluster_cross_node_push(urls)
         # 3d'. v_87 — a binary media frame crosses nodes byte-identical.
         _gfs_cluster_cross_node_media(urls)
         # 3d''. Anonymous mailboxes: register via node 0, claim on node 1.
@@ -3698,11 +3405,10 @@ def cmd_gfs_cluster() -> None:
         # 3g. A public-highlight link through a round-robin balancer: every
         # request of a session reaches the node that holds it.
         _gfs_cluster_highlight_link(urls, node_ids)
-        # 3h. The space media cache: an upload via one node is served by
-        # another (shared data dir + DB), and a re-upload coalesces.
-        shared_media = _gfs_cluster_space_media(urls, clients[0])
-        # 3i. …and for a private space's opaque channel.
-        _gfs_cluster_channel_media(urls, shared_media, clients[:1])
+        # 3h + 3i. The space media cache under a channel: an upload via one
+        # node is served by another (shared data dir + DB), a re-upload
+        # coalesces, and the address is bound to the channel.
+        _gfs_cluster_channel_media(urls, clients[:1])
         # 3j. Space media on demand (v_83): readers on one node, the holder's
         # socket on another, its serve routed by the ticket's tag.
         _gfs_cluster_media_on_demand(urls, node_ids)
@@ -3969,12 +3675,1264 @@ def cmd_gfs_join_request() -> None:
     # never list a.
     seat = _instance_row("e", a["instance_id"]) or {}
     if seat.get("source") != "space_session":
-        raise SystemExit(f"gfs-join-request: e's row for a is not a space seat: {seat!r}")
+        raise SystemExit(
+            f"gfs-join-request: e's row for a is not a space seat: {seat!r}"
+        )
     s, conns = _request(f"{e_url}/api/connections", token=e["token"])
     if s != 200 or any(c.get("instance_id") == a["instance_id"] for c in conns or []):
-        raise SystemExit(f"gfs-join-request: e's /api/connections lists the seat: {conns!r}")
-    print("  e and a are not paired — e holds only a space-session seat, not a connection ✓")
+        raise SystemExit(
+            f"gfs-join-request: e's /api/connections lists the seat: {conns!r}"
+        )
+    print(
+        "  e and a are not paired — e holds only a space-session seat, not a connection ✓"
+    )
     print("gfs-join-request: ok (unpaired household asked, was approved, reads)")
+
+
+def cmd_space_follow_paired() -> None:
+    """v_96 — a paired household follows a public space: an auto-approved join.
+
+    a creates a ``public`` space, ``invite_only`` (join mode is irrelevant
+    to a follow) with ``allow_subscribers`` on. b finds it in its paired
+    directory and ``POST /subscribe`` → ``{pending: true}`` (a follow
+    request for the read-only role, auto-approved by the host, no admin
+    step). Then b is a ``subscriber`` in its own ``space_members`` and a
+    holds it in ``space_remote_members``; a's post reaches b; b's own post
+    is refused. ``DELETE /subscribe`` is b's own leave: a tombstones the
+    seat and does NOT rotate the content key.
+
+    Prereq: ``up`` + ``pair``.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    b = state["instances"]["b"]
+    nonce = secrets.token_hex(3)
+
+    s, sp = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Follow paired {nonce}",
+            "description": "public, invite only, followers allowed",
+            "space_type": "public",
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must("space-follow-paired: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True}},
+    )
+    _must("space-follow-paired: a enables followers", s, patched, ok=(200,))
+    print(f"  a: public invite-only space {space_id[:8]}…, followers on")
+
+    # b learns a's public spaces through the PAIRED directory (§D1a,
+    # SPACE_DIRECTORY_SYNC on a's config change) — never the GFS. Poll it
+    # before following: the follow finds its host there.
+    entry: dict | None = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        s, rows = _as(state, "b", "GET", "/api/peer_spaces")
+        if s == 200 and isinstance(rows, list):
+            entry = next((r for r in rows if r.get("space_id") == space_id), None)
+        if entry is None:
+            time.sleep(1.0)
+    if entry is None:
+        raise SystemExit(
+            "space-follow-paired: b never listed a's public space in its "
+            "paired directory (/api/peer_spaces) within 30 s"
+        )
+    if entry.get("host_instance_id") != state["instances"]["a"]["instance_id"]:
+        raise SystemExit(f"space-follow-paired: directory names {entry!r}")
+    print("  b lists it in its paired directory ✓")
+
+    def seat_on_b() -> list[tuple]:
+        return _rows(
+            "b",
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, b["user_id"]),
+        )
+
+    def seat_on_a(tombstoned: int) -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=?",
+            (space_id, b["user_id"], tombstoned),
+        )
+
+    s, body = _as(state, "b", "POST", f"/api/spaces/{space_id}/subscribe", {})
+    body = _must("space-follow-paired: b follows", s, body, ok=(200,))
+    # A host elsewhere: a follow request, seated only by the host's answer.
+    if body.get("pending") is not True or body.get("subscribed") is not False:
+        raise SystemExit(f"space-follow-paired: follow answered {body!r}")
+    print(f"  b followed → {body!r} (no admin step on a)")
+
+    _poll(
+        "b to hold a subscriber seat",
+        lambda: [r for r in seat_on_b() if r[0] == "subscriber"],
+        timeout=45.0,
+    )
+    _poll(
+        "a to hold b's subscriber seat",
+        lambda: [r for r in seat_on_a(0) if r[0] == "subscriber"],
+        timeout=45.0,
+    )
+    print("  b is a subscriber on b and on a ✓")
+
+    content = f"follow paired hello {nonce}"
+    s, post = _as(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": content},
+    )
+    post_id = _must("space-follow-paired: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "b", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"space-follow-paired: b read {seen.get('content')!r}")
+    print("  b reads a's post ✓")
+
+    s, refused = _as(
+        state,
+        "b",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": "a follower must not post"},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"space-follow-paired: b's post answered {s} {refused!r}, wanted 403"
+        )
+    print("  b's own post is refused (403) ✓")
+
+    # v_96 P4 — b comments like a member, under the switch; its own
+    # comment's delete needs no switch (owner decision F6).
+    _follower_comment_round(
+        state,
+        what="space-follow-paired",
+        host="a",
+        follower="b",
+        space_id=space_id,
+        post_id=post_id,
+        members=("a",),
+    )
+
+    epoch_sql = "SELECT MAX(epoch) FROM space_keys WHERE space_id=?"
+    epoch_before = _rows("a", epoch_sql, (space_id,))[0][0]
+    s, left = _as(state, "b", "DELETE", f"/api/spaces/{space_id}/subscribe")
+    left = _must("space-follow-paired: b unfollows", s, left, ok=(200,))
+    if left.get("subscribed") or left.get("pending"):
+        raise SystemExit(f"space-follow-paired: unfollow answered {left!r}")
+    _poll(
+        "a to tombstone b's subscriber seat",
+        lambda: seat_on_a(1) and not seat_on_a(0),
+        timeout=45.0,
+    )
+    time.sleep(3.0)
+    epoch_after = _rows("a", epoch_sql, (space_id,))[0][0]
+    if epoch_after != epoch_before:
+        raise SystemExit(
+            f"space-follow-paired: the unfollow rotated the content key "
+            f"(epoch {epoch_before} → {epoch_after})"
+        )
+    print(f"  unfollow → seat tombstoned on a, key epoch unchanged ({epoch_after}) ✓")
+    print("space-follow-paired: ok (follow is an auto-approved join, leave is own)")
+
+
+def _db_write(label: str, statements: list[tuple[str, tuple]]) -> None:
+    """Write ``label``'s SQLite DB behind the backend's back — only for a
+    step that has to fast-forward the clock or tamper with a sender."""
+    import sqlite3
+
+    con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+    try:
+        for sql, params in statements:
+            con.execute(sql, params)
+        con.commit()
+    finally:
+        con.close()
+
+
+@_offline_step
+def cmd_space_follow_rotation() -> None:
+    """v_96 P5 — the person-ID anchor and the owed / immediate rotations.
+
+    a creates a ``public`` invite-only space with followers on.
+
+    1. **Squat refused.** b's person carries a wrong identity anchor (the
+       harness rewrites it on b), so b's follow names a user id b's identity
+       key does not derive with that anchor: a refuses it
+       ("is not proven by the household's identity key") and seats nobody.
+       With the anchor put back (and b's 15-minute pending follow expired)
+       the same person follows and is seated — no lockout.
+    2. c follows too. **Unfollow without rotation:** b leaves; a tombstones
+       the seat, the key epoch stays, and a now owes a rotation.
+    3. **Owed rotation paid by the sweep.** The harness moves b's
+       ``removed_at`` and the current key's ``created_at`` back past 24 h on
+       a and restarts a (the hourly sweep ticks at start): a rotates once,
+       the debt is gone and c (still following) holds the new epoch.
+    4. **A ban rotates at once.** a bans c: the epoch moves within seconds.
+
+    Prereq: ``up`` + ``pair`` (a↔b, a↔c paired).
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    step = "space-follow-rotation"
+    a, b, c = (state["instances"][x] for x in ("a", "b", "c"))
+    nonce = secrets.token_hex(3)
+
+    s, sp = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Follow rotation {nonce}",
+            "description": "public, invite only, followers allowed",
+            "space_type": "public",
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must(f"{step}: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True}},
+    )
+    _must(f"{step}: a enables followers", s, patched, ok=(200,))
+    print(f"  a: public invite-only space {space_id[:8]}…, followers on")
+
+    for label in ("b", "c"):
+        _poll(
+            f"{label} to list a's space in its paired directory",
+            lambda label=label: any(
+                r.get("space_id") == space_id
+                for r in (_as(state, label, "GET", "/api/peer_spaces")[1] or [])
+                if isinstance(r, dict)
+            ),
+            timeout=30.0,
+        )
+
+    def seat_on_a(user_id: str, tombstoned: int) -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=?",
+            (space_id, user_id, tombstoned),
+        )
+
+    def epoch_on(label: str) -> int:
+        return int(
+            _rows(
+                label, "SELECT MAX(epoch) FROM space_keys WHERE space_id=?", (space_id,)
+            )[0][0]
+            or 0
+        )
+
+    def owed_on_a() -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT m.user_id FROM space_remote_members m JOIN space_keys k"
+            " ON k.space_id=m.space_id AND k.epoch=(SELECT MAX(epoch) FROM"
+            " space_keys WHERE space_id=m.space_id) WHERE m.space_id=?"
+            " AND m.tombstoned=1 AND m.role='subscriber'"
+            " AND datetime(m.removed_at) >= datetime(k.created_at)",
+            (space_id,),
+        )
+
+    # 1. Squat refused: b's follow names b's user id with an anchor that
+    #    does not derive it under b's identity key.
+    (anchor_before,) = _rows(
+        "b", "SELECT identity_anchor FROM users WHERE user_id=?", (b["user_id"],)
+    )[0]
+    a_off = _log_size("a")
+    _db_write(
+        "b",
+        [
+            (
+                "UPDATE users SET identity_anchor=? WHERE user_id=?",
+                (f"squat-{nonce}", b["user_id"]),
+            )
+        ],
+    )
+    try:
+        s, body = _as(state, "b", "POST", f"/api/spaces/{space_id}/subscribe", {})
+        _must(f"{step}: b's unprovable follow is sent", s, body, ok=(200,))
+        _poll(
+            "a to refuse b's unprovable follow",
+            lambda: _log_lines_matching(
+                "a",
+                "is not proven by the household's identity key",
+                offset=a_off,
+            ),
+            timeout=30.0,
+        )
+    finally:
+        _db_write(
+            "b",
+            [
+                (
+                    "UPDATE users SET identity_anchor=? WHERE user_id=?",
+                    (anchor_before, b["user_id"]),
+                )
+            ],
+        )
+    time.sleep(3.0)
+    if seat_on_a(b["user_id"], 0) or _rows(
+        "a",
+        "SELECT 1 FROM space_invite_tokens WHERE space_id=? AND bound_user_id=?",
+        (space_id, b["user_id"]),
+    ):
+        raise SystemExit(f"{step}: a seated / answered b's unprovable follow")
+    print("  squat refused: a seats nobody for a user id b cannot prove ✓")
+    # b's own follow row waits 15 minutes for an answer that never comes
+    # (a refusal is silent); expire it rather than wait.
+    _db_write(
+        "b",
+        [
+            (
+                "DELETE FROM space_join_requests WHERE space_id=? AND user_id=?"
+                " AND status='pending'",
+                (space_id, b["user_id"]),
+            )
+        ],
+    )
+
+    # 2. b (anchor restored) and c follow; both seated.
+    for label in ("b", "c"):
+        who = state["instances"][label]
+        s, body = _as(state, label, "POST", f"/api/spaces/{space_id}/subscribe", {})
+        _must(f"{step}: {label} follows", s, body, ok=(200,))
+        _poll(
+            f"a to hold {label}'s subscriber seat",
+            lambda who=who: [
+                r for r in seat_on_a(who["user_id"], 0) if r[0] == "subscriber"
+            ],
+            timeout=45.0,
+        )
+        _poll(
+            f"{label} to hold the space key",
+            # The first key is epoch 0: a row is what proves it arrived.
+            lambda label=label: _rows(
+                label, "SELECT 1 FROM space_keys WHERE space_id=?", (space_id,)
+            ),
+            timeout=45.0,
+        )
+    print("  b (proof restored, no lockout) and c follow and are seated ✓")
+
+    epoch0 = epoch_on("a")
+    s, left = _as(state, "b", "DELETE", f"/api/spaces/{space_id}/subscribe")
+    _must(f"{step}: b unfollows", s, left, ok=(200,))
+    _poll(
+        "a to tombstone b's seat",
+        lambda: seat_on_a(b["user_id"], 1) and not seat_on_a(b["user_id"], 0),
+        timeout=45.0,
+    )
+    time.sleep(3.0)
+    if epoch_on("a") != epoch0:
+        raise SystemExit(
+            f"{step}: b's unfollow rotated the key ({epoch0} → {epoch_on('a')})"
+        )
+    if [r[0] for r in owed_on_a()] != [b["user_id"]]:
+        raise SystemExit(f"{step}: a owes no rotation for b's leave: {owed_on_a()!r}")
+    print(f"  unfollow: no rotation (epoch {epoch0}), a owes one ✓")
+
+    # 3. Fast-forward the debt past 24 h and restart a: its sweep pays it.
+    _kill_household("a", a)
+    _db_write(
+        "a",
+        [
+            (
+                "UPDATE space_remote_members SET removed_at="
+                "datetime(removed_at, '-25 hours') WHERE space_id=? AND user_id=?",
+                (space_id, b["user_id"]),
+            ),
+            (
+                "UPDATE space_keys SET created_at=strftime("
+                "'%Y-%m-%dT%H:%M:%S+00:00', created_at, '-26 hours')"
+                " WHERE space_id=? AND epoch=?",
+                (space_id, epoch0),
+            ),
+        ],
+    )
+    if [r[0] for r in owed_on_a()] != [b["user_id"]]:
+        raise SystemExit(f"{step}: the fast-forward lost a's debt: {owed_on_a()!r}")
+    a["pid"] = _spawn("a", a["port"])
+    _save(state)
+    _wait_ready(a["port"])
+    print(f"  a restarted with a 25 h-old debt: pid={a['pid']}")
+    _poll(
+        "a's sweep to pay the owed rotation",
+        lambda: epoch_on("a") == epoch0 + 1,
+        timeout=60.0,
+    )
+    if owed_on_a():
+        raise SystemExit(f"{step}: a still owes after paying: {owed_on_a()!r}")
+    _poll("c to hold the new epoch", lambda: epoch_on("c") >= epoch0 + 1, timeout=90.0)
+    time.sleep(3.0)
+    if epoch_on("a") != epoch0 + 1:
+        raise SystemExit(f"{step}: the sweep rotated more than once ({epoch_on('a')})")
+    print(f"  owed rotation paid once (epoch {epoch0} → {epoch0 + 1}), c has it ✓")
+
+    # 4. A ban rotates at once.
+    epoch1 = epoch_on("a")
+    s, body = _as(
+        state, "a", "POST", f"/api/spaces/{space_id}/ban", {"user_id": c["user_id"]}
+    )
+    _must(f"{step}: a bans c", s, body, ok=(200,))
+    _poll(
+        "a to rotate at once on c's ban",
+        lambda: epoch_on("a") == epoch1 + 1,
+        timeout=20.0,
+    )
+    print(f"  ban: rotated at once (epoch {epoch1} → {epoch1 + 1}) ✓")
+    print(
+        f"{step}: ok (squat refused, unfollow owes, the sweep pays once, "
+        "a ban rotates at once)"
+    )
+
+
+def _follower_comment_round(
+    state: dict,
+    *,
+    what: str,
+    host: str,
+    follower: str,
+    space_id: str,
+    post_id: str,
+    members: tuple[str, ...],
+) -> str:
+    """v_96 P4 — a follower comments the way a member does, on whatever
+    path reaches the space's members (paired / mesh directly, the GFS
+    channel), under the space's switch; its own comment's delete needs no
+    switch (owner decision F6).
+
+    1. ``host`` turns ``allow_subscriber_comment`` on: ``follower`` stores a
+       ``reader`` comment cert (+ the writer key where the space has a
+       channel).
+    2. ``follower`` comments on ``post_id``; every household in ``members``
+       holds it, under the follower's own name in their roster.
+    3. ``host`` turns the switch off: exactly ONE rotation; once the follower
+       holds the change, its next comment is refused (403).
+    4. ``follower`` deletes its first comment (204) with the switch off and
+       its reader cert retired: every household in ``members`` drops it.
+
+    Returns the first comment's text.
+    """
+    fol = state["instances"][follower]
+
+    def _features(label: str, **features: bool) -> None:
+        s, patched = _as(
+            state, host, "PATCH", f"/api/spaces/{space_id}", {"features": features}
+        )
+        _must(f"{what}: {label}", s, patched, ok=(200,))
+
+    def _epoch() -> int:
+        rows = _rows(
+            host, "SELECT MAX(epoch) FROM space_keys WHERE space_id=?", (space_id,)
+        )
+        return int(rows[0][0])
+
+    def _comment(text: str) -> tuple[int, Any]:
+        return _as(
+            state,
+            follower,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{post_id}/comments",
+            {"content": text},
+        )
+
+    # 1.
+    _features(f"{host} turns follower comments on", allow_subscriber_comment=True)
+    rows = _poll_rows(
+        follower,
+        "SELECT writer_cert FROM space_keys WHERE space_id = ? "
+        "AND writer_cert IS NOT NULL ORDER BY epoch DESC LIMIT 1",
+        (space_id,),
+        lambda r: bool(r) and json.loads(r[0][0]).get("reader") is True,
+        what=f"{what}: {follower} never stored its reader comment cert",
+    )
+    if json.loads(rows[0][0]).get("scope") != "comment":
+        raise SystemExit(f"{what}: {follower}'s reader cert is {rows[0][0]!r}")
+    _poll_rows(
+        follower,
+        "SELECT allow_subscriber_comment FROM spaces WHERE id = ?",
+        (space_id,),
+        lambda r: bool(r) and r[0][0] == 1,
+        what=f"{what}: {follower} never took the switch",
+    )
+    print(f"  switch on: {follower} holds a reader comment cert ✓")
+
+    # 2.
+    text = f"A follower's comment — {time.time_ns()}"
+    st, body = _comment(text)
+    first = _must(f"{what}: {follower} comments", st, body, ok=(200, 201))["id"]
+    for label in members:
+        _poll_rows(
+            label,
+            "SELECT content FROM space_post_comments WHERE id = ? AND deleted = 0",
+            (first,),
+            lambda r: bool(r) and r[0][0] == text,
+            what=f"{what}: {label} never held {follower}'s comment",
+        )
+        _poll_rows(
+            label,
+            "SELECT role, display_name FROM space_remote_members "
+            "WHERE space_id = ? AND user_id = ? AND tombstoned = 0",
+            (space_id, fol["user_id"]),
+            lambda r: bool(r) and r[0][0] == "subscriber" and bool(r[0][1]),
+            what=f"{what}: {label}'s roster never named the follower",
+        )
+        st, roster = _as(state, label, "GET", f"/api/spaces/{space_id}/members")
+        mine = [
+            r
+            for r in (roster if isinstance(roster, list) else [])
+            if r.get("user_id") == fol["user_id"]
+        ]
+        if (
+            not mine
+            or mine[0].get("role") != "subscriber"
+            or not mine[0].get("display_name")
+        ):
+            raise SystemExit(
+                f"{what}: {label}'s roster does not name the follower: {mine!r}"
+            )
+    print(
+        f"  {follower}'s comment reached {', '.join(members)}, named from the "
+        "roster (role subscriber) ✓"
+    )
+
+    # 3.
+    before = _epoch()
+    _features(f"{host} turns follower comments off", allow_subscriber_comment=False)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and _epoch() <= before:
+        time.sleep(1.0)
+    time.sleep(5.0)  # a second rotation, if any, lands meanwhile
+    after = _epoch()
+    if after != before + 1:
+        raise SystemExit(
+            f"{what}: the switch off moved {host}'s content epoch {before} → "
+            f"{after}, expected exactly one rotation"
+        )
+    _poll_rows(
+        follower,
+        "SELECT allow_subscriber_comment FROM spaces WHERE id = ?",
+        (space_id,),
+        lambda r: bool(r) and r[0][0] == 0,
+        what=f"{what}: {follower} never took the switch off",
+    )
+    st, body = _comment(f"After the switch went off — {time.time_ns()}")
+    if st != 403:
+        raise SystemExit(
+            f"{what}: {follower}'s comment with the switch off answered {st} {body!r}"
+        )
+    print(f"  switch off: one rotation (epoch {before} → {after}), next comment 403 ✓")
+
+    # 4.
+    st, body = _as(
+        state,
+        follower,
+        "DELETE",
+        f"/api/spaces/{space_id}/posts/{post_id}/comments/{first}",
+    )
+    if st != 204:
+        raise SystemExit(f"{what}: {follower}'s own delete answered {st} {body!r}")
+    for label in members:
+        _poll_rows(
+            label,
+            "SELECT deleted FROM space_post_comments WHERE id = ?",
+            (first,),
+            lambda r: bool(r) and r[0][0] == 1,
+            what=f"{what}: {label} never dropped {follower}'s deleted comment",
+        )
+    print(
+        f"  {follower} deleted its own comment with the switch off; "
+        f"{', '.join(members)} dropped it ✓"
+    )
+    return text
+
+
+def cmd_gfs_space_follow() -> None:
+    """v_96 — e follows a's global invite-only space through the GFS, unpaired.
+
+    a creates a global ``invite_only`` space with ``allow_subscribers`` on,
+    listed on the GFS (the listing carries a ``join_contact`` because our
+    GFS proves ``subscriber_seats``). e (paired with nobody) lists it
+    ``gfs_followable`` and ``POST /subscribe`` → ``{pending: true}``; a
+    auto-approves — NO admin step — and e is seated as a ``subscriber``
+    (e's ``space_members``, a's ``space_remote_members``). e holds only a
+    ``space_session`` row for a, reads a's post and cannot post.
+
+    Prereq: ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": "Follow through the GFS",
+            "description": "global, invite only, followers allowed",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must("gfs-space-follow: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _request(
+        f"{a_url}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": {"allow_subscribers": True}},
+    )
+    _must("gfs-space-follow: a enables followers", s, patched, ok=(200,))
+    state.setdefault("gfs", {})["space_follow_space_id"] = space_id
+    _save(state)
+    print(f"  a: global invite-only space {space_id[:8]}…, followers on")
+
+    entry: dict | None = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next(
+                (
+                    r
+                    for r in rows
+                    if r.get("space_id") == space_id and r.get("gfs_followable")
+                ),
+                None,
+            )
+    if entry is None:
+        raise SystemExit(
+            "gfs-space-follow: e never listed the space with a usable join contact"
+        )
+    print("  e lists it under Global (verified join contact) ✓")
+
+    s, body = _request(
+        f"{e_url}/api/spaces/{space_id}/subscribe",
+        token=e["token"],
+        method="POST",
+        body={},
+        timeout=30.0,
+    )
+    body = _must("gfs-space-follow: e follows", s, body, ok=(200,))
+    if body.get("pending") is not True or body.get("subscribed") is not False:
+        raise SystemExit(f"gfs-space-follow: follow answered {body!r}")
+    print(f"  e followed → {body!r} (no approval by a)")
+
+    def e_seat() -> list[tuple]:
+        return _rows(
+            "e",
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, e["user_id"]),
+        )
+
+    def a_seat() -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=0",
+            (space_id, e["user_id"]),
+        )
+
+    _poll(
+        "e to hold a subscriber seat",
+        lambda: [r for r in e_seat() if r[0] == "subscriber"],
+        timeout=60.0,
+    )
+    _poll(
+        "a to hold e's subscriber seat",
+        lambda: [r for r in a_seat() if r[0] == "subscriber"],
+        timeout=60.0,
+    )
+    print("  e is a subscriber on e and on a ✓")
+
+    content = f"Follow over the GFS {time.time_ns()}"
+    s, post = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("gfs-space-follow: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "e", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"gfs-space-follow: e read {seen.get('content')!r}")
+    print("  e reads a's post ✓")
+
+    s, refused = _request(
+        f"{e_url}/api/spaces/{space_id}/posts",
+        token=e["token"],
+        method="POST",
+        body={"type": "text", "content": "a follower must not post"},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"gfs-space-follow: e's post answered {s} {refused!r}, wanted 403"
+        )
+    print("  e's own post is refused (403) ✓")
+
+    s, conns = _request(f"{e_url}/api/connections", token=e["token"])
+    if s != 200 or any(c.get("instance_id") == a["instance_id"] for c in conns or []):
+        raise SystemExit(
+            f"gfs-space-follow: e's /api/connections lists the seat: {conns!r}"
+        )
+    print("  e and a are not paired — e holds only a space-session seat ✓")
+    print("gfs-space-follow: ok (unpaired household followed, auto-approved, reads)")
+
+
+@_offline_step
+def cmd_gfs_space_bans() -> None:
+    """P7b — a person ban and a household ban hold on every path.
+
+    a creates a global invite-only space with followers on and mints a
+    member link. c and b (paired with a) join with the link; e (paired with
+    nobody) follows through the GFS.
+
+    1. **Person ban.** a bans b's person: b's seat ends on a and on b, and
+       c — a plain member — holds the ban (the signed
+       ``SPACE_MEMBER_BANNED`` reached it). b's link redeem is refused, and
+       b's follow is refused by a ("applicant banned").
+    2. **Household ban.** a bans household e: e's seat ends on a and on e
+       (told over the GFS), c holds the household ban, and neither a fresh
+       follow through the GFS nor the invite link (§D2b bootstrap through
+       the GFS) seats e again.
+    3. **Unban.** a lifts both bans; c drops both rows (the signed
+       ``SPACE_MEMBER_UNBANNED`` reached it). Nobody is re-seated.
+
+    Prereq: ``up`` + ``pair`` + ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    step = "gfs-space-bans"
+    a, b, c, e = (state["instances"][x] for x in ("a", "b", "c", "e"))
+    e_url = f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+    nonce = secrets.token_hex(3)
+
+    s, sp = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Bans {nonce}",
+            "description": "global, invite only, followers allowed",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must(f"{step}: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True}},
+    )
+    _must(f"{step}: a enables followers", s, patched, ok=(200,))
+    s, link = _as(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/invite-tokens",
+        {"role": "member", "uses": 10, "via": "gfs"},
+    )
+    link = _must(f"{step}: a mints a member link", s, link, ok=(201,))
+    join_body = _join_body_from_blob(_decode_invite_blob(str(link["code"])))
+    state.setdefault("gfs", {})["bans_space_id"] = space_id
+    _save(state)
+    print(f"  a: global space {space_id[:8]}…, followers on, member link minted")
+
+    def join(label: str) -> tuple[int, Any]:
+        inst = state["instances"][label]
+        return _request(
+            f"http://127.0.0.1:{inst['port']}/api/spaces/join",
+            token=inst["token"],
+            method="POST",
+            body=join_body,
+            timeout=45.0,
+        )
+
+    def seat_on(label: str, user_id: str) -> list[tuple]:
+        return _rows(
+            label,
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, user_id),
+        )
+
+    def live_seat_on_a(user_id: str) -> list[tuple]:
+        return _rows(
+            "a",
+            "SELECT role FROM space_remote_members WHERE space_id=?"
+            " AND user_id=? AND tombstoned=0",
+            (space_id, user_id),
+        )
+
+    for label in ("c", "b"):
+        s, joined = join(label)
+        _must(f"{step}: {label} joins with the link", s, joined, ok=(200, 201))
+        _poll(
+            f"a to seat {label}",
+            lambda label=label: live_seat_on_a(state["instances"][label]["user_id"]),
+            timeout=60.0,
+        )
+    print("  b and c joined with the link ✓")
+
+    # e follows through the GFS (paired with nobody).
+    _poll(
+        "e to list the space as followable",
+        lambda: (
+            _request(
+                f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST"
+            )
+            and any(
+                r.get("space_id") == space_id and r.get("gfs_followable")
+                for r in (
+                    _request(f"{e_url}/api/public_spaces", token=e["token"])[1] or []
+                )
+                if isinstance(r, dict)
+            )
+        ),
+        timeout=60.0,
+        interval=2.0,
+    )
+
+    def follow(label: str, *, may_refuse: bool = False) -> int:
+        """Send a follow; a banned household may already refuse it itself
+        (403 ``BANNED`` from a ban row it holds) — then nothing is sent."""
+        inst = state["instances"][label]
+        s, body = _request(
+            f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/subscribe",
+            token=inst["token"],
+            method="POST",
+            body={},
+            timeout=30.0,
+        )
+        _must(
+            f"{step}: {label} sends a follow",
+            s,
+            body,
+            ok=(200, 403) if may_refuse else (200,),
+        )
+        return s
+
+    follow("e")
+    _poll(
+        "a to seat e as a follower", lambda: live_seat_on_a(e["user_id"]), timeout=90.0
+    )
+    _poll(
+        "e to hold its follower seat", lambda: seat_on("e", e["user_id"]), timeout=90.0
+    )
+    print("  e follows through the GFS ✓")
+
+    # 1. Person ban of b.
+    a_off = _log_size("a")
+    s, body = _as(
+        state, "a", "POST", f"/api/spaces/{space_id}/ban", {"user_id": b["user_id"]}
+    )
+    _must(f"{step}: a bans b's person", s, body, ok=(200,))
+    _poll("a to end b's seat", lambda: not live_seat_on_a(b["user_id"]), timeout=30.0)
+    _poll("b to lose its seat", lambda: not seat_on("b", b["user_id"]), timeout=60.0)
+    _poll(
+        "c to hold the person ban (signed event)",
+        lambda: _rows(
+            "c",
+            "SELECT 1 FROM space_bans WHERE space_id=? AND user_id=?",
+            (space_id, b["user_id"]),
+        ),
+        timeout=60.0,
+    )
+    s, refused = join("b")
+    if s in (200, 201):
+        raise SystemExit(f"{step}: banned b rejoined with the link: {refused!r}")
+    if follow("b", may_refuse=True) == 200:
+        _poll(
+            "a to refuse banned b's follow",
+            lambda: _log_lines_matching("a", "refused: applicant banned", offset=a_off),
+            timeout=30.0,
+        )
+    if live_seat_on_a(b["user_id"]) or seat_on("b", b["user_id"]):
+        raise SystemExit(f"{step}: banned b holds a seat again")
+    print(
+        f"  person ban: b lost its seat, c holds the ban, link ({s}) + follow refused ✓"
+    )
+
+    # 2. Household ban of e.
+    a_off = _log_size("a")
+    s, body = _as(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/ban",
+        {"instance_id": e["instance_id"]},
+    )
+    _must(f"{step}: a bans household e", s, body, ok=(200,))
+    _poll("a to end e's seat", lambda: not live_seat_on_a(e["user_id"]), timeout=30.0)
+    _poll("e to lose its seat", lambda: not seat_on("e", e["user_id"]), timeout=90.0)
+    _poll(
+        "c to hold the household ban (signed event)",
+        lambda: _rows(
+            "c",
+            "SELECT 1 FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+            (space_id, e["instance_id"]),
+        ),
+        timeout=60.0,
+    )
+    if follow("e", may_refuse=True) == 200:
+        _poll(
+            "a to refuse banned household e's follow",
+            lambda: _log_lines_matching("a", "refused: applicant banned", offset=a_off),
+            timeout=90.0,
+        )
+    s, refused = join("e")
+    if s in (200, 201):
+        raise SystemExit(
+            f"{step}: banned household e rejoined with the link: {refused!r}"
+        )
+    if live_seat_on_a(e["user_id"]) or seat_on("e", e["user_id"]):
+        raise SystemExit(f"{step}: banned household e holds a seat again")
+    print(
+        f"  household ban: e lost its seat, c holds the ban, follow + link ({s}) refused ✓"
+    )
+
+    # 3. Unban both; the lifts reach c, nobody is re-seated.
+    s, body = _as(state, "a", "DELETE", f"/api/spaces/{space_id}/bans/{b['user_id']}")
+    _must(f"{step}: a unbans b", s, body, ok=(200,))
+    s, body = _as(
+        state,
+        "a",
+        "DELETE",
+        f"/api/spaces/{space_id}/household-bans/{e['instance_id']}",
+    )
+    _must(f"{step}: a unbans household e", s, body, ok=(200,))
+    _poll(
+        "c to drop both bans (signed unban)",
+        lambda: (
+            not _rows(
+                "c",
+                "SELECT 1 FROM space_bans WHERE space_id=? AND user_id=? UNION ALL"
+                " SELECT 1 FROM space_instance_bans WHERE space_id=? AND instance_id=?",
+                (space_id, b["user_id"], space_id, e["instance_id"]),
+            )
+        ),
+        timeout=60.0,
+    )
+    if live_seat_on_a(b["user_id"]) or live_seat_on_a(e["user_id"]):
+        raise SystemExit(f"{step}: an unban re-seated somebody")
+    print("  unban: c dropped both rows, nobody re-seated ✓")
+    print(f"{step}: ok (person + household bans hold on link, follow and GFS paths)")
+
+
+def cmd_gfs_global_channel() -> None:
+    """v_96 (P3) — a GLOBAL space reaches its members and followers over the
+    space's opaque channel, even with the host offline.
+
+    1. b (paired with a) becomes a GFS client if it is not one yet. a
+       creates a global ``invite_only`` space with followers on; b joins it
+       as a member (an internal link, the direct path); e (paired with
+       nobody) follows it through the GFS (auto-approved).
+    2. a registers the space's channel on the GFS (it proves
+       ``private_channels`` + ``subscriber_seats``); b (member, writer key)
+       and e (follower, pass only) hold grants and take seats; a never does.
+    3. Stop **a**. b posts; e receives it over the channel — exactly one
+       channel frame, and no space-keyed relay frame for the space.
+    4. The GFS log and database never hold the post's text.
+    5. Restart a; a catches b's post up over the member path.
+    6. a's own post reaches e over the channel (a holds no seat).
+    7. b posts a photo; e holds it byte-identical, fetched from the GFS
+       media cache, which keeps it under the channel id, never the space.
+
+    Prereqs: ``pair`` (a↔b), ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, b, e = (state["instances"][x] for x in ("a", "b", "e"))
+    if _instance_row("a", b["instance_id"]) is None:
+        raise SystemExit("gfs-global-channel: a and b are not paired — run 'pair'")
+    _ensure_gfs_client(state, "b")
+    a_url = f"http://127.0.0.1:{a['port']}"
+    b_url = f"http://127.0.0.1:{b['port']}"
+    e_url = f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    # 1. The space, a member and a follower.
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": f"Global channel {time.time_ns()}",
+            "description": "global, members and followers on one channel",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must("gfs-global-channel: a creates the space", s, sp, ok=(201,))["id"]
+    s, patched = _request(
+        f"{a_url}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": {"allow_subscribers": True}},
+    )
+    _must("gfs-global-channel: a enables followers", s, patched, ok=(200,))
+    s, link = _request(
+        f"{a_url}/api/spaces/{space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 1, "via": "internal"},
+    )
+    link = _must("gfs-global-channel: a mints b's link", s, link, ok=(201,))
+    s, joined = _request(
+        f"{b_url}/api/spaces/join",
+        token=b["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(link["code"])),
+        timeout=40.0,
+    )
+    _must("gfs-global-channel: b joins as a member", s, joined, ok=(200, 201))
+    print(f"  a: global space {space_id[:8]}…; b joined as a member ✓")
+    entry: dict | None = None
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next(
+                (
+                    r
+                    for r in rows
+                    if r.get("space_id") == space_id and r.get("gfs_followable")
+                ),
+                None,
+            )
+    if entry is None:
+        raise SystemExit("gfs-global-channel: e never listed the space as followable")
+    s, body = _request(
+        f"{e_url}/api/spaces/{space_id}/subscribe",
+        token=e["token"],
+        method="POST",
+        body={},
+        timeout=30.0,
+    )
+    _must("gfs-global-channel: e follows", s, body, ok=(200,))
+    _poll_rows(
+        "e",
+        "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+        (space_id, e["user_id"]),
+        lambda r: bool(r) and r[0][0] == "subscriber",
+        what="e never held its follower seat",
+    )
+    print("  e follows it through the GFS (a subscriber seat) ✓")
+
+    # 2. The channel, the grants and the seats.
+    rows = _poll_rows(
+        "a",
+        "SELECT gfs_channel_id FROM spaces WHERE id = ?",
+        (space_id,),
+        lambda r: bool(r) and bool(r[0][0]),
+        what="a never registered the global space's channel",
+    )
+    channel_id = rows[0][0]
+    if space_id in channel_id or len(channel_id) != 32:
+        raise SystemExit(f"gfs-global-channel: odd channel id {channel_id!r}")
+    for label in ("b", "e"):
+        _poll_rows(
+            label,
+            "SELECT gfs_channel_id FROM spaces WHERE id = ?",
+            (space_id,),
+            lambda r: bool(r) and r[0][0] == channel_id,
+            what=f"{label} never took its channel grant",
+        )
+    want = {b["instance_id"], e["instance_id"]}
+    seats = _poll_gfs_rows(
+        "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id = ?",
+        (channel_id,),
+        lambda r: want <= {x[0] for x in r},
+        what="b and e never both took their seats on the channel",
+    )
+    if a["instance_id"] in {x[0] for x in seats}:
+        raise SystemExit("gfs-global-channel: the owner a holds a seat")
+    print(f"  channel {channel_id[:8]}…: member b and follower e seated, a not ✓")
+
+    # 3. Host offline; b posts; e gets it over the channel, once. b's FIRST
+    # post in the space also publishes b's author profile (v_60) on the
+    # channel — a second item — so a warm-up post goes first and the count
+    # is taken on the next one.
+    _kill_household("a", a)
+    st, warm = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": f"Warm-up {time.time_ns()}"},
+    )
+    warm_id = _must("gfs-global-channel: b's warm-up post", st, warm, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT 1 FROM space_posts WHERE id = ?",
+        (warm_id,),
+        bool,
+        what="e never received b's warm-up post while a was down",
+    )
+    time.sleep(5.0)  # the profile item lands too
+    e_off = _log_size("e")
+    content = f"Member posts into a global space, host offline — {time.time_ns()}"
+    st, post = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("gfs-global-channel: b posts", st, post, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda r: bool(r) and r[0][0] == content,
+        what=f"e never received b's post {post_id} while a was down",
+    )
+    if not _await_log_lines(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit(
+            "gfs-global-channel: e logged no channel frame — b's post reached "
+            "it some other way."
+        )
+    time.sleep(5.0)  # anything late (a second copy) lands meanwhile
+    frames = _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    )
+    if len(frames) != 1:
+        raise SystemExit(
+            f"gfs-global-channel: e got {len(frames)} channel frames for one post"
+        )
+    # v_96 — no space-keyed relay exists any more: a frame naming the space
+    # (from a GFS still running the legacy code) is dropped unparsed.
+    keyed = _log_lines_matching(
+        "e", f"gfs.relay.received: space={space_id}", offset=e_off
+    )
+    if keyed:
+        raise SystemExit(
+            "gfs-global-channel: a space-keyed relay frame for the space was "
+            f"taken by e: {keyed[:2]}"
+        )
+    print("  e received b's post over the channel, once, with a offline ✓")
+
+    # 4. What the GFS saw.
+    log_text = "\n".join(_gfs_log_lines_matching("", offset=0))
+    db_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    if content in log_text or content.encode() in db_bytes:
+        raise SystemExit("gfs-global-channel: the GFS saw the post's text")
+    print("  the GFS never saw the post's text ✓")
+
+    # 5. The host comes back and catches the post up.
+    _respawn(state, "a")
+    _poll_rows(
+        "a",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda r: bool(r) and r[0][0] == content,
+        what=f"a (host) never caught b's post {post_id} up after restarting",
+    )
+    # The host now holds b's post: b marked it ``channel_sent``, so a adds
+    # no copy on the channel — e still saw exactly one frame for it.
+    time.sleep(10.0)
+    frames = _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    )
+    if len(frames) != 1:
+        raise SystemExit(
+            f"gfs-global-channel: after a's catch-up e saw {len(frames)} channel "
+            "frames for b's one post — the host re-published a marked post"
+        )
+    unreached = _log_lines_matching(
+        "b", f"did not reach member household {e['instance_id']}", offset=0
+    )
+    if unreached:
+        raise SystemExit(
+            "gfs-global-channel: b tried to reach the GFS-reached follower e "
+            f"directly: {unreached[:1]}"
+        )
+    print("  a's catch-up added no channel copy; b never tried to reach e ✓")
+
+    # 6. The owner's own post reaches e over the channel (Q4: it publishes
+    #    into its own channel, holding no seat).
+    _wait_for_gfs_ws(a["instance_id"], timeout=120.0)
+    e_off = _log_size("e")
+    own = f"The owner posts into its own channel — {time.time_ns()}"
+    st, apost = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": own},
+    )
+    apost_id = _must("gfs-global-channel: a posts", st, apost, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (apost_id,),
+        lambda r: bool(r) and r[0][0] == own,
+        what=f"e never received a's post {apost_id}",
+    )
+    if not _await_log_lines(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit("gfs-global-channel: a's own post never came over the channel")
+    print("  a's own post reached e over the channel (a holds no seat) ✓")
+
+    # 7. A member's photo reaches the follower through the GFS media cache,
+    #    under the channel scope (``gfs-media-on-demand`` expires it later).
+    photo = _picture_via_gfs_media_cache(
+        state,
+        author="b",
+        author_token=b["token"],
+        reader="e",
+        space_id=space_id,
+        step="gfs-global-channel",
+    )
+    state.setdefault("gfs", {})["global_channel_space_id"] = space_id
+    state["gfs_channel_photo"] = {
+        "space_id": space_id,
+        "filename": photo,
+        "holder": "b",
+        "reader": "e",
+    }
+    _save(state)
+    print(
+        "gfs-global-channel: ok (a member's and the owner's posts reach a "
+        "GFS follower over the global space's opaque channel, once, host "
+        "offline or online; a member's photo through the channel's media "
+        "cache)"
+    )
 
 
 #: How long a household stays down in ``gfs-join-request-offline`` — past
@@ -4058,7 +5016,9 @@ def cmd_gfs_join_request_offline() -> None:
     row = None
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline and row is None:
-        s, queue = _request(f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"])
+        s, queue = _request(
+            f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"]
+        )
         if s == 200:
             row = next((r for r in queue if r.get("id") == request_id), None)
         time.sleep(1.0)
@@ -4066,7 +5026,9 @@ def cmd_gfs_join_request_offline() -> None:
         raise SystemExit("offline: a never filed the request it drained")
     if not row.get("via_gfs") or not row.get("unverified_name"):
         raise SystemExit(f"offline: the request is not marked as from the GFS: {row!r}")
-    print(f"  a filed it after {JOIN_OFFLINE_WAIT_S} s, named '{row['unverified_name']}' (unverified) ✓")
+    print(
+        f"  a filed it after {JOIN_OFFLINE_WAIT_S} s, named '{row['unverified_name']}' (unverified) ✓"
+    )
 
     _kill_household("e", e)
     s, body = _request(
@@ -4101,7 +5063,9 @@ def cmd_gfs_join_request_offline() -> None:
     seen = _await_space_post(state, "e", space_id, post_id)
     if seen.get("content") != content:
         raise SystemExit(f"offline: e read {seen.get('content')!r}")
-    print("gfs-join-request-offline: ok (queued > 5 min both ways, filed, seated, reads)")
+    print(
+        "gfs-join-request-offline: ok (queued > 5 min both ways, filed, seated, reads)"
+    )
 
 
 def cmd_gfs_open_signup() -> None:
@@ -4231,9 +5195,14 @@ def cmd_gfs_approval() -> None:
             f"{base}/api/gfs/connections/{conn_id}", token=c["token"], method="DELETE"
         )
     _gfs_admin_json(
-        gfs_url, "/admin/api/policy", method="PATCH", body={"auto_accept_clients": False}
+        gfs_url,
+        "/admin/api/policy",
+        method="PATCH",
+        body={"auto_accept_clients": False},
     )
-    _gfs_admin_json(gfs_url, f"/admin/api/clients/{c['instance_id']}/reject", method="POST")
+    _gfs_admin_json(
+        gfs_url, f"/admin/api/clients/{c['instance_id']}/reject", method="POST"
+    )
     try:
         s, conn = _request(
             f"{base}/api/gfs/connections/default", token=c["token"], method="POST"
@@ -4368,7 +5337,6 @@ def cmd_gfs_traffic() -> None:
 
     # Readability is an explicit owner opt-in and it defaults OFF, so a fresh
     # space relays nothing and seats no subscriber. The whole downstream chain
-    # (``gfs-space-subscribe`` → ``gfs-space-post`` → ``gfs-space-rotate``)
     # proves the READABLE path, so turn followers on. ``POST /api/spaces``
     # takes no ``features`` block, so this is a PATCH — a partial one, which
     # merges onto the space's current features and leaves every other flag
@@ -4578,12 +5546,9 @@ def cmd_gfs_replay() -> None:
 def _gfs_rows(sql: str, params: tuple = ()) -> list[tuple]:
     """Run a read-only query against the GFS's own SQLite DB.
 
-    The GFS exposes ``subscriber_count`` on ``GET /gfs/spaces/{id}`` but
-    never the subscriber *identities* without a space-authority signature
-    (``GET /gfs/spaces/{id}/subscribers`` is seed-holder-gated on purpose).
-    The harness needs to assert "it is **d** that got registered", not just
-    "somebody did", so it reads the ``space_subscribers`` table directly.
-    Read-only, same contract as :func:`_rows`.
+    The harness asserts what the GFS stores (channel seats, cached media
+    rows, queued frames), which no route exposes, so it reads the tables
+    directly. Read-only, same contract as :func:`_rows`.
     """
     conn = sqlite3.connect(GFS_DIR / "gfs.db")
     try:
@@ -4641,8 +5606,8 @@ def _wait_for_gfs_ws(instance_id: str, *, timeout: float = 60.0) -> None:
 
     ``GfsWebSocketSupervisor`` opens the socket from a background reconcile
     loop, so a household that paired seconds ago may not be connected yet.
-    Every GFS→household push (relay frames, ``new_subscriber`` notifies,
-    sealed key handoffs) needs it, and the HTTPS-inbox fallback the GFS uses
+    Every GFS→household push (channel relay frames, envelopes,
+    moment frames) needs it, and the HTTPS-inbox fallback the GFS uses
     when the socket is missing is not an authenticated path for relay frames
     (it answers 401), so a frame sent too early is simply lost.
     """
@@ -4654,218 +5619,10 @@ def _wait_for_gfs_ws(instance_id: str, *, timeout: float = 60.0) -> None:
             return
         time.sleep(1.0)
     raise SystemExit(
-        f"gfs-space-subscribe: instance {instance_id} never opened its SH↔GFS "
+        f"instance {instance_id} never opened its SH↔GFS "
         f"WebSocket within {timeout:.0f}s (no {marker!r} in {log_path}) — "
         "GFS pushes to it would be lost.",
     )
-
-
-def cmd_gfs_space_subscribe() -> None:
-    """Discover Alpha's global space on Delta and subscribe to it over the GFS.
-
-    Prereqs (chain via ``up`` → ``gfs-up`` → ``gfs-pair`` → ``gfs-traffic``):
-    Alpha owns a published ``space_type=global`` space (state key
-    ``gfs.global_space_id``), and both Alpha and Delta are active GFS clients.
-
-    Topology matters: ``cmd_gfs_pair`` pairs **a** and **d** with the GFS, but
-    a and d are NOT QR-paired with each other (d only pairs with b). So every
-    byte d learns about a's space travelled through the GFS — there is no
-    HFS↔HFS shortcut that could mask a broken relay. **c** is paired with
-    neither and is the negative control in :func:`cmd_gfs_space_post`.
-
-    Sequence:
-    1. Force Delta's directory poll — ``POST /api/public_spaces/refresh``
-       (admin-only, 202) runs :meth:`PublicSpaceDiscoveryService.refresh_now`
-       inline instead of waiting for the scheduled tick.
-    2. Assert Alpha's space now shows on Delta's
-       ``GET /api/public_spaces`` with the right ``name`` and ``instance_id``.
-       This is the regression for the two discovery bugs: polling the wrong
-       GFS URL (nothing ever lands in ``public_space_cache``) and mapping the
-       listing's ``owning_instance`` onto the wrong local field (the row shows
-       up but points at nobody, so the join can never be routed).
-    3. Delta subscribes — ``POST /api/spaces/{id}/subscribe``.
-    4. Assert Delta now holds a local ``spaces`` row for the space whose
-       ``identity_public_key`` equals Alpha's own pin for the same space.
-       This is the regression for the missing-mirror bug: without the
-       :class:`GfsSpaceMirrorService` stub there is no pinned space-authority
-       key, so every relayed frame fails ``_verify_authority`` and is dropped
-       — silently, at WARNING, with the subscribe itself still returning 200.
-    5. Assert the GFS registered **d** as a subscriber (public
-       ``subscriber_count`` moved, and the ``space_subscribers`` row names
-       Delta's instance id). Without the GFS-side registration the relay fan-out
-       never targets Delta at all.
-    """
-    state = _load()
-    if not state:
-        raise SystemExit("run 'up' first")
-    if not _gfs_alive(state):
-        raise SystemExit("run 'gfs-up' first")
-    gfs = state.get("gfs") or {}
-    space_id = gfs.get("global_space_id")
-    if not space_id:
-        raise SystemExit("run 'gfs-traffic' first — needs Alpha's global space")
-    pairings = gfs.get("pairings") or {}
-    if "d" not in pairings:
-        raise SystemExit("run 'gfs-pair' first — Delta must be a GFS client")
-
-    a = state["instances"]["a"]
-    d = state["instances"]["d"]
-    gfs_url = f"http://127.0.0.1:{GFS_PORT}"
-
-    # 0. Wait for Delta's SH↔GFS WebSocket to be REGISTERED on the GFS side.
-    #    This is not cosmetic: the ``new_subscriber`` → sealed-content-key
-    #    handoff that ``POST /api/spaces/{id}/subscribe`` triggers is
-    #    fire-and-forget. If the subscriber's WS isn't up when the GFS fans
-    #    that frame out, the GFS falls back to the household's HTTPS
-    #    ``/federation/inbox`` — which rejects GFS relay frames with 401 — and
-    #    the subscriber is left permanently keyless for that epoch. In a real
-    #    deployment the WS has been up for hours; in the harness d pairs
-    #    seconds before it subscribes, and the supervisor's reconcile loop
-    #    can take ~30 s to open the socket. The GFS's own log is the
-    #    authoritative signal (``gfs.ws.register: instance=<d>``).
-    _wait_for_gfs_ws(d["instance_id"], timeout=60.0)
-    print("  d's SH↔GFS WebSocket is registered on the GFS ✓")
-
-    # Baseline the GFS's subscriber tally BEFORE d subscribes so step 5 can
-    # assert the delta rather than an absolute that a re-run would already
-    # satisfy.
-    s, detail = _request(f"{gfs_url}/gfs/spaces/{space_id}")
-    _must("gfs-space-subscribe: pre GET /gfs/spaces/{id}", s, detail)
-    subs_before = int(detail.get("subscriber_count") or 0)
-    space_name = detail.get("name")
-    print(f"  gfs detail: name={space_name!r} subscriber_count={subs_before}")
-
-    # 1. Force d's directory poll instead of waiting for the scheduled tick.
-    s, body = _request(
-        f"http://127.0.0.1:{d['port']}/api/public_spaces/refresh",
-        token=d["token"],
-        method="POST",
-    )
-    _must("d: POST /api/public_spaces/refresh", s, body, ok=(202,))
-    print("  d: forced a GFS directory refresh (202) ✓")
-
-    # Settle: ``refresh_now`` awaits the poll inline, but the cache write and
-    # the GFS's own response are both async — give the row a moment to land.
-    deadline = time.monotonic() + 20.0
-    listing: list[dict] = []
-    entry: dict | None = None
-    while time.monotonic() < deadline:
-        s, payload = _request(
-            f"http://127.0.0.1:{d['port']}/api/public_spaces",
-            token=d["token"],
-        )
-        if s == 200 and isinstance(payload, list):
-            listing = payload
-            entry = next(
-                (row for row in listing if row.get("space_id") == space_id),
-                None,
-            )
-            if entry is not None:
-                break
-        time.sleep(1.0)
-
-    # 2. The directory row must exist AND carry the right metadata.
-    if entry is None:
-        raise SystemExit(
-            f"gfs-space-subscribe: {space_id} never appeared on d's "
-            f"/api/public_spaces within 20 s — discovery poll is not reaching "
-            f"the GFS directory. Listing was {listing!r}",
-        )
-    if entry.get("name") != space_name:
-        raise SystemExit(
-            f"gfs-space-subscribe: d's directory row has name="
-            f"{entry.get('name')!r}, GFS published {space_name!r}",
-        )
-    if entry.get("instance_id") != a["instance_id"]:
-        raise SystemExit(
-            f"gfs-space-subscribe: d's directory row has instance_id="
-            f"{entry.get('instance_id')!r}, expected Alpha's "
-            f"{a['instance_id']!r} (owning_instance → instance_id mapping)",
-        )
-    print(f"  d discovers '{entry['name']}' hosted by {entry['instance_id'][:8]}… ✓")
-
-    # 3. Delta subscribes as a read-only member.
-    s, sub = _request(
-        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/subscribe",
-        token=d["token"],
-        method="POST",
-    )
-    _must("d: POST /api/spaces/{id}/subscribe", s, sub, ok=(200,))
-    if not sub.get("subscribed"):
-        raise SystemExit(f"gfs-space-subscribe: subscribe returned {sub!r}")
-    print("  d subscribed to the global space ✓")
-
-    # Settle: the mirror fetch + local stub write + the GFS-side subscriber
-    # registration all happen inside the request, but the GFS then pushes a
-    # ``new_subscriber`` frame to Alpha over the SH↔GFS WebSocket.
-    time.sleep(3)
-
-    # 4. d must hold a local ``spaces`` row pinned to Alpha's authority key.
-    d_rows = _rows(
-        "d",
-        "SELECT identity_public_key, name FROM spaces WHERE id = ?",
-        (space_id,),
-    )
-    if not d_rows:
-        raise SystemExit(
-            f"gfs-space-subscribe: d has no local 'spaces' row for {space_id} — "
-            "GfsSpaceMirrorService never seated the stub, so every relayed "
-            "frame will fail authority verification.",
-        )
-    d_pin, d_name = d_rows[0]
-    a_rows = _rows(
-        "a",
-        "SELECT identity_public_key FROM spaces WHERE id = ?",
-        (space_id,),
-    )
-    if not a_rows:
-        raise SystemExit(
-            f"gfs-space-subscribe: a has no 'spaces' row for {space_id} — "
-            "the owning household lost its own space?",
-        )
-    a_pin = a_rows[0][0]
-    if not d_pin:
-        raise SystemExit(
-            f"gfs-space-subscribe: d's mirrored row for {space_id} has an "
-            "empty identity_public_key — the pin was never seated.",
-        )
-    if d_pin != a_pin:
-        raise SystemExit(
-            f"gfs-space-subscribe: d pinned identity_public_key={d_pin!r} but "
-            f"a's own space authority key is {a_pin!r} — relayed frames will "
-            "never verify at d.",
-        )
-    print(f"  d mirrored the space (name={d_name!r}) pinned to a's key ✓")
-
-    # 5. The GFS must now count d as a subscriber, and the row must name d.
-    s, detail = _request(f"{gfs_url}/gfs/spaces/{space_id}")
-    _must("gfs-space-subscribe: post GET /gfs/spaces/{id}", s, detail)
-    subs_after = int(detail.get("subscriber_count") or 0)
-    if subs_after < 1:
-        raise SystemExit(
-            f"gfs-space-subscribe: GFS subscriber_count is {subs_after} after "
-            f"d subscribed (was {subs_before}) — the SH side never called "
-            "POST /gfs/spaces/{id}/subscribe.",
-        )
-    gfs_subs = _gfs_rows(
-        "SELECT instance_id FROM space_subscribers WHERE space_id = ?",
-        (space_id,),
-    )
-    registered = {row[0] for row in gfs_subs}
-    if d["instance_id"] not in registered:
-        raise SystemExit(
-            f"gfs-space-subscribe: GFS space_subscribers for {space_id} is "
-            f"{sorted(registered)} — Delta ({d['instance_id']}) is not in it.",
-        )
-    print(
-        f"  gfs registered d as a subscriber "
-        f"(subscriber_count {subs_before} → {subs_after}) ✓"
-    )
-
-    state["gfs_space_id"] = space_id
-    state["gfs_subscriber"] = "d"
-    _save(state)
-    print("gfs-space-subscribe: ok (discovery → mirror → GFS subscriber set)")
 
 
 def _seat_local_member(
@@ -4992,517 +5749,6 @@ def _await_space_post(state: dict, label: str, space_id: str, post_id: str) -> d
     )
 
 
-def cmd_gfs_space_post() -> None:
-    """Public space CONTENT over the GFS: a posts, d reads it, c never sees it.
-
-    Prereqs: ``gfs-space-subscribe`` (d is a GFS subscriber of a's global
-    space and holds the mirrored authority pin).
-
-    Sequence:
-    1. Seat a provisioned local author on Alpha and post in the global space
-       via ``POST /api/spaces/{id}/posts`` — the space endpoint, not the
-       household feed, which would land a non-federating household post.
-    2. Settle. The post has to be encrypted under the per-space content key,
-       signed by the author's household identity, authority-signed by the
-       space seed-holder, POSTed to the GFS relay, fanned out over the SH↔GFS
-       WebSocket to every registered subscriber — and the content key itself
-       has to have reached d through the ``new_subscriber`` → sealed
-       key-handoff path fired when d subscribed.
-    3. Assert d's ``GET /api/spaces/{id}/feed`` shows the post DECRYPTED, with
-       the right author user id and body. One assertion, six moving parts: a
-       break anywhere in relay, authority signature, ``new_subscriber`` notify,
-       sealed content-key handoff, per-author signature, or decrypt shows up
-       here and nowhere else.
-    4. Post AGAIN as Alpha's **setup admin** and assert d sees that one too,
-       attributed to the admin's own ``user_id``. The admin's id is
-       username-anchored while the provisioned author's is uuid4-anchored (see
-       :func:`_seat_local_member`), and the relay's per-author self-cert has to
-       hold for both shapes — a regression to a synthetic admin id fails the
-       attribution assertion here instead of silently dropping the post.
-    5. Negative control: **c** — subscribed to nothing, GFS-paired with
-       nothing, QR-paired with a but not a member of this space — must NOT
-       hold EITHER post. This is the §"non-member households MUST NOT see
-       space content" hard rule from CLAUDE.md, asserted on the real wire.
-    6. Anonymity: the GFS relay is identity-free. The GFS log names a's
-       instance id on no relay line and never mentions ``from_instance``; d's
-       ``gfs.relay.received`` records carry ``space=`` + ``event=`` and no
-       ``from=``; and a never logged the legacy identified-publish downgrade
-       ("does not advertise anonymous_publish"). This is the live proof of
-       "the GFS does not require, store, log or forward which household
-       relayed a public-space event".
-    """
-    state = _load()
-    if not state:
-        raise SystemExit("run 'up' first")
-    space_id = state.get("gfs_space_id")
-    if not space_id:
-        raise SystemExit("run 'gfs-space-subscribe' first")
-    a = state["instances"]["a"]
-    c = state["instances"]["c"]
-
-    # 1. A provisioned (derivable-user_id) author on Alpha, seated in the space.
-    author_id, author_token = _seat_local_member(
-        state,
-        "a",
-        space_id,
-        username="erin",
-        password="erin-pw-demo",
-        display_name=ERIN_DISPLAY_NAME,
-    )
-    state["gfs_space_author_user_id"] = author_id
-
-    # Bookmarks for the step-6 anonymity assertions: everything the GFS, d and
-    # a log from here on is what THIS publish produced.
-    gfs_off = _gfs_log_size()
-    d_off = _log_size("d")
-
-    # Marker keeps the step re-runnable against a live sandbox.
-    content = f"Global space post over the GFS — Grüße 漢字 😀 {time.time_ns()}"
-    s, post = _request(
-        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
-        token=author_token,
-        method="POST",
-        body={"type": "text", "content": content},
-    )
-    _must("a posts in the global space", s, post, ok=(201,))
-    post_id = post["id"]
-    print(f"  a posted in the global space → id={post_id}")
-
-    # 2./3. Settle: encrypt → author-sign → authority-sign → POST to the GFS
-    #       relay → GFS WS fan-out to subscribers → d verifies + decrypts +
-    #       persists. The content key reached d via the ``new_subscriber``
-    #       handoff at subscribe time.
-    seen = _await_space_post(state, "d", space_id, post_id)
-    if seen.get("content") != content:
-        raise SystemExit(
-            f"gfs-space-post: d decrypted content={seen.get('content')!r}, "
-            f"expected {content!r}",
-        )
-    if seen.get("author") != author_id:
-        raise SystemExit(
-            f"gfs-space-post: d attributes the post to "
-            f"{seen.get('author')!r}, expected {author_id!r}",
-        )
-    print(f"  d sees the post decrypted, authored by {seen['author']} ✓")
-    # The host's relay copy went compressed with the preset dictionary
-    # (``payload_suite: "zlib1+dict1"``, under its authority signature): the GFS
-    # proved ``payload_zlib1_dict1`` and every follower seat there reads it.
-    relayed = _gfs_log_lines_matching(
-        f"GFS: relaying space_post_public for space {space_id}", offset=gfs_off
-    )
-    if not any("suite=zlib1+dict1" in line for line in relayed):
-        raise SystemExit(
-            f"gfs-space-post: the relay was not fanned out compressed: {relayed!r}"
-        )
-    print("  … relayed compressed (payload_suite zlib1+dict1) ✓")
-    # …and to d as a binary frame (``ws_binary1``): d's socket asked for it
-    # in its hello, so the ciphertext travelled raw and d rebuilt the exact
-    # base64url string before verifying the authority signature.
-    d_id = state["instances"]["d"]["instance_id"]
-    binary = [
-        line
-        for line in _gfs_log_lines_matching(f"gfs.ws.register: instance={d_id}")
-        if "binary=True" in line
-    ]
-    if not binary:
-        raise SystemExit(
-            "gfs-space-post: d's GFS socket never registered for binary frames "
-            "(ws_binary1 in its hello)"
-        )
-    print("  … over d's binary socket (ws_binary1), verified and decrypted ✓")
-
-    # 4. The OTHER author shape: Alpha's setup admin, whose user_id is
-    #    username-anchored rather than uuid4-anchored. Same relay, same
-    #    self-cert, different minting rule.
-    admin_id = a["user_id"]
-    admin_content = f"Setup-admin post over the GFS — {time.time_ns()}"
-    s, admin_post = _request(
-        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
-        token=a["token"],
-        method="POST",
-        body={"type": "text", "content": admin_content},
-    )
-    _must("a's setup admin posts in the global space", s, admin_post, ok=(201,))
-    admin_post_id = admin_post["id"]
-    print(f"  a's setup admin posted → id={admin_post_id}")
-
-    # Settle: same encrypt → sign → relay → fan-out path as above; d already
-    # holds the epoch content key, so only the per-author self-cert is new.
-    admin_seen = _await_space_post(state, "d", space_id, admin_post_id)
-    if admin_seen.get("content") != admin_content:
-        raise SystemExit(
-            f"gfs-space-post: d decrypted content={admin_seen.get('content')!r}, "
-            f"expected {admin_content!r}",
-        )
-    if admin_seen.get("author") != admin_id:
-        raise SystemExit(
-            f"gfs-space-post: d attributes the setup-admin post to "
-            f"{admin_seen.get('author')!r}, expected {admin_id!r} — the admin's "
-            "user_id is not the derivable one the relay self-cert checks.",
-        )
-    print(f"  d sees the setup-admin post decrypted, authored by {admin_id} ✓")
-
-    # 5. Negative control — c is not a member, not a subscriber, not GFS-paired.
-    #    Neither author shape may reach it.
-    for label, pid in (("provisioned", post_id), ("setup-admin", admin_post_id)):
-        c_rows = _rows("c", "SELECT id FROM space_posts WHERE id = ?", (pid,))
-        if c_rows:
-            raise SystemExit(
-                f"gfs-space-post: c holds the {label} space post {pid} — a "
-                "non-member household received space content (§ hard rule "
-                "violated).",
-            )
-    s, c_feed = _request(
-        f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}/feed",
-        token=c["token"],
-    )
-    if s == 200:
-        rows = c_feed if isinstance(c_feed, list) else (c_feed.get("posts") or [])
-        have = {p.get("id") for p in rows}
-        leaked = have & {post_id, admin_post_id}
-        if leaked:
-            raise SystemExit(
-                f"gfs-space-post: c's feed for {space_id} exposes {sorted(leaked)}",
-            )
-    print("  c (non-member, non-subscriber) sees neither post ✓")
-
-    # 6. ANONYMITY — the property the identity-free relay exists for. The
-    #    ``POST /gfs/publish`` body is ``{space_id, event_type, payload}`` and
-    #    the fan-out frame is ``{type, space_id, event_type, payload}``: the
-    #    relaying household's id is on neither. Asserted on the three logs
-    #    where a regression would actually show up.
-    a_inst = a["instance_id"]
-
-    # 6a. The GFS wrote a's instance id on NO publish/relay line. Scoped on
-    #     purpose: the GFS legitimately knows a's id from other surfaces — the
-    #     ``/gfs/register`` handshake, the authenticated ``/gfs/ws`` hello
-    #     (``gfs.ws.register: instance=…``) and the space DIRECTORY listing,
-    #     whose ``owning_instance`` is public by design ("GFS: published space
-    #     … (owner=…)", written back in ``gfs-traffic``). The claim is about
-    #     the CONTENT-relay path only, so the scan covers the lines this step
-    #     produced and flags one only if it also mentions relaying.
-    relay_terms = (
-        "relay",
-        "space_post_public",
-        "space_subscriber_key_handoff",
-        "/gfs/publish",
-    )
-    leaky = [
-        line
-        for line in _gfs_log_lines_matching(a_inst, offset=gfs_off)
-        if any(term in line for term in relay_terms)
-    ]
-    if leaky:
-        raise SystemExit(
-            "gfs-space-post: the GFS logged a's instance id on a relay line — "
-            f"the relay is no longer identity-free. Lines: {leaky!r}",
-        )
-    # ``from_instance`` is the legacy identity field. A household that talks to
-    # an ``anonymous_publish`` GFS omits it, so it must not appear anywhere in
-    # the GFS log (unscoped — a legacy-downgrade regression could log it at
-    # registration or publish time alike).
-    legacy = _gfs_log_lines_matching("from_instance")
-    if legacy:
-        raise SystemExit(
-            "gfs-space-post: 'from_instance' appears in the GFS log — the "
-            f"legacy identified-publish path was taken. Lines: {legacy!r}",
-        )
-    print("  the GFS logged no relaying-household id for either post ✓")
-
-    # 6b. d's receive record names the space + event and NOTHING else.
-    #     ``dispatch_gfs_relay_frame`` used to log ``from=%s``; a frame that
-    #     carries (or a receiver that re-reads) the outer identity shows up as
-    #     a ``from=`` on exactly this line.
-    relay_lines = [
-        line
-        for line in _log_lines_matching("d", "gfs.relay.received:", offset=d_off)
-        if f"space={space_id}" in line and "event=space_post_public" in line
-    ]
-    if not relay_lines:
-        raise SystemExit(
-            f"gfs-space-post: d logged no 'gfs.relay.received: space={space_id} "
-            "event=space_post_public' record for this step — the frames landed "
-            f"some other way. Check {_log_path('d')}.",
-        )
-    identified = [line for line in relay_lines if "from=" in line]
-    if identified:
-        raise SystemExit(
-            "gfs-space-post: d's relay record carries a 'from=' — the fan-out "
-            f"frame is identity-bearing again. Lines: {identified!r}",
-        )
-    print(f"  d's {len(relay_lines)} relay record(s) carry no 'from=' ✓")
-
-    # 6c. a took the anonymous path. ``GfsConnectionService`` warns once per
-    #     connection when the GFS did NOT advertise ``anonymous_publish`` and
-    #     falls back to the legacy identified body; against this build's own
-    #     GFS that downgrade must never fire. (``verify``'s log audit would
-    #     also fail on the un-allow-listed WARNING — this names the cause.)
-    downgrade = _log_lines_matching("a", "does not advertise anonymous_publish")
-    if downgrade:
-        raise SystemExit(
-            "gfs-space-post: a logged the legacy identified-publish downgrade "
-            "against a GFS that does advertise anonymous_publish. Lines: "
-            f"{downgrade!r}",
-        )
-    print("  a never fell back to the legacy identified publish ✓")
-
-    # 7. v_80 — a follower gets a public post's picture: the relayed inner
-    #    carries ``media_refs``; d fetches the blob from its GFS's cache.
-    state["gfs_space_photo"] = _picture_via_gfs_media_cache(
-        state,
-        author="a",
-        author_token=author_token,
-        reader="d",
-        space_id=space_id,
-        step="gfs-space-post",
-    )
-
-    state["gfs_space_post_id"] = post_id
-    state["gfs_space_post_content"] = content
-    state["gfs_space_admin_post_id"] = admin_post_id
-    state["gfs_space_admin_post_content"] = admin_content
-    _save(state)
-    print(
-        "gfs-space-post: ok (relay + authority sig + key handoff + decrypt, "
-        "both author shapes, identity-free relay)"
-    )
-
-
-def cmd_gfs_space_author_profile() -> None:
-    """A GFS follower names a global space's authors (v_60).
-
-    Prereqs: ``gfs-space-subscribe`` + ``gfs-space-post`` (d follows a's
-    global space through the GFS and holds no roster; Erin, a member on a,
-    posted there).
-
-    1. Erin's post made a publish her profile into the space as an
-       ``author_profile`` item. d's ``GET /api/spaces/{id}/authors`` names
-       her "Erin" — d has no roster seat for her.
-    2. Erin sets a bio and a picture. The profile change republishes; d gets
-       the bio and a signed picture URL that returns WebP bytes.
-    3. The GFS saw ciphertext only: its log and database never carry Erin's
-       name or bio. c (no member, no follower) holds no profile.
-    """
-    state = _load()
-    space_id = state.get("gfs_space_id") if state else None
-    if not space_id or not state.get("gfs_space_author_user_id"):
-        raise SystemExit("run 'gfs-space-subscribe' + 'gfs-space-post' first")
-    a, d = state["instances"]["a"], state["instances"]["d"]
-    erin = state["gfs_space_author_user_id"]
-    a_url = f"http://127.0.0.1:{a['port']}"
-    d_url = f"http://127.0.0.1:{d['port']}"
-    gfs_off = _gfs_log_size()
-
-    def _authors() -> dict:
-        s, body = _request(f"{d_url}/api/spaces/{space_id}/authors", token=d["token"])
-        if s != 200:
-            raise SystemExit(
-                f"gfs-space-author-profile: d /authors → HTTP {s} {body!r}"
-            )
-        return {row["user_id"]: row for row in body}
-
-    def _wait(pred, what: str) -> dict:
-        deadline = time.monotonic() + 90
-        rows: dict = {}
-        while time.monotonic() < deadline:
-            rows = _authors()
-            if pred(rows.get(erin)):
-                return rows[erin]
-            time.sleep(3)
-        raise SystemExit(
-            f"gfs-space-author-profile: d never got {what} (last {rows.get(erin)!r})"
-        )
-
-    row = _wait(lambda r: r is not None, "Erin's profile")
-    if row["display_name"] != ERIN_DISPLAY_NAME:
-        raise SystemExit(f"gfs-space-author-profile: d names Erin {row!r}")
-    print("  d names Erin from her published profile (no roster seat) ✓")
-
-    bio = ERIN_BIO
-    s, login = _request(
-        f"{a_url}/api/auth/token",
-        method="POST",
-        body={"username": "erin", "password": "erin-pw-demo"},
-    )
-    _must("gfs-space-author-profile: erin login(a)", s, login)
-    tok = login["token"]
-    s, me = _request(f"{a_url}/api/me", token=tok, method="PATCH", body={"bio": bio})
-    _must("gfs-space-author-profile: erin bio", s, me)
-    s, pic = _upload_file(
-        f"{a_url}/api/me/picture",
-        token=tok,
-        filename="erin.webp",
-        content=_make_demo_webp(),
-        content_type="image/webp",
-    )
-    _must("gfs-space-author-profile: erin picture", s, pic)
-    row = _wait(
-        lambda r: r is not None and r.get("bio") == bio and r.get("picture_url"),
-        "Erin's bio and picture",
-    )
-    if not row["picture_url"].startswith(
-        f"api/spaces/{space_id}/authors/{erin}/picture"
-    ):
-        raise SystemExit(
-            f"gfs-space-author-profile: picture URL {row['picture_url']!r}"
-        )
-    s, raw = _http_get_bytes(f"{d_url}/{row['picture_url']}")
-    if s != 200 or not raw.startswith(b"RIFF"):
-        raise SystemExit(f"gfs-space-author-profile: picture → HTTP {s} {raw[:16]!r}")
-    print("  d gets Erin's bio and picture after her profile change ✓")
-
-    leaks = [
-        line
-        for needle in ("Erin", bio, "author_profile")
-        for line in _gfs_log_lines_matching(needle, offset=gfs_off)
-    ]
-    if leaks:
-        raise SystemExit(
-            f"gfs-space-author-profile: the GFS log names them: {leaks[:3]}"
-        )
-    for table in ("gfs_envelope_queue",):
-        try:
-            rows = _gfs_rows(f"SELECT * FROM {table}")
-        except Exception:
-            rows = []
-        blob = repr(rows)
-        if "Erin" in blob or bio in blob:
-            raise SystemExit(f"gfs-space-author-profile: GFS {table} holds the profile")
-    if _rows(
-        "c", "SELECT 1 FROM space_author_profiles WHERE space_id = ?", (space_id,)
-    ):
-        raise SystemExit("gfs-space-author-profile: c (no member) holds a profile")
-    print("  the GFS saw ciphertext only; c holds nothing ✓")
-    state["gfs_space_author_profile"] = {
-        "space_id": space_id,
-        "user_id": erin,
-        "bio": bio,
-    }
-    _save(state)
-    print("gfs-space-author-profile: ok (a follower names a global space's authors)")
-
-
-def cmd_gfs_space_follower_names() -> None:
-    """A NEW follower names a global space's authors within seconds (v_61),
-    and nobody else gets anything for it.
-
-    Prereqs: ``gfs-space-author-profile`` (Erin's profile, with a bio, is
-    out; d already follows the space). Runs LAST in its chain: it subscribes
-    **e** to a's global space as a follower, which the ``gfs-invite-link*``
-    steps (e as a link-joined member of that space) must not find.
-
-    e refreshes its directory and subscribes. The GFS tells a
-    (``new_subscriber``); a seals the content key to e and then ONE bundle
-    of the cached, author-signed profiles — both TARGETED to e
-    (``POST /gfs/publish`` with ``to``). Asserts:
-
-    * e names Erin, with her bio, within 30 s — without Erin posting again;
-    * from the subscribe on, every ``POST /gfs/publish`` the GFS took was
-      targeted (its "relayed targeted … (1 reached)" line, one per publish),
-      and no member published anything (no ``/gfs/member-publish*``) — so the
-      other follower, d, was sent nothing for e's subscribe;
-    * the GFS log carries neither her name nor her bio.
-    """
-    state = _load()
-    gsap = (state or {}).get("gfs_space_author_profile")
-    if not gsap:
-        raise SystemExit("run 'gfs-space-author-profile' first")
-    space_id, erin, bio = gsap["space_id"], gsap["user_id"], gsap["bio"]
-    e = state["instances"]["e"]
-    e_url = f"http://127.0.0.1:{e['port']}"
-    _wait_for_gfs_ws(e["instance_id"], timeout=60.0)
-    s, body = _request(
-        f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST"
-    )
-    _must("e: POST /api/public_spaces/refresh", s, body, ok=(202,))
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        s, listing = _request(f"{e_url}/api/public_spaces", token=e["token"])
-        if s == 200 and any(r.get("space_id") == space_id for r in listing):
-            break
-        time.sleep(1)
-    else:
-        raise SystemExit(f"gfs-space-follower-names: e never listed {space_id}")
-    gfs_off = _gfs_log_size()
-    t0 = time.monotonic()
-    s, sub = _request(
-        f"{e_url}/api/spaces/{space_id}/subscribe", token=e["token"], method="POST"
-    )
-    _must("e: POST /api/spaces/{id}/subscribe", s, sub, ok=(200,))
-    got: dict | None = None
-    while time.monotonic() - t0 < 30:
-        s, rows = _request(f"{e_url}/api/spaces/{space_id}/authors", token=e["token"])
-        if s == 200:
-            got = next((r for r in rows if r.get("user_id") == erin), None)
-            if got and got.get("bio") == bio:
-                break
-        time.sleep(2)
-    else:
-        raise SystemExit(
-            f"gfs-space-follower-names: e did not name Erin within 30 s ({got!r})"
-        )
-    if got["display_name"] != ERIN_DISPLAY_NAME:
-        raise SystemExit(f"gfs-space-follower-names: e names Erin {got!r}")
-    print(
-        f"  e (new follower) names Erin with her bio after "
-        f"{time.monotonic() - t0:.0f} s, no new post ✓"
-    )
-    # Names come first; her picture follows in a later bundle part, checked
-    # against the hash she signed.
-    pic_deadline = time.monotonic() + 30
-    while not got.get("picture_url") and time.monotonic() < pic_deadline:
-        time.sleep(2)
-        s, rows = _request(f"{e_url}/api/spaces/{space_id}/authors", token=e["token"])
-        if s == 200:
-            got = next((r for r in rows if r.get("user_id") == erin), got)
-    if not got.get("picture_url"):
-        raise SystemExit("gfs-space-follower-names: e never got Erin's picture")
-    s, raw = _http_get_bytes(f"{e_url}/{got['picture_url']}")
-    if s != 200 or not raw.startswith(b"RIFF"):
-        raise SystemExit(f"gfs-space-follower-names: picture → HTTP {s} {raw[:16]!r}")
-    print("  e gets Erin's picture from the bundle's picture part ✓")
-    # Let a late publish land before counting.
-    time.sleep(3)
-    publishes = _gfs_log_lines_matching("POST /gfs/publish ", offset=gfs_off)
-    targeted = _gfs_log_lines_matching("relayed targeted", offset=gfs_off)
-    member = _gfs_log_lines_matching("POST /gfs/member-publish", offset=gfs_off)
-    kinds = sorted(
-        "bundle" if "space_author_profiles_bundle" in line else "handoff"
-        for line in targeted
-    )
-    if member:
-        raise SystemExit(
-            f"gfs-space-follower-names: members republished for e's subscribe "
-            f"(fanned out to every follower): {member[:2]}"
-        )
-    if (
-        len(targeted) != len(publishes)
-        or "bundle" not in kinds
-        or not all("(1 reached)" in line for line in targeted)
-    ):
-        raise SystemExit(
-            "gfs-space-follower-names: not every publish for e was targeted at e "
-            f"({len(targeted)} targeted of {len(publishes)}: {targeted[:3]})"
-        )
-    print(
-        f"  every GFS publish for e's subscribe was targeted at e alone "
-        f"({', '.join(kinds)}); no member republished — d was sent nothing ✓"
-    )
-    leaks = [
-        line
-        for needle in ("Erin", bio)
-        for line in _gfs_log_lines_matching(needle, offset=gfs_off)
-    ]
-    if leaks:
-        raise SystemExit(f"gfs-space-follower-names: GFS log names her: {leaks[:2]}")
-    state["gfs_space_follower_names"] = {"space_id": space_id, "user_id": erin}
-    _save(state)
-    print(
-        "gfs-space-follower-names: ok (a new follower is named at once, "
-        "by one targeted bundle)"
-    )
-
-
 def _wait_for_gfs_ws_since(
     instance_id: str, *, offset: int, timeout: float = 60.0
 ) -> None:
@@ -5517,470 +5763,6 @@ def _wait_for_gfs_ws_since(
     raise SystemExit(
         f"{instance_id} did not re-open its GFS WebSocket within {timeout:.0f}s"
     )
-
-
-@_offline_step
-def cmd_gfs_space_follower_reconnect() -> None:
-    """A follower's reconnect re-seals the key but never re-sends the
-    author-profiles bundle (v_61) — even after the HOST restarted.
-
-    Prereqs: ``gfs-space-follower-names`` (e follows a's global space and
-    got its one bundle). Runs right after it, last in that chain.
-
-    1. Restart **a** (the host): any in-memory "already sent" record is
-       gone — before the fix that made e's next reconnect cost a ≤ 1 MB
-       bundle again (and a GFS restart one per follower).
-    2. Restart **e** (the follower): its GFS socket reconnects (the GFS
-       sends ``new_subscriber`` with ``reason: "reconnect"``) and it
-       re-subscribes every seat (a held seat: no notify at all).
-
-    Asserts, in the GFS log from e's restart on: at least one targeted
-    ``space_subscriber_key_handoff`` reached e's one socket, and no
-    ``space_author_profiles_bundle`` was relayed. e still names Erin.
-    """
-    state = _load()
-    gsfn = (state or {}).get("gfs_space_follower_names")
-    if not gsfn:
-        raise SystemExit("run 'gfs-space-follower-names' first")
-    space_id, erin = gsfn["space_id"], gsfn["user_id"]
-    a, e = state["instances"]["a"], state["instances"]["e"]
-
-    # 1. Restart the host; let its own reconnect + reconcile settle.
-    off = _gfs_log_size()
-    _kill_household("a", a)
-    state["instances"]["a"]["pid"] = _spawn("a", a["port"])
-    _save(state)
-    _wait_ready(a["port"])
-    _wait_for_gfs_ws_since(a["instance_id"], offset=off)
-    print("  a (host) restarted and re-opened its GFS socket ✓")
-    time.sleep(8)
-
-    # 1b. H2: Erin posts after the restart. Her profile didn't change, so a
-    #     publishes NO profile item (the dedupe is the persisted cache row,
-    #     not an in-memory map a restart forgets). Her own row on a — whose
-    #     ts moves on every publish — must stay as it was.
-    def _erin_row_ts() -> str | None:
-        rows = _rows(
-            "a",
-            "SELECT ts FROM space_author_profiles WHERE space_id = ? "
-            "AND author_user_id = ?",
-            (space_id, erin),
-        )
-        return rows[0][0] if rows else None
-
-    before = _erin_row_ts()
-    if before is None:
-        raise SystemExit("gfs-space-follower-reconnect: a holds no row for Erin")
-    a_url = f"http://127.0.0.1:{a['port']}"
-    s, login = _request(
-        f"{a_url}/api/auth/token",
-        method="POST",
-        body={"username": "erin", "password": "erin-pw-demo"},
-    )
-    _must("gfs-space-follower-reconnect: erin login(a)", s, login)
-    s, post = _request(
-        f"{a_url}/api/spaces/{space_id}/posts",
-        token=login["token"],
-        method="POST",
-        body={"type": "text", "content": f"After the restart — {time.time_ns()}"},
-    )
-    _must("gfs-space-follower-reconnect: erin posts", s, post, ok=(201,))
-    time.sleep(8)
-    if _erin_row_ts() != before:
-        raise SystemExit(
-            "gfs-space-follower-reconnect: a re-published Erin's unchanged "
-            "profile after its restart"
-        )
-    print("  Erin posts after a's restart: her unchanged profile is not re-sent ✓")
-
-    # 2. Restart the follower.
-    gfs_off = _gfs_log_size()
-    _kill_household("e", e)
-    state["instances"]["e"]["pid"] = _spawn("e", e["port"])
-    _save(state)
-    _wait_ready(e["port"])
-    _wait_for_gfs_ws_since(e["instance_id"], offset=gfs_off)
-    print("  e (follower) restarted and re-opened its GFS socket ✓")
-
-    handoffs: list[str] = []
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        handoffs = [
-            line
-            for line in _gfs_log_lines_matching("relayed targeted", offset=gfs_off)
-            if "space_subscriber_key_handoff" in line and space_id in line
-        ]
-        if handoffs:
-            break
-        time.sleep(1)
-    else:
-        raise SystemExit(
-            "gfs-space-follower-reconnect: e's reconnect produced no targeted "
-            "key handoff for the space"
-        )
-    if not all("(1 reached)" in line for line in handoffs):
-        raise SystemExit(
-            f"gfs-space-follower-reconnect: a handoff missed e: {handoffs[:2]}"
-        )
-    # Let a late bundle (the regression) land before counting.
-    time.sleep(8)
-    bundles = _gfs_log_lines_matching("space_author_profiles_bundle", offset=gfs_off)
-    if bundles:
-        raise SystemExit(
-            f"gfs-space-follower-reconnect: e's reconnect re-sent the bundle "
-            f"after a host restart: {bundles[:2]}"
-        )
-    print(
-        f"  e's reconnect: {len(handoffs)} targeted key handoff(s), "
-        "no profiles bundle ✓"
-    )
-    s, rows = _request(
-        f"http://127.0.0.1:{e['port']}/api/spaces/{space_id}/authors",
-        token=e["token"],
-    )
-    names = {r["user_id"]: r.get("display_name") for r in rows} if s == 200 else {}
-    if names.get(erin) != ERIN_DISPLAY_NAME:
-        raise SystemExit(f"gfs-space-follower-reconnect: e lost Erin ({names!r})")
-    print(
-        "gfs-space-follower-reconnect: ok (a reconnect re-seals the key, "
-        "never re-sends the bundle)"
-    )
-
-
-def cmd_gfs_space_rotate() -> None:
-    """A content-key epoch rotation must not cut GFS subscribers off.
-
-    Prereqs: ``gfs-space-post`` (d is a subscriber that has already read one
-    post, so a failure here is unambiguously about the rotation).
-
-    Removing a member rotates the per-space AES-256 content key (forward
-    secrecy — the removed member must not read future posts). Members are
-    re-keyed through the ``space_instances`` fan-out, but GFS subscribers hold
-    a read-only subscription and are never in ``space_instances``: they need
-    the separate :class:`SpaceSubscriberKeyOutbound` re-seal. Before that was
-    wired, every post after a rotation was dropped at the subscriber with
-    "no key for epoch N" — silently, until the subscriber's next GFS-WS
-    reconnect happened to re-trigger a handoff.
-
-    Sequence:
-    1. Seat a SECOND provisioned member on Alpha (``frank``) purely so there is
-       somebody to remove — the author from ``gfs-space-post`` (``erin``) has
-       to survive the rotation to write the post in step 4.
-    2. Alpha removes frank — ``DELETE /api/spaces/{id}/members/{user_id}`` —
-       which runs ``_rotate_and_distribute_space_key``.
-    3. Settle: the new epoch key has to be re-sealed to every GFS subscriber.
-    4. Erin posts again, under the NEW epoch.
-    5. Assert d can still read it. A drop here is the rotation regression.
-    """
-    state = _load()
-    if not state:
-        raise SystemExit("run 'up' first")
-    space_id = state.get("gfs_space_id")
-    if not space_id or not state.get("gfs_space_post_id"):
-        raise SystemExit("run 'gfs-space-post' first")
-    a = state["instances"]["a"]
-    a_base = f"http://127.0.0.1:{a['port']}"
-
-    # 1. The sacrificial member. Distinct from the author so the post in
-    #    step 4 still has a derivable-user_id writer after the removal.
-    victim_id, _victim_token = _seat_local_member(
-        state,
-        "a",
-        space_id,
-        username="frank",
-        password="frank-pw-demo",
-        display_name="Frank",
-    )
-    author_id, author_token = _seat_local_member(
-        state,
-        "a",
-        space_id,
-        username="erin",
-        password="erin-pw-demo",
-        display_name=ERIN_DISPLAY_NAME,
-    )
-
-    # 2. Remove frank — this is what forces the epoch rotation.
-    s, removed = _request(
-        f"{a_base}/api/spaces/{space_id}/members/{victim_id}",
-        token=a["token"],
-        method="DELETE",
-    )
-    _must("a: remove frank", s, removed, ok=(200,))
-    print("  a: removed frank → content-key epoch rotation ✓")
-
-    # 3. Settle: rotate_epoch → re-seal to members → re-seal to GFS
-    #    subscribers (SpaceSubscriberKeyOutbound) → d persists the new epoch.
-    time.sleep(10)
-
-    # 4. Post again, now under the new epoch.
-    content = f"Post after the epoch rotation — {time.time_ns()}"
-    s, post = _request(
-        f"{a_base}/api/spaces/{space_id}/posts",
-        token=author_token,
-        method="POST",
-        body={"type": "text", "content": content},
-    )
-    _must("a posts after rotation", s, post, ok=(201,))
-    post_id = post["id"]
-    print(f"  a posted under the new epoch → id={post_id}")
-
-    # 5. d must still be able to read it.
-    seen = _await_space_post(state, "d", space_id, post_id)
-    if seen.get("content") != content:
-        raise SystemExit(
-            f"gfs-space-rotate: d decrypted {seen.get('content')!r}, expected "
-            f"{content!r}",
-        )
-    if seen.get("author") != author_id:
-        raise SystemExit(
-            f"gfs-space-rotate: d attributes the post to {seen.get('author')!r},"
-            f" expected {author_id!r}",
-        )
-    print("  d reads the post-rotation post — rotated key was re-sealed ✓")
-
-    state["gfs_space_rotated_post_id"] = post_id
-    state["gfs_space_rotated_post_content"] = content
-    _save(state)
-    print("gfs-space-rotate: ok (epoch rotation re-keys GFS subscribers)")
-
-
-def cmd_gfs_space_no_subscribers() -> None:
-    """A space that takes no followers is LISTED but never publicly readable.
-
-    A space carries a ``space_type`` (private / public / global), a
-    ``join_mode`` (``invite_only`` / ``open`` / ``request``) telling people how
-    to become a posting MEMBER, and — independently — an ``allow_subscribers``
-    opt-in saying whether STRANGERS may follow it read-only. The product rule:
-    with ``allow_subscribers`` off, the space is published to the GFS
-    directory — that is how people discover it and get invited — but its
-    CONTENT never leaves the member households. No post is relayed to the GFS,
-    and the per-space content key is never sealed to a subscriber, so a
-    stranger cannot read a group nobody let them into.
-
-    The space here is deliberately ``join_mode=open``: anyone may JOIN it, and
-    that still buys them nothing to read. Under the old (wrong) model, where
-    ``open`` implied readable, this space would have relayed — so this step
-    also guards against a regression back to that model.
-
-    Prereqs (chain via ``up`` → ``gfs-up`` → ``gfs-pair``): a and d are active
-    GFS clients. Independent of the readable-space chain — ``gfs-traffic``
-    turns followers ON for its space precisely so that chain keeps proving the
-    relay works.
-
-    Sequence:
-    1. Alpha creates a SECOND global space and leaves ``allow_subscribers``
-       off (the default). ``_auto_publish_on_type`` publishes its METADATA to
-       every paired GFS exactly as before.
-    2. Assert the GFS directory lists it — ``GET /gfs/spaces`` — and reports
-       ``allow_subscribers: false``. The metadata path is deliberately
-       untouched by the content gate; a regression that "fixes" the leak by
-       refusing to publish would hide the space from the people meant to
-       request an invite, and fails here.
-    3. Assert d DISCOVERS it too (``POST /api/public_spaces/refresh`` then
-       ``GET /api/public_spaces``) — discovery is the whole point of listing —
-       and that the listing carries the flag so d's browser can suppress
-       Subscribe.
-    4. Waits for d's SH↔GFS WebSocket to be registered (a relay frame would be
-       fanned out over exactly that socket, so the negative assertion in
-       step 6 is only meaningful once it is up), then d tries to subscribe.
-       It must be REFUSED — the GFS 403s ``POST /gfs/subscribe`` for a space
-       with the flag off, and d's own ``subscribe_to_space`` refuses before
-       that on the mirrored stub, which now carries the truthful flag.
-    5. Alpha posts into the space.
-    6. Assert d got NO relay frame for that space (no ``gfs.relay.received:
-       space=<id>`` in d's log since the bookmark) and holds no
-       ``space_posts`` row / feed entry for the post. c — non-member,
-       non-subscriber, not GFS-paired — must not hold it either.
-    """
-    state = _load()
-    if not state:
-        raise SystemExit("run 'up' first")
-    if not _gfs_alive(state):
-        raise SystemExit("run 'gfs-up' first")
-    pairings = (state.get("gfs") or {}).get("pairings") or {}
-    if "a" not in pairings or "d" not in pairings:
-        raise SystemExit("run 'gfs-pair' first — a and d must be GFS clients")
-
-    a = state["instances"]["a"]
-    c = state["instances"]["c"]
-    d = state["instances"]["d"]
-    gfs_url = f"http://127.0.0.1:{GFS_PORT}"
-
-    # 1. A global space anyone may JOIN but nobody may merely READ.
-    space_name = f"No Followers Global Space — {time.time_ns()}"
-    s, body = _request(
-        f"http://127.0.0.1:{a['port']}/api/spaces",
-        token=a["token"],
-        method="POST",
-        body={
-            "name": space_name,
-            "description": "harness probe: listed for discovery, never relayed",
-            "space_type": "global",
-            # #874: the owner picks the GFSs a global space is listed on.
-            "gfs_ids": _active_gfs_ids(state, "a"),
-            # Open to join — and STILL unreadable, because the readability
-            # opt-in below is off. That pairing is the point of this step.
-            "join_mode": "open",
-        },
-    )
-    body = _must("create-no-subscribers-global-space", s, body, ok=(201,))
-    space_id = body["id"]
-    print(f"  a: created global space {space_id} with followers OFF")
-
-    # 2. The GFS directory must LIST it — metadata publish is unaffected —
-    #    and must report the flag truthfully.
-    deadline = time.monotonic() + 30.0
-    listing: list[dict] = []
-    row: dict | None = None
-    while time.monotonic() < deadline:
-        s, payload = _request(f"{gfs_url}/gfs/spaces")
-        if s == 200:
-            listing = payload.get("spaces", []) if isinstance(payload, dict) else []
-            row = next((sp for sp in listing if sp["space_id"] == space_id), None)
-            if row is not None:
-                break
-        time.sleep(1.0)
-    if row is None:
-        raise SystemExit(
-            f"gfs-space-no-subscribers: {space_id} never appeared on GET "
-            f"/gfs/spaces within 30 s — a space with followers off must still "
-            f"be LISTED for discovery. Listing was {listing!r}",
-        )
-    if row.get("allow_subscribers") is not False:
-        raise SystemExit(
-            "gfs-space-no-subscribers: the GFS reports allow_subscribers="
-            f"{row.get('allow_subscribers')!r} for {space_id}, expected False "
-            "— the owner never opted into followers",
-        )
-    if row.get("join_mode") != "open":
-        raise SystemExit(
-            "gfs-space-no-subscribers: the GFS reports join_mode="
-            f"{row.get('join_mode')!r}, expected 'open' — the membership gate "
-            "and the readability flag are independent and both must travel",
-        )
-    print(f"  the GFS lists '{space_name}' as open-to-join, not readable ✓")
-
-    # 3. d discovers it through the directory poll, flag included.
-    s, refreshed = _request(
-        f"http://127.0.0.1:{d['port']}/api/public_spaces/refresh",
-        token=d["token"],
-        method="POST",
-    )
-    _must("d: POST /api/public_spaces/refresh", s, refreshed, ok=(202,))
-    deadline = time.monotonic() + 20.0
-    entry: dict | None = None
-    d_listing: list[dict] = []
-    while time.monotonic() < deadline:
-        s, payload = _request(
-            f"http://127.0.0.1:{d['port']}/api/public_spaces",
-            token=d["token"],
-        )
-        if s == 200 and isinstance(payload, list):
-            d_listing = payload
-            entry = next(
-                (r for r in d_listing if r.get("space_id") == space_id),
-                None,
-            )
-            if entry is not None:
-                break
-        time.sleep(1.0)
-    if entry is None:
-        raise SystemExit(
-            f"gfs-space-no-subscribers: {space_id} never appeared on d's "
-            f"/api/public_spaces within 20 s — the space is not discoverable. "
-            f"Listing was {d_listing!r}",
-        )
-    if entry.get("allow_subscribers") is not False:
-        raise SystemExit(
-            "gfs-space-no-subscribers: d's directory row reports "
-            f"allow_subscribers={entry.get('allow_subscribers')!r}, expected "
-            "False — the browser would offer a Subscribe button that 403s",
-        )
-    print(f"  d discovers '{entry.get('name')}' and sees it is not readable ✓")
-
-    # d's SH↔GFS WebSocket must be REGISTERED before the negative assertion
-    # means anything: a relay frame, had one been produced, is fanned out over
-    # exactly that socket. Same wait as ``gfs-space-subscribe``.
-    _wait_for_gfs_ws(d["instance_id"], timeout=60.0)
-    print("  d's SH↔GFS WebSocket is registered on the GFS ✓")
-
-    # 4. d asks to subscribe — and must be refused. Unlike the earlier
-    #    join-mode attempt this is a hard assertion: the mirrored stub now
-    #    carries the owner's truthful flag, so d refuses locally, and the GFS
-    #    403s the same request independently.
-    s, sub = _request(
-        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/subscribe",
-        token=d["token"],
-        method="POST",
-    )
-    if s == 200:
-        raise SystemExit(
-            "gfs-space-no-subscribers: d's subscribe SUCCEEDED for a space "
-            f"with followers off ({space_id}) — both the household and the "
-            "GFS must refuse it",
-        )
-    print(f"  d's subscribe was refused (HTTP {s}) ✓")
-
-    # Bookmark d's log AFTER the subscribe so step 6 only scans what the post
-    # produced. (``_spawn`` truncates log.txt on respawn — read at step time.)
-    d_off = _log_size("d")
-
-    # 5. Alpha posts into the space.
-    content = f"Members-only content that must never leave — {time.time_ns()}"
-    s, post = _request(
-        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/posts",
-        token=a["token"],
-        method="POST",
-        body={"type": "text", "content": content},
-    )
-    _must("a posts in the no-followers global space", s, post, ok=(201,))
-    post_id = post["id"]
-    print(f"  a posted in the space → id={post_id}")
-
-    # Settle: long enough that a relay, had one been produced, would have been
-    # encrypted, authority-signed, POSTed to the GFS and fanned out to d.
-    # ``gfs-space-post`` sees the readable equivalent land well inside this.
-    time.sleep(10)
-
-    # 6a. d saw no relay frame for this space at all.
-    relay_lines = [
-        line
-        for line in _log_lines_matching("d", "gfs.relay.received:", offset=d_off)
-        if f"space={space_id}" in line
-    ]
-    if relay_lines:
-        raise SystemExit(
-            "gfs-space-no-subscribers: d received a GFS relay frame for "
-            f"{space_id} — its content stream must be dead. "
-            f"Lines: {relay_lines!r}",
-        )
-    print("  d received no relay frame for the space ✓")
-
-    # 6b. …and holds none of its content, by row and by feed.
-    for label, inst in (("d", d), ("c", c)):
-        if _rows(label, "SELECT id FROM space_posts WHERE id = ?", (post_id,)):
-            raise SystemExit(
-                f"gfs-space-no-subscribers: {label} holds post {post_id} from "
-                "a space that allows no followers (§ hard rule violated).",
-            )
-        s, feed = _request(
-            f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/feed",
-            token=inst["token"],
-        )
-        if s == 200:
-            rows = feed if isinstance(feed, list) else (feed.get("posts") or [])
-            if any(p.get("id") == post_id for p in rows):
-                raise SystemExit(
-                    f"gfs-space-no-subscribers: {label}'s feed for {space_id} "
-                    f"exposes {post_id}",
-                )
-    print("  neither d nor c can see the post ✓")
-
-    state["gfs_no_subscribers_space_id"] = space_id
-    state["gfs_no_subscribers_post_id"] = post_id
-    _save(state)
-    print("gfs-space-no-subscribers: ok (listed for discovery, content never relayed)")
 
 
 # ─── Step: gfs-invite-link ─────────────────────────────────────────────────
@@ -6186,50 +5968,6 @@ def _check_writer_cert_on_e(state: dict, failures: list[str], cap) -> None:
     print(
         f"  e holds a verifying writer cert for epoch {epoch} "
         f"(scope={cert.scope}, v_{int(cap.MIN_FOR_MEMBER_GFS_PUBLISH)}) ✓"
-    )
-
-
-def _check_writer_key_on_e(state: dict, failures: list[str], cap) -> None:
-    """v_50 tripwire: link-joined **e** holds a verifying writer group key for
-    the strict epoch ``gfs-member-publish-strict`` recorded."""
-    import json as _json
-
-    from socialhome.domain.writer_key import WriterKeyGrant
-    from socialhome.infrastructure.key_manager import KeyManager
-    from socialhome.writer_key import verify_writer_key_grant
-
-    space_id = state["gfs_invite_space_id"]
-    epoch = int(state["gfs_member_publish_strict_epoch"])
-    try:
-        pin = _rows(
-            "e", "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,)
-        )
-        row = _rows(
-            "e",
-            "SELECT writer_key FROM space_keys WHERE space_id=? AND epoch=?",
-            (space_id, epoch),
-        )
-        kek = KeyManager.from_data_dir(_instance_dir("e"))
-        if not pin or not row or row[0][0] is None:
-            failures.append(
-                f"e: holds no writer key for epoch {epoch} (v_"
-                f"{int(cap.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY)})"
-            )
-            return
-        raw = kek.decrypt(
-            row[0][0],
-            associated_data=f"socialhome-writer-key:{space_id}:{epoch}".encode(),
-        )
-        grant = WriterKeyGrant.from_wire(_json.loads(raw))
-        verify_writer_key_grant(
-            grant, space_pubkey=bytes.fromhex(pin[0][0]), space_id=space_id
-        )
-    except Exception as exc:
-        failures.append(f"e: stored writer key does not verify: {exc!r}")
-        return
-    print(
-        f"  e holds a verifying writer group key for epoch {epoch} "
-        f"(v_{int(cap.MIN_FOR_STRICT_MEMBER_PUBLISH)}) ✓"
     )
 
 
@@ -7412,8 +7150,13 @@ def _gfs_invite_mailboxes(state: dict, space_id: str) -> tuple[str, str]:
             "gfs-invite-link-content: no member card with a mailbox on the seat "
             f"(a holds {on_a!r}, e holds {on_e!r}) — v_89 mailboxes were not minted.",
         )
-    if on_a["instance_id"] != e["instance_id"] or on_e["instance_id"] != a["instance_id"]:
-        raise SystemExit("gfs-invite-link-content: a member card names the wrong household")
+    if (
+        on_a["instance_id"] != e["instance_id"]
+        or on_e["instance_id"] != a["instance_id"]
+    ):
+        raise SystemExit(
+            "gfs-invite-link-content: a member card names the wrong household"
+        )
     e_mailbox = on_a["mailbox"]["mailbox_id"]
     a_mailbox = on_e["mailbox"]["mailbox_id"]
     if {e_mailbox, a_mailbox} & {e["instance_id"], a["instance_id"]}:
@@ -7464,8 +7207,8 @@ def cmd_gfs_invite_link_content() -> None:
        quietly worked.
     3. e posts; a must see it. The reply leg is the one that would break
        if only the host knew how to reach the other side.
-    4. a rotates the per-space content key (removing a member, as
-       ``gfs-space-rotate`` does) and posts again. e must decrypt the
+    4. a rotates the per-space content key (removing a member) and posts
+       again. e must decrypt the
        NEW epoch — the re-key has to reach a link-joined member like any
        other, or e goes dark at the first roster change.
     5. e's seat for a is ``source=space_session`` and ``GET
@@ -7693,9 +7436,11 @@ def cmd_gfs_invite_link_content() -> None:
         f"({len(e_bytes) // 1024} KiB rendition, served by e's /cover) ✓"
     )
 
-    # 7. v_80 — a photo post reaches e through the GFS media cache: the
-    #    relay can't carry the bytes, so a seals the file once, uploads it
-    #    once to the GFS and e's copy of the post carries ``media_refs``.
+    # 7. v_80 — a photo post in a's global space: a seals the file once and
+    #    uploads it once to the GFS under the space's channel, and e's copy
+    #    of the post carries ``media_refs``. e holds a MEMBER seat, so a's
+    #    household push (v_87 relay media frames) reaches it too, usually
+    #    before the upload lands — either transport is fine for e.
     state["gfs_invite_photo"] = _picture_via_gfs_media_cache(
         state,
         author="a",
@@ -7703,6 +7448,7 @@ def cmd_gfs_invite_link_content() -> None:
         reader="e",
         space_id=space_id,
         step="gfs-invite-link-content",
+        member_push_ok=True,
     )
 
     state["gfs_invite_post_id"] = post_id
@@ -7724,6 +7470,7 @@ def _picture_via_gfs_media_cache(
     space_id: str,
     step: str,
     timeout: float = 90.0,
+    member_push_ok: bool = True,
 ) -> str:
     """v_80 — *author* posts a ~0.7 MB photo in *space_id*; *reader*, which
     reads the space only through the GFS (a link-joined member or a
@@ -7736,6 +7483,16 @@ def _picture_via_gfs_media_cache(
     * *reader*'s ``space_media_refs`` row names the same blob;
     * *reader*'s log: ``fetched blob <id> … from GFS`` — it came from the
       cache, not from any other transport.
+
+    *member_push_ok*: *reader* holds a MEMBER seat (link-joined), so since
+    v_87 the author's household push (``SPACE_MEDIA_BLOB`` in sealed relay
+    media frames) reaches it as well, and usually first: its GFS prefetch
+    runs on the post's arrival, before the queued upload lands, and the
+    10 s retry then finds the file stored. Either transport is accepted for
+    *reader*'s copy (logged as such); the GFS must still hold the one
+    upload under the channel. Since P10 a follower gets the push like a
+    member (no follower-specific delivery rule), so the default accepts
+    either transport for every reader.
 
     Returns the file name."""
     a = state["instances"][author]
@@ -7779,7 +7536,9 @@ def _picture_via_gfs_media_cache(
         if not refs:
             time.sleep(0.5)
     if not refs:
-        raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
+        raise SystemExit(
+            f"{step}: {reader} holds no space_media_refs row for {filename}"
+        )
     blob_id, suite, _epoch, blob_size, local_name = refs[0]
     if not local_name.startswith(("sc-", "sg-")):
         raise SystemExit(
@@ -7792,7 +7551,9 @@ def _picture_via_gfs_media_cache(
         (post["id"], f"%{local_name}%"),
     )
     if not shown:
-        raise SystemExit(f"{step}: {reader}'s post {post['id']} does not show {local_name}")
+        raise SystemExit(
+            f"{step}: {reader}'s post {post['id']} does not show {local_name}"
+        )
     dst = _instance_dir(reader) / "media" / local_name
     while time.time() < deadline and not dst.is_file():
         time.sleep(0.5)
@@ -7802,39 +7563,61 @@ def _picture_via_gfs_media_cache(
             f"within {timeout:.0f} s — no picture through the GFS media cache.",
         )
     if dst.read_bytes() != src.read_bytes():
-        raise SystemExit(f"{step}: {reader}'s copy of {filename} differs from {author}'s")
+        raise SystemExit(
+            f"{step}: {reader}'s copy of {filename} differs from {author}'s"
+        )
     size = len(src.read_bytes())
+    # Since v_96 the GFS keeps a space's media only under the space's opaque
+    # channel: it learns the channel id, never the space.
+    channel = _rows(
+        author, "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,)
+    )
+    channel_id = channel[0][0] if channel else None
     held = _gfs_rows(
         # The address is scope-bound: one blob, one owning scope.
-        "SELECT scope_id, size FROM gfs_space_media"
-        " WHERE blob_id = ? AND scope_kind = 'space' AND scope_id = ?",
-        (blob_id, space_id),
+        "SELECT scope_kind, scope_id FROM gfs_space_media WHERE blob_id = ?",
+        (blob_id,),
     )
-    if not held or held[0][0] != space_id:
+    if not channel_id or held != [("channel", channel_id)]:
         raise SystemExit(
-            f"{step}: the GFS holds no blob {blob_id[:12]} for space {space_id} "
-            f"(rows: {held!r})",
+            f"{step}: the GFS holds no blob {blob_id[:12]} for the space's "
+            f"channel {channel_id!r} (rows: {held!r})",
         )
-    uploaded = _log_lines_matching(author, f"uploaded blob {blob_id[:12]}", offset=author_off)
+    if _gfs_rows("SELECT 1 FROM gfs_space_media WHERE scope_id = ?", (space_id,)):
+        raise SystemExit(f"{step}: the GFS keeps media under the space id")
+    uploaded = _log_lines_matching(
+        author, f"uploaded blob {blob_id[:12]}", offset=author_off
+    )
     fetched = [
         line
-        for line in _log_lines_matching(reader, f"fetched blob {blob_id[:12]}", offset=reader_off)
+        for line in _log_lines_matching(
+            reader, f"fetched blob {blob_id[:12]}", offset=reader_off
+        )
         if "from GFS" in line
     ]
-    if not uploaded or not fetched:
+    pushed = (
+        _log_lines_matching(
+            reader, f"SPACE_MEDIA_BLOB: stored {local_name}", offset=reader_off
+        )
+        if member_push_ok
+        else []
+    )
+    if not uploaded or not (fetched or pushed):
         raise SystemExit(
             f"{step}: no upload ({len(uploaded)}) / GFS fetch ({len(fetched)}) "
-            f"logged for blob {blob_id[:12]}",
+            f"/ member push ({len(pushed)}) logged for blob {blob_id[:12]}",
         )
     print(
         f"  {author} uploaded {filename} ({size // 1024} KiB) once as blob "
         f"{blob_id[:12]}… ({suite}, {blob_size // 1024} KiB padded) — the GFS "
-        f"holds it for the space ✓"
+        f"holds it under the space's channel {channel_id[:8]}…, never the space ✓"
     )
-    print(
-        f"  {reader} fetched it from the GFS media cache as "
-        f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
+    how = (
+        "fetched it from the GFS media cache"
+        if fetched
+        else "got it by the author's household push (member seat)"
     )
+    print(f"  {reader} {how} as {local_name[:15]}…, byte-identical ({size} bytes) ✓")
     return filename
 
 
@@ -7913,8 +7696,7 @@ def cmd_gfs_member_mesh() -> None:
     d_mailbox = on_e["mailbox"]["mailbox_id"]
     seat = _rows(
         "d",
-        "SELECT source, relay_via, remote_inbox_url FROM remote_instances "
-        "WHERE id = ?",
+        "SELECT source, relay_via, remote_inbox_url FROM remote_instances WHERE id = ?",
         (e["instance_id"],),
     )
     if not seat or seat[0][0] != "space_session" or seat[0][1] or seat[0][2]:
@@ -8000,9 +7782,7 @@ def cmd_gfs_member_mesh() -> None:
 
         # 3c. v_91 — that event went up ONCE for both mailboxes: one multi
         #     frame queued for 2 of 2 mailboxes (a's waits, d's drained).
-        multi = _gfs_log_lines_matching(
-            "multi frame queued for", offset=multi_off
-        )
+        multi = _gfs_log_lines_matching("multi frame queued for", offset=multi_off)
         if len(multi) != 1 or "for 2 of 2 mailboxes" not in multi[0]:
             raise SystemExit(
                 f"{step}: e's event did not go up as ONE multi-recipient "
@@ -8114,7 +7894,10 @@ def _forget_gfs_copies(local_name: str) -> int:
 @_offline_step
 def cmd_gfs_space_healing() -> None:
     """v_92 — a GFS-only member heals from the host, then from a helper
-    while the host is offline.
+    while the host is offline. P10 (by path, never by role): e reaches the
+    space only through the GFS, so its missed PICTURES come back through the
+    GFS on-demand fetch (steps 2 and 4 assert no SPACE_MEDIA_WANTED);
+    missed EVENTS still come from the helper's resume (step 3).
 
     Prereqs: the gfs chain through ``gfs-member-mesh`` (e holds a
     link-joined seat in a's space reached only through the GFS; d, paired
@@ -8158,7 +7941,9 @@ def cmd_gfs_space_healing() -> None:
     on_d = _card_on("d", space_id, e["instance_id"])
     on_e = _card_on("e", space_id, d["instance_id"])
     if not (on_d and on_d.get("mailbox") and on_e and on_e.get("mailbox")):
-        raise SystemExit(f"{step}: d and e hold no member cards — run 'gfs-member-mesh'")
+        raise SystemExit(
+            f"{step}: d and e hold no member cards — run 'gfs-member-mesh'"
+        )
     e_mailbox = on_d["mailbox"]["mailbox_id"]
     d_mailbox = on_e["mailbox"]["mailbox_id"]
     gfs_off = _gfs_log_size()
@@ -8198,13 +7983,15 @@ def cmd_gfs_space_healing() -> None:
         return ""
 
     def _view_until(post_id: str, original: bytes, timeout: float) -> tuple[str, int]:
-        """e views the picture; its first view must miss. Polls the view
-        until e serves the original bytes; returns (name, first status)."""
+        """e views the picture its copy of which went. P10 (by path): e
+        reaches the space only through the GFS, so the view asks the GFS on
+        demand — it may serve at once. Polls until e serves the original
+        bytes; returns (name, first status)."""
         name = _space_post_file("e", post_id)
         url = f"{e_base}/api/media/{name}"
-        first, _ = _http_get_bytes(url, token=e["token"], timeout=60.0)
-        if first == 200:
-            raise SystemExit(f"{step}: e still served {name[:15]}… after its copy went")
+        first, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
+        if first == 200 and body == original:
+            return name, first
         deadline = time.time() + timeout
         while time.time() < deadline:
             s, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
@@ -8246,7 +8033,9 @@ def cmd_gfs_space_healing() -> None:
             "e did not hold the first picture", lambda: _held("e", post1, pic1), 90.0
         )
         if not name1.startswith("sc-"):
-            raise SystemExit(f"{step}: e holds the picture as {name1!r}, not a content name")
+            raise SystemExit(
+                f"{step}: e holds the picture as {name1!r}, not a content name"
+            )
         # d too, before the GFS copies go (it may read the GFS cache copy).
         _poll(
             "d did not hold the first picture",
@@ -8255,29 +8044,23 @@ def cmd_gfs_space_healing() -> None:
         )
         dropped = _forget_gfs_copies(name1)
         (_instance_dir("e") / "media" / name1).unlink()
-        a_off, e_off = _log_size("a"), _log_size("e")
+        a_off = _log_size("a")
         _, first = _view_until(post1, pic1, 90.0)
-        asked = _log_lines_matching("e", f"to {a['instance_id']}: sent", offset=e_off)
-        helper_asked = _log_lines_matching(
-            "e", f"to {d['instance_id']}:", offset=e_off
-        )
+        # P10, by path: e reaches the space only through the GFS — its view
+        # asked the GFS on demand, never the host with SPACE_MEDIA_WANTED.
         served = _log_lines_matching(
             "a", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=a_off
         )
-        if not asked or not [x for x in served if "1 file(s) queued" in x]:
+        if served:
             raise SystemExit(
-                f"{step}: no SPACE_MEDIA_WANTED round-trip with the host "
-                f"(e: {asked!r}, a: {served!r})"
-            )
-        if helper_asked:
-            raise SystemExit(
-                f"{step}: e asked the helper d while the host answered: "
-                f"{helper_asked!r}"
+                f"{step}: GFS-reached e asked the host with SPACE_MEDIA_WANTED "
+                f"instead of its GFS: {served!r}"
             )
         print(
             f"  old picture {name1[:15]}… (GFS copies dropped: {dropped}, e's copy "
-            f"gone): e's view → HTTP {first}, SPACE_MEDIA_WANTED to the host a "
-            "only, a served it, e holds it byte-identical ✓"
+            f"gone): e's view → HTTP {first}, through its GFS on demand (P10: by "
+            "path — e reaches the space only through the GFS); e holds it "
+            "byte-identical ✓"
         )
 
         # 3. A second picture both hold, gone from the GFS and from e; then
@@ -8339,7 +8122,9 @@ def cmd_gfs_space_healing() -> None:
             "DELETE FROM gfs_media_queue WHERE to_instance = ? AND id > ?",
             (e_mailbox, top_media),
         )
-        print(f"  e offline; d created an event; its {n_env} frame(s) for e's mailbox dropped ✓")
+        print(
+            f"  e offline; d created an event; its {n_env} frame(s) for e's mailbox dropped ✓"
+        )
         _respawn(state, "e")
         e_down = False
         seen = None
@@ -8379,30 +8164,25 @@ def cmd_gfs_space_healing() -> None:
         )
 
         # 4. Old picture, host silent → the helper d serves it.
-        d_off, e_off = _log_size("d"), _log_size("e")
+        d_off = _log_size("d")
         t0 = time.time()
         _, first = _view_until(post2, pic2, 180.0)
         took = time.time() - t0
-        to_d = _log_lines_matching(
-            "e", f"to {d['instance_id']}: sent", offset=e_off
+        # P10, by path: through the GFS on demand (a holder — d — serves the
+        # GFS over its socket), never SPACE_MEDIA_WANTED to the helper.
+        served = _log_lines_matching(
+            "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
         )
-        served = [
-            x
-            for x in _log_lines_matching(
-                "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
-            )
-            if "1 file(s) queued" in x
-        ]
-        if not to_d or not served:
+        if served:
             raise SystemExit(
-                f"{step}: the helper d did not serve e's request with the host "
-                f"silent (e asked d: {to_d!r}; d served: {served!r})"
+                f"{step}: GFS-reached e asked the helper d with SPACE_MEDIA_WANTED "
+                f"instead of its GFS: {served!r}"
             )
         print(
             f"  host a silent; old picture {name2[:15]}… (GFS copies dropped: "
             f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
-            f"a being silent, it asked the helper d instead, which served it; "
-            f"byte-identical after {took:.0f} s ✓"
+            f"a being silent: through its GFS on demand (P10: by path), never "
+            f"SPACE_MEDIA_WANTED to the helper; byte-identical after {took:.0f} s ✓"
         )
 
         # 5. What the GFS saw over the whole step.
@@ -8514,7 +8294,9 @@ def cmd_gfs_relay_media() -> None:
                 f"{step}: the restarted GFS should prove envelope_media and no "
                 f"space_media cache; capabilities={sorted(caps)!r}"
             )
-        print("  GFS restarted with its media cache off: envelope_media, no space_media ✓")
+        print(
+            "  GFS restarted with its media cache off: envelope_media, no space_media ✓"
+        )
         # a re-reads /gfs/info on its reconnect; give it a moment.
         time.sleep(3.0)
         gfs_off = _gfs_log_size()
@@ -8539,7 +8321,9 @@ def cmd_gfs_relay_media() -> None:
         _await_space_post(state, "e", space_id, post["id"])
         src = (_instance_dir("a") / "media" / up["filename"]).read_bytes()
         if len(src) <= 200 * 1024:
-            raise SystemExit(f"{step}: the photo is only {len(src)} bytes — want > 200 KiB")
+            raise SystemExit(
+                f"{step}: the photo is only {len(src)} bytes — want > 200 KiB"
+            )
         deadline = time.time() + 120.0
         local = ""
         got = b""
@@ -8625,10 +8409,9 @@ def cmd_gfs_relay_media() -> None:
 def cmd_gfs_media_on_demand() -> None:
     """v_83 — a space picture that left the GFS cache comes back on a view.
 
-    Prereqs: the gfs chain through ``gfs-invite-link-content``: a's photo in
-    a's global space reached **d** (a follower) through the GFS media cache
-    (``gfs-space-post``), and a's photo in the link-joined space reached
-    **e** (a member reached only through the GFS relay) the same way.
+    Prereqs: ``gfs-global-channel``: member **b**'s photo in a's global
+    space reached the follower **e** through the GFS media cache, under the
+    space's opaque channel (since v_96 the cache's only scope).
 
     Expiry is simulated exactly as the GFS store does it
     (``GfsSpaceMediaStore._drop`` + ``_remember_left``): the
@@ -8636,37 +8419,34 @@ def cmd_gfs_media_on_demand() -> None:
     and ``gfs_space_media_demand`` remembers when the cache had stored it.
     The reader's own copy is deleted too, so a VIEW
     (``GET /api/media/<name>``) misses, finds no GFS holding the blob and
-    asks ``POST /gfs/media/{blob}/wanted``; the GFS asks the host a over its
-    socket (``space_media_request``), a re-seals the file deterministically
-    and serves the ticket.
+    asks ``POST /gfs/media/{blob}/wanted``; the GFS asks a household seated
+    on the channel over its socket (``space_media_request`` — b, which holds
+    the file; e, also seated, declines: it lost its copy; the owner a holds
+    no seat and is never asked), b re-seals the file deterministically and
+    serves the ticket.
 
     1. **Fresh → ONE re-upload.** ``stored_at`` = the row's ``created_at``
        (well within ``fresh_seconds``): the reader gets the bytes
-       byte-identical, the GFS row and file are back (cache mode, under a's
-       upload authorization), a logged exactly one ``re-uploaded on demand``
-       for that blob, and the admin overview counts +1 holder request /
-       +1 re-upload. The OTHER reader kind (follower ↔ link-joined member),
-       when it holds the same blob, then views it too: straight from the
-       cache (``fetched blob … from GFS``), no new holder request. Run for
-       the follower d (space photo); since v_92 a member household asks the
-       host and helpers instead (``gfs-space-healing``).
+       byte-identical, the GFS row and file are back (cache mode, under b's
+       channel upload authorization), b logged exactly one ``re-uploaded on
+       demand`` for that blob, and the admin overview counts one re-upload.
+       Only a FOLLOWER asks its GFS on demand: since v_92 a member household
+       asks the host and helpers instead (``gfs-space-healing``).
     2. **Old → stream, nothing stored.** ``stored_at`` 30 days ago: the
        reader still gets the bytes byte-identical, but the GFS has NO row
        and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
-       a logged ``streamed on demand``. Run for d.
+       b logged ``streamed on demand``.
 
-    Not re-runnable within ~10 min: a attaches its upload authorization to
+    Not re-runnable within ~10 min: b attaches its upload authorization to
     a cache request at most once per (GFS, blob) per ``REUPLOAD_COALESCE_S``.
     """
     state = _load()
-    if not state or not _gfs_alive(state):
-        raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
-    space_photo = state.get("gfs_space_photo")
-    if not space_photo:
-        raise SystemExit(
-            "run 'gfs-space-post' first — this step needs the photo it proved "
-            "through the GFS media cache"
-        )
+    photo_state = (state or {}).get("gfs_channel_photo")
+    if not state or not _gfs_alive(state) or not photo_state:
+        raise SystemExit("run 'gfs-global-channel' first")
+    space_photo = photo_state["filename"]
+    holder = photo_state["holder"]
+    follower = photo_state["reader"]
     gfs = f"http://127.0.0.1:{GFS_PORT}"
     step = "gfs-media-on-demand"
     keys = ("holder_requests", "streams_served", "reuploads", "live_sessions")
@@ -8674,7 +8454,9 @@ def cmd_gfs_media_on_demand() -> None:
     def _counts() -> dict[str, int]:
         card = _gfs_admin_space_media(gfs)
         if not card.get("on_demand"):
-            raise SystemExit(f"{step}: the GFS admin card says on_demand is off: {card!r}")
+            raise SystemExit(
+                f"{step}: the GFS admin card says on_demand is off: {card!r}"
+            )
         return {k: int(card.get(k, 0)) for k in keys}
 
     def _ref(reader: str, filename: str) -> tuple[str, str] | None:
@@ -8743,72 +8525,57 @@ def cmd_gfs_media_on_demand() -> None:
     # v_92: only a FOLLOWER asks its GFS on demand. A member household
     # (the link-joined e) asks the space's host and helpers with
     # ``SPACE_MEDIA_WANTED`` instead — ``gfs-space-healing`` proves that.
-    cases = [("d", space_photo, "e", "the follower")]
+    cases = [(follower, space_photo, "", "the follower")]
     blobs: dict[str, tuple[str, str, bytes]] = {}
     for reader, photo, _other, _kind in cases:
         ref = _ref(reader, photo)
         if ref is None:
-            raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {photo}")
-        blobs[reader] = (ref[0], ref[1], (_instance_dir("a") / "media" / photo).read_bytes())
+            raise SystemExit(
+                f"{step}: {reader} holds no space_media_refs row for {photo}"
+            )
+        blobs[reader] = (
+            ref[0],
+            ref[1],
+            (_instance_dir(holder) / "media" / photo).read_bytes(),
+        )
 
     # 1. Fresh content: one re-upload into the cache.
     for reader, photo, other, kind in cases:
         blob_id, local_name, original = blobs[reader]
-        a_off = _log_size("a")
+        a_off = _log_size(holder)
         _expire(blob_id, old=False)
         before = _counts()
         _view(reader, local_name, original)
         _wait(
-            lambda b=blob_id: _gfs_rows(
-                "SELECT 1 FROM gfs_space_media WHERE blob_id = ?", (b,)
-            )
-            and _gfs_file(b).is_file(),
+            lambda b=blob_id: (
+                _gfs_rows("SELECT 1 FROM gfs_space_media WHERE blob_id = ?", (b,))
+                and _gfs_file(b).is_file()
+            ),
             f"the GFS did not hold blob {blob_id[:12]} again (no re-upload)",
         )
         reup = _wait(
             lambda b=blob_id, o=a_off: _log_lines_matching(
-                "a", f"space media {b[:12]}: re-uploaded on demand", offset=o
+                holder, f"space media {b[:12]}: re-uploaded on demand", offset=o
             ),
-            f"a logged no 're-uploaded on demand' for blob {blob_id[:12]}",
+            f"{holder} logged no 're-uploaded on demand' for blob {blob_id[:12]}",
         )
         after = _counts()
-        if len(reup) != 1 or after["holder_requests"] - before["holder_requests"] != 1 or (
-            after["reuploads"] - before["reuploads"] != 1
+        if (
+            len(reup) != 1
+            # The reader's own seat may be asked first and decline (it lost
+            # its copy): one or two holder requests, one re-upload.
+            or not 1 <= after["holder_requests"] - before["holder_requests"] <= 2
+            or (after["reuploads"] - before["reuploads"] != 1)
         ):
             raise SystemExit(
                 f"{step}: {reader}'s view of a fresh blob → {len(reup)} re-upload "
-                f"line(s) on a, counts {before!r} → {after!r}; want exactly one "
-                "holder request and one re-upload"
+                f"line(s) on {holder}, counts {before!r} → {after!r}; want one "
+                "re-upload (after at most two holder requests)"
             )
         print(
             f"  {kind} {reader}: blob {blob_id[:12]}… left the cache (fresh) → its "
-            "view got the photo byte-identical; a re-uploaded it ONCE, the GFS "
+            f"view got the photo byte-identical; {holder} re-uploaded it ONCE, the GFS "
             "holds it again ✓"
-        )
-        # The other reader kind, if it holds the same blob, reads the cache.
-        theirs = _ref(other, photo)
-        if theirs is None or theirs[0] != blob_id:
-            print(f"  ({other} holds no ref to this photo — cache re-read not shown)")
-            continue
-        other_off = _log_size(other)
-        _view(other, theirs[1], original)
-        again = _counts()
-        fetched = [
-            line
-            for line in _log_lines_matching(
-                other, f"fetched blob {blob_id[:12]}", offset=other_off
-            )
-            if "from GFS" in line
-        ]
-        if again["holder_requests"] != after["holder_requests"] or not fetched:
-            raise SystemExit(
-                f"{step}: {other}'s view after the re-upload → holder requests "
-                f"{after['holder_requests']} → {again['holder_requests']}, "
-                f"{len(fetched)} cache fetch line(s); want a plain cache fetch"
-            )
-        print(
-            f"  {other} viewed the same photo: straight from the GFS cache, no "
-            "new holder request ✓"
         )
 
     # 2. Old content: streamed through, nothing stored. Wait out the cache
@@ -8821,15 +8588,15 @@ def cmd_gfs_media_on_demand() -> None:
     )
     for reader, _photo, _other, kind in cases:
         blob_id, local_name, original = blobs[reader]
-        a_off = _log_size("a")
+        a_off = _log_size(holder)
         _expire(blob_id, old=True)
         before = _counts()
         _view(reader, local_name, original)
         streamed = _wait(
             lambda b=blob_id, o=a_off: _log_lines_matching(
-                "a", f"space media {b[:12]}: streamed on demand", offset=o
+                holder, f"space media {b[:12]}: streamed on demand", offset=o
             ),
-            f"a logged no 'streamed on demand' for blob {blob_id[:12]}",
+            f"{holder} logged no 'streamed on demand' for blob {blob_id[:12]}",
         )
         time.sleep(1.0)
         after = _counts()
@@ -8844,7 +8611,7 @@ def cmd_gfs_media_on_demand() -> None:
             raise SystemExit(
                 f"{step}: {reader}'s view of OLD blob {blob_id[:12]} → row "
                 f"{bool(held)}, file {_gfs_file(blob_id).exists()}, "
-                f"{len(streamed)} stream line(s) on a, counts {before!r} → "
+                f"{len(streamed)} stream line(s) on {holder}, counts {before!r} → "
                 f"{after!r}; want one stream, nothing stored"
             )
         print(
@@ -8854,264 +8621,8 @@ def cmd_gfs_media_on_demand() -> None:
 
     print(
         f"{step}: ok (fresh → one re-upload, then a plain cache read; old → "
-        "streamed, nothing stored; the follower d)"
+        f"streamed, nothing stored; the follower {follower}, holder {holder})"
     )
-
-
-
-@_offline_step
-def cmd_gfs_member_publish() -> None:
-    """v_49 member publish (anonymous — the one mode since v_90): a
-    link-joined member posts while the HOST is offline, and the space's
-    followers still get it live.
-
-    Prereqs: ``gfs-space-subscribe`` (d follows a's global space over the
-    GFS) and ``gfs-invite-link`` (+ ``-content``) — e holds a link-joined
-    member seat in that space and is paired with nobody but the GFS.
-
-    Sequence:
-    1. Stop **a** — the host, the only seed holder. Before v_49 nothing e
-       posted could reach a follower now: only a seed holder could put an
-       item on the relay.
-    2. e posts and publishes the post ITSELF — ``POST
-       /gfs/member-publish-anon``, signed with the space's writer group key
-       (e's writer cert rides inside the ciphertext).
-    3. d (a follower that is NOT a member) receives the post decrypted
-       within the poll window. The GFS log shows the member-publish fan-out
-       for the space, and no line carries the post text.
-    4. Restart a. a receives e's post over the normal member path (the
-       relay envelope queue) and sends NO copy to the GFS (step 12): e is
-       v_90, the GFS proved member publish and ``space_item_followers``,
-       and every follower there reads ``space_item``.
-    5. d holds exactly ONE copy of e's post.
-
-    Between 3 and 4 (PR 3, host still offline): e comments on and reacts to
-    its post, posts a second post, edits it and deletes it; d (follower)
-    reflects each step from the member relay alone, and the GFS log carries
-    none of the text. After 5: a, back and caught up, holds the second post
-    deleted, and its relayed copy of the create never resurrects it on d.
-
-    Polls every 3 s (the per-user 60/min bucket on ``/api/spaces/*``).
-    """
-    state = _load()
-    if not state or not _gfs_alive(state):
-        raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
-    space_id = (state.get("gfs") or {}).get("global_space_id")
-    if not space_id or not state.get("gfs_invite_space_id"):
-        raise SystemExit("run 'gfs-space-subscribe' and 'gfs-invite-link' first")
-    if state.get("gfs_invite_space_id") != space_id:
-        raise SystemExit(
-            "gfs-member-publish: the invite-link space is not the global space "
-            "d follows — run 'gfs-invite-link' against gfs.global_space_id"
-        )
-    a = state["instances"]["a"]
-    d = state["instances"]["d"]
-    e = state["instances"]["e"]
-    e_base = f"http://127.0.0.1:{e['port']}"
-
-    # 1. Host offline.
-    _kill_household("a", a)
-    gfs_off = _gfs_log_size()
-
-    # 2. The link-joined member posts.
-    content = f"Posted while the host is offline — {time.time_ns()}"
-    s, post = _request(
-        f"{e_base}/api/spaces/{space_id}/posts",
-        token=e["token"],
-        method="POST",
-        body={"type": "text", "content": content},
-    )
-    post = _must("e posts with the host offline", s, post, ok=(201,))
-    post_id = post["id"]
-
-    # 3. The follower gets it live, over the GFS, from e itself.
-    deadline = time.monotonic() + 60.0
-    seen = None
-    while time.monotonic() < deadline and seen is None:
-        time.sleep(3.0)
-        st, body = _request(
-            f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/feed",
-            token=d["token"],
-        )
-        if st == 429:
-            time.sleep(10.0)
-            continue
-        if st != 200:
-            continue
-        feed = body if isinstance(body, list) else (body.get("posts") or [])
-        seen = next((p for p in feed if p.get("id") == post_id), None)
-    if seen is None:
-        raise SystemExit(
-            f"gfs-member-publish: d never saw e's post {post_id} within 60 s "
-            f"while a was down. Check {_instance_dir('e') / 'log.txt'} for "
-            "'gfs.member_publish' and the GFS log for the member-publish "
-            "route's DEBUG refusal reason.",
-        )
-    if seen.get("content") != content:
-        raise SystemExit(
-            f"gfs-member-publish: d decrypted {seen.get('content')!r}, "
-            f"expected {content!r}",
-        )
-    print("  d (follower) received e's post with the host offline ✓")
-    fanned = _gfs_log_lines_matching(
-        f"gfs.member_publish: space={space_id}", offset=gfs_off
-    )
-    if not fanned:
-        raise SystemExit(
-            "gfs-member-publish: the GFS logged no member-publish fan-out for "
-            "the space — the post reached d some other way."
-        )
-    leaked = _gfs_log_lines_matching(content, offset=gfs_off)
-    if leaked:
-        raise SystemExit(
-            f"gfs-member-publish: the GFS log carries the post text: {leaked[:1]!r}"
-        )
-    print(f"  the GFS fanned the member-published item out ({fanned[-1].strip()}) ✓")
-    # Compressed with the preset dictionary (``payload_suite: "zlib1+dict1"``):
-    # the GFS proved ``payload_zlib1_dict1`` and every seat of the space said
-    # it reads it (seat labels 7).
-    if not any("suite=zlib1+dict1" in line for line in fanned):
-        raise SystemExit(
-            "gfs-member-publish: the member-published item was not fanned out "
-            f"compressed — {fanned[-1].strip()!r}. Every follower seat should "
-            "carry payload_zlib1_dict1 (space_subscribers.reads_space_item & 4)."
-        )
-    print("  … compressed (payload_suite zlib1+dict1), and d decrypted it ✓")
-
-    # 3b. PR 3 — comments, reactions and own edits / deletes, still with the
-    #     host offline. d (a follower) reads them only from the member relay:
-    #     no other path ever carried them to a follower.
-    second_id, edited = _member_publish_items(state, space_id, post_id, gfs_off)
-
-    # 4. The host comes back. Step 12: e is a v_90 household that published
-    #    the post itself to every listed GFS, the GFS proved member publish
-    #    and ``space_item_followers``, and every follower there (d) said it
-    #    reads ``space_item`` — so a sends NO copy of e's post to that GFS
-    #    (it used to relay it again for older followers). A respawn starts a
-    #    fresh ``log.txt``, so a's whole new log is this step's evidence.
-    a_off = 0
-    new_pid = _spawn("a", a["port"])
-    state["instances"]["a"]["pid"] = new_pid
-    _save(state)
-    _wait_ready(a["port"])
-    print(f"  a respawned: pid={new_pid}")
-    _await_space_post(state, "a", space_id, post_id)
-    print("  a (host) caught e's post up over the member path ✓")
-    deadline = time.monotonic() + 30.0
-    skipped: list[str] = []
-    while time.monotonic() < deadline and not skipped:
-        time.sleep(3.0)
-        skipped = [
-            line
-            for line in _log_lines_matching(
-                "a", "reads the member's own item", offset=a_off
-            )
-            if space_id in line
-        ]
-    if not skipped:
-        raise SystemExit(
-            "gfs-member-publish: a did not skip its copy of e's post — every "
-            "follower on the GFS reads e's own space_item, so the host's relay "
-            "is a redundant fan-out (step 12)."
-        )
-    print("  a sent no copy of e's post: every follower reads e's own item ✓")
-    time.sleep(3.0)  # let anything late land on d
-
-    # 5. d received it twice and holds exactly one copy.
-    rows = _rows("d", "SELECT id FROM space_posts WHERE id = ?", (post_id,))
-    if len(rows) != 1:
-        raise SystemExit(f"gfs-member-publish: d holds {len(rows)} copies of the post")
-    print("  d holds exactly one copy (receiver dedupe by post id) ✓")
-
-    # 6. e's deleted post stays deleted everywhere once a is back: a got the
-    #    create, edit and delete over the member path in order and relayed
-    #    the create to the GFS again — d's copy is a duplicate of a deleted
-    #    row and is dropped, never resurrected.
-    _assert_post_stays_deleted(state, space_id, second_id, edited)
-    state["gfs_member_publish_post_id"] = post_id
-    _save(state)
-
-    # 7. Moderation outcomes reach the follower on the host's authority: a
-    #    moderator's removal of e's post, and e's post approved from the
-    #    review queue of the space switched to MODERATED.
-    _moderation_outcomes_reach_followers(state, space_id)
-    _old_follower_forces_json(state, space_id)
-    print(
-        "gfs-member-publish: ok (member posts, comments, reactions, edits and "
-        "deletes reach followers without the host; moderator removals and "
-        "approved posts reach them on the host's authority; compressed where "
-        "every follower reads it, JSON otherwise)"
-    )
-
-
-def _old_follower_forces_json(state: dict, space_id: str) -> None:
-    """A follower seat without ``payload_zlib1`` (an older household — staged
-    by clearing the bit in the GFS DB, since the demo boots only this build)
-    makes the GFS refuse a compressed item (409). e notes it, publishes the
-    JSON item at once, and d still gets the post. The bit is restored after.
-    """
-    d = state["instances"]["d"]
-    seat = (space_id, d["instance_id"])
-    rows = _gfs_rows(
-        "SELECT reads_space_item FROM space_subscribers"
-        " WHERE space_id=? AND instance_id=?",
-        seat,
-    )
-    if not rows or rows[0][0] != 7:
-        raise SystemExit(
-            f"gfs-member-publish: d's seat labels are {rows!r}, expected 7 "
-            "(space_item + payload_zlib1 + payload_zlib1_dict1)"
-        )
-    _gfs_write(
-        "UPDATE space_subscribers SET reads_space_item=1"
-        " WHERE space_id=? AND instance_id=?",
-        seat,
-    )
-    try:
-        gfs_off = _gfs_log_size()
-        e_off = _log_size("e")
-        content = f"Posted while an older follower is seated — {time.time_ns()}"
-        st, post = _e_request(
-            state,
-            "POST",
-            f"/api/spaces/{space_id}/posts",
-            {"type": "text", "content": content},
-        )
-        post_id = _must("e posts with an older follower seated", st, post, ok=(201,))[
-            "id"
-        ]
-        _poll_rows(
-            "d",
-            "SELECT content FROM space_posts WHERE id = ?",
-            (post_id,),
-            lambda r: bool(r) and r[0][0] == content,
-            what="d never got e's post while its seat lacked payload_zlib1",
-        )
-        refused = _log_lines_matching(
-            "e", f"refused a compressed item for space {space_id}", offset=e_off
-        )
-        if not refused:
-            raise SystemExit(
-                "gfs-member-publish: e never logged the GFS's payload-suite "
-                "refusal — did the compressed item reach an older follower?"
-            )
-        fanned = _gfs_log_lines_matching(
-            f"gfs.member_publish: space={space_id}", offset=gfs_off
-        )
-        if not fanned or any("suite=zlib1" in line for line in fanned):
-            raise SystemExit(
-                f"gfs-member-publish: expected only JSON fan-outs, got {fanned!r}"
-            )
-        print(
-            "  an older follower's seat: the GFS refused the compressed item, "
-            "e sent JSON, d got the post ✓"
-        )
-    finally:
-        _gfs_write(
-            "UPDATE space_subscribers SET reads_space_item=7"
-            " WHERE space_id=? AND instance_id=?",
-            seat,
-        )
 
 
 def _poll_rows(
@@ -9133,7 +8644,7 @@ def _poll_rows(
             return rows
         time.sleep(3.0)
     raise SystemExit(
-        f"gfs-member-publish: {what} within {timeout:.0f} s (last rows {rows!r}). "
+        f"{what} within {timeout:.0f} s (last rows {rows!r}). "
         f"Check {_instance_dir(label) / 'log.txt'} for 'space_item' and "
         f"{_instance_dir('e') / 'log.txt'} for 'gfs.member_publish'."
     )
@@ -9153,107 +8664,6 @@ def _e_request(state: dict, method: str, path: str, body: dict | None = None):
             return st, resp
         time.sleep(15.0)
     return st, resp
-
-
-def _member_publish_items(
-    state: dict, space_id: str, post_id: str, gfs_off: int
-) -> tuple[str, str]:
-    """While host a is offline: e comments on and reacts to its post, posts
-    a second one, edits it, then deletes it. d (follower) reflects each
-    step from the member relay alone. Returns ``(second post id, edited
-    text)``."""
-    base = f"/api/spaces/{space_id}/posts"
-    comment_text = f"A comment with the host offline — {time.time_ns()}"
-    st, comment = _e_request(
-        state, "POST", f"{base}/{post_id}/comments", {"content": comment_text}
-    )
-    comment = _must("e comments with the host offline", st, comment, ok=(200, 201))
-    comment_id = comment["id"]
-    st, body = _e_request(state, "POST", f"{base}/{post_id}/reactions", {"emoji": "🎉"})
-    _must("e reacts with the host offline", st, body, ok=(200, 201))
-    _poll_rows(
-        "d",
-        "SELECT content FROM space_post_comments WHERE id = ? AND deleted = 0",
-        (comment_id,),
-        lambda rows: bool(rows) and rows[0][0] == comment_text,
-        what=f"d never received e's comment {comment_id}",
-    )
-    print("  d (follower) received e's comment over the member relay ✓")
-    _poll_rows(
-        "d",
-        "SELECT reactions FROM space_posts WHERE id = ?",
-        (post_id,),
-        lambda rows: bool(rows) and "🎉" in (rows[0][0] or ""),
-        what="d never received e's reaction",
-    )
-    print("  d (follower) received e's reaction over the member relay ✓")
-
-    original = f"A post to edit and delete — {time.time_ns()}"
-    st, second = _e_request(state, "POST", base, {"type": "text", "content": original})
-    second_id = _must("e posts a second post", st, second, ok=(201,))["id"]
-    _poll_rows(
-        "d",
-        "SELECT content FROM space_posts WHERE id = ?",
-        (second_id,),
-        lambda rows: bool(rows) and rows[0][0] == original,
-        what=f"d never received e's second post {second_id}",
-    )
-    edited = f"Edited with the host offline — {time.time_ns()}"
-    st, body = _e_request(state, "PATCH", f"{base}/{second_id}", {"content": edited})
-    _must("e edits its post", st, body)
-    _poll_rows(
-        "d",
-        "SELECT content, edited_at FROM space_posts WHERE id = ?",
-        (second_id,),
-        lambda rows: bool(rows) and rows[0][0] == edited and rows[0][1],
-        what="d never reflected e's edit",
-    )
-    print("  d (follower) reflected e's post edit ✓")
-    st, body = _e_request(state, "DELETE", f"{base}/{second_id}")
-    _must("e deletes its post", st, body)
-    _poll_rows(
-        "d",
-        "SELECT deleted, content FROM space_posts WHERE id = ?",
-        (second_id,),
-        lambda rows: bool(rows) and rows[0][0] == 1 and rows[0][1] is None,
-        what="d never reflected e's delete",
-    )
-    print("  d (follower) reflected e's post delete ✓")
-    for text in (comment_text, edited, original):
-        leaked = _gfs_log_lines_matching(text, offset=gfs_off)
-        if leaked:
-            raise SystemExit(
-                f"gfs-member-publish: the GFS log carries item text: {leaked[:1]!r}"
-            )
-    print("  the GFS logged none of the items' text ✓")
-    return second_id, edited
-
-
-def _assert_post_stays_deleted(
-    state: dict, space_id: str, post_id: str, edited: str
-) -> None:
-    """After a's restart and catch-up: a holds e's second post deleted
-    (never live), and so does d."""
-    _poll_rows(
-        "a",
-        "SELECT deleted FROM space_posts WHERE id = ?",
-        (post_id,),
-        lambda rows: bool(rows) and rows[0][0] == 1,
-        what=f"a (host) never caught up e's delete of {post_id}",
-    )
-    time.sleep(6.0)  # let a's relayed copy of the create reach d
-    for label in ("a", "d"):
-        rows = _rows(
-            label,
-            "SELECT deleted, content FROM space_posts WHERE id = ?",
-            (post_id,),
-        )
-        if not rows or rows[0][0] != 1 or rows[0][1] is not None:
-            raise SystemExit(
-                f"gfs-member-publish: {label} resurrected e's deleted post "
-                f"{post_id}: {rows!r}"
-            )
-    print("  a and d keep e's deleted post deleted after a came back ✓")
 
 
 def _inst_request(
@@ -9293,312 +8703,7 @@ def _set_posts_access(state: dict, space_id: str, level: str) -> None:
         ):
             return
         time.sleep(3.0)
-    raise SystemExit(
-        f"gfs-member-publish: e never saw posts_access={level} within 60 s"
-    )
-
-
-def _moderation_outcomes_reach_followers(state: dict, space_id: str) -> None:
-    """With a (host, seed holder) back: (1) e posts, d gets it; a removes
-    it as a moderator and d — a follower with no seat, which no ``SPACE_*``
-    event reaches — drops it, from a's authority-signed removal notice on
-    the host relay. (2) a switches posts to MODERATED; e's post queues; a
-    approves it; d receives it attributed to e — under the signature e made
-    when it submitted the item, relayed and marked by a (e's cert is
-    comment-scope now, so e could not publish it). The
-    GFS log carries neither text nor id. (3) posts back to OPEN.
-    DB polls every 3 s; REST calls back off on 429."""
-    e = state["instances"]["e"]
-    base = f"/api/spaces/{space_id}/posts"
-    gfs_off = _gfs_log_size()
-
-    # (1) A moderator's removal.
-    doomed = f"A post a moderator removes — {time.time_ns()}"
-    st, post = _e_request(state, "POST", base, {"type": "text", "content": doomed})
-    doomed_id = _must("e posts a post to be moderated", st, post, ok=(201,))["id"]
-    _poll_rows(
-        "d",
-        "SELECT content FROM space_posts WHERE id = ? AND deleted = 0",
-        (doomed_id,),
-        lambda rows: bool(rows) and rows[0][0] == doomed,
-        what=f"d never received e's post {doomed_id}",
-    )
-    st, body = _inst_request(state, "a", "DELETE", f"{base}/{doomed_id}")
-    _must("a removes e's post as a moderator", st, body)
-    _poll_rows(
-        "d",
-        "SELECT deleted, content FROM space_posts WHERE id = ?",
-        (doomed_id,),
-        lambda rows: bool(rows) and rows[0][0] == 1 and rows[0][1] is None,
-        what="d (follower) never dropped the post a moderator removed",
-        timeout=90.0,
-    )
-    print("  d (follower) dropped the post a moderator removed ✓")
-
-    # (2) An approved post in a MODERATED space.
-    _set_posts_access(state, space_id, "moderated")
-    print("  a switched the space's posts to Reviewed (e sees it)")
-    reviewed = f"A post released from review — {time.time_ns()}"
-    st, queued = _e_request(state, "POST", base, {"type": "text", "content": reviewed})
-    if st != 202 or not (queued or {}).get("queued"):
-        raise SystemExit(
-            f"gfs-member-publish: e's post under Reviewed -> {st} {queued!r} "
-            "(expected 202 queued)"
-        )
-    item_id = queued["item_id"]
-    approved_id = queued.get("target_id")
-    deadline = time.monotonic() + 60.0
-    listed = False
-    while time.monotonic() < deadline and not listed:
-        time.sleep(3.0)
-        st, items = _inst_request(
-            state, "a", "GET", f"/api/spaces/{space_id}/moderation"
-        )
-        listed = st == 200 and any(i.get("id") == item_id for i in items)
-    if not listed:
-        raise SystemExit(
-            f"gfs-member-publish: a's moderation queue never listed e's item {item_id}"
-        )
-    st, body = _inst_request(
-        state, "a", "POST", f"/api/spaces/{space_id}/moderation/{item_id}/approve", {}
-    )
-    body = _must("a approves e's post", st, body)
-    approved_id = body.get("target_id") or approved_id
-    print(f"  a approved e's queued post → id={approved_id}")
-    rows = _poll_rows(
-        "d",
-        "SELECT content, author, deleted FROM space_posts WHERE id = ?",
-        (approved_id,),
-        lambda rows: bool(rows) and rows[0][0] == reviewed and rows[0][2] == 0,
-        what=f"d (follower) never received the approved post {approved_id}",
-        timeout=90.0,
-    )
-    if rows[0][1] != e["user_id"]:
-        raise SystemExit(
-            f"gfs-member-publish: d attributes the approved post to {rows[0][1]!r}, "
-            f"expected e's user {e['user_id']!r}"
-        )
-    print("  d (follower) received the approved post, attributed to e ✓")
-    for needle in (doomed, reviewed, doomed_id, approved_id, item_id):
-        leaked = _gfs_log_lines_matching(needle, offset=gfs_off)
-        if leaked:
-            raise SystemExit(
-                f"gfs-member-publish: the GFS log carries {needle!r}: {leaked[:1]!r}"
-            )
-    print("  the GFS logged none of the moderated items' text or ids ✓")
-
-    # (3) Back to OPEN for the steps that follow.
-    _set_posts_access(state, space_id, "open")
-    print("  a switched the space's posts back to open")
-
-
-@_offline_step
-def cmd_gfs_member_publish_strict() -> None:
-    """Anonymous member publish — the one mode since v_90 (the step keeps
-    its v_50 name for the chain): a link-joined member's post reaches a
-    follower over the GFS while the host is offline, with nothing
-    identifying on the wire, and the identified route is gone.
-
-    Prereqs: ``gfs-member-publish`` (and everything it needs) — a is back
-    up, e holds a writer seat in a's global space, d follows it.
-
-    Sequence:
-    1. Wait until the GFS has the writer key of the space's current epoch
-       pinned (the owner's notice) and e holds that key (no publish-mode
-       switch any more: every publicly readable space has one).
-    2. Stop **a** (host) and **d** (so the GFS has to STORE the item for d).
-    3. e posts. Its publisher signs ``POST /gfs/member-publish-anon`` with
-       the writer key, over its cookie-less session.
-    4. The GFS access log shows the anonymous route, no identified
-       ``/gfs/member-publish`` for it, and no GFS log line about the publish
-       names e. The row queued for d carries no ``writer_cert`` and nothing
-       of e's (instance id, identity key).
-    5. Restart d: it drains the queue and decrypts e's post (the cert came
-       from inside the ciphertext).
-    6. The identified ``POST /gfs/member-publish`` — what a pre-v_90
-       household would send — has no route any more (404 / 405).
-    7. Restart a and record the epoch for ``verify``'s writer-key check.
-
-    Polls every 3 s; backs off on 429. GFS / household logs are bookmarked
-    before each respawn.
-    """
-    import json as _json
-
-    from socialhome.crypto import b64url_encode
-
-    state = _load()
-    if not state or not _gfs_alive(state):
-        raise SystemExit("run the gfs chain through 'gfs-member-publish' first")
-    space_id = (state.get("gfs") or {}).get("global_space_id")
-    if not space_id or state.get("gfs_invite_space_id") != space_id:
-        raise SystemExit("run 'gfs-space-subscribe' and 'gfs-invite-link' first")
-    if not state.get("gfs_member_publish_post_id"):
-        raise SystemExit("run 'gfs-member-publish' first")
-    a = state["instances"]["a"]
-    d = state["instances"]["d"]
-    e = state["instances"]["e"]
-    gfs_base = state["gfs"]["base_url"]
-    e_iid = e["instance_id"]
-    e_pk_hex = _rows("e", "SELECT identity_public_key FROM instance_identity")[0][0]
-    e_leaks = (e_iid, e_pk_hex, b64url_encode(bytes.fromhex(e_pk_hex)))
-
-    # 1. The GFS pin and e's writer key for the current epoch.
-    deadline = time.monotonic() + 90.0
-    epoch = None
-    gfs_row: list = []
-    e_key: list = []
-    while time.monotonic() < deadline:
-        latest = _rows(
-            "a", "SELECT MAX(epoch) FROM space_keys WHERE space_id=?", (space_id,)
-        )
-        epoch = latest[0][0] if latest else None
-        gfs_row = _gfs_rows(
-            "SELECT writer_key_epoch FROM global_spaces WHERE space_id=?",
-            (space_id,),
-        )
-        e_key = _rows(
-            "e",
-            "SELECT epoch FROM space_keys WHERE space_id=? AND epoch=?"
-            " AND writer_key IS NOT NULL",
-            (space_id, epoch),
-        )
-        if gfs_row and gfs_row[0] == (epoch,) and e_key:
-            break
-        time.sleep(3.0)
-    else:
-        raise SystemExit(
-            f"gfs-member-publish-strict: GFS writer-key pin={gfs_row!r} (want "
-            f"epoch {epoch}) and e's writer key for epoch {epoch} "
-            f"present={bool(e_key)} within 90 s. Check "
-            f"{_instance_dir('a') / 'log.txt'} for 'GFS epoch notice' and "
-            f"{_instance_dir('e') / 'log.txt'} for 'writer key'."
-        )
-    print(f"  GFS: writer key pinned for epoch {epoch}; e holds it (one mode) ✓")
-
-    # 2. Host and follower offline (d must get the item from the GFS queue).
-    _kill_household("a", a)
-    _kill_household("d", d)
-    gfs_off = _gfs_log_size()
-
-    # 3. e posts.
-    content = f"Anonymous: posted with the host offline — {time.time_ns()}"
-    st, post = _e_request(
-        state,
-        "POST",
-        f"/api/spaces/{space_id}/posts",
-        {"type": "text", "content": content},
-    )
-    post_id = _must("e posts in the space", st, post, ok=(201,))["id"]
-
-    # 4. What the GFS saw and stored.
-    deadline = time.monotonic() + 60.0
-    queued: list = []
-    while time.monotonic() < deadline:
-        queued = []
-        for r in _gfs_rows(
-            "SELECT sealed_json FROM gfs_envelope_queue"
-            " WHERE frame_type='relay' AND to_instance=?",
-            (d["instance_id"],),
-        ):
-            frame = _json.loads(r[0])
-            if frame.get("space_id") == space_id and frame.get("epoch") == epoch:
-                queued.append(r)
-        if queued:
-            break
-        time.sleep(3.0)
-    anon_lines = [
-        line
-        for line in _gfs_log_lines_matching("/gfs/member-publish-anon", offset=gfs_off)
-        if "POST" in line
-    ]
-    if not anon_lines or not queued:
-        raise SystemExit(
-            f"gfs-member-publish-strict: no anonymous publish reached the GFS "
-            f"(access lines={anon_lines[-1:]!r}, rows queued for d={len(queued)}). "
-            f"Check {_instance_dir('e') / 'log.txt'} for 'gfs.member_publish'."
-        )
-    print(
-        f"  the GFS took e's item on the anonymous route ({anon_lines[-1].strip()}) ✓"
-    )
-    identified = list(
-        _gfs_log_lines_matching("POST /gfs/member-publish HTTP", offset=gfs_off)
-    )
-    if identified:
-        raise SystemExit(
-            f"gfs-member-publish-strict: an IDENTIFIED member publish reached the "
-            f"GFS: {identified[:1]!r}"
-        )
-    about = [
-        line
-        for line in _gfs_log_lines_matching("", offset=gfs_off)
-        if ("member_publish" in line or "member-publish" in line)
-        and any(x in line for x in e_leaks)
-    ]
-    if about:
-        raise SystemExit(
-            f"gfs-member-publish-strict: a GFS log line about the publish names "
-            f"e: {about[:1]!r}"
-        )
-    for (raw,) in queued:
-        frame = _json.loads(raw)
-        if "writer_cert" in frame or any(x in raw for x in e_leaks):
-            raise SystemExit(
-                f"gfs-member-publish-strict: the row stored for d carries the "
-                f"cert or e's identity: {sorted(frame)!r}"
-            )
-        if content in raw:
-            raise SystemExit("gfs-member-publish-strict: the stored row is plaintext")
-    print(
-        "  no identified publish, no GFS line naming e, and the row stored for d "
-        f"is {sorted(_json.loads(queued[0][0]))} — no cert, no household ✓"
-    )
-
-    # 5. d comes back, drains the queue and decrypts it.
-    d_off = _log_size("d")
-    new_d = _spawn("d", d["port"])
-    state["instances"]["d"]["pid"] = new_d
-    _save(state)
-    _wait_ready(d["port"])
-    print(f"  d respawned: pid={new_d} (log bookmark {d_off})")
-    _poll_rows(
-        "d",
-        "SELECT content FROM space_posts WHERE id = ?",
-        (post_id,),
-        lambda rows: bool(rows) and rows[0][0] == content,
-        what=f"d never decrypted e's anonymous post {post_id}",
-        timeout=90.0,
-    )
-    print("  d (follower) drained and decrypted e's anonymous post ✓")
-
-    # 6. The identified route is gone (v_90): what a pre-v_90 household
-    #    would send has nowhere to go.
-    st, body = _request(
-        f"{gfs_base}/gfs/member-publish",
-        method="POST",
-        body={"instance_id": e_iid, "target": space_id, "epoch": int(epoch)},
-    )
-    if st not in (404, 405):
-        raise SystemExit(
-            f"gfs-member-publish-strict: the identified route answered HTTP {st} "
-            f"{body!r}, expected 404 / 405 (gone since v_90)"
-        )
-    print(f"  the identified POST /gfs/member-publish is gone (HTTP {st}) ✓")
-
-    # 7. a back; record for verify.
-    a_off = _log_size("a")
-    new_a = _spawn("a", a["port"])
-    state["instances"]["a"]["pid"] = new_a
-    _save(state)
-    _wait_ready(a["port"])
-    print(f"  a respawned: pid={new_a} (log bookmark {a_off})")
-    _await_space_post(state, "a", space_id, post_id)
-    print("  a (host) caught e's post up over the member path ✓")
-    state["gfs_member_publish_strict_epoch"] = int(epoch)
-    _save(state)
-    print(
-        "gfs-member-publish-strict: ok (anonymous member publish, the one mode; "
-        "the identified route is gone)"
-    )
+    raise SystemExit(f"e never saw posts_access={level} within 60 s")
 
 
 def _check_private_channel(state: dict, failures: list[str], cap) -> None:
@@ -9744,171 +8849,76 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
 
 
 def cmd_gfs_follower_comment() -> None:
-    """Followers are members with a read-only role (owner decision
-    2026-11-17): a follower household comments under the space's switch,
-    with the same cert and writer key a comment-only member holds.
+    """v_96 P4 — a GFS-reached follower comments like a member, over the
+    global space's opaque channel, under the switch; its own comment's
+    delete needs no switch (owner decision F6).
 
-    Prereqs: ``gfs-invite-link`` — e holds a link-joined FOLLOWER seat on a's
-    third (global) space (``gfs_invite_follower_space_id``).
+    Prereqs: ``gfs-global-channel`` — a's global space, b a member (paired
+    with a), e a follower reached only through the GFS, both seated on the
+    space's channel.
 
-    Sequence:
-    0. a opens the space to readers (``allow_subscribers``, left on): only a
-       publicly readable space is published over a GFS. d subscribes to it
-       over the GFS (left subscribed).
-    1. a turns ``allow_subscriber_comment`` on. e gets its credentials alone
-       (a snapshot with no roster entry): a ``comment`` cert and the writer
-       group key (e's ``space_keys``).
-    2. a posts; e receives it.
-    3. e comments — the normal member path: a (a member household) holds
-       the comment, e publishes it anonymously over the GFS (``POST
-       /gfs/member-publish-anon`` 200), and d — a GFS subscriber with no
-       seat, subscribed in step 0 — holds it too.
-    4. a turns the switch off: ONE rotation (a's content epoch moves on), and
-       e's next comment is refused — at e, or a never holds it. The comment
-       switch is left off (its default).
+    b posts; a and e hold it. Then :func:`_follower_comment_round` with host a,
+    follower e and members a + b: switch on → e's reader cert (and the
+    channel writer key); e's comment reaches a and b — b over the channel
+    (e publishes it anonymously, ``POST /gfs/channels/publish-anon``), named
+    from the roster; switch off → one rotation, e's next comment 403; e
+    deletes its first comment with the switch off → a and b drop it. The
+    GFS never sees the comment's text.
     """
     state = _load()
     if not state or not _gfs_alive(state):
-        raise SystemExit("run the gfs chain through 'gfs-invite-link' first")
-    space_id = state.get("gfs_invite_follower_space_id")
+        raise SystemExit("run the gfs chain through 'gfs-global-channel' first")
+    space_id = state.get("gfs", {}).get("global_channel_space_id")
     if not space_id:
-        raise SystemExit("run 'gfs-invite-link' first (it seats e as a follower)")
-    a = state["instances"]["a"]
-    a_base = f"http://127.0.0.1:{a['port']}"
-
-    def _features(what: str, **features: bool) -> None:
-        s, patched = _request(
-            f"{a_base}/api/spaces/{space_id}",
-            token=a["token"],
-            method="PATCH",
-            body={"features": features},
-        )
-        _must(what, s, patched, ok=(200,))
-
-    def _epoch() -> int:
-        rows = _rows(
-            "a", "SELECT MAX(epoch) FROM space_keys WHERE space_id = ?", (space_id,)
-        )
-        return int(rows[0][0])
-
-    # 0–1. Readers (d subscribes over the GFS), then the switch: e's
-    #      credentials arrive alone.
-    _features("a opens the follower space to readers", allow_subscribers=True)
-    d = state["instances"]["d"]
-    d_base = f"http://127.0.0.1:{d['port']}"
-    deadline = time.monotonic() + 60.0
-    sub: object = None
-    while time.monotonic() < deadline:
-        _request(f"{d_base}/api/public_spaces/refresh", token=d["token"], method="POST")
-        time.sleep(3.0)
-        s, sub = _request(
-            f"{d_base}/api/spaces/{space_id}/subscribe", token=d["token"], method="POST"
-        )
-        if s == 200 and isinstance(sub, dict) and sub.get("subscribed"):
-            break
-    else:
-        raise SystemExit(
-            f"gfs-follower-comment: d could not subscribe to the space over "
-            f"the GFS within 60 s (last answer {sub!r})"
-        )
-    print("  d reads the space through the GFS (a subscriber, no seat) ✓")
-    _features("a turns follower comments on", allow_subscriber_comment=True)
-    rows = _poll_rows(
-        "e",
-        "SELECT writer_cert FROM space_keys WHERE space_id = ? "
-        "AND writer_cert IS NOT NULL AND writer_key IS NOT NULL "
-        "ORDER BY epoch DESC LIMIT 1",
-        (space_id,),
-        bool,
-        what="e never stored its comment cert and writer key",
+        raise SystemExit("run 'gfs-global-channel' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    _wait_for_gfs_ws(a["instance_id"], timeout=120.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=120.0)
+    st, post = _as(
+        state,
+        "b",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": f"Followers may comment — {time.time_ns()}"},
     )
-    scope = json.loads(rows[0][0]).get("scope")
-    if scope != "comment":
-        raise SystemExit(
-            f"gfs-follower-comment: e stored a {scope!r} cert, expected the "
-            "'comment' cert a comment-only member holds"
+    post_id = _must("gfs-follower-comment: b posts", st, post, ok=(201,))["id"]
+    for label in ("a", "e"):
+        _poll_rows(
+            label,
+            "SELECT 1 FROM space_posts WHERE id = ?",
+            (post_id,),
+            bool,
+            what=f"gfs-follower-comment: {label} never held b's post",
         )
-    print("  switch on: e holds a comment cert and the writer key ✓")
-
-    # 2.
-    s, post = _request(
-        f"{a_base}/api/spaces/{space_id}/posts",
-        token=a["token"],
-        method="POST",
-        body={"type": "text", "content": f"Followers may comment — {time.time_ns()}"},
-    )
-    post_id = _must("a posts in the follower space", s, post, ok=(201,))["id"]
-    _await_space_post(state, "e", space_id, post_id)
-    _await_space_post(state, "d", space_id, post_id)
-
-    def _comment(text: str) -> tuple[int, object]:
-        return _e_request(
-            state,
-            "POST",
-            f"/api/spaces/{space_id}/posts/{post_id}/comments",
-            {"content": text},
-        )
-
-    def _a_holds(comment_id: str) -> bool:
-        return bool(
-            _rows("a", "SELECT 1 FROM space_post_comments WHERE id = ?", (comment_id,))
-        )
-
-    # 3. The normal member path: direct to a, and over the GFS to d.
     gfs_off = _gfs_log_size()
-    st, body = _comment(f"A follower's comment — {time.time_ns()}")
-    first = _must("e (a follower) comments", st, body, ok=(200, 201))["id"]
-    _poll_rows(
-        "a",
-        "SELECT 1 FROM space_post_comments WHERE id = ?",
-        (first,),
-        bool,
-        what="a never held e's follower comment",
-    )
-    _poll_rows(
-        "d",
-        "SELECT 1 FROM space_post_comments WHERE id = ?",
-        (first,),
-        bool,
-        what="d (a GFS subscriber) never held e's follower comment",
+    text = _follower_comment_round(
+        state,
+        what="gfs-follower-comment",
+        host="a",
+        follower="e",
+        space_id=space_id,
+        post_id=post_id,
+        members=("a", "b"),
     )
     anon = [
         line
-        for line in _gfs_log_lines_matching("/gfs/member-publish-anon", offset=gfs_off)
+        for line in _gfs_log_lines_matching(
+            "/gfs/channels/publish-anon", offset=gfs_off
+        )
         if "POST" in line and '" 200 ' in line
     ]
     if not anon:
         raise SystemExit(
-            "gfs-follower-comment: the GFS log shows no accepted anonymous "
+            "gfs-follower-comment: the GFS log shows no accepted channel "
             "publish for e's comment"
         )
-    print("  e's comment reached a directly and d over the GFS ✓")
-
-    # 4. Switch off: one rotation, and the next comment is refused.
-    before = _epoch()
-    _features("a turns follower comments off", allow_subscriber_comment=False)
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline and _epoch() <= before:
-        time.sleep(1.0)
-    after = _epoch()
-    if after != before + 1:
-        raise SystemExit(
-            f"gfs-follower-comment: switch off moved a's content epoch "
-            f"{before} → {after}, expected exactly one rotation"
-        )
-    time.sleep(5.0)
-    st, body = _comment(f"After the switch went off — {time.time_ns()}")
-    third = body.get("id") if isinstance(body, dict) else None
-    time.sleep(10.0)
-    if third and _a_holds(third):
-        raise SystemExit(
-            "gfs-follower-comment: a holds e's comment made after follower "
-            "comments were turned off"
-        )
+    log_text = "\n".join(_gfs_log_lines_matching("", offset=gfs_off))
+    if text in log_text:
+        raise SystemExit("gfs-follower-comment: the GFS log holds a comment's text")
     print(
-        "gfs-follower-comment: ok (switch on → comment cert + writer key, the "
-        "comment reached a and the GFS subscriber d; switch off → one rotation "
-        f"(epoch {before} → {after}), e's next comment refused, HTTP {st})"
+        "gfs-follower-comment: ok (a GFS follower comments over the channel "
+        "under the switch, named from the roster; switch off → one rotation, "
+        "refused; its own delete reaches a and b with the switch off)"
     )
 
 
@@ -9919,8 +8929,8 @@ def cmd_gfs_private_channel() -> None:
     an OPAQUE channel every member household subscribes to — and the server
     never learns the space.
 
-    Prereqs: the gfs chain through ``gfs-member-publish-strict`` (a and e
-    are GFS clients; e is paired with nobody; a↔b are paired).
+    Prereqs: ``pair`` (a↔b), ``gfs-up`` + ``gfs-pair`` (a and e are GFS
+    clients; e is paired with nobody).
 
     Sequence:
     1. b (paired with a) becomes a GFS client too, if it is not one yet.
@@ -9950,7 +8960,7 @@ def cmd_gfs_private_channel() -> None:
     """
     state = _load()
     if not state or not _gfs_alive(state):
-        raise SystemExit("run the gfs chain through 'gfs-member-publish-strict' first")
+        raise SystemExit("run 'pair' + 'gfs-up' + 'gfs-pair' first")
     a = state["instances"]["a"]
     b = state["instances"]["b"]
     e = state["instances"]["e"]
@@ -10706,14 +9716,14 @@ def cmd_gfs_down() -> None:
     print("gfs-down: ok")
 
 
-# ─── Steps: gfs-b-up / gfs-b-down / gfs-multi-listing (v_57) ──────────────
+# ─── Steps: gfs-b-up / gfs-b-down (v_57) ───────────────────────────────────
 
 #: A second, independent GFS (own data dir, own identity key) next to the
 #: main one on 18765 — the cluster steps use 18770-18772.
 GFS_B_PORT = 18767
 GFS_B_DIR = ROOT / "gfs-b"
 
-#: Harness-only prelude for household d in ``gfs-multi-listing``. A member
+#: Harness-only prelude for household d in ``gfs-private-channel-multi``. A member
 #: drops an owner-listed server on a private / loopback address it never
 #: connected to, and the pinned session refuses any non-public address —
 #: both on purpose (an owner's list must never aim a member at its own
@@ -10995,323 +10005,6 @@ def _pair_with(state: dict, label: str, base_url: str) -> dict:
     return _must(f"{label} connects to {base_url}", st, resp, ok=(201,))
 
 
-@_offline_step
-def cmd_gfs_multi_listing() -> None:
-    """v_57: every GFS on the owner's list gets every item — a follower on
-    GFS B alone sees what a member registered only on GFS A published while
-    the host is offline, and B never learns who that member is.
-
-    Prereqs: ``up`` → ``pair`` → ``gfs-up`` → ``gfs-pair`` (a, d, e on A) →
-    ``gfs-b-up``. Runs after the rest of the gfs chain (it moves e off A for
-    a while and restarts a and d), before ``verify``.
-
-    1. a and e connect to B. a creates a global space, publicly
-       readable, and lists it on A and on B (owner selection, ``PUT
-       /api/spaces/{id}/gfs-servers``). Both servers
-       list it and pin the epoch's writer key (the first-listing notice).
-    2. a invites d (paired, registered on A only); d accepts. d holds the
-       owner's signed list naming A and B, and the writer key (every v_90
-       writer of a publicly readable space).
-    3. d restarts with loopback treated as public (the demo's B is on
-       127.0.0.1 — see :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`).
-    4. e leaves A, discovers the space on B and follows it there only.
-    5. a goes offline. d posts, comments and reacts.
-    6. e receives all three — B is the only server it follows on. B holds no
-       ``client_instances`` row for d, never got an identified member
-       publish, and its log names neither d nor the content.
-    7. Clean-up: a and d restart normally; e reconnects to A.
-    """
-    state = _load()
-    if not state or not _gfs_alive(state):
-        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
-    if not _gfs_b_alive(state):
-        raise SystemExit("run 'gfs-b-up' first")
-    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
-    b_url = state["gfs_b"]["base_url"]
-    a_url = f"http://127.0.0.1:{GFS_PORT}"
-    d_iid = d["instance_id"]
-    d_pk = _rows("d", "SELECT identity_public_key FROM instance_identity")[0][0]
-    d_leaks = (
-        d_iid,
-        d_pk,
-        base64.urlsafe_b64encode(bytes.fromhex(d_pk)).decode().rstrip("="),
-    )
-
-    # 1. a and e connect to B; a lists a new global space on A and B.
-    a_b = _pair_with(state, "a", b_url)
-    e_b = _pair_with(state, "e", b_url)
-    print(f"  a and e connected to GFS B ({b_url}) ✓")
-    st, space = _as(
-        state,
-        "a",
-        "POST",
-        "/api/spaces",
-        {
-            "name": "Two servers",
-            "description": "v_57 multi-GFS listing",
-            "space_type": "global",
-            # Listed on A at creation (#874); the owner's selection below adds B.
-            "gfs_ids": [state["gfs"]["pairings"]["a"]["id"]],
-            "join_mode": "invite_only",
-        },
-    )
-    space_id = _must("a creates the global space", st, space, ok=(201,))["id"]
-    st, body = _as(
-        state,
-        "a",
-        "PATCH",
-        f"/api/spaces/{space_id}",
-        {"features": {"allow_subscribers": True}},
-    )
-    _must("a makes it publicly readable", st, body)
-    a_a_id = state["gfs"]["pairings"]["a"]["id"]
-    st, body = _as(
-        state,
-        "a",
-        "PUT",
-        f"/api/spaces/{space_id}/gfs-servers",
-        {"gfs_ids": [a_a_id, a_b["id"]]},
-    )
-    body = _must("a lists the space on GFS A and B", st, body)
-    if sorted(body.get("listed") or []) != sorted([a_a_id, a_b["id"]]):
-        raise SystemExit(f"gfs-multi-listing: owner selection answered {body!r}")
-    for name, rows_of in (("A", _gfs_rows), ("B", _gfs_b_rows)):
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            rows = rows_of(
-                "SELECT writer_key_epoch FROM global_spaces WHERE space_id=?",
-                (space_id,),
-            )
-            if rows and rows[0][0] is not None:
-                break
-            time.sleep(2.0)
-        else:
-            raise SystemExit(
-                f"gfs-multi-listing: GFS {name} lists no space {space_id} with a "
-                f"pinned writer key within 60 s (rows {rows!r}) — check "
-                f"{_instance_dir('a') / 'log.txt'} for 'epoch notice'"
-            )
-    print("  the space is listed on A and B, writer key pinned on both ✓")
-
-    # 2. d joins as a member; it holds the owner's list and the writer key.
-    #    The key goes only to a household a KNOWS runs v_57, so a and d
-    #    must be paired (the canonical gfs chain leaves them mesh-only;
-    #    ``relay-pair`` would pair them too) and have exchanged versions.
-    if d_iid not in _peer_ids(a):
-        # :func:`_pair_two`, but each call waits out a 429 on its own: the
-        # ``/api/pairing/*`` bucket is 5 calls / 60 s, and restarting the
-        # whole handshake after a refused confirm would accept twice.
-        # Patient calls: run soon after ``pair``, a's /api/pairing/* bucket
-        # may still be full — each call waits out its 429 (Retry-After or
-        # a bounded backoff) and is retried as is, never the whole handshake.
-        st, qr = _as_patient(state, "a", "POST", "/api/pairing/initiate")
-        qr = _must("initiate(a→d)", st, qr, ok=(201,))
-        st, ack = _as_patient(state, "d", "POST", "/api/pairing/accept", qr)
-        ack = _must("accept(d)", st, ack)
-        st, conf = _as_patient(
-            state,
-            "a",
-            "POST",
-            "/api/pairing/confirm",
-            {"token": ack["token"], "verification_code": ack["verification_code"]},
-        )
-        _must("confirm(a→d)", st, conf)
-        print("  paired a ↔ d")
-    _poll_rows(
-        "a",
-        "SELECT proto_version FROM remote_instances WHERE id=?",
-        (d_iid,),
-        lambda rows: bool(rows) and int(rows[0][0] or 0) >= 57,
-        what="a never learned that d runs v_57",
-        timeout=120.0,
-    )
-    st, inv = _as(
-        state,
-        "a",
-        "POST",
-        f"/api/spaces/{space_id}/remote-invites",
-        {"invitee_instance_id": d_iid, "invitee_user_id": d["user_id"]},
-    )
-    _must("a invites d", st, inv, ok=(201,))
-    time.sleep(4)
-    _accept_remote_invite(state, "d", space_id)
-    _poll_rows(
-        "d",
-        "SELECT gfs_servers FROM spaces WHERE id=?",
-        (space_id,),
-        lambda rows: bool(rows) and rows[0][0] and rows[0][0].count("inbox_url") == 2,
-        what="d never stored the owner's two-server list",
-        timeout=90.0,
-    )
-    _poll_rows(
-        "d",
-        "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
-        (space_id,),
-        bool,
-        what="d never got the writer key of the space (v_90)",
-        timeout=90.0,
-    )
-    print("  d joined: holds the owner's list (A + B) and the writer key ✓")
-
-    # 3. d restarts treating loopback as public (B is on 127.0.0.1).
-    _kill_household("d", d)
-    state["instances"]["d"]["pid"] = _spawn_loopback_public("d", d["port"])
-    _save(state)
-    _wait_ready(d["port"])
-    print("  d restarted (loopback treated as public — harness-only shim) ✓")
-
-    # 4. e follows on B only.
-    e_a_id = state["gfs"]["pairings"]["e"]["id"]
-    st, body = _as(state, "e", "DELETE", f"/api/gfs/connections/{e_a_id}")
-    _must("e leaves GFS A", st, body, ok=(200, 204))
-    _as(state, "e", "POST", "/api/public_spaces/refresh")
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        st, listing = _as(state, "e", "GET", "/api/public_spaces")
-        if st == 200 and isinstance(listing, list):
-            if any(row.get("space_id") == space_id for row in listing):
-                break
-        _as(state, "e", "POST", "/api/public_spaces/refresh")
-        time.sleep(3.0)
-    else:
-        raise SystemExit(
-            f"gfs-multi-listing: e (on GFS B only) never discovered {space_id}"
-        )
-    st, sub = _as(state, "e", "POST", f"/api/spaces/{space_id}/subscribe")
-    _must("e follows the space (via B)", st, sub)
-    _poll_rows(
-        "e",
-        "SELECT 1 FROM space_keys WHERE space_id=?",
-        (space_id,),
-        bool,
-        what="e never got the space's content key over B",
-        timeout=90.0,
-    )
-    if _gfs_rows(
-        "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?",
-        (space_id, e["instance_id"]),
-    ):
-        raise SystemExit("gfs-multi-listing: e holds a follower seat on GFS A")
-    print("  e follows the space on GFS B only, content key in hand ✓")
-
-    # 5. a offline; d posts, comments and reacts.
-    _kill_household("a", a)
-    b_off = _gfs_b_log_size()
-    content = f"Posted through every listed GFS — {time.time_ns()}"
-    st, post = _as(
-        state,
-        "d",
-        "POST",
-        f"/api/spaces/{space_id}/posts",
-        {"type": "text", "content": content},
-    )
-    post_id = _must("d posts with the host offline", st, post, ok=(201,))["id"]
-    comment_text = f"And a comment — {time.time_ns()}"
-    st, comment = _as(
-        state,
-        "d",
-        "POST",
-        f"/api/spaces/{space_id}/posts/{post_id}/comments",
-        {"content": comment_text},
-    )
-    comment_id = _must("d comments", st, comment, ok=(200, 201))["id"]
-    st, body = _as(
-        state,
-        "d",
-        "POST",
-        f"/api/spaces/{space_id}/posts/{post_id}/reactions",
-        {"emoji": "🛰"},
-    )
-    _must("d reacts", st, body, ok=(200, 201))
-
-    # 6. e receives everything via B.
-    _poll_rows(
-        "e",
-        "SELECT content FROM space_posts WHERE id=?",
-        (post_id,),
-        lambda rows: bool(rows) and rows[0][0] == content,
-        what=f"e never received d's post {post_id} over GFS B",
-        timeout=90.0,
-    )
-    _poll_rows(
-        "e",
-        "SELECT content FROM space_post_comments WHERE id=? AND deleted=0",
-        (comment_id,),
-        lambda rows: bool(rows) and rows[0][0] == comment_text,
-        what="e never received d's comment over GFS B",
-        timeout=90.0,
-    )
-    _poll_rows(
-        "e",
-        "SELECT reactions FROM space_posts WHERE id=?",
-        (post_id,),
-        lambda rows: bool(rows) and "🛰" in (rows[0][0] or ""),
-        what="e never received d's reaction over GFS B",
-        timeout=90.0,
-    )
-    print("  e (on B only) received d's post, comment and reaction ✓")
-    if _gfs_b_rows("SELECT 1 FROM client_instances WHERE instance_id=?", (d_iid,)):
-        raise SystemExit("gfs-multi-listing: GFS B holds a client row for d")
-    b_log = _gfs_b_log_text(b_off)
-    if "POST /gfs/member-publish-anon" not in b_log:
-        raise SystemExit("gfs-multi-listing: no anonymous member publish reached GFS B")
-    if "POST /gfs/member-publish HTTP" in b_log:
-        raise SystemExit(
-            "gfs-multi-listing: an IDENTIFIED member publish reached GFS B"
-        )
-    for leak in (*d_leaks, content, comment_text):
-        if leak in b_log:
-            raise SystemExit(
-                f"gfs-multi-listing: GFS B's log names d or the content ({leak[:16]!r})"
-            )
-    print(
-        "  GFS B: no client row for d, only anonymous publishes, and its log "
-        "names neither d nor the content ✓"
-    )
-
-    # 7. Clean-up for the rest of the chain.
-    _kill_household("d", d)
-    state["instances"]["d"]["pid"] = _spawn("d", d["port"])
-    state["instances"]["a"]["pid"] = _spawn("a", a["port"])
-    _save(state)
-    _wait_ready(d["port"])
-    _wait_ready(a["port"])
-    again = _pair_with(state, "e", a_url)
-    # A fresh connection queues every relayed envelope until its socket is
-    # up: the next step must not race it.
-    _wait_gfs_connected(state, "e", a_url)
-    state["gfs"]["pairings"]["e"] = {
-        "id": again["id"],
-        "gfs_instance_id": again["gfs_instance_id"],
-        "status": again["status"],
-    }
-    state["gfs_multi_listing"] = {
-        "space_id": space_id,
-        "post_id": post_id,
-        "e_b_connection": e_b["id"],
-    }
-    _save(state)
-    print("gfs-multi-listing: ok (a member reached every listed GFS anonymously)")
-
-
-def _check_multi_listing(state: dict, failures: list[str]) -> None:
-    """v_57 tripwire for ``verify``: d still holds the space's writer
-    key and the owner's two-server list; e still holds d's post."""
-    info = state["gfs_multi_listing"]
-    space_id = info["space_id"]
-    if not _rows(
-        "d",
-        "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
-        (space_id,),
-    ):
-        failures.append("d: no writer key for the multi-GFS space (v_57 / v_90)")
-    rows = _rows("d", "SELECT gfs_servers FROM spaces WHERE id=?", (space_id,))
-    if not rows or not rows[0][0] or rows[0][0].count("inbox_url") != 2:
-        failures.append("d: the owner's GFS list does not name both servers")
-    if not _rows("e", "SELECT 1 FROM space_posts WHERE id=?", (info["post_id"],)):
-        failures.append("e: lost d's post from the multi-GFS step")
-
-
 # ─── Step: gfs-private-channel-multi (v_57) ────────────────────────────────
 
 
@@ -11377,7 +10070,6 @@ def cmd_gfs_private_channel_multi() -> None:
     connected to — while a GFS the owner did not pick never hears of it.
 
     Prereqs: the gfs chain (a, d, e on GFS A; a ↔ d paired) + ``gfs-b-up``;
-    runs after ``gfs-multi-listing`` (reuses its B connections when there)
     and before ``verify``.
 
     1. a and e hold connections to A and B. a creates a TRUSTED private
@@ -11409,8 +10101,7 @@ def cmd_gfs_private_channel_multi() -> None:
     d_iid = d["instance_id"]
     if d_iid not in _peer_ids(a):
         raise SystemExit(
-            "gfs-private-channel-multi: a and d are not paired — run "
-            "'gfs-multi-listing' (or 'relay-pair') first"
+            "gfs-private-channel-multi: a and d are not paired — run 'relay-pair' first"
         )
     d_pk = _rows("d", "SELECT identity_public_key FROM instance_identity")[0][0]
 
@@ -12775,6 +11466,17 @@ def cmd_verify() -> None:
     else:
         print("  v_95 sync pages gate in place ✓")
     failures.extend(_verify_sync_page(state))
+    # v_96 — subscriber seats: a follow is an auto-approved join with role
+    # subscriber, and the reader cert / subscriber grant go only to a
+    # household at >= v_96, so the OURS round-trip above is what proves
+    # every pair can follow.
+    if int(_Cap.MIN_FOR_SUBSCRIBER_SEATS) != 96 or _OURS < 96:
+        failures.append(
+            "MIN_FOR_SUBSCRIBER_SEATS moved off v_96 (or OURS fell below it) — "
+            "no household could follow a space with one seat on every path"
+        )
+    else:
+        print("  v_96 subscriber seats gate in place ✓")
     # v_96 — moment reach: signed reach, the relay clamp, hops 4–5 only
     # toward households that look that far (moment_look_hops, in memory,
     # re-learned by the startup capability resync).
@@ -12821,8 +11523,7 @@ def cmd_verify() -> None:
         print("  v_56 space-sync series rows gate in place ✓")
     # v_57 — members publish to every GFS on the owner's list (anonymous to
     # servers they never joined; since v_90 the only member publish). The OURS
-    # round-trip above proves every pair advertises >= v_57. Pin it, and when
-    # ``gfs-multi-listing`` ran, check what it left behind.
+    # round-trip above proves every pair advertises >= v_57. Pin it.
     # v_64 — a public moment's sealed, signed ``sent_at``: followers refuse a
     # replayed envelope. Nothing is gated between households (author → GFS →
     # follower); the OURS round-trip above proves every pair is at >= v_64,
@@ -13161,8 +11862,11 @@ def cmd_verify() -> None:
                 "highlight-audience: c lost a's re-widened highlight "
                 f"({hla['caption']!r})"
             )
-        elif not stamps or not stamps[0][0] or not stamps[0][1] or not (
-            stamps[0][1] > stamps[0][0]
+        elif (
+            not stamps
+            or not stamps[0][0]
+            or not stamps[0][1]
+            or not (stamps[0][1] > stamps[0][0])
         ):
             failures.append(
                 "highlight-audience: c's stamp doesn't order the re-widen after "
@@ -13218,15 +11922,6 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_90 one anonymous GFS publish mode gate in place ✓")
-    if state.get("gfs_multi_listing"):
-        before = len(failures)
-        _check_multi_listing(state, failures)
-        if len(failures) == before:
-            print(
-                "  v_57 multi-GFS listing round-tripped (d keyed, e holds d's post) ✓"
-            )
-    else:
-        print("  (v_57 multi-listing check skipped — run 'gfs-multi-listing')")
     if state.get("gfs_private_channel_multi"):
         before = len(failures)
         _check_private_channel_multi(state, failures)
@@ -13309,14 +12004,6 @@ def cmd_verify() -> None:
         _check_writer_cert_on_e(state, failures, _Cap)
     else:
         print("  (v_49 writer-cert check skipped — run 'gfs-invite-link')")
-    # 0d-bis. v_50 strict member publish: the writer GROUP key the host
-    #     delivered to link-joined **e** for the strict epoch round-trips —
-    #     stored KEK-wrapped, its authority cert verifying against e's pin
-    #     and its seed matching the pinned writer key.
-    if state.get("gfs_member_publish_strict_epoch") is not None:
-        _check_writer_key_on_e(state, failures, _Cap)
-    else:
-        print("  (v_50 writer-key check skipped — run 'gfs-member-publish-strict')")
     # 0d-ter. v_51 private-space channel: e and b still point the private
     #     space at the channel a owns, e holds a KEK-wrapped grant, and the
     #     GFS never stored the space id.
@@ -13762,7 +12449,9 @@ def cmd_verify() -> None:
         # v_69 — c's totals reach b (paired) and d (two hops, relayed).
         failures.extend(_verify_moment_totals(state, carol_moment["id"]))
     else:
-        print("  (v_67 routed-reaction check skipped — c's moment rate-limited or no d)")
+        print(
+            "  (v_67 routed-reaction check skipped — c's moment rate-limited or no d)"
+        )
 
     # 3c-ter. Deletes stick. c replies to its own moment (replies are exempt
     #     from the 15-min rate limit, so verify can re-run), the reply relays
@@ -14634,215 +13323,6 @@ def cmd_verify() -> None:
             body={"hide_highlights": False},
         )
 
-    # 13. GFS public-space content — the opt-in ``gfs-*`` chain. Only
-    #    asserted when it actually ran; the chain is excluded from ``all``
-    #    because booting a GFS is heavyweight.
-    if "gfs_space_id" in state:
-        gfs_space_id = state["gfs_space_id"]
-        d = state["instances"]["d"]
-        c = state["instances"]["c"]
-
-        # 13a. d's mirrored authority pin still matches a's own. A pin that
-        #      drifts (or gets re-``save``d away by a later metadata refresh)
-        #      silently kills every relayed frame at the subscriber, because
-        #      ``SpacePublicInbound._verify_authority`` checks against exactly
-        #      this column.
-        d_pin_rows = _rows(
-            "d",
-            "SELECT identity_public_key FROM spaces WHERE id = ?",
-            (gfs_space_id,),
-        )
-        a_pin_rows = _rows(
-            "a",
-            "SELECT identity_public_key FROM spaces WHERE id = ?",
-            (gfs_space_id,),
-        )
-        if not d_pin_rows:
-            failures.append(
-                f"d: local 'spaces' mirror for GFS space {gfs_space_id} is gone",
-            )
-        elif not a_pin_rows:
-            failures.append(
-                f"a: lost its own 'spaces' row for {gfs_space_id}",
-            )
-        elif d_pin_rows[0][0] != a_pin_rows[0][0]:
-            failures.append(
-                f"d: mirrored identity_public_key for {gfs_space_id} no longer "
-                f"matches a's ({d_pin_rows[0][0]!r} != {a_pin_rows[0][0]!r})",
-            )
-        else:
-            print("  d's mirrored space-authority pin still matches a's ✓")
-
-        # 13b. d still sees every post relayed over the GFS — the pre-rotation
-        #      one AND (when ``gfs-space-rotate`` ran) the post-rotation one.
-        #      A regression that only re-keys ``space_instances`` members
-        #      leaves the second one missing while the first still reads.
-        expected_posts = {
-            k: state[k]
-            for k in ("gfs_space_post_id", "gfs_space_rotated_post_id")
-            if k in state
-        }
-        s, body = _space_feed_all(d["port"], d["token"], gfs_space_id)
-        if s != 200:
-            failures.append(
-                f"d: GET /api/spaces/{gfs_space_id}/feed failed: HTTP {s}",
-            )
-        else:
-            rows = body if isinstance(body, list) else (body.get("posts") or [])
-            have = {p.get("id") for p in rows}
-            for key, pid in expected_posts.items():
-                if pid in have:
-                    print(f"  d still sees {key}={pid[:8]}… ✓")
-                else:
-                    failures.append(
-                        f"d: GFS-relayed post {pid} ({key}) missing from the "
-                        f"space feed (got {sorted(have)})",
-                    )
-
-        # 13c. c is the negative control — never a member, never a subscriber,
-        #      never GFS-paired. It must hold NONE of the space content. This
-        #      is the §"non-member households MUST NOT see space content"
-        #      hard rule, re-asserted at the end of the run.
-        for key, pid in expected_posts.items():
-            if _rows("c", "SELECT id FROM space_posts WHERE id = ?", (pid,)):
-                failures.append(
-                    f"c: holds GFS space post {pid} ({key}) — non-member "
-                    "household received space content",
-                )
-            else:
-                print(f"  c still does not hold {key} ✓")
-        s, c_feed = _request(
-            f"http://127.0.0.1:{c['port']}/api/spaces/{gfs_space_id}/feed",
-            token=c["token"],
-        )
-        if s == 200:
-            rows = c_feed if isinstance(c_feed, list) else (c_feed.get("posts") or [])
-            leaked = {p.get("id") for p in rows} & set(expected_posts.values())
-            if leaked:
-                failures.append(
-                    f"c: space feed for {gfs_space_id} exposes {sorted(leaked)}",
-                )
-
-        # 13d. The setup-admin-authored post — the OTHER author-id shape. The
-        #      admin's user_id is username-anchored, a provisioned user's is
-        #      uuid4-anchored, and the relay's per-author self-cert
-        #      (``derive_user_id(author_pk, anchor_or_username) ==
-        #      author_user_id``) has to hold for both. A regression that mints
-        #      a synthetic admin id again drops this post at the subscriber
-        #      with "author verification failed" while erin's still arrives.
-        if "gfs_space_admin_post_id" in state:
-            admin_pid = state["gfs_space_admin_post_id"]
-            admin_uid = state["instances"]["a"]["user_id"]
-            s, body = _space_feed_all(d["port"], d["token"], gfs_space_id)
-            if s != 200:
-                failures.append(
-                    f"d: GET /api/spaces/{gfs_space_id}/feed failed: HTTP {s}",
-                )
-            else:
-                rows = body if isinstance(body, list) else (body.get("posts") or [])
-                mine = next((p for p in rows if p.get("id") == admin_pid), None)
-                if mine is None:
-                    failures.append(
-                        f"d: setup-admin GFS post {admin_pid} missing from the "
-                        f"space feed (got {sorted(p.get('id') for p in rows)})",
-                    )
-                elif mine.get("author") != admin_uid:
-                    failures.append(
-                        f"d: setup-admin GFS post {admin_pid} attributed to "
-                        f"{mine.get('author')!r}, expected {admin_uid!r}",
-                    )
-                else:
-                    print("  d still sees a's setup-admin GFS post ✓")
-            if _rows("c", "SELECT id FROM space_posts WHERE id = ?", (admin_pid,)):
-                failures.append(
-                    f"c: holds setup-admin GFS space post {admin_pid} — "
-                    "non-member household received space content",
-                )
-            else:
-                print("  c still does not hold the setup-admin GFS post ✓")
-
-        # 13e. The relay is IDENTITY-FREE (``gfs-space-post`` step 6). Re-read
-        #      from d's own log: every ``gfs.relay.received`` record for this
-        #      space must name the space + event and nothing else. A ``from=``
-        #      back on that line means either the GFS started stamping the
-        #      relaying household onto the fan-out frame again or the receiver
-        #      started reading (and logging) the outer identity.
-        if "gfs_space_post_id" in state:
-            # Every log d wrote this run: later GFS steps respawn d, and the
-            # record is from gfs-space-post.
-            relay_lines = [
-                line
-                for line in _all_log_lines_matching("d", "gfs.relay.received:")
-                if f"space={gfs_space_id}" in line
-            ]
-            if not relay_lines:
-                failures.append(
-                    f"d: no 'gfs.relay.received: space={gfs_space_id}' record "
-                    "in any of d's logs",
-                )
-            else:
-                identified = [line for line in relay_lines if "from=" in line]
-                if identified:
-                    failures.append(
-                        "d: GFS relay record carries a 'from=' — the fan-out "
-                        f"frame is identity-bearing again: {identified!r}",
-                    )
-                else:
-                    print(
-                        f"  ✓ GFS relay identity-free ({len(relay_lines)} "
-                        "relay record(s) on d, none with 'from=')"
-                    )
-    else:
-        print(
-            "  GFS public-space content skipped — run 'gfs-space-subscribe' / "
-            "'gfs-space-post' / 'gfs-space-rotate' to exercise"
-        )
-
-    # 13f. A global space with followers OFF (``gfs-space-no-subscribers``):
-    #    still LISTED in the GFS directory, still unreadable by everyone else,
-    #    and still reported as not-readable on the wire. Gated on the step
-    #    having run — the whole gfs-* chain is opt-in.
-    if "gfs_no_subscribers_space_id" in state:
-        io_space_id = state["gfs_no_subscribers_space_id"]
-        io_post_id = state.get("gfs_no_subscribers_post_id")
-        s, payload = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/spaces")
-        if s != 200:
-            failures.append(f"GFS: GET /gfs/spaces failed: HTTP {s}")
-        else:
-            rows = payload.get("spaces", []) if isinstance(payload, dict) else []
-            row = next((sp for sp in rows if sp.get("space_id") == io_space_id), None)
-            if row is None:
-                failures.append(
-                    f"GFS: space {io_space_id} dropped out of the directory — "
-                    "a space with followers off must stay listed so people can "
-                    "discover it and ask for an invite",
-                )
-            elif row.get("allow_subscribers") is not False:
-                failures.append(
-                    f"GFS: space {io_space_id} now reports allow_subscribers="
-                    f"{row.get('allow_subscribers')!r} — nobody turned it on",
-                )
-            elif row.get("join_mode") != "open":
-                failures.append(
-                    f"GFS: space {io_space_id} reports join_mode="
-                    f"{row.get('join_mode')!r}, expected 'open' — the two "
-                    "directory dials are independent and both must round-trip",
-                )
-            else:
-                print("  the GFS still lists it, open-to-join and unreadable ✓")
-        if io_post_id:
-            for label in ("d", "c"):
-                if _rows(
-                    label, "SELECT id FROM space_posts WHERE id = ?", (io_post_id,)
-                ):
-                    failures.append(
-                        f"{label}: holds post {io_post_id} — content of a "
-                        "space that allows no followers reached a household "
-                        "that was never let in",
-                    )
-                else:
-                    print(f"  {label} still cannot see that post ✓")
-
     # 13g. §D2b invite-link durability (``gfs-invite-link`` /
     #    ``gfs-invite-link-content``). Everything the two steps proved has
     #    to still be true at the end of the run: the pair is a
@@ -15056,40 +13536,6 @@ def cmd_verify() -> None:
         else:
             print(f"  {_what} id is bound to its creator (v_36) ✓")
 
-    # 13x. ``gfs-space-follower-names`` (v_61): e, a follower that joined
-    #      after Erin's profile went out, still names her. Opt-in.
-    gsfn = state.get("gfs_space_follower_names")
-    if gsfn:
-        e = state["instances"]["e"]
-        s, body = _request(
-            f"http://127.0.0.1:{e['port']}/api/spaces/{gsfn['space_id']}/authors",
-            token=e["token"],
-        )
-        names = {r["user_id"]: r.get("display_name") for r in body} if s == 200 else {}
-        if names.get(gsfn["user_id"]) != ERIN_DISPLAY_NAME:
-            failures.append(f"e: new follower does not name Erin ({names!r})")
-        else:
-            print("  e (new follower) names Erin ✓")
-
-    # 13y. ``gfs-space-author-profile`` (v_60): d, a follower with no roster,
-    #      still names Erin with her bio from her published profile. Opt-in.
-    gsap = state.get("gfs_space_author_profile")
-    if gsap:
-        d = state["instances"]["d"]
-        s, body = _request(
-            f"http://127.0.0.1:{d['port']}/api/spaces/{gsap['space_id']}/authors",
-            token=d["token"],
-        )
-        rows = {r["user_id"]: r for r in body} if s == 200 else {}
-        got = rows.get(gsap["user_id"])
-        if not got or (got.get("display_name"), got.get("bio")) != (
-            ERIN_DISPLAY_NAME,
-            gsap["bio"],
-        ):
-            failures.append(f"d: GFS follower's author profile for Erin is {got!r}")
-        else:
-            print("  d names Erin from her published profile ✓")
-
     # 13z. ``gfs-moment-profile``: e (paired with nobody) still names a's
     #      user on the public moment by name and bio, never the id — and its
     #      follow row still holds the signed profile. Opt-in.
@@ -15220,6 +13666,13 @@ _LOG_BENIGN: tuple[str, ...] = (
     # surfaces.
     "outbox: ",
     " returned HTTP ",
+    # The GFS's one-address spread warning (``global_server/client_spread``:
+    # a 5-min window of >= 600 requests with one address above half). Every
+    # demo household reaches the GFS from 127.0.0.1, so a busy window of the
+    # GFS chain (invite links + member mesh + moderator parity) crosses the
+    # count by construction — the line is right for a real GFS behind one
+    # proxy and says nothing about the demo. Narrowed to its own text.
+    "GFS: one client address (127.0.0.1) made ",
     # libdatachannel native ICE state-machine status lines. The
     # harness intentionally configures STUN against an external
     # endpoint while the instances themselves talk loopback-only,
@@ -15233,6 +13686,16 @@ _LOG_BENIGN: tuple[str, ...] = (
     "juice: STUN server binding successful",
     "juice: Candidate gathering done",
     "juice: Using STUN server",
+    # A connectivity check of a PeerConnection that was just replaced
+    # (glare between two households dialling each other on loopback, or a
+    # rebuild): libjuice gets the old session's STUN request with the old
+    # ufrag, logs these two lines and drops it — no state change, the new
+    # session goes on. Taken un-named outside offline windows too (they
+    # were offline-only): they appear on code without any subscriber-seats
+    # change (sync-pages run, 2026-11-22) and this branch touches no RTC /
+    # transport code. "juice: Lost connectivity" stays offline-only.
+    "juice: STUN local ufrag check failed",
+    "juice: STUN message verification failed",
     # libjuice's single poll thread (conn_poll.c) builds its pollfd set
     # under the registry mutex, then polls without it. When one
     # PeerConnection closes (its UDP socket freed) and another is created
@@ -15269,7 +13732,7 @@ _LOG_BENIGN: tuple[str, ...] = (
     # in ``socialhome/federation/transport.py``.
     # SCTP stream reset failing while a peer's association is already
     # gone: steps that kill a household to simulate it going offline
-    # (e.g. ``gfs-member-publish`` stopping host a before ``verify``)
+    # (e.g. ``gfs-global-channel`` stopping host a before ``verify``)
     # leave its peers' DataChannels to be torn down against a dead
     # association, and libdatachannel logs the failed reset. Delivery
     # is unaffected (the step's own content checks prove it). Narrow
@@ -16717,7 +15180,9 @@ def cmd_highlight_audience() -> None:
             token=a["token"],
             method="POST",
             body={
-                "media_url": _upload_demo_image(a_url, token=a["token"], label="hl-aud"),
+                "media_url": _upload_demo_image(
+                    a_url, token=a["token"], label="hl-aud"
+                ),
                 "frame_type": "image",
                 "caption_text": "[a] highlight-audience first frame",
                 "audience_kind": "all_paired",
@@ -16776,7 +15241,9 @@ def cmd_highlight_audience() -> None:
         },
     )
     _must("highlight-audience narrowed frame(a)", s, resp, ok=(201,))
-    _wait("b got the narrowed frame", lambda: caption in _highlight_captions(state, "b"))
+    _wait(
+        "b got the narrowed frame", lambda: caption in _highlight_captions(state, "b")
+    )
     if _todays("c") is not None:
         raise SystemExit("highlight-audience: c holds the highlight after narrowing")
     print("  c never got the narrowed frame ✓")
@@ -17784,9 +16251,7 @@ def cmd_space_media_blob() -> None:
 
     # 5. Bytes should now exist on d's media path with the same
     #    filename + same content.
-    d_media_path = (
-        _instance_dir("d") / "media" / _received_name(space_id, c, filename)
-    )
+    d_media_path = _instance_dir("d") / "media" / _received_name(space_id, c, filename)
     if not d_media_path.is_file():
         raise SystemExit(
             f"space-media-blob: {filename} missing from d's media path "
@@ -19072,6 +17537,96 @@ def _chat_row_by_id(label: str, msg_id: str) -> dict | None:
     return dict(rows[0]) if rows else None
 
 
+def _follower_reads_like_a_member(state: dict, space_id: str, nonce: str, wait) -> None:
+    """P10 (owner 2026-11-26/27) — follower household d of Beta's space gets
+    what a member gets: b's zone, a's shared live location (4 dp), and a
+    signed sync page; its own location sharing is refused."""
+    inst = state["instances"]
+    a, b, d = inst["a"], inst["b"], inst["d"]
+    base = f"/api/spaces/{space_id}"
+
+    def call(info: dict, method: str, path: str, body: dict | None = None):
+        return _request(
+            f"http://127.0.0.1:{info['port']}{path}",
+            token=info["token"],
+            method=method,
+            body=body,
+        )
+
+    s, patched = call(b, "PATCH", base, {"features": {"location": True}})
+    _must("follower-parity: b turns the map on", s, patched, ok=(200,))
+    lat, lon = 47.3769, 8.5417
+    zone_name = f"Salon zone {nonce}"
+    s, zone = call(
+        b,
+        "POST",
+        f"{base}/zones",
+        {"name": zone_name, "latitude": lat, "longitude": lon, "radius_m": 300},
+    )
+    _must("follower-parity: b creates a zone", s, zone, ok=(200, 201))
+
+    def d_zone_names() -> set[str]:
+        s, body = call(d, "GET", f"{base}/zones")
+        if s != 200:
+            return set()
+        rows = body.get("zones", body) if isinstance(body, dict) else body
+        return {z.get("name") for z in rows or []}
+
+    wait("follower d to hold b's zone", lambda: zone_name in d_zone_names(), 90.0)
+    print("  b's zone reaches follower d ✓")
+
+    s, on = call(a, "PATCH", f"{base}/members/me/location-sharing", {"enabled": True})
+    _must("follower-parity: a shares its location", s, on, ok=(200,))
+    s, _ = call(
+        a,
+        "POST",
+        "/api/presence/location",
+        {
+            "username": a["username"],
+            "latitude": lat,
+            "longitude": lon,
+            "accuracy_m": 10,
+            "zone_name": None,
+        },
+    )
+    if s not in (200, 204):
+        raise SystemExit(f"follower-parity: a's presence fix answered {s}")
+
+    def d_sees_a() -> bool:
+        s, body = call(d, "GET", f"{base}/presence")
+        if s != 200:
+            return False
+        return any(e.get("user_id") == a["user_id"] for e in body.get("entries", []))
+
+    wait("follower d to see a's shared location", d_sees_a, 90.0)
+    print("  a's shared location reaches follower d's map ✓")
+
+    s, refused = call(
+        d, "PATCH", f"{base}/members/me/location-sharing", {"enabled": True}
+    )
+    if s != 403:
+        raise SystemExit(f"follower-parity: d's own sharing answered {s} {refused!r}")
+    print("  d's own location sharing is refused (403) ✓")
+
+    def d_holds_page() -> bool:
+        return bool(
+            _rows("d", "SELECT 1 FROM space_sync_pages WHERE space_id=?", (space_id,))
+        )
+
+    deadline = time.monotonic() + 150.0
+    asked = 0
+    next_ask = 0.0
+    while not d_holds_page() and time.monotonic() < deadline:
+        if asked < 3 and time.monotonic() >= next_ask:
+            call(d, "POST", f"{base}/sync")  # a follower may ask too (P10)
+            asked += 1
+            next_ask = time.monotonic() + 20.0
+        time.sleep(1.0)
+    if not d_holds_page():
+        raise SystemExit("follower-parity: follower d never held a sync page")
+    print("  follower d holds a signed sync page of the space ✓")
+
+
 def cmd_space_chat() -> None:
     """Every space's members' chat across households (v_55).
 
@@ -19081,7 +17636,8 @@ def cmd_space_chat() -> None:
     1. **Follower household.** Beta mints a ``subscriber`` (Follower)
        invite link (``via: internal``) and Delta — paired with Beta only —
        redeems it over federation, so d sits in the space as a read-only
-       follower household. Its chat summary must say ``enabled: false``.
+       follower household. P10: its chat summary says ``enabled: true``,
+       ``can_post: false``, and a send from d is refused (403).
     2. a / b / c read their own chat summary (each household maps the
        space to its own conversation — no conversation id rides the wire).
     3. **Create.** a posts; b and c hold it (``SPACE_CHAT_MESSAGE_CREATED``).
@@ -19094,9 +17650,10 @@ def cmd_space_chat() -> None:
     7. **Moderator delete.** b — the space's owner — deletes c's reply;
        it is deleted (content gone) on a, b and c
        (``SPACE_CHAT_MESSAGE_DELETED``).
-    8. **Follower household gets nothing.** d holds no chat message of
-       this run (``only_instances`` limits fan-out to households with a
-       writer seat).
+    8. **Follower household reads like a member (P10).** d holds a's
+       message; b's zone reaches d; a's shared location reaches d's map;
+       d's own location sharing is refused (403); d holds a signed sync
+       page of the space (pushed or sent on its "Sync now").
     9. **v_55.** ``OURS`` is at least ``MIN_FOR_SPACE_CHAT`` and a, b and c
        see each other at it.
     """
@@ -19165,10 +17722,20 @@ def cmd_space_chat() -> None:
         lambda: all(d_is_follower_on(x) for x in ("a", "c")),
     )
     print("  b, a and c hold d's follower seat ✓")
+    # P10: a follower reads the chat, never posts.
     d_chat = _space_chat_conv("d", d, space_id)
-    if d_chat.get("enabled") is not False or d_chat.get("conversation_id"):
-        raise SystemExit(f"space-chat: follower d got a chat: {d_chat!r}")
-    print("  d (follower) sees no chat ✓")
+    if d_chat.get("enabled") is not True or d_chat.get("can_post") is not False:
+        raise SystemExit(f"space-chat: follower d's chat summary: {d_chat!r}")
+    s, refused = _request(
+        f"http://127.0.0.1:{d['port']}/api/conversations/"
+        f"{d_chat['conversation_id']}/messages",
+        token=d["token"],
+        method="POST",
+        body={"content": f"a follower must not post {nonce}"},
+    )
+    if s != 403:
+        raise SystemExit(f"space-chat: d's chat send answered {s} {refused!r}")
+    print("  d (follower) reads the chat, its send is refused (403) ✓")
 
     # 2. Every member household's own chat.
     convs: dict[str, str] = {}
@@ -19292,30 +17859,13 @@ def cmd_space_chat() -> None:
         wait(f"{x} to drop c's reply", gone)
     print("  b (owner) deletes c's reply; deleted on a, b and c ✓")
 
-    # 8. The follower household received nothing of the chat.
-    leaked = _rows(
-        "d",
-        "SELECT id, content FROM conversation_messages WHERE content LIKE ?",
-        (f"%{nonce}%",),
+    # 8. P10 — the follower household reads like a member.
+    wait(
+        "follower d to hold a's chat message",
+        lambda: _chat_row("d", d_chat["conversation_id"], hello) is not None,
     )
-    d_space_convs = _rows(
-        "d", "SELECT id FROM conversations WHERE space_id=?", (space_id,)
-    )
-    d_msgs = (
-        _rows(
-            "d",
-            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id=?",
-            (d_space_convs[0][0],),
-        )[0][0]
-        if d_space_convs
-        else 0
-    )
-    if leaked or d_msgs:
-        raise SystemExit(
-            f"space-chat: follower household d holds chat messages: "
-            f"{leaked!r} / {d_msgs} in its space chat"
-        )
-    print("  d (follower household) holds no chat message ✓")
+    print("  d (follower household) holds a's chat message ✓")
+    _follower_reads_like_a_member(state, space_id, nonce, wait)
 
     # 9. v_55.
     if _OURS < _Cap.MIN_FOR_SPACE_CHAT:
@@ -19394,7 +17944,11 @@ def cmd_space_reaction() -> None:
             token=inst[label]["token"],
         )
         feed = body if isinstance(body, list) else ((body or {}).get("posts") or [])
-        seen = next((p for p in feed if p.get("id") == post_id), None) if s == 200 else None
+        seen = (
+            next((p for p in feed if p.get("id") == post_id), None)
+            if s == 200
+            else None
+        )
         return {k: sorted(v) for k, v in ((seen or {}).get("reactions") or {}).items()}
 
     def converge(what: str, want: dict) -> None:
@@ -19482,7 +18036,9 @@ def cmd_space_poll_vote() -> None:
         method="POST",
         body={"question": "Which one?", "options": ["First", "Second"]},
     )
-    options = [o["id"] for o in _must(f"{step}: a adds a poll", s, made, ok=(201,))["options"]]
+    options = [
+        o["id"] for o in _must(f"{step}: a adds a poll", s, made, ok=(201,))["options"]
+    ]
 
     def wait(what: str, check, timeout: float = 45.0):
         deadline = time.time() + timeout
@@ -19571,7 +18127,7 @@ def cmd_space_poll_vote() -> None:
 
 
 def cmd_bazaar_ask() -> None:
-    """"Ask the seller" from the listing (v_74).
+    """ "Ask the seller" from the listing (v_74).
 
     Prereqs: ``space-chat`` (Beta's space: owner b, members a + c, d a
     follower household). Runs standalone after it.
@@ -19621,6 +18177,7 @@ def cmd_bazaar_ask() -> None:
         body={"features": {"bazaar": True}},
     )
     _must("bazaar on(b)", s, body)
+
     def bazaar_on(label: str) -> bool:
         rows = _rows(label, "SELECT feature_bazaar FROM spaces WHERE id=?", (space_id,))
         return bool(rows and rows[0][0])
@@ -19673,9 +18230,7 @@ def cmd_bazaar_ask() -> None:
     wait(
         "c to receive a's question",
         lambda: bool(
-            _rows(
-                "c", "SELECT 1 FROM conversation_messages WHERE content=?", (text,)
-            )
+            _rows("c", "SELECT 1 FROM conversation_messages WHERE content=?", (text,))
         ),
     )
     print("  a → Ask the seller → DM to c (paired) ✓")
@@ -19687,9 +18242,7 @@ def cmd_bazaar_ask() -> None:
         token=d["token"],
         method="POST",
     )
-    code = (
-        refused.get("error", {}).get("code") if isinstance(refused, dict) else None
-    )
+    code = refused.get("error", {}).get("code") if isinstance(refused, dict) else None
     if s != 403 or code != "SUBSCRIBER_READ_ONLY":
         raise SystemExit(f"bazaar-ask: follower d could ask: {s} {refused!r}")
     print("  d (follower) can't ask ✓")
@@ -19720,8 +18273,7 @@ def cmd_bazaar_ask() -> None:
                     f"(< {_Cap.MIN_FOR_BAZAAR_THREAD})"
                 )
     print(
-        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_THREAD} "
-        f"(OURS={_OURS}) ✓"
+        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_THREAD} (OURS={_OURS}) ✓"
     )
     state["bazaar_ask"] = {"post_id": post_id, "text": text}
     _save(state)
@@ -19822,8 +18374,11 @@ def cmd_app_group() -> None:
         if not hit or hit[0].get("groups") is not True:
             raise SystemExit(f"app-group: {node['username']} not offered for a group")
         picks.append(
-            {"instance_id": node["instance_id"], "user_ref": node["username"],
-             "is_local": False}
+            {
+                "instance_id": node["instance_id"],
+                "user_ref": node["username"],
+                "is_local": False,
+            }
         )
     # 2. Open the table.
     s, opened = api(a, "/groups", method="POST", body={"targets": picks})
@@ -19864,8 +18419,12 @@ def cmd_app_group() -> None:
         return g["state"] if g else None
 
     for label, node in (("b", b), ("c", c)):
-        wait(f"{label} to see the game start", lambda node=node: state_of(node) == "playing")
+        wait(
+            f"{label} to see the game start",
+            lambda node=node: state_of(node) == "playing",
+        )
         print(f"  app-group: {label} sees the game playing ✓")
+
     # 4b. Messages: one to everyone, one sealed to c's seat only.
     def me(node: dict) -> int:
         g = next((g for g in view(node) if g["session_id"] == sid), None)
@@ -19923,7 +18482,9 @@ def cmd_app_group() -> None:
     s, closed = api(a, f"/groups/{sid}/close", method="POST")
     _must("close(a)", s, closed)
     for label, node in (("b", b), ("c", c)):
-        wait(f"{label} to see the table end", lambda node=node: state_of(node) == "ended")
+        wait(
+            f"{label} to see the table end", lambda node=node: state_of(node) == "ended"
+        )
         print(f"  app-group: {label} sees the table closed ✓")
     # 6. v_76 round-trips between the three.
     if _OURS < _Cap.MIN_FOR_APP_GROUPS:
@@ -20076,7 +18637,9 @@ def cmd_app_draw() -> None:
     for label, node in people.items():
         wait(f"{label} to see four seats", lambda node=node: seated(node) == 4)
     print("  app-draw: four people in three households at the table ✓")
-    seat = {label: int((mine(node) or {}).get("me") or 0) for label, node in people.items()}
+    seat = {
+        label: int((mine(node) or {}).get("me") or 0) for label, node in people.items()
+    }
     # 2. Settings, the pair, wish lists.
     s, conf = api(
         a,
@@ -20097,7 +18660,12 @@ def cmd_app_draw() -> None:
         raise SystemExit(f"app-draw: adding a pair wiped the settings: {conf!r}")
     marks = {label: f"DEMO-WISH-{label}-{secrets.token_hex(6)}" for label in people}
     for label, node in people.items():
-        s, w = api(node, f"/groups/{sid}/engines/draw/wish", method="POST", body={"text": marks[label]})
+        s, w = api(
+            node,
+            f"/groups/{sid}/engines/draw/wish",
+            method="POST",
+            body={"text": marks[label]},
+        )
         _must(f"wish({label})", s, w)
     a_log_from = _log_size("a")
     # 3. Draw names.
@@ -20110,7 +18678,9 @@ def cmd_app_draw() -> None:
         return s == 200 and d.get("state") == "ready" and d.get("has_result") is True
 
     for label, node in people.items():
-        wait(f"{label}'s name to be ready", lambda node=node: ready(node), timeout=240.0)
+        wait(
+            f"{label}'s name to be ready", lambda node=node: ready(node), timeout=240.0
+        )
     print("  app-draw: every household did its part — four names ready ✓")
     # 4. The results: one circle, the pair apart, the right wish lists.
     # The admins of a, b and c share one display name, so a sheet's person
@@ -20162,7 +18732,9 @@ def cmd_app_draw() -> None:
     print("  app-draw: no wish list or result in plaintext on any disk or a's log ✓")
     # 6. v_78 between the three.
     if _OURS < _Cap.MIN_FOR_APP_ENGINES:
-        raise SystemExit(f"app-draw: OURS={_OURS} < MIN_FOR_APP_ENGINES={_Cap.MIN_FOR_APP_ENGINES}")
+        raise SystemExit(
+            f"app-draw: OURS={_OURS} < MIN_FOR_APP_ENGINES={_Cap.MIN_FOR_APP_ENGINES}"
+        )
     for peer in (b, c):
         rows = _rows(
             "a",
@@ -20291,12 +18863,15 @@ def cmd_space_table() -> None:
     for label, node in (("c", c), ("d", d)):
         wait(
             f"{label} to see the game playing at two seats",
-            lambda node=node: group(node).get("state") == "playing"
-            and sorted(
-                pl["seat"] for pl in group(node).get("players", [])
-                if pl["state"] == "seated"
-            )
-            == [1, 2],
+            lambda node=node: (
+                group(node).get("state") == "playing"
+                and sorted(
+                    pl["seat"]
+                    for pl in group(node).get("players", [])
+                    if pl["state"] == "seated"
+                )
+                == [1, 2]
+            ),
         )
         print(f"  space-table: {label} sees the duel playing ✓")
     rows = _rows(
@@ -20329,11 +18904,15 @@ def cmd_space_table() -> None:
             got.extend((body or {}).get("group_messages", []))
         return got
 
-    wait("c to get d's move", lambda: any(m["data"] == {"move": marker} for m in held()))
+    wait(
+        "c to get d's move", lambda: any(m["data"] == {"move": marker} for m in held())
+    )
     print("  space-table: c got d's move over the space ✓")
     # 5. Nobody outside the space heard of it.
     for label in ("a", "b"):
-        if _rows(label, "SELECT 1 FROM app_group_sessions WHERE session_id = ?", (sid,)):
+        if _rows(
+            label, "SELECT 1 FROM app_group_sessions WHERE session_id = ?", (sid,)
+        ):
             raise SystemExit(f"space-table: {label} (no member) holds the table")
         for path in _instance_dir(label).glob("socialhome.db*"):
             if marker.encode() in path.read_bytes():
@@ -20485,9 +19064,7 @@ def cmd_bazaar_faq() -> None:
                     f"bazaar-faq: {label} sees {peer[:8]} at v{pv} "
                     f"(< {_Cap.MIN_FOR_BAZAAR_FAQ})"
                 )
-    print(
-        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_FAQ} (OURS={_OURS}) ✓"
-    )
+    print(f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_FAQ} (OURS={_OURS}) ✓")
     state["bazaar_faq"] = {"entry_id": keep["entry_id"], "question": reworded}
     _save(state)
     print("bazaar-faq: ok")
@@ -20578,7 +19155,9 @@ def cmd_members_page_catchup() -> None:
             method="POST",
             body={"type": "text", "content": content},
         )
-        posts.append((_must(f"{step}: the host posts", s, post, ok=(201,))["id"], content))
+        posts.append(
+            (_must(f"{step}: the host posts", s, post, ok=(201,))["id"], content)
+        )
     page_body = f"{marker} — the house rules"
     s, page = _request(
         f"{b_url}/api/spaces/{space_id}/pages",
@@ -20624,7 +19203,9 @@ def cmd_members_page_catchup() -> None:
             lambda lb=label: _holds_all(lb),
             timeout=120.0,
         )
-    print(f"  host {_PC_HOST}'s space {space_id}: two posts + a page; {_PC_LAG} and {_PC_DLV} joined, hold them ✓")
+    print(
+        f"  host {_PC_HOST}'s space {space_id}: two posts + a page; {_PC_LAG} and {_PC_DLV} joined, hold them ✓"
+    )
 
     def _held_page(label: str) -> dict | None:
         rows = _rows(
@@ -20673,7 +19254,9 @@ def cmd_members_page_catchup() -> None:
     signed = _held_page(_PC_LAG)
     if _held_page(_PC_DLV) != signed:
         raise SystemExit(f"{step}: the members hold different pages of the host")
-    pushes = _log_lines_matching(_PC_HOST, f"pushed page {signed['seq']} of space {space_id}")
+    pushes = _log_lines_matching(
+        _PC_HOST, f"pushed page {signed['seq']} of space {space_id}"
+    )
     if not pushes:
         raise SystemExit(
             f"{step}: the host's log names no push of page {signed['seq']} — "
@@ -20693,9 +19276,31 @@ def cmd_members_page_catchup() -> None:
         ),
         timeout=90.0,
     )
+    # The deliverer can only prove buckets it holds unchanged: its verdict
+    # must read a match too before the host goes down. A verdict it formed
+    # before its own first stream landed (the page push can beat the
+    # stream) is redone on its next round — press "Sync now" until then.
+    deadline = time.monotonic() + 120.0
+    next_ask = 0.0
+    while time.monotonic() < deadline:
+        verdict = (_sync_state_of(state, _PC_DLV, space_id) or {}).get("page") or {}
+        if verdict.get("match") is True:
+            break
+        if time.monotonic() >= next_ask:
+            _request(
+                f"{c_url}/api/spaces/{space_id}/sync",
+                token=c["token"],
+                method="POST",
+            )
+            next_ask = time.monotonic() + 25.0
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: the deliverer {_PC_DLV}'s copy never matched the host's page"
+        )
     print(
         f"  both members hold the host's signed page {signed['seq']} ({signed['rows']} rows); "
-        f"{_PC_LAG}'s copy matches it ✓"
+        f"{_PC_LAG}'s and {_PC_DLV}'s copies match it ✓"
     )
 
     a_down = b_down = False
@@ -20717,10 +19322,14 @@ def cmd_members_page_catchup() -> None:
         finally:
             conn.close()
         if _holds_all(_PC_LAG):
-            raise SystemExit(f"{step}: {_PC_LAG} still holds the content after the removal")
+            raise SystemExit(
+                f"{step}: {_PC_LAG} still holds the content after the removal"
+            )
         _kill_household(_PC_HOST, b)
         b_down = True
-        print(f"  {_PC_LAG} lost the posts and the page; the host {_PC_HOST} is down too ✓")
+        print(
+            f"  {_PC_LAG} lost the posts and the page; the host {_PC_HOST} is down too ✓"
+        )
         # The respawn starts a fresh log.txt: read it whole (the lines name
         # this fresh space, so nothing older can match).
         t0 = time.time()
@@ -20764,7 +19373,9 @@ def cmd_members_page_catchup() -> None:
             if space_id in x
         ]
         if refused:
-            raise SystemExit(f"{step}: {_PC_LAG} refused rows of an honest member: {refused!r}")
+            raise SystemExit(
+                f"{step}: {_PC_LAG} refused rows of an honest member: {refused!r}"
+            )
         status = _poll(
             "a's status to read the space up to date with b still down",
             lambda: (
@@ -20997,6 +19608,7 @@ def _verify_sync_page(state: dict, *, want_match: bool = False) -> list[str]:
                 "rows), verified; match: true proven by the sync-pages step ✓"
             )
         return out
+
     # a compares its own rows with the page as soon as it stores it: wait
     # on a's status for the verdict, then it must match (after traffic a
     # holds everything b committed).
@@ -21939,24 +20551,27 @@ def cmd_rotation_offline_catchup() -> None:
 
 
 def cmd_gfs_authority_rotate() -> None:
-    """The GFS and a subscriber follow an owner-certified rotation (v_44).
+    """The GFS and a follower follow an owner-certified rotation (v_44).
 
-    Prereqs: ``gfs-space-post`` (d is a GFS subscriber of a's global space).
+    Prereqs: ``gfs-global-channel`` (e follows a's global space through the
+    GFS and reads it over the space's opaque channel).
 
     1. a turns ``delegated_admin_authority`` on, then off — the off-flip
        rotates the space authority key unconditionally.
     2. Assert the GFS re-pinned: ``global_spaces.identity_public_key`` is a's
        new key and ``authority_cert`` is stored — and that a took the GFS's
        publish answer as the confirmation (no re-pin left owed).
-    3. a posts; d (still pinned to the old key) must heal its pin from the
-       GFS listing's cert and read the post.
+    3. a posts; e — a follower is a member with the read-only role (v_96),
+       so the rotation bundle reaches it by federation, never from a GFS
+       listing — moves its pin to the new key and reads the post over the
+       channel.
     """
     state = _load()
     if not state:
         raise SystemExit("run 'up' first")
-    space_id = state.get("gfs_space_id")
-    if not space_id or not state.get("gfs_space_post_id"):
-        raise SystemExit("run 'gfs-space-post' first")
+    space_id = (state.get("gfs") or {}).get("global_channel_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-global-channel' first")
     a = state["instances"]["a"]
     a_base = f"http://127.0.0.1:{a['port']}"
     before = _space_col("a", space_id, "authority_key_epoch") or 0
@@ -22003,7 +20618,11 @@ def cmd_gfs_authority_rotate() -> None:
             "gfs-authority-rotate: a's rotation ended with a re-pin still owed"
         )
     print("  the GFS confirmed the new pin in its publish answer; nothing owed ✓")
-    time.sleep(8)  # the K2-signed subscriber key re-seal reaches d
+    _poll(
+        "e (the follower) to move its pin to K2 by federation",
+        lambda: _space_col("e", space_id, "identity_public_key") == k2 or None,
+        timeout=60.0,
+    )
     content = f"Post after the authority rotation — {time.time_ns()}"
     s, post = _request(
         f"{a_base}/api/spaces/{space_id}/posts",
@@ -22012,13 +20631,11 @@ def cmd_gfs_authority_rotate() -> None:
         body={"type": "text", "content": content},
     )
     post_id = _must("a posts after rotation", s, post, ok=(201,))["id"]
-    seen = _await_space_post(state, "d", space_id, post_id)
+    seen = _await_space_post(state, "e", space_id, post_id)
     if seen.get("content") != content:
-        raise SystemExit("gfs-authority-rotate: d did not read the post-rotation post")
-    if _space_col("d", space_id, "identity_public_key") != k2:
-        raise SystemExit("gfs-authority-rotate: d did not heal its pin to K2")
-    print("  d healed its pin from the GFS listing and reads the K2-relayed post ✓")
-    print("gfs-authority-rotate: ok (the GFS and a subscriber follow the rotation)")
+        raise SystemExit("gfs-authority-rotate: e did not read the post-rotation post")
+    print("  e moved its pin by federation and reads the post-rotation post ✓")
+    print("gfs-authority-rotate: ok (the GFS and a follower follow the rotation)")
 
 
 @_offline_step
@@ -24340,14 +22957,10 @@ def cmd_gfs_public_pages() -> None:
         raise SystemExit("run 'up' + 'gfs-up' + 'gfs-pair' first")
     gfs = f"http://127.0.0.1:{GFS_PORT}"
 
-    space_id = state.get("gfs_space_id")
-    if not space_id:
-        # ``gfs-traffic`` lists one without recording it: take the directory's.
-        s, listing = _request(f"{gfs}/gfs/spaces")
-        rows = (
-            listing if isinstance(listing, list) else (listing or {}).get("spaces", [])
-        )
-        space_id = next((r.get("space_id") for r in rows if r.get("space_id")), None)
+    # Any listed space (``gfs-traffic`` lists one without recording it).
+    s, listing = _request(f"{gfs}/gfs/spaces")
+    rows = listing if isinstance(listing, list) else (listing or {}).get("spaces", [])
+    space_id = next((r.get("space_id") for r in rows if r.get("space_id")), None)
     if space_id:
         s, page = _open_through_viewer(
             f"{gfs}/spaces/{space_id}",
@@ -24909,7 +23522,9 @@ def _gfs_moment_reaction(state: dict, moment_id: str, author_uid: str) -> None:
     deadline = time.monotonic() + 120
     totals = None
     while time.monotonic() < deadline:
-        rows = _rows("e", "SELECT reaction_summary FROM moments WHERE id = ?", (moment_id,))
+        rows = _rows(
+            "e", "SELECT reaction_summary FROM moments WHERE id = ?", (moment_id,)
+        )
         totals = json.loads(rows[0][0]) if rows and rows[0][0] else None
         if totals and totals.get("counts") == {"🔥": 1} and totals.get("total") == 1:
             break
@@ -25550,7 +24165,9 @@ def _parity_compare(
         expected = views[ref]
         ok_ref = want is None or all(expected.get(k) == v for k, v in want.items())
         if ok_ref and all(views[m] == expected for m in members):
-            results.append((action, "PASS", f"{' = '.join(members)} = {ref}: {expected}"))
+            results.append(
+                (action, "PASS", f"{' = '.join(members)} = {ref}: {expected}")
+            )
             print(f"  {action}: {' and '.join(members)} match ✓")
             return True
         if time.monotonic() > deadline:
@@ -25649,7 +24266,7 @@ def _dir_seq_on(label: str, space_id: str, instance_id: str) -> int:
 
 
 def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> None:
-    """"Host" means the owner OR the delegated admin that invited us (owner
+    """ "Host" means the owner OR the delegated admin that invited us (owner
     decision 2026-11-13, ``federation/host_equivalence.py``).
 
     A fresh private space of a's (``private_gfs`` and
@@ -26198,8 +24815,10 @@ def cmd_gfs_moderator_parity() -> None:
             timeout=300.0,
             interval=3.0,
         )
-        via = "the host's catch-up" if _log_contains("a", needle, offset=a_log) else (
-            "its GFS mailbox"
+        via = (
+            "the host's catch-up"
+            if _log_contains("a", needle, offset=a_log)
+            else ("its GFS mailbox")
         )
         print(f"  e (offline during the submission) sees the item — from {via} ✓")
         approve_on_e(item_id, post_id, text)
@@ -27203,9 +25822,7 @@ def cmd_members_parity_apps() -> None:
         want={"game": "lobby", "my_state": "seated"},
     )
     seats = table(sid)("a").get("seats") or []
-    three = [(n, st) for n, _name, st in seats] == [
-        (n, "seated") for n in (1, 2, 3)
-    ]
+    three = [(n, st) for n, _name, st in seats] == [(n, "seated") for n in (1, 2, 3)]
     results.append(
         ("three seats at a's table", "PASS" if three else "DIFF", f"a shows {seats!r}")
     )
@@ -27305,7 +25922,11 @@ def cmd_members_parity_apps() -> None:
         s, body = games(host, f"/{duel}/close")
         if do(f"{host} closes {who}", s, body):
             _parity_show(
-                results, f"{who} closed", table(duel), {"closed": True}, members=everyone
+                results,
+                f"{who} closed",
+                table(duel),
+                {"closed": True},
+                members=everyone,
             )
 
     # 4. The lobby: one more open table of a's; the strip reads the same.
@@ -27326,7 +25947,11 @@ def cmd_members_parity_apps() -> None:
         listed = _parity_lobby(state, "a", space_id).get("tables") or []
         if not any(t[0] == lobby for t in listed):
             results.append(
-                ("space game lobby", "DIFF", f"a's lobby lacks its own table: {listed!r}")
+                (
+                    "space game lobby",
+                    "DIFF",
+                    f"a's lobby lacks its own table: {listed!r}",
+                )
             )
         s, body = games("a", f"/{lobby}/close")
         if do("a closes the lobby table", s, body):
@@ -27564,28 +26189,15 @@ def _seed_pin(seed: bytes | None) -> str | None:
     return ed25519_public_key(seed).hex() if seed else None
 
 
-def _authority_probe(gfs_url: str, space_id: str, seed: bytes) -> int:
-    """Ask the GFS at ``gfs_url`` something only the space key may ask:
-    ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh authority
-    signature made with ``seed``. 200 — that GFS takes this key as the
-    space authority (the same pin its relay, epoch notices and media
-    uploads are checked against); 403 — it does not. Read-only: nothing is
-    relayed to anybody."""
-    from socialhome.authority_sig import (
-        AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-        sign_authority_event,
-    )
-
-    ts = datetime.now(timezone.utc).isoformat()
-    sig = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-        space_id=space_id,
-        payload={"space_id": space_id, "ts": ts},
-        space_seed=seed,
-    )
-    query = urllib.parse.urlencode({"ts": ts, "summary": "1", **sig})
-    status, _body = _request(f"{gfs_url}/gfs/spaces/{space_id}/subscribers?{query}")
-    return status
+def _authority_probe(rows_of: Any, space_id: str, seed: bytes) -> int:
+    """Whether a GFS (its rows, ``rows_of``: :func:`_gfs_rows` or
+    :func:`_gfs_b_rows`) takes ``seed`` as the space authority: 200 when it
+    pins the key that seed signs for, 403 when it does not. Since v_96 (P7)
+    no GFS route takes a space-authority-signed request any more (the
+    subscriber roster read, the relay, the epoch notice and the space-scope
+    media upload are gone), so the pin is the whole question."""
+    held = _gfs_pin(rows_of, space_id)
+    return 200 if held is not None and held[0] == _seed_pin(seed) else 403
 
 
 def _gfs_pin(rows_of: Any, space_id: str) -> tuple[str, bool, bool] | None:
@@ -27786,16 +26398,15 @@ def _admin_seed_probe(
 ) -> None:
     """``seed`` is taken (``want`` 200) or refused (403) as the space
     authority by every GFS that holds a pin for the space."""
-    for name, url, _rows_of in _admin_seed_servers(state):
-        got = _authority_probe(url, space_id, seed)
+    for name, _url, rows_of in _admin_seed_servers(state):
+        got = _authority_probe(rows_of, space_id, seed)
         if got != want:
             raise SystemExit(
-                f"{step}: GFS {name} answered HTTP {got} to a request signed "
-                f"with {whose} (expected {want})"
+                f"{step}: GFS {name} pin answers {got} for {whose} (expected {want})"
             )
     names = " + ".join(n for n, _u, _r in _admin_seed_servers(state))
     verdict = "takes" if want == 200 else "refuses"
-    print(f"  GFS {names} {verdict} a request signed with {whose} ✓")
+    print(f"  GFS {names} {verdict} {whose} as the space authority ✓")
 
 
 def _admin_seed_seat_gone(state: dict, space_id: str, step: str) -> None:
@@ -27952,8 +26563,7 @@ def _admin_seed_refuses_to_forget(
             got = _space_col(label, space_id, "name")
             if got != names[label]:
                 raise SystemExit(
-                    f"{step}: {label} took the removed admin's old-key rename "
-                    f"({got!r})"
+                    f"{step}: {label} took the removed admin's old-key rename ({got!r})"
                 )
         print(
             "  e (seat + retired seed written back) signed a rename with K1: "
@@ -27994,13 +26604,12 @@ def cmd_gfs_admin_seed() -> None:
     1. **The seed reaches e.** e redeems a published admin link (a member
        seat, admin pending) and a approves. e holds the signing seed of the
        key a pins; a logged the share and e the receipt. The GFS log carries
-       no ``space_admin_key_share``. e keeps the fan-out seat on the GFS
-       (``space_subscribers``) it took as a plain member the moment it
-       joined — also after it restarts and reconnects.
+       no ``space_admin_key_share``. e keeps the channel seat on the GFS
+       (``gfs_channel_subscribers``, v_96) it took as a plain member — also
+       after it restarts and reconnects.
     2. **e acts for the owner.** a is stopped. e posts: b and d hold it, and
-       the GFS got an anonymous member publish and no authority-signed
-       ``POST /gfs/publish`` at all (a delegated admin is a writer to the
-       GFS). e renames the space (executed on e, signed with the seed):
+       the GFS got an anonymous channel publish and no space-keyed
+       request at all (a delegated admin is a writer to the GFS). e renames the space (executed on e, signed with the seed):
        b and d show the new name. e removes b's person: d drops b's
        seat (b itself drops its copy only on its host's word: a tells it
        once it is back). A request signed with e's seed is taken by
@@ -28140,13 +26749,24 @@ def cmd_gfs_admin_seed() -> None:
     # 1. The seed reaches e.
     a_off = _log_size("a")
     gfs_off = _gfs_log_size()
-    seat_sql = "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?"
-    seat_of_e = (space_id, e["instance_id"])
+    # v_96 — every member's seat is its CHANNEL seat (no space-keyed seat).
+    seat_sql = (
+        "SELECT 1 FROM gfs_channel_subscribers WHERE channel_id=? AND instance_id=?"
+    )
+
+    def _seat_of_e() -> tuple[str, str]:
+        rows = _rows("a", "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,))
+        return ((rows[0][0] if rows else None) or "", e["instance_id"])
 
     def _check_seat(what: str) -> None:
-        """e must hold its fan-out seat for the space on the GFS."""
+        """e must hold its channel seat for the space on the GFS."""
         try:
-            _poll_gfs_rows(seat_sql, seat_of_e, bool, what=what)
+            _poll(
+                what,
+                lambda: _gfs_rows(seat_sql, _seat_of_e()),
+                timeout=90.0,
+                interval=2.0,
+            )
         except SystemExit as exc:
             raise SystemExit(f"{step}: {exc}") from None
 
@@ -28165,8 +26785,7 @@ def cmd_gfs_admin_seed() -> None:
         # No restart: the redeem itself takes the seat (the joiner side
         # publishes ``SpaceMemberJoined``).
         as_member=lambda: _check_seat(
-            "e, a plain member, took no fan-out seat on the GFS when it "
-            "joined (it must not wait for its next reconnect)"
+            "e, a plain member, to hold its channel seat on the GFS"
         ),
     )
     state = _load()
@@ -28197,21 +26816,20 @@ def cmd_gfs_admin_seed() -> None:
         {"type": "text", "content": text0},
     )
     _must(f"{step}: e posts", s, post, ok=(201,))
-    if not _gfs_rows(seat_sql, seat_of_e):
+    if not _gfs_rows(seat_sql, _seat_of_e()):
         raise SystemExit(
-            f"{step}: e lost its fan-out seat on the GFS when it was handed "
+            f"{step}: e lost its channel seat on the GFS when it was handed "
             "the seed — the GFS can tell which household holds it"
         )
     _reconnect_and_check_seat(
-        "e, holding the seed, did not take its fan-out seat again on its "
-        "reconnect — the GFS can tell which household holds the seed"
+        "e, holding the seed, to take its channel seat again on its reconnect"
     )
     state = _load()
     e = state["instances"]["e"]
     if _seed_pin(_space_seed("e", space_id)) != k1:
         raise SystemExit(f"{step}: e lost the seed over its restart")
     print(
-        "  the GFS log names no seed share; e keeps the fan-out seat it held "
+        "  the GFS log names no seed share; e keeps the channel seat it held "
         "as a plain member, also after it reconnects ✓"
     )
     for label in ("b", "d"):
@@ -28269,20 +26887,24 @@ def cmd_gfs_admin_seed() -> None:
                 interval=2.0,
             )
         gfs_lines = _gfs_log_lines_matching("POST /gfs/", offset=gfs_off)
-        if not any("/gfs/member-publish-anon" in line for line in gfs_lines):
+        if not any("/gfs/channels/publish-anon" in line for line in gfs_lines):
             raise SystemExit(
-                f"{step}: e's post never reached the GFS as an anonymous "
-                "member publish"
+                f"{step}: e's post never reached the GFS as an anonymous channel "
+                "publish"
             )
-        signed = [line for line in gfs_lines if "POST /gfs/publish " in line]
-        if signed:
+        keyed = [
+            line
+            for line in gfs_lines
+            if "POST /gfs/publish " in line or "/gfs/member-publish-anon" in line
+        ]
+        if keyed:
             raise SystemExit(
-                f"{step}: with the owner offline the GFS got an authority-signed "
-                f"relay for a post — only a seed holder sends one: {signed[:2]!r}"
+                f"{step}: with the owner offline the GFS got a space-keyed "
+                f"request (removed in v_96): {keyed[:2]!r}"
             )
         print(
             "  a offline: e's post reached b and d; the GFS saw an anonymous "
-            "member publish and no authority-signed relay ✓"
+            "channel publish and no space-keyed request ✓"
         )
         s, body = _inst_request(
             state, "e", "PATCH", f"/api/spaces/{space_id}", {"name": new_name}
@@ -28497,7 +27119,10 @@ def cmd_gfs_admin_seed() -> None:
             "a came back and applied d's removal of it — the host never told it"
         )
     print("  e lost the space once its host a was back and told it ✓")
-    for seed, whose in ((seed1, "e's first seed (K1)"), (seed2, "e's second seed (K2)")):
+    for seed, whose in (
+        (seed1, "e's first seed (K1)"),
+        (seed2, "e's second seed (K2)"),
+    ):
         _admin_seed_probe(state, space_id, seed, want=403, whose=whose, step=step)
     _admin_seed_probe(
         state, space_id, seed3, want=200, whose="d's seed (K3)", step=step
@@ -28507,9 +27132,7 @@ def cmd_gfs_admin_seed() -> None:
     # may land a little later than the row's last state shows).
     _poll(
         "d's rekey for a to leave d's outbox",
-        lambda: (
-            "space_key_exchange_rekey" not in _outbox_events("d", a["instance_id"])
-        ),
+        lambda: "space_key_exchange_rekey" not in _outbox_events("d", a["instance_id"]),
         timeout=300.0,
         interval=2.0,
     )
@@ -28550,11 +27173,11 @@ def _check_gfs_admin_seed(state: dict, failures: list[str]) -> None:
                 f"gfs-admin-seed: GFS {name} pins {held!r}, a pins {str(pin)[:12]}…"
             )
         for seed_hex in info["retired_seeds"]:
-            got = _authority_probe(url, space_id, bytes.fromhex(seed_hex))
+            got = _authority_probe(rows_of, space_id, bytes.fromhex(seed_hex))
             if got != 403:
                 failures.append(
-                    f"gfs-admin-seed: GFS {name} answered HTTP {got} to a "
-                    "request signed with a seed of the removed admin"
+                    f"gfs-admin-seed: GFS {name} takes a seed of the removed "
+                    f"admin as the space authority ({got})"
                 )
 
 
@@ -28723,6 +27346,14 @@ def main() -> None:
         # d holds nothing. Late in the chain: it seats d as a follower in
         # the space the earlier steps assert member counts on.
         cmd_space_chat()
+        # ``space-follow-paired`` (v_96): b follows a's public invite-only
+        # space — an auto-approved join for the read-only role; leaving
+        # tombstones the seat without rotating the content key.
+        cmd_space_follow_paired()
+        # ``space-follow-rotation`` (v_96 P5): a squat (an id b cannot prove)
+        # is refused, an unfollow owes the rotation, the sweep (a restarted
+        # with a fast-forwarded debt) pays it once, a ban rotates at once.
+        cmd_space_follow_rotation()
         # ``space-reaction`` (v_93): in the same space a and c react to a
         # post of a's and a takes its reaction back — a, b and c show the
         # same reactions after each change.
@@ -28799,6 +27430,22 @@ def main() -> None:
         # GFS, a approves, e reads. Last: it gives e a space-session seat
         # with a, which the bootstrap-only steps above must not see.
         cmd_gfs_join_request()
+        # ``gfs-space-follow`` (v_96): e follows a's global invite-only
+        # space through the GFS — auto-approved, no admin step, subscriber seat.
+        cmd_gfs_space_follow()
+        # ``gfs-global-channel`` (v_96, P3): b (member) and e (follower)
+        # of a's global space read each other over the space's opaque
+        # channel while a is down. Restarts a.
+        cmd_gfs_global_channel()
+        # ``gfs-follower-comment`` (v_96, P4): e (GFS follower) comments over
+        # the channel under the switch; switch off → one rotation, refused;
+        # e's own delete with the switch off reaches a and b.
+        cmd_gfs_follower_comment()
+        # ``gfs-space-bans`` (P7b): a bans b's person and household e — both
+        # lose their seats, c holds both bans (signed events), and neither
+        # the link nor a follow (paired or through the GFS) seats them again;
+        # the unbans reach c too.
+        cmd_gfs_space_bans()
         # ``members-page-catchup`` (v_95, sync pages Phase 3): host c down,
         # b catches up c's posts and page from the plain member a, every row
         # verified against c's signed page. Restarts b and c.

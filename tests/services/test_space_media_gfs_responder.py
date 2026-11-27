@@ -15,7 +15,7 @@ import pytest
 from socialhome import space_media_hint as hint_mod
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.gfs_space_media import (
-    AUTH_AUTHORITY,
+    AUTH_CHANNEL,
     SpaceMediaUploadAuth,
     space_media_address,
 )
@@ -98,7 +98,7 @@ class _Crypto:
 
 
 class _Spaces:
-    def __init__(self, *, channel=None, owner=OWN):
+    def __init__(self, *, channel=CHANNEL, owner=OWN):
         self.channel = channel
         self.owner = owner
 
@@ -140,7 +140,7 @@ class _Uploader:
         if not self.authorized:
             return None
         return SpaceMediaUploadAuth(
-            claim=claim, kind=AUTH_AUTHORITY, sig="c2ln", sig_suite="ed25519"
+            claim=claim, kind=AUTH_CHANNEL, sig="c2ln", sig_suite="ed25519"
         )
 
     async def remember_stored(self, conn, blob_id):
@@ -182,7 +182,7 @@ def _file(tmp_path: pathlib.Path, name: str, size: int = 5000) -> bytes:
     return data
 
 
-def _blob(data, *, origin=OWN, filename="a.webp", scope="space", scope_id=SPACE):
+def _blob(data, *, origin=OWN, filename="a.webp", scope="channel", scope_id=CHANNEL):
     return seal_and_address_sync(
         KEY, SPACE, 4, ITEM, origin, filename, data, scope, scope_id
     )
@@ -194,8 +194,8 @@ def _frame(
     origin=OWN,
     filename="a.webp",
     mode=MODE_STREAM,
-    scope="space",
-    scope_id=SPACE,
+    scope="channel",
+    scope_id=CHANNEL,
     key=KEY,
     ticket=None,
 ) -> dict:
@@ -241,7 +241,7 @@ async def test_a_cache_request_attaches_the_upload_authorization_once(tmp_path):
     assert (auth.claim.blob_id, auth.claim.size, auth.claim.scope) == (
         bid,
         len(blob),
-        "space",
+        "channel",
     )
     assert up.remembered == [("g1", bid)]
     # Coalesced at the holder: a second cache request for the same blob in
@@ -376,15 +376,16 @@ class _SpyCrypto(_Crypto):
         return await super().media_key(space_id, epoch=epoch)
 
 
-@pytest.mark.parametrize("owner", ["someone-else", None])
-async def test_only_the_owner_answers_for_a_listed_space(tmp_path, owner):
+@pytest.mark.parametrize("owner", [OWN, "someone-else"])
+async def test_a_household_holding_no_seat_declines(tmp_path, owner):
     """Review H2: a GFS replaying a reader's hint to other households must
-    not learn who is a member — a member that doesn't own the space (and a
-    non-member) declines the same way, before opening anything."""
+    not learn who is a member — a household holding no channel seat (the
+    owner of the space included: since v_96 there is no listed-space owner
+    to ask) declines the same way, before opening anything."""
     data = _file(tmp_path, "a.webp")
     _b, bid = _blob(data)
     gfs, crypto = _Gfs(), _SpyCrypto()
-    spaces = _Spaces(owner=owner) if owner else _Spaces()
+    spaces = _Spaces(owner=owner)
     r = SpaceMediaGfsResponder(
         gfs_repo=_GfsRepo([_Conn("g1")]),
         gfs_service=gfs,
@@ -395,8 +396,7 @@ async def test_only_the_owner_answers_for_a_listed_space(tmp_path, owner):
         media_dir=tmp_path,
     )
     r.attach_federation(SimpleNamespace(own_instance_id=OWN))
-    frame = _frame(bid) if owner else _frame(bid, scope_id="sp-other")
-    await _ask(r, frame)
+    await _ask(r, _frame(bid))
     assert [s[2] for s in gfs.serves] == [None]
     assert gfs.reasons == ["not_held"]
     assert crypto.asked == 0
@@ -442,6 +442,7 @@ async def test_one_gfs_cannot_spend_the_budget_of_another(tmp_path, monkeypatch)
         media_dir=tmp_path,
     )
     r.attach_federation(SimpleNamespace(own_instance_id=OWN))
+    r.attach_channels(_Channels(gfs_ids=("inst-g1", "inst-g2")))
     for gfs_id in ("g1", "g1", "g2"):
         await r.handle(_frame(bid), gfs_id=gfs_id)
         await r.drain()

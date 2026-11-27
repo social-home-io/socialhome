@@ -40,14 +40,12 @@ export function followersLabel(n: number): string {
   return t(isOne(n) ? 'space.followers.count_one' : 'space.followers.count', { n: String(n) })
 }
 
-/** Does a space's follower count belong on screen? Only a number the host
- *  declared, and "0 followers" only for a space that takes followers
- *  (``allow_subscribers``) — one that takes none never says it. */
-export function followersShown(
-  count: number | null | undefined,
-  allowSubscribers: boolean | null | undefined,
-): count is number {
-  return typeof count === 'number' && (count > 0 || allowSubscribers === true)
+/** Does a space's follower count belong on screen? Exactly when the host
+ *  declared one: it declares a follower count only while the space takes
+ *  followers (``allow_subscribers``), "0" included — a space that takes
+ *  none sends no count, so it shows only its members. */
+export function followersShown(count: number | null | undefined): count is number {
+  return typeof count === 'number'
 }
 
 /** "8 members · active 2 h ago" — either part may be missing. */

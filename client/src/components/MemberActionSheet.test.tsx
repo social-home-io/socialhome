@@ -194,3 +194,81 @@ describe('MemberActionSheet — making another household an admin', () => {
     expect(r2.baseElement.querySelector('[data-testid="admin-grant-check"]')).toBeNull()
   })
 })
+
+describe('MemberActionSheet bans (P7b, ban UX review P8)', () => {
+  const confirmButton = (root: Element) =>
+    root.querySelector('[data-action="ban-confirm"]') as HTMLButtonElement
+
+  it('names who it acts on; the household confirm lists its people and sends a reason', async () => {
+    const { api } = await import('@/api')
+    const post = api.post as ReturnType<typeof vi.fn>
+    post.mockClear()
+    openMemberActions('sp-1', 'u-bob', 'member', 'peer-x', 'owner', false, 'Smith Household', {
+      name: 'Bob Smith', people: ['Bob Smith', 'Ann Smith'],
+    })
+    const onUpdate = vi.fn()
+    const r = render(<MemberActionSheet onUpdate={onUpdate} />)
+    // The sheet's title is the person, the household under it.
+    expect(r.baseElement.querySelector('h2')?.textContent).toBe('Bob Smith')
+    expect(r.baseElement.textContent).toContain('From Smith Household')
+    expect(r.baseElement.textContent).toContain('Remove: they can be invited back.')
+    fireEvent.click(r.baseElement.querySelector('[data-action="ban-household"]') as HTMLElement)
+    await waitFor(() => expect(r.baseElement.textContent).toContain('Ban Smith Household?'))
+    expect(r.baseElement.textContent).toContain('Bob Smith, Ann Smith (2 people) leave this space.')
+    const reason = r.baseElement.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.input(reason, { target: { value: '  spam links  ' } })
+    fireEvent.click(confirmButton(r.baseElement))
+    await waitFor(() => expect(onUpdate).toHaveBeenCalled())
+    expect(post).toHaveBeenCalledWith('/api/spaces/sp-1/ban', {
+      instance_id: 'peer-x', reason: 'spam links',
+    })
+    expect(showToast).toHaveBeenCalledWith('Smith Household is banned.', 'info')
+  })
+
+  it('a person ban says who; a refusal stays in the dialog, translated', async () => {
+    const { api } = await import('@/api')
+    const post = api.post as ReturnType<typeof vi.fn>
+    post.mockRejectedValueOnce(new ApiError(403, '/api/spaces/sp-1/ban', {
+      code: 'BAN_NOT_ALLOWED', detail: 'x', params: { target: 'person' },
+    }))
+    openMemberActions('sp-1', 'u-bob', 'member', null, 'owner', false, null, { name: 'Bob' })
+    const onUpdate = vi.fn()
+    const r = render(<MemberActionSheet onUpdate={onUpdate} />)
+    fireEvent.click(r.baseElement.querySelector('[data-action="ban"]') as HTMLElement)
+    await waitFor(() => expect(r.baseElement.textContent).toContain('Ban Bob?'))
+    fireEvent.click(confirmButton(r.baseElement))
+    await waitFor(() => expect(r.baseElement.querySelector('[role="alert"]')?.textContent)
+      .toBe('Only the space owner’s household decides about this person.'.replace('’', "'")))
+    expect(onUpdate).not.toHaveBeenCalled()
+    // A network failure reads as one, not "Failed to fetch".
+    post.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    fireEvent.click(confirmButton(r.baseElement))
+    await waitFor(() => expect(r.baseElement.querySelector('[role="alert"]')?.textContent)
+      .toBe('Couldn’t reach your Social Home. Check the connection and try again.'.replace('’', "'")))
+  })
+
+  it('a member of this household offers only the person ban', () => {
+    openMemberActions('sp-1', 'u-bob', 'member', null, 'owner')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r.baseElement.querySelector('[data-action="ban-household"]')).toBeNull()
+    expect(r.baseElement.querySelector('[data-action="ban"]')).not.toBeNull()
+  })
+
+  it('the owner seat offers no ban at all', () => {
+    openMemberActions('sp-1', 'u-own', 'owner', 'peer-host', 'admin')
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r.baseElement.querySelector('[data-action="ban-household"]')).toBeNull()
+    expect(r.baseElement.querySelector('[data-action="ban"]')).toBeNull()
+  })
+
+  it('an admin of another household gets no ban on the owner household people', () => {
+    openMemberActions('sp-1', 'u-spouse', 'member', 'peer-host', 'admin', false, 'Host Home', {
+      name: 'Spouse', ownerHousehold: true,
+    })
+    const r = render(<MemberActionSheet onUpdate={() => {}} />)
+    expect(r.baseElement.querySelector('[data-action="ban"]')).toBeNull()
+    expect(r.baseElement.querySelector('[data-action="ban-household"]')).toBeNull()
+    // Remove stays (the server decides).
+    expect(r.baseElement.textContent).toContain('Remove from space')
+  })
+})

@@ -505,7 +505,8 @@ export interface Space {
   /** Members (local + remote, never followers). ``GET /api/spaces/{id}``
    *  sends ``null`` when nobody declared a number: show none. */
   member_count?: number | null
-  /** ``GET /api/spaces/{id}``: followers; ``null`` when not known. */
+  /** ``GET /api/spaces/{id}``: followers; ``null`` when not known or when
+   *  the space takes no followers (show none). */
   follower_count?: number | null
   /** ``GET /api/spaces`` rows: newest feed post, else when the space was
    *  created here (naive UTC). */
@@ -1072,10 +1073,11 @@ export interface HouseholdSpaceRow {
   category: string
   allow_subscribers: boolean
   min_age: number
-  /** Seats in the space (followers included). */
+  /** Members (local + remote, never followers). */
   member_count: number
-  /** Followers of the space. Absent from an older backend. */
-  follower_count?: number
+  /** Followers of the space; ``null`` when it takes no followers. Absent
+   *  from an older backend. */
+  follower_count?: number | null
   /** The caller's role, `null` when they hold no seat. */
   role: string | null
   /** A local community's area, `null` otherwise. */
@@ -1103,7 +1105,8 @@ export interface DirectoryEntry {
    *  declared none (an older host or GFS): show no number, never 0. */
   member_count: number | null
   /** Followers, as the host declares them — ``null``/absent when unknown
-   *  (an older host). Shown only with ``followersShown``. */
+   *  (an older host) or when the space takes no followers. Shown only
+   *  with ``followersShown``. */
   follower_count?: number | null
   /** Local/household spaces use the same shape — scope tells us which
    *  browser tab / chip to surface the card in. ``'private'`` never comes
@@ -1136,6 +1139,9 @@ export interface DirectoryEntry {
   /** Asked through the GFS, approved, the seat still being made (v_84):
    *  "Approved, joining…" instead of "Requested". */
   request_joining?: boolean
+  /** The request out is a follow this page sent (its host seats it on its
+   *  own): "Following…" beside the way to join, not "Requested". */
+  follow_pending?: boolean
   /** Asked through the GFS lately and the host answered "busy" (no room
    *  for more requests right now), not asked again since: "Ask to join"
    *  with a "try again later" note. */

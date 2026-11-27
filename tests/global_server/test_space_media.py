@@ -22,9 +22,7 @@ from socialhome.global_server.blob_store import (
     MediaRefused,
 )
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.repositories import (
-    SqliteGfsFederationRepo,
     SqliteGfsSpaceMediaDemandRepo,
     SqliteGfsSpaceMediaRepo,
 )
@@ -76,7 +74,7 @@ def make(repo, tmp_dir):
 _ADDR: dict[bytes, str] = {}
 
 
-def _addr(data: bytes, space: str = "s1", kind: str = "space") -> str:
+def _addr(data: bytes, space: str = "s1", kind: str = "channel") -> str:
     """The blob's scope-bound address (security review v2, N1)."""
     _ADDR[data] = space_media_address(kind, space, data)
     return _ADDR[data]
@@ -84,10 +82,10 @@ def _addr(data: bytes, space: str = "s1", kind: str = "space") -> str:
 
 def _bid(data: bytes) -> str:
     """The address *data* was last put under (else its address in s1)."""
-    return _ADDR.get(data) or space_media_address("space", "s1", data)
+    return _ADDR.get(data) or space_media_address("channel", "s1", data)
 
 
-async def _put(store, data, *, space="s1", kind="space", now=NOW, expires=None):
+async def _put(store, data, *, space="s1", kind="channel", now=NOW, expires=None):
     return await store.put(
         scope_kind=kind,
         scope_id=space,
@@ -124,7 +122,7 @@ def test_limits_from_config_and_capability():
         "ttl_s": 259_200,
         "space_max_bytes": 256 * 1024**2,
         "space_uploads_per_hour": 300,
-        "scopes": ["channel", "space"],
+        "scopes": ["channel"],
     }
     small = SpaceMediaLimits.from_config(
         GfsConfig(space_media_max_bytes=1_000_000, space_media_ttl_seconds=3_600)
@@ -144,7 +142,7 @@ async def test_put_once_read_many(make, repo):
     assert await store.read(_bid(data), now=NOW + 10) == data
     row = await repo.get_blob(_bid(data))
     assert (row.size, row.created_at, row.last_fetched_at) == (SMALL, NOW, NOW)
-    assert (row.scope_kind, row.scope_id) == ("space", "s1")
+    assert (row.scope_kind, row.scope_id) == ("channel", "s1")
 
 
 async def test_a_duplicate_upload_is_a_no_op_and_keeps_the_expiry(make, repo):
@@ -206,7 +204,7 @@ async def test_shape_and_address_are_checked(make, blob_id, data, reason):
     store = make()
     status, got = await _refused(
         store.put(
-            scope_kind="space",
+            scope_kind="channel",
             scope_id="s1",
             blob_id=(
                 hashlib.sha256(data).hexdigest()
@@ -254,7 +252,7 @@ async def test_an_unknown_scope_is_refused(make):
         make().put(
             scope_kind="room",
             scope_id="s1",
-            blob_id=space_media_address("space", "s1", data),
+            blob_id=space_media_address("channel", "s1", data),
             data=data,
             expires_at=NOW + 60,
             now=NOW,
@@ -302,7 +300,7 @@ async def test_upload_and_delete_does_not_reset_the_upload_rate(make):
         try:
             await _put(store, data, now=NOW + i)
             answers.append(201)
-            await store.delete(_bid(data), scope_kind="space", scope_id="s1")
+            await store.delete(_bid(data), scope_kind="channel", scope_id="s1")
         except MediaRefused as exc:
             answers.append(exc.status)
     assert answers[:5] == [201] * 5
@@ -336,7 +334,6 @@ async def test_the_rate_is_per_scope(make):
     store = make(space_uploads_per_hour=1)
     await _put(store, _blob())
     await _put(store, _blob(), space="s2")
-    await _put(store, _blob(), kind="channel")
 
 
 # ── Per-scope cap ───────────────────────────────────────────────────────
@@ -434,19 +431,6 @@ async def test_read_misses(make, repo, gfs_db):
     data = _blob()
     await _put(store, data, expires=NOW + 10)
     assert await store.read(_bid(data), now=NOW + 10) is None
-    fed = SqliteGfsFederationRepo(gfs_db)
-    await fed.upsert_instance(
-        ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="bad", owning_instance="o", status="active")
-    )
-    other = _blob()
-    await _put(store, other, space="bad")
-    assert await store.read(_bid(other), now=NOW + 1) == other
-    await fed.set_space_status("bad", "banned")
-    # A ban hides the space's blobs at once (the auth refuses its uploads).
-    assert await store.read(_bid(other), now=NOW + 1) is None
 
 
 async def test_a_missing_file_reads_as_a_miss(make, tmp_dir):
@@ -477,10 +461,9 @@ async def test_delete_needs_the_claiming_scope(make, tmp_dir):
     data = _blob()
     bid = _bid(data)
     await _put(store, data)
-    assert await store.delete(bid, scope_kind="space", scope_id="s2") is False
-    assert await store.delete(bid, scope_kind="channel", scope_id="s1") is False
-    assert await store.delete("nope", scope_kind="space", scope_id="s1") is False
-    assert await store.delete(bid, scope_kind="space", scope_id="s1") is True
+    assert await store.delete(bid, scope_kind="channel", scope_id="s2") is False
+    assert await store.delete("nope", scope_kind="channel", scope_id="s1") is False
+    assert await store.delete(bid, scope_kind="channel", scope_id="s1") is True
     assert await store.read(bid, now=NOW + 1) is None
     assert not (tmp_dir / "spaces" / bid).exists()
 
@@ -499,7 +482,7 @@ async def test_the_sweep_drops_expired_blobs_claims_and_counts(
     assert await repo.totals() == (1, SMALL)
     assert sorted(p.name for p in (tmp_dir / "spaces").iterdir()) == [_bid(live)]
     # Upload counts older than the previous hour are gone.
-    assert await repo.upload_counts("space", "s1", bucket=(NOW + 7300) // 3600) == (
+    assert await repo.upload_counts("channel", "s1", bucket=(NOW + 7300) // 3600) == (
         0,
         0,
     )
@@ -570,7 +553,7 @@ async def test_concurrent_uploads_cannot_pass_the_byte_caps(make, repo):
     _, total = await repo.totals()
     assert total <= 3 * SMALL
     for scope in ("s0", "s1"):
-        assert await repo.scope_bytes("space", scope) <= 2 * SMALL
+        assert await repo.scope_bytes("channel", scope) <= 2 * SMALL
 
 
 async def test_a_failed_upload_gives_its_rate_slot_back(make, repo):
@@ -578,16 +561,16 @@ async def test_a_failed_upload_gives_its_rate_slot_back(make, repo):
     data = _blob()
     status, reason = await _refused(
         store.put(
-            scope_kind="space",
+            scope_kind="channel",
             scope_id="s1",
-            blob_id=space_media_address("space", "s1", b"other"),
+            blob_id=space_media_address("channel", "s1", b"other"),
             data=data,
             expires_at=NOW + 60,
             now=NOW,
         )
     )
     assert (status, reason) == (422, "blob_id_mismatch")
-    assert await repo.upload_counts("space", "s1", bucket=NOW // 3600) == (0, 0)
+    assert await repo.upload_counts("channel", "s1", bucket=NOW // 3600) == (0, 0)
     assert await _put(store, data) is True
 
 
@@ -789,7 +772,7 @@ async def test_an_address_has_an_upload_byte_budget(make, repo):
 
     async def up(data, *, space, client="198.51.100.7", now=NOW):
         return await store.put(
-            scope_kind="space",
+            scope_kind="channel",
             scope_id=space,
             blob_id=_addr(data, space),
             data=data,
@@ -821,7 +804,7 @@ async def test_another_scopes_identical_ciphertext_gets_another_address(make, re
     store = make(max_bytes=4 * SMALL)
     data = _blob()
     await _put(store, data, space="victim")
-    victim_id = space_media_address("space", "victim", data)
+    victim_id = space_media_address("channel", "victim", data)
     # Under the victim's address but the attacker's scope: refused.
     assert await _refused(
         store.put(
@@ -844,54 +827,11 @@ async def test_another_scopes_identical_ciphertext_gets_another_address(make, re
     held = await repo.get_blob(victim_id)
     assert held is not None
     assert (held.scope_kind, held.scope_id, held.expires_at) == (
-        "space",
+        "channel",
         "victim",
         NOW + 86_400,
     )
     assert await store.read(victim_id, now=NOW + 2) == data
-
-
-async def test_a_banned_other_space_cannot_touch_the_blob(make, repo, gfs_db):
-    """R9: banning another space that uploaded the same ciphertext hides and
-    drops only that space's blob."""
-    store = make()
-    fed = SqliteGfsFederationRepo(gfs_db)
-    await fed.upsert_instance(
-        ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
-    )
-    for sid in ("victim", "bad"):
-        await fed.upsert_space(
-            GlobalSpace(space_id=sid, owning_instance="o", status="active")
-        )
-    data = _blob()
-    await _put(store, data, space="victim")
-    await _put(store, data, space="bad")
-    victim_id = space_media_address("space", "victim", data)
-    bad_id = space_media_address("space", "bad", data)
-    await fed.set_space_status("bad", "banned")
-    assert await store.read(bad_id, now=NOW + 1) is None
-    assert await store.withdraw_scope("space", "bad") == 1
-    assert await repo.get_blob(bad_id) is None
-    assert await store.read(victim_id, now=NOW + 1) == data
-
-
-async def test_a_ban_hides_and_drops_the_spaces_own_blobs(make, repo, gfs_db, tmp_dir):
-    store = make()
-    fed = SqliteGfsFederationRepo(gfs_db)
-    await fed.upsert_instance(
-        ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
-    )
-    await fed.upsert_space(
-        GlobalSpace(space_id="bad", owning_instance="o", status="active")
-    )
-    a, b = _blob(), _blob()
-    await _put(store, a, space="bad")
-    await _put(store, b, space="bad")
-    await fed.set_space_status("bad", "banned")
-    assert await store.read(_bid(a), now=NOW + 1) is None
-    assert await store.withdraw_scope("space", "bad") == 2
-    assert await repo.totals() == (0, 0)
-    assert list((tmp_dir / "spaces").iterdir()) == []
 
 
 # ── Third review A3: fairness per household ──────────────────────────────
@@ -904,7 +844,7 @@ async def test_eviction_is_fair_per_household_not_per_scope(make, repo):
 
     async def up(data, space, household, now):
         return await store.put(
-            scope_kind="space",
+            scope_kind="channel",
             scope_id=space,
             blob_id=_addr(data, space),
             data=data,
@@ -957,20 +897,28 @@ async def test_a_blob_that_expires_or_is_evicted_leaves_its_age_behind(
     # c evicts the expired a first, then (scope full) the LRU b.
     await _put(store, c, now=NOW + 20)
     await _put(store, d, now=NOW + 21)
-    got_a = await demand.note_request(_bid(a), "space", "s1", now=NOW + 30, window_s=60)
-    got_b = await demand.note_request(_bid(b), "space", "s1", now=NOW + 30, window_s=60)
+    got_a = await demand.note_request(
+        _bid(a), "channel", "s1", now=NOW + 30, window_s=60
+    )
+    got_b = await demand.note_request(
+        _bid(b), "channel", "s1", now=NOW + 30, window_s=60
+    )
     assert got_a.stored_at == NOW
     assert got_b.stored_at == NOW + 1
     # The sweep's expiry is remembered too.
     await store.prune_expired(NOW + 10 * 86_400)
-    got_c = await demand.note_request(_bid(c), "space", "s1", now=NOW + 30, window_s=60)
+    got_c = await demand.note_request(
+        _bid(c), "channel", "s1", now=NOW + 30, window_s=60
+    )
     assert got_c.stored_at == NOW + 20
     # A seed holder's delete is NOT remembered: deleted content must not be
     # asked of a holder as if it were merely old.
     e = _blob()
     await _put(store, e, space="s9", now=NOW + 40)
-    assert await store.delete(_bid(e), scope_kind="space", scope_id="s9")
-    got_e = await demand.note_request(_bid(e), "space", "s9", now=NOW + 50, window_s=60)
+    assert await store.delete(_bid(e), scope_kind="channel", scope_id="s9")
+    got_e = await demand.note_request(
+        _bid(e), "channel", "s9", now=NOW + 50, window_s=60
+    )
     assert got_e.stored_at is None
 
 
@@ -980,18 +928,18 @@ async def test_the_sweep_prunes_old_demand(repo, gfs_db, tmp_dir):
     store = GfsSpaceMediaStore(
         repo, FsBlobFiles(tmp_dir / "spaces"), _limits(), demand=demand
     )
-    await demand.note_request("a" * 64, "space", "s1", now=NOW, window_s=60)
+    await demand.note_request("a" * 64, "channel", "s1", now=NOW, window_s=60)
     await demand.note_request(
-        "b" * 64, "space", "s1", now=NOW + 20 * 86_400, window_s=60
+        "b" * 64, "channel", "s1", now=NOW + 20 * 86_400, window_s=60
     )
     await store.sweep(NOW + sm.DEMAND_KEEP_S + 1)
     assert (
         await demand.note_request(
-            "a" * 64, "space", "s1", now=NOW + 40 * 86_400, window_s=10**9
+            "a" * 64, "channel", "s1", now=NOW + 40 * 86_400, window_s=10**9
         )
     ).requests == 1
     assert (
         await demand.note_request(
-            "b" * 64, "space", "s1", now=NOW + 40 * 86_400, window_s=10**9
+            "b" * 64, "channel", "s1", now=NOW + 40 * 86_400, window_s=10**9
         )
     ).requests == 2

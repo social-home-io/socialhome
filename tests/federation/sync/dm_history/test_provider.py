@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+
+import pytest
 
 from socialhome.domain.conversation import ConversationMember, ConversationMessage
 from socialhome.domain.federation import FederationEventType
@@ -29,8 +32,12 @@ class _FakeFederation:
 
 
 class _FakeConvRepo:
-    def __init__(self, messages, members: list | None = None, seats=("peer-a",)):
+    def __init__(
+        self, messages, members: list | None = None, seats=("peer-a",), held=True
+    ):
         self._messages = messages
+        #: Whether this household holds the conversation at all.
+        self._held = held
         self._members: list = members or []
         #: Households holding a remote seat in the conversation.
         self._seats = seats
@@ -49,7 +56,7 @@ class _FakeConvRepo:
 
     async def get(self, conversation_id):
         # Plain DMs only: no system chat (``DmScope`` asks).
-        return None
+        return SimpleNamespace(federates_as_dm=True) if self._held else None
 
     async def list_remote_members(self, conversation_id: str) -> list:
         return [
@@ -272,3 +279,24 @@ async def test_no_history_for_a_household_without_a_seat():
     )
     assert count == 0
     assert fed.sent == []
+
+
+@pytest.mark.parametrize(("held", "warned"), [(True, True), (False, False)])
+async def test_an_unknown_conversation_is_no_warning(caplog, held, warned):
+    """P9 (demo audit): a conversation we no longer hold (a hidden person's
+    USER_REMOVED cascade dropped it; the requester asks again after the
+    unhide) gets nothing back and an INFO line; a sender asking about one
+    we DO hold without a seat stays a WARNING."""
+    now = datetime(2026, 4, 1, tzinfo=UTC)
+    fed = _FakeFederation()
+    provider = DmHistoryProvider(
+        conversation_repo=_FakeConvRepo([_msg(0, now)], seats=("peer-b",), held=held),
+        federation_service=fed,
+        user_repo=_FakeUserRepo({}),
+    )
+    with caplog.at_level(logging.INFO):
+        count = await provider.handle_request(
+            _event("peer-a", {"conversation_id": "c-1", "since": ""})
+        )
+    assert count == 0 and fed.sent == []
+    assert any(r.levelno >= logging.WARNING for r in caplog.records) is warned

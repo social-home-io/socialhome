@@ -1,30 +1,29 @@
 """The GFS space media cache — encrypted, short-lived, bounded.
 
-Households reached only through a GFS (a space member seated from an invite
-link, a follower of a public / global space) can't fetch a picture from the
+Households reached only through a GFS (a space member or follower seated
+from an invite link or a GFS follow) can't fetch a picture from the
 household that posted it. So a household encrypts each space file ONCE —
 under the space content key, padded to a size bucket — and uploads the same
 ciphertext ONCE per GFS; every reader fetches it here by its address. This
 server can't open it.
 
-**One blob, one scope.** A blob is uploaded for a scope — a listed space
-(``space`` + its id) or a private space's opaque v_51 channel (``channel`` +
-the random channel id; this server never learns which space that is) — and
-its address is bound to that scope:
+**One blob, one scope.** A blob is uploaded for a scope — a space's opaque
+channel (``channel`` + the random channel id; this server never learns which
+space that is; the ``space`` scope went in v_96) — and its address is bound
+to that scope:
 :func:`~socialhome.domain.gfs_space_media.space_media_address`,
 ``sha256("sm1|" + scope_kind + "|" + scope_id + "|" + ciphertext)``. This
 server recomputes it on upload (``422 blob_id_mismatch`` otherwise) and a
 reader checks it with the scope id it knows. The same ciphertext therefore
-has another address in every scope: whoever fetched a space's blob can't
-store it under their own scope at that space's address, so nothing another
+has another address in every scope: whoever fetched a channel's blob can't
+store it under their own scope at that channel's address, so nothing another
 scope does reaches it (security review v2, N1 — it replaced cross-scope
 claims, owners and tombstones). The scope's own retries coalesce (``200
-already_stored``, never a fresher expiry); its seed holder deletes it; a
-moderator's ban of a space hides its blobs at once and drops them.
+already_stored``, never a fresher expiry); its channel key holder deletes
+it.
 
 No tombstone keeps a deleted blob out: only the scope's own upload
-authorization (its authority, a member's cert or writer key, its channel
-key) can store it again — the same parties who may upload any new content of
+authorization (its channel key or channel writer key) can store it again — the same parties who may upload any new content of
 that scope — and the item that named it is gone.
 
 It is a **cache, not storage** — the operator sizes it to the disk they have
@@ -41,12 +40,10 @@ favours new pictures over old ones:
 * all blobs together stay under ``max_bytes`` (5 GiB): before a new blob is
   stored, expired blobs go first, then — fair PER OWNER, never one global
   order and never per scope — the least recently fetched (then oldest)
-  blobs of the fairness owner holding the most bytes (a space's owning
-  household across all its spaces; a channel blob's uploader address
-  bucket), down to the next largest, then again — so a household flooding
-  the cache with however many spaces, or a channel flooded by its uploader,
-  pushes out its own (security review F1, third review A3, fourth review
-  G1); only an ACTIVE listed space takes uploads;
+  blobs of the fairness owner holding the most bytes (a blob's uploader
+  address bucket), down to the next largest, then again — so a channel
+  flooded by its uploader pushes out its own (security review F1, third
+  review A3, fourth review G1);
 * one client network prefix (IPv6 /48, IPv4 /24) uploads at most ``ip_bytes_per_hour`` (1 GiB) across
   every scope (``429 ip_media_quota``), cluster-wide in the shared database
   under a keyed hash of the address; a channel takes media only while it is
@@ -183,7 +180,7 @@ MAX_BODY_BYTES_IN_FLIGHT: int = 256 * 1024 * 1024
 @dataclass(slots=True, frozen=True)
 class SpaceMediaLimits:
     """The operator's bounds (``[space_media]``). ``space_*`` apply per
-    scope — a listed space or a private space's channel."""
+    scope — a space's channel."""
 
     max_bytes: int
     ttl_s: int
@@ -481,9 +478,8 @@ class GfsSpaceMediaStore:
         :meth:`admit_upload` took (given back here when the upload fails or
         stores nothing new); without it this call admits the upload itself
         (for *client*'s address). *owner* is the fairness owner the blob
-        counts against — ``("household", a space's owning instance)`` or
-        ``("client", the uploader's keyed network prefix)`` for a channel;
-        without it the scope stands alone. Raises :class:`MediaRefused`."""
+        counts against — ``("client", the uploader's keyed network
+        prefix)``; without it the scope stands alone. Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
         if reserved is None:
             admitted = await self.admit_upload(
@@ -513,7 +509,7 @@ class GfsSpaceMediaStore:
                     data,
                     expires_at,
                     now,
-                    owner or ("household", f"{scope_kind}:{scope_id}"),
+                    owner or ("client", f"{scope_kind}:{scope_id}"),
                 )
         except BaseException:
             await self.release_upload(slot)
@@ -525,8 +521,7 @@ class GfsSpaceMediaStore:
         return stored
 
     async def read(self, blob_id: str, *, now: int | None = None) -> bytes | None:
-        """The blob, or ``None`` when unknown, expired, evicted, or its
-        scope is a banned space. Marks the fetch at most once an hour."""
+        """The blob, or ``None`` when unknown, expired or evicted. Marks the fetch at most once an hour."""
         if not is_blob_id(blob_id):
             return None
         now = int(time.time()) if now is None else now
@@ -554,18 +549,6 @@ class GfsSpaceMediaStore:
                 return False
             await self._files.remove(blob_id)
         return True
-
-    async def withdraw_scope(self, scope_kind: str, scope_id: str) -> int:
-        """A moderator banned the scope: every blob of it goes (rows, then
-        files). Its blobs are hidden from the moment of the ban already
-        (:meth:`read` checks the space's status); its uploads are refused by
-        the auth. Returns the blobs dropped."""
-        async with self._lock:
-            ids = await self._repo.scope_blob_ids(scope_kind, scope_id)
-            dropped = await self._drop(ids)
-        if dropped:
-            log.info("space media: dropped %d blob(s) of a banned scope", len(dropped))
-        return len(dropped)
 
     async def prune_expired(self, now: int | None = None) -> int:
         """Drop expired blobs (rows, then files). The node's lock is taken
@@ -830,11 +813,9 @@ class GfsSpaceMediaStore:
         ``max_bytes``: expired blobs first, then — FAIR PER OWNER, never one
         global order and never per scope — the least recently fetched (then
         oldest) blobs of the fairness owner holding the most bytes (a
-        space's owning household across all its spaces; a channel blob's
-        uploader network prefix), counting the uploader's owner with the
+        blob's uploader network prefix), counting the uploader's owner with the
         blob it is storing (a tie takes the uploader's own), until it is down
-        to the next largest, then again. So a household flooding the cache —
-        however many spaces it publishes — or a channel flooded by its
+        to the next largest, then again. So a channel flooded by its
         uploader pushes out its own blobs, and every other owner keeps its
         share (security review F1, third review A3, fourth review G1)."""
         for _ in range(EVICT_MAX_ROUNDS):

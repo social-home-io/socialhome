@@ -1,20 +1,20 @@
-"""Bounded, in-memory retry queue for ``POST /gfs/publish``.
+"""Bounded, in-memory retry queue for anonymous GFS publishes.
 
-:meth:`GfsConnectionService.publish_space_event` relays a public/global
-space event to every connection server the space is published on. Before
-this queue a failed POST — the GFS restarting, a network blip, a 5xx, the
-GFS's per-IP limiter answering 429 — lost the event for every subscriber
-on that server. Now a *transient* failure (transport error, timeout, 408,
+Born for the space-keyed ``POST /gfs/publish`` relay (removed in v_96);
+the opaque channel service (:mod:`.gfs_channel_service`) and the moment
+senders reuse it. Before this queue a failed POST — the GFS restarting, a
+network blip, a 5xx, the GFS's per-IP limiter answering 429 — lost the
+event for every subscriber on that server. Now a *transient* failure (transport error, timeout, 408,
 429, 5xx) is queued per connection and re-POSTed with backoff, honouring a
 429's ``Retry-After``; a *permanent* one (any other 4xx, an unfollowed
 redirect) is not retried, because the identical body gets the identical
 answer.
 
-**What is queued is only ``{space_id, event_type, payload}``** — the
-identity-free relay body (:class:`GfsPublish`). There is no slot for
-``from_instance`` or a household signature, so a retry cannot add identity
-by construction; the sender re-checks ``anonymous_publish`` before every
-retry and drops the item if the GFS cannot take the identity-free body.
+**What is queued is only ``{space_id, event_type, payload}``**
+(:class:`GfsPublish`) — what the sender rebuilds the anonymous request
+from. There is no slot for ``from_instance`` or a household signature, so a
+retry cannot add identity by construction; the sender re-checks the
+server's capability before every retry.
 
 **Why in memory, not the durable outbox or a new table.** The outbox
 (``federation_outbox``) is keyed by a recipient *instance* and stores a
@@ -28,8 +28,12 @@ is minutes long (the budget below is ~13 minutes). A restart losing the
 queue costs what it cost before this queue existed, and the owner can
 always republish. Bounded by :data:`GFS_PUBLISH_RETRY_MAX_PENDING`.
 
-Order is kept per connection: while a connection has pending items, a new
-publish to it joins the back of its queue instead of overtaking.
+Order is kept per (connection, space): while a space has pending items
+for a connection, a new publish of that space to it joins the back of its
+queue instead of overtaking. Spaces never wait on each other — one space's
+failing head (an epoch notice the GFS's one-epoch-a-minute bound answered
+429) must not hold back another space's first notice to the same GFS,
+whose seats would be refused meanwhile.
 
 Lifecycle follows the scheduler pattern (``_stop: asyncio.Event``, see
 ``infrastructure/replay_cache_scheduler.py``); a second event wakes the
@@ -45,17 +49,9 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
-
-import orjson
-
-from ..domain.space_item import PAYLOAD_SUITE_UNSUPPORTED_ERROR
+from typing import Literal
 
 log = logging.getLogger(__name__)
-
-#: Most of a 409 body read to tell a payload-suite refusal from any other
-#: conflict — the GFS answers a few dozen bytes.
-_REFUSAL_BODY_MAX_BYTES: int = 1024
 
 #: Wait before retry *n + 1* of a connection's head item; the length is the
 #: retry budget. ~5 s, 30 s, 2 min, 10 min — about 13 minutes in all, which
@@ -78,34 +74,20 @@ GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN: int = 64
 
 @dataclass(slots=True, frozen=True)
 class GfsPublish:
-    """One identity-free relay body waiting for a retry. Process-local queue
-    item, never persisted. Exactly the ``POST /gfs/publish`` body."""
+    """One anonymous publish waiting for a retry: the sender's own kind
+    (``event_type``) and what it rebuilds the request from. Process-local
+    queue item, never persisted."""
 
     space_id: str
     event_type: str
     payload: dict
-    #: The same item under compressed payload suites (``"zlib1+dict1"`` /
-    #: ``"zlib1"`` → its envelope), or ``None``. One of them is sent instead
-    #: of ``payload`` to a server that proved that suite and has not refused
-    #: it for this space lately.
-    compressed: dict[str, dict] | None = None
-
-    def body(self, *, suite: str | None = None) -> dict:
-        """The wire body — ``{space_id, event_type, payload}``, nothing else
-        (``payload`` the copy under *suite* when asked and present)."""
-        payload = (self.compressed or {}).get(suite or "") or self.payload
-        return {
-            "space_id": self.space_id,
-            "event_type": self.event_type,
-            "payload": payload,
-        }
 
 
 @dataclass(slots=True, frozen=True)
 class PublishOutcome:
-    """How one ``POST /gfs/publish`` attempt ended."""
+    """How one anonymous publish attempt ended."""
 
-    kind: Literal["delivered", "transient", "permanent", "suite_refused"]
+    kind: Literal["delivered", "transient", "permanent"]
     #: Seconds the server asked us to wait (a 429's ``Retry-After``).
     retry_after_s: float | None = None
 
@@ -120,27 +102,6 @@ class PublishOutcome:
     @classmethod
     def permanent(cls) -> PublishOutcome:
         return cls("permanent")
-
-    @classmethod
-    def suite_refused(cls) -> PublishOutcome:
-        """409 ``payload_suite_unsupported``: a follower there cannot open a
-        compressed item — send the JSON one instead."""
-        return cls("suite_refused")
-
-
-async def is_payload_suite_refusal(resp: Any) -> bool:
-    """Whether ``resp`` is the GFS's ``409 payload_suite_unsupported``.
-    Reads at most :data:`_REFUSAL_BODY_MAX_BYTES` of the body."""
-    if resp.status != 409:
-        return False
-    try:
-        raw = await resp.content.read(_REFUSAL_BODY_MAX_BYTES)
-        body = orjson.loads(raw)
-    except ValueError, OSError:
-        return False
-    return isinstance(body, dict) and body.get("error") == (
-        PAYLOAD_SUITE_UNSUPPORTED_ERROR
-    )
 
 
 def parse_retry_after_s(value: str | None) -> float | None:
@@ -161,7 +122,7 @@ def parse_retry_after_s(value: str | None) -> float | None:
 
 
 def classify_publish_status(status: int, retry_after: str | None) -> PublishOutcome:
-    """Map a ``POST /gfs/publish`` status to an outcome.
+    """Map an anonymous publish's HTTP status to an outcome.
 
     2xx delivered; 408 / 429 / 5xx transient (429 carries ``Retry-After``);
     everything else permanent — a 4xx is the same answer on every attempt,
@@ -192,30 +153,49 @@ PublishSender = Callable[[str, GfsPublish], Awaitable[PublishOutcome]]
 
 
 class GfsPublishRetryQueue:
-    """Per-connection FIFO of failed GFS publishes, retried with backoff."""
+    """Per-(connection, space) FIFO of failed GFS publishes, retried with
+    backoff; the caps count per connection and in all."""
 
     __slots__ = (
         "_conn_full_logged",
         "_full_logged",
         "_queues",
         "_send",
+        "_solo",
         "_stop",
         "_task",
         "_wake",
     )
 
-    def __init__(self, send: PublishSender) -> None:
+    def __init__(
+        self, send: PublishSender, *, solo_kinds: frozenset[str] = frozenset()
+    ) -> None:
+        """*solo_kinds*: kinds (``event_type``) that give up ALONE — the
+        items queued behind such a head keep their own attempts (a seat
+        request that never lands must not take content down with it)."""
         self._send = send
-        self._queues: dict[str, _ConnQueue] = {}
+        self._solo = solo_kinds
+        self._queues: dict[tuple[str, str], _ConnQueue] = {}
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._full_logged = False
         self._conn_full_logged: set[str] = set()
 
-    def pending(self, conn_id: str) -> bool:
-        """Whether ``conn_id`` has publishes waiting (new ones queue behind)."""
-        return conn_id in self._queues
+    def expedite(self, space_id: str) -> None:
+        """Make every waiting retry of *space_id* due now (on every
+        connection): its state changed (a fresh channel), so what waits may
+        have nothing left to send and must not hold the rest back."""
+        now = time.monotonic()
+        for (_conn, space), conn in self._queues.items():
+            if space == space_id:
+                conn.due_at = min(conn.due_at, now)
+        self._wake.set()
+
+    def pending(self, conn_id: str, space_id: str) -> bool:
+        """Whether ``conn_id`` has publishes of ``space_id`` waiting (new
+        ones of that space queue behind)."""
+        return (conn_id, space_id) in self._queues
 
     def enqueue(
         self,
@@ -243,10 +223,9 @@ class GfsPublishRetryQueue:
                     GFS_PUBLISH_RETRY_MAX_PENDING,
                 )
             return False
-        existing = self._queues.get(conn_id)
-        if existing is not None and len(existing.items) >= (
-            GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN
-        ):
+        if sum(
+            len(q.items) for (cid, _s), q in self._queues.items() if cid == conn_id
+        ) >= (GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN):
             if conn_id not in self._conn_full_logged:
                 self._conn_full_logged.add(conn_id)
                 log.warning(
@@ -260,12 +239,14 @@ class GfsPublishRetryQueue:
             space_id=item.space_id,
             event_type=item.event_type,
             payload=copy.deepcopy(item.payload),
-            compressed=copy.deepcopy(item.compressed),
         )
-        conn = self._queues.get(conn_id)
+        key = (conn_id, item.space_id)
+        conn = self._queues.get(key)
+        if conn is not None and queued in conn.items:
+            return True  # the same send is already waiting: once is enough
         if conn is None:
             conn = _ConnQueue(due_at=self._due(0, retry_after_s))
-            self._queues[conn_id] = conn
+            self._queues[key] = conn
         conn.items.append(queued)
         self._wake.set()
         return True
@@ -327,16 +308,25 @@ class GfsPublishRetryQueue:
                 continue
 
     async def _run_due(self) -> None:
-        """Retry every connection whose head item is due, in order."""
-        for conn_id in list(self._queues):
-            conn = self._queues.get(conn_id)
-            if conn is None or conn.due_at > time.monotonic():
+        """Retry every (connection, space) whose head item is due, in order.
+        A connection that just failed without a ``Retry-After`` (unreachable,
+        5xx: the server, not one space's bound) has its other spaces skipped
+        for the rest of the pass, uncounted — one probe a pass per dead
+        server, and another server's retries are not held behind it."""
+        down: set[str] = set()
+        for key in list(self._queues):
+            conn = self._queues.get(key)
+            if conn is None or conn.due_at > time.monotonic() or key[0] in down:
                 continue
-            await self._drain_conn(conn_id, conn)
+            if await self._drain_conn(key, conn):
+                down.add(key[0])
             if self._stop.is_set():
                 return
 
-    async def _drain_conn(self, conn_id: str, conn: _ConnQueue) -> None:
+    async def _drain_conn(self, key: tuple[str, str], conn: _ConnQueue) -> bool:
+        """Send *key*'s items in order. Returns whether it stopped on a
+        transient failure of the server itself (no ``Retry-After``)."""
+        conn_id = key[0]
         while conn.items and not self._stop.is_set():
             item = conn.items[0]
             try:
@@ -362,6 +352,21 @@ class GfsPublishRetryQueue:
                 )
                 continue
             conn.retries_done += 1
+            if (
+                conn.retries_done >= len(GFS_PUBLISH_RETRY_BACKOFF_S)
+                and item.event_type in self._solo
+            ):
+                conn.items.popleft()
+                conn.retries_done = 0
+                log.warning(
+                    "GFS publish retry: giving up on %s@%s to %s after %d"
+                    " retries (what waited behind it goes on)",
+                    item.event_type,
+                    item.space_id,
+                    conn_id,
+                    len(GFS_PUBLISH_RETRY_BACKOFF_S),
+                )
+                continue
             if conn.retries_done >= len(GFS_PUBLISH_RETRY_BACKOFF_S):
                 log.warning(
                     "GFS publish retry: giving up on %d GFS publish(es) to %s"
@@ -374,9 +379,10 @@ class GfsPublishRetryQueue:
                 conn.items.clear()
                 break
             conn.due_at = self._due(conn.retries_done, outcome.retry_after_s)
-            return
-        if not conn.items and self._queues.get(conn_id) is conn:
-            del self._queues[conn_id]
+            return outcome.retry_after_s is None
+        if not conn.items and self._queues.get(key) is conn:
+            del self._queues[key]
             self._conn_full_logged.discard(conn_id)
             if not self._queues:
                 self._full_logged = False
+        return False

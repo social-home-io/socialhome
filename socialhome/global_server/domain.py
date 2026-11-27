@@ -84,9 +84,9 @@ class GlobalSpace:
     join_mode: str = "invite_only"
     #: The owner's readability opt-in, straight off the signed publish body.
     #: When False this space is LISTED here for discovery but is NOT publicly
-    #: readable: the GFS refuses ``POST /gfs/subscribe`` for it, purges any
-    #: seats it already had, and the owner relays neither content nor content
-    #: key. Independent of ``join_mode`` — an ``invite_only`` space with this
+    #: followable: no follow (a join for the read-only role) is offered for
+    #: it, and its ``join_contact`` is served only when it takes requests.
+    #: Independent of ``join_mode`` — an ``invite_only`` space with this
     #: ON is a broadcast space. Fail-closed default: a row published before
     #: this field existed reads as False until the owner's next publish.
     allow_subscribers: bool = False
@@ -98,16 +98,15 @@ class GlobalSpace:
     published_at: str = ""  # ISO 8601
     #: The space's Ed25519 *authority* verify key (hex), TOFU-pinned on first
     #: publish (Phase 5a); moved afterwards only by an owner-signed
-    #: ``authority_cert`` with a higher epoch (v_44). Lets the GFS authorize a relay by a space-authority
-    #: signature (any seed-holder — owner or delegated admin) without learning
-    #: the space content. Empty when an older HFS published no pubkey → such a
-    #: space can only be relayed by its owning instance.
+    #: ``authority_cert`` with a higher epoch (v_44). Verifies the space's
+    #: authority-signed ``join_contact`` (v_84); since v_96 no relay is keyed
+    #: to it. Empty when an older HFS published no pubkey.
     identity_public_key: str = ""
     #: The owner's cert for ``identity_public_key`` (v_44,
     #: :mod:`socialhome.authority_cert`) — ``None`` while the space still uses
     #: its creation-time key (epoch 0). Stored only after verifying it against
     #: the owner's registered key; served on ``GET /gfs/spaces/{id}`` so a
-    #: subscriber can heal its pin. Names no member and no reason.
+    #: reader can heal its pin. Names no member and no reason.
     authority_cert: dict | None = None
     #: This server's own count of accepted re-pins (migration 0013): +1 each
     #: time an owner cert moved the pin. The public directory serves THIS,
@@ -120,7 +119,7 @@ class GlobalSpace:
     #: is sticky against re-publish — conflating the two let an owner
     #: permanently lock itself out of its own listing. Withdrawal hides the
     #: space from DISCOVERY only (listing, detail route, public pages);
-    #: existing subscribers and the relay keep working.
+    #: the space's channels and their seats keep working.
     withdrawn: bool = False
     #: The owner's optional place pin for a global space (GFS migration
     #: 0019), 4 dp, from its signed publish body — for sorting the directory
@@ -151,35 +150,6 @@ class GlobalSpace:
     #: cluster peer's stale row) never overwrites newer counts. Internal:
     #: never served.
     counts_ts: str | None = None
-
-
-@dataclass(slots=True, frozen=True)
-class GfsSubscriber:
-    """A subscriber row: the instance to push a relay frame to.
-
-    Delivery is WebSocket-only — the GFS holds no household address (its
-    former ``inbox_url`` was dropped by migration 0018).
-    """
-
-    instance_id: str
-
-
-@dataclass(slots=True, frozen=True)
-class GfsSubscriberWithKeys:
-    """A subscriber joined with its registered identity + key-wrap keys.
-
-    Returned by the Phase-5b-c reconcile query (``GET /gfs/spaces/{id}/
-    subscribers``) so a verified seed-holder can re-seal the per-space content
-    key to each subscriber. Carries only already-GFS-registered public material
-    (the subscriber's Ed25519 identity pubkey + its X25519 key-wrap pubkey +
-    the self-signature binding them) — no inbox URL, no private data.
-    ``keywrap_public_key`` / ``keywrap_sig`` are empty for an older subscriber
-    that registered no key-wrap key (it can't be sealed-to yet → skipped)."""
-
-    instance_id: str
-    identity_public_key: str
-    keywrap_public_key: str = ""
-    keywrap_sig: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -393,14 +363,14 @@ class GfsSpaceMedia:
     expires_at: int
     #: Last fetch (the upload counts as one), moved at most once an hour.
     last_fetched_at: int
-    #: ``"space"`` (a listed space) or ``"channel"`` (a private space's
-    #: opaque v_51 channel).
-    scope_kind: str = "space"
+    #: ``"channel"`` — a space's opaque channel (v_51 private, v_96 global);
+    #: the only scope since v_96 (GFS migration 0033 deleted the ``space``
+    #: scope's rows).
+    scope_kind: str = "channel"
     scope_id: str = ""
-    #: The fairness owner it counts against: ``("household", a space's
-    #: owning instance)`` or ``("client", the uploader's keyed address-bucket
-    #: hash)`` for a channel blob.
-    owner_kind: str = "household"
+    #: The fairness owner it counts against: ``("client", the uploader's
+    #: keyed address-bucket hash)``.
+    owner_kind: str = "client"
     owner_id: str = ""
 
 
@@ -493,120 +463,6 @@ class GfsQueuedMedia:
     expires_at: int
 
 
-#: How far an OWNER epoch notice may raise a space's confirmed content epoch
-#: beyond the stored one — unless it stays within
-#: :data:`MAX_EPOCH_CLOCK_LEAD_S` of wall-clock now, which is how far a v_44
-#: post-restore rotation (epoch lifted to unix seconds) may legitimately jump.
-MAX_EPOCH_STEP: int = 1000
-
-#: How far ahead of wall-clock now (seconds) an owner may ever set the epoch.
-MAX_EPOCH_CLOCK_LEAD_S: int = 24 * 60 * 60
-
-#: Minimum spacing (seconds) between two raises of ``current`` that do NOT
-#: come from the owner (a delegated admin's notice, an authorized host relay).
-MIN_EPOCH_STEP_INTERVAL_S: int = 60
-
-
-def epoch_ceiling(current: int | None, now: int) -> int:
-    """The highest content epoch an OWNER notice may confirm.
-
-    ``max(current + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)`` — the
-    restored owner's wall-clock epoch still lands, an absurd value does not.
-    Nobody but the owner raises by more than +1 (see :class:`GfsSpaceEpoch`)."""
-    base = current if current is not None else 0
-    return max(base + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)
-
-
-@dataclass(slots=True, frozen=True)
-class GfsSpaceEpoch:
-    """What this server knows about a space's content epoch (v_49).
-
-    Two tiers, because the GFS can tell the space OWNER apart (its registered
-    household key) but cannot tell a legitimate delegated admin from a
-    demoted one whose seed still matches until the re-pin:
-
-    * ``confirmed`` — the epoch the OWNER last announced (owner-signed
-      notice). Only the owner moves it, by any amount up to
-      :func:`epoch_ceiling`; ``previous`` is the confirmed epoch before it
-      and ``confirmed_at`` when it was confirmed.
-    * ``current`` — the newest epoch seen at all (``>= confirmed``). Seed-only
-      statements (a delegated admin's notice, an authorized host relay) raise
-      it by exactly +1, at most once per :data:`MIN_EPOCH_STEP_INTERVAL_S`
-      (``raised_at``); writer certs never raise anything.
-
-    Kept off :class:`GlobalSpace` so the public directory never shows it,
-    and reset whenever the space authority key is re-pinned.
-    """
-
-    space_id: str
-    current: int
-    confirmed: int
-    previous: int | None
-    confirmed_at: int
-    raised_at: int
-
-    def admits(self, epoch: int, *, now: int, grace_s: int) -> bool:
-        """Whether a cert for ``epoch`` is fresh enough to relay.
-
-        * never beyond ``current + 1`` (one rotation may be in flight);
-        * anything from ``confirmed`` up is admitted — seed-only raises move
-          ``current`` but never the floor, so no seed holder can strand the
-          writers on the owner's real epoch (a cert can't either: certs never
-          raise);
-        * an epoch below ``confirmed`` is admitted back to ``previous`` only
-          for ``grace_s`` after the owner confirmed the newer one — that is
-          what retires a writer the owner's rotation removed.
-
-        Receivers apply their own (exact) freshness rule on top.
-        """
-        if epoch > self.current + 1:
-            return False
-        if epoch >= self.confirmed:
-            return True
-        if self.previous is None or epoch < self.previous:
-            return False
-        return now - self.confirmed_at <= grace_s
-
-    def may_step(self, epoch: int, *, now: int) -> bool:
-        """Whether a seed-only statement may raise ``current`` to ``epoch``:
-        exactly +1, and not within :data:`MIN_EPOCH_STEP_INTERVAL_S` of the
-        last raise."""
-        return (
-            epoch == self.current + 1
-            and now - self.raised_at >= MIN_EPOCH_STEP_INTERVAL_S
-        )
-
-
-@dataclass(slots=True, frozen=True)
-class GfsSpaceWriterKeys:
-    """The pinned writer group keys of a space's newest and previous content
-    epoch (member publish, GFS migration 0015).
-
-    Kept off :class:`GlobalSpace` so the public directory never shows them.
-    Cleared on an authority re-pin. (The migration's ``member_publish_mode``
-    columns are unused since v_90: there is one publish mode.)
-    """
-
-    space_id: str
-    writer_key_epoch: int | None = None
-    writer_key_pk: str | None = None
-    writer_key_prev_epoch: int | None = None
-    writer_key_prev_pk: str | None = None
-
-    def writer_pk_for(self, epoch: int) -> str | None:
-        """The pinned writer public key (b64url) for ``epoch``, or ``None``.
-        Only the newest and the previous pin are kept; freshness (the grace
-        on the previous epoch) is :meth:`GfsSpaceEpoch.admits`'s job."""
-        if self.writer_key_epoch is not None and epoch == self.writer_key_epoch:
-            return self.writer_key_pk
-        if (
-            self.writer_key_prev_epoch is not None
-            and epoch == self.writer_key_prev_epoch
-        ):
-            return self.writer_key_prev_pk
-        return None
-
-
 #: How long a channel's previous content epoch stays open after the newer
 #: one was announced (seconds) — the receivers' and the space path's grace.
 CHANNEL_EPOCH_GRACE_S: int = 600
@@ -629,13 +485,12 @@ CHANNEL_UNUSED_TTL_SECONDS: int = 24 * 60 * 60
 
 @dataclass(slots=True, frozen=True)
 class GfsChannel:
-    """One opaque channel (v_51, migration 0016) — a PRIVATE space's member
-    relay, keyed by a random id. Nothing here names a space, a space key or
-    an owner household.
+    """One opaque channel (v_51, migration 0016) — a space's member and
+    follower relay (private since v_51, global since v_96), keyed by a random
+    id. Nothing here names a space, a space key or an owner household.
 
-    The content epoch has ONE tier (unlike :class:`GfsSpaceEpoch`): this
-    server cannot tell an owner from a delegated admin without learning who
-    owns the channel, so every channel-key-signed notice is equal and
+    The content epoch has ONE tier: this server cannot tell an owner from a
+    delegated admin without learning who owns the channel, so every channel-key-signed notice is equal and
     inflation is bounded by time instead — :meth:`step_allowance`."""
 
     channel_id: str

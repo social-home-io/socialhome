@@ -13,6 +13,7 @@ import base64
 import io
 import random
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -55,6 +56,7 @@ from socialhome.domain.space import (
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    UserBannedError,
 )
 from socialhome.domain.space_proposal import ProposalAction, ProposalStatus
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
@@ -184,6 +186,30 @@ async def test_invite_remote_user_rejects_unpaired_host(stack):
             invitee_instance_id="peer",
             invitee_user_id="bob",
         )
+
+
+@pytest.mark.parametrize("banned", ["person", "household"])
+async def test_invite_remote_user_refuses_a_banned_person_or_household(stack, banned):
+    """P7b (owner fork (a)): a household ban blocks every person of it,
+    explicit invites included — nothing is minted or sent."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(
+        owner_username="alicehost",
+        name="Private",
+        space_type=SpaceType.PRIVATE,
+    )
+    if banned == "person":
+        await stack.space_repo.ban_member(space.id, "bob", "alicehost")
+    else:
+        await stack.space_repo.ban_household(space.id, "peer")
+    with pytest.raises(UserBannedError):
+        await stack.svc.invite_remote_user(
+            space.id,
+            actor_username="alicehost",
+            invitee_instance_id="peer",
+            invitee_user_id="bob",
+        )
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
 
 
 async def test_invite_remote_user_happy(stack):
@@ -799,6 +825,29 @@ async def test_approve_local_join_request(stack):
     )
     assert member is not None
     assert member.user_id == bob.user_id
+
+
+@pytest.mark.parametrize("banned", ["person", "household"])
+async def test_a_request_of_a_banned_applicant_is_never_approved(stack, banned):
+    """P7b — a request filed before its person or household was banned
+    stays unapproved: no token is minted, the request stays pending."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(
+        owner_username="alicehost",
+        name="S",
+        join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
+    )
+    rid = await stack.space_repo.save_join_request(
+        space.id, "remote-u", remote_applicant_instance_id="remote-house"
+    )
+    if banned == "person":
+        await stack.space_repo.ban_member(space.id, "remote-u", "alicehost")
+    else:
+        await stack.space_repo.ban_household(space.id, "remote-house")
+    with pytest.raises(UserBannedError):
+        await stack.svc.approve_join_request(rid, actor_username="alicehost")
+    assert (await stack.space_repo.get_join_request(rid))["status"] == "pending"
 
 
 async def test_approve_unknown_request_raises(stack):
@@ -1583,19 +1632,19 @@ async def test_apply_remote_admin_action_archive(stack):
 
 
 async def test_apply_remote_admin_action_ban(stack):
+    """A remote admin's forwarded ban of a person of ANOTHER household runs
+    on the host. (One of the owner household's people is refused — P7b
+    Fable re-review I-A, ``test_a_forwarded_ban_never_names_the_owner_households_people``.)"""
     space = await _host_space_with_remote_admin(stack)
-    victim = await _user(stack, "victimlocal")
-    await stack.svc.add_member(
-        space.id, actor_username="alicehost", user_id=victim.user_id, role="member"
-    )
-    await stack.svc.apply_remote_admin_action(
+    outcome = await stack.svc.apply_remote_admin_action(
         space.id,
         actor_instance_id="instance-A",
         actor_user_id="u-admin",
         action="ban",
-        params={"user_id": victim.user_id, "reason": "nope"},
+        params={"user_id": "u-far-victim", "reason": "nope"},
     )
-    assert await stack.space_repo.get_member(space.id, victim.user_id) is None
+    assert outcome is RemoteAdminOutcome.EXECUTED
+    assert await stack.space_repo.is_banned(space.id, "u-far-victim") is True
 
 
 async def test_apply_remote_admin_action_rejects_non_admin(stack):
@@ -1694,11 +1743,30 @@ async def test_apply_remote_admin_action_unarchive(stack):
 
 async def test_apply_remote_admin_action_unban(stack):
     space = await _host_space_with_remote_admin(stack)
-    victim = await _user(stack, "victimlocal")
-    await stack.svc.add_member(
-        space.id, actor_username="alicehost", user_id=victim.user_id, role="member"
-    )
+    # A person of another household (one of the owner household's is not
+    # the remote admin's at all — P7b Fable re-review I-A).
+    victim = SimpleNamespace(user_id="u-far-victim")
+    # P7b finding 5: the owner's own ban is not the remote admin's to lift.
     await stack.svc.ban(space.id, actor_username="alicehost", user_id=victim.user_id)
+    outcome = await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="unban",
+        params={"user_id": victim.user_id},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert await stack.space_repo.is_banned(space.id, victim.user_id) is True
+    # A ban the remote admin made (forwarded) it may lift again.
+    await stack.svc.unban(space.id, actor_username="alicehost", user_id=victim.user_id)
+    await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="ban",
+        params={"user_id": victim.user_id},
+    )
+    assert await stack.space_repo.is_banned(space.id, victim.user_id) is True
     await stack.svc.apply_remote_admin_action(
         space.id,
         actor_instance_id="instance-A",
@@ -1836,7 +1904,10 @@ async def test_owner_approval_gate_end_to_end_real_services(stack):
     assert proposal["status"] == ProposalStatus.PENDING.value
     assert proposal["owner_only"] is True
     assert proposal["fwd_action"] == "ban"
-    assert proposal["fwd_params"] == {"user_id": victim.user_id, "reason": "spam"}
+    # The reason never rides the view; the owner reading its own row
+    # sees it apart (owner 2026-11-27: ban reasons to owner / admins only).
+    assert proposal["fwd_params"] == {"user_id": victim.user_id}
+    assert proposal["fwd_reason"] == "spam"
     assert await stack.space_repo.get_member(space.id, victim.user_id) is not None
 
     # 5. NEGATIVE leg: a non-owner admin's vote must NOT execute; the
@@ -2315,12 +2386,13 @@ async def test_a_definitive_accept_failure_rolls_back_with_a_clear_message(
     ] == "pending"
 
 
-async def test_startup_sweep_spares_gfs_mirror_stubs(stack):
-    """Round 8 L2: a public / global stub the household follows through a
-    GFS (mirror provenance or a recorded GFS seat) is never swept, even with
-    a private invitation for its id — its teardown is the mirror's."""
+async def test_startup_sweep_spares_followers_and_gfs_mirror_rows(stack):
+    """Round 8 L2: a space a local user follows (a member with the read-only
+    role) is never swept, even with a private invitation for its id; nor is
+    a row left from a GFS follow-only mirror (``mirror_gfs_id``) — migration
+    0155 owns those."""
     bob = await _user(stack, "bobmirror")
-    for sid in ("sp-mirror", "sp-seat"):
+    for sid in ("sp-mirror", "sp-follow"):
         await stack.space_repo.save(
             Space(
                 id=sid,
@@ -2342,12 +2414,17 @@ async def test_startup_sweep_spares_gfs_mirror_stubs(stack):
             invite_token=f"t-{sid}",
         )
     await stack.db.enqueue("UPDATE spaces SET mirror_gfs_id='g1' WHERE id='sp-mirror'")
-    await stack.db.enqueue(
-        "INSERT INTO gfs_space_seats(space_id, gfs_instance_id) VALUES('sp-seat','g1')"
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id="sp-follow",
+            user_id=bob.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
     )
     assert await stack.svc.sweep_unjoined_invitation_stubs() == 0
     assert await stack.space_repo.get("sp-mirror") is not None
-    assert await stack.space_repo.get("sp-seat") is not None
+    assert await stack.space_repo.get("sp-follow") is not None
 
 
 # ── v_77: a remote moderator forwards a games-list edit, and only that ──

@@ -31,6 +31,22 @@ CHUNK_SIZE: int = 50
 MAX_MESSAGES_PER_REQUEST: int = 5_000
 
 
+async def local_user_ids_of(
+    conversation_repo: AbstractConversationRepo,
+    user_repo: AbstractUserRepo,
+    conversation_id: str,
+) -> set[str]:
+    """The user ids of this household's people in ``conversation_id`` —
+    what a per-pair visibility hide list is checked against, on both sides
+    of a history request (the provider's gate and the requester's)."""
+    out: set[str] = set()
+    for member in await conversation_repo.list_members(conversation_id):
+        user = await user_repo.get(member.username)
+        if user is not None:
+            out.add(user.user_id)
+    return out
+
+
 class DmHistoryProvider(VisibilityMixin):
     """Answers :data:`FederationEventType.DM_HISTORY_REQUEST` events.
 
@@ -114,6 +130,18 @@ class DmHistoryProvider(VisibilityMixin):
         # Nothing is sent otherwise — not even DM_HISTORY_COMPLETE, which
         # would confirm the conversation exists.
         if not await self._dm_scope.seated(event, conversation_id):
+            if await self._conversation_repo.get(conversation_id) is None:
+                # A conversation we do not hold (any more): e.g. a person
+                # of the requester was hidden from us and its USER_REMOVED
+                # cascade dropped our copy — after the unhide the requester
+                # asks again. Nothing to give and nothing confirmed; the
+                # WARNING is for a sender asking about one we do hold.
+                log.info(
+                    "DM_HISTORY_REQUEST from %s for a conversation not held "
+                    "here — nothing sent",
+                    event.from_instance,
+                )
+                return 0
             refuse(
                 event,
                 "requester holds no seat in the conversation",
@@ -126,12 +154,9 @@ class DmHistoryProvider(VisibilityMixin):
         if self._visibility_repo is not None:
             hidden = await self.hidden_for_peer(event.from_instance)
             if hidden:
-                members = await self._conversation_repo.list_members(conversation_id)
-                local_user_ids: set[str] = set()
-                for member in members:
-                    user = await self._user_repo.get(member.username)
-                    if user is not None:
-                        local_user_ids.add(user.user_id)
+                local_user_ids = await local_user_ids_of(
+                    self._conversation_repo, self._user_repo, conversation_id
+                )
                 if local_user_ids & hidden:
                     await self._federation.send_event(
                         to_instance_id=event.from_instance,

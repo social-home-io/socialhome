@@ -43,7 +43,7 @@ from ..domain.events import (
     SpaceMemberLocationOptedOut,
 )
 from ..domain.federation import FederationEventType
-from ..domain.space import WRITER_ROLES, Space, SpaceZone
+from ..domain.space import Space, SpaceZone
 from ..domain.zone_geo import match_zone
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
@@ -110,8 +110,8 @@ class SpaceLocationOutbound:
         member_households: SpaceWriterHouseholds,
     ) -> None:
         self._bus = bus
-        #: A member's pin goes to member households only — never to one
-        #: that only follows the space (owner decision 13).
+        #: A member's pin goes to every seated household of the space —
+        #: followers included (P10, owner 2026-11-26).
         self._members = member_households
         self._ws = ws
         self._federation = federation_service
@@ -434,16 +434,10 @@ class SpaceLocationOutbound:
         *,
         frame_type: str = "space_location_updated",
     ) -> None:
-        """The pin to this household's members of the space — never its
-        followers, who may not read the map (owner decision 13)."""
+        """The pin to this household's people in the space — every seat,
+        a follower's included: it reads the map (P10, owner 2026-11-26)."""
         try:
-            local = await self._spaces.list_local_member_user_ids(space_id)
-            members = {
-                m.user_id
-                for m in await self._spaces.list_members(space_id)
-                if m.role in WRITER_ROLES
-            }
-            user_ids = [uid for uid in local if uid in members]
+            user_ids = list(await self._spaces.list_local_member_user_ids(space_id))
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(
                 "space-location-outbound: list local members failed: %s",
@@ -501,7 +495,7 @@ class SpaceLocationOutbound:
                 space_id,
                 FederationEventType.SPACE_LOCATION_UPDATED,
                 payload,
-                only_instances=await self._members.writer_households(space_id),
+                only_instances=await self._members.households(space_id),
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(

@@ -1,7 +1,7 @@
 """Member-published space item types (v_49 ``space_item``).
 
-A member household publishes its own items over the connection server as
-the generic ``space_item`` (:mod:`socialhome.domain.gfs_member_publish`); the
+A member household publishes its own items into a space's opaque channel as
+the generic ``space_item`` (:mod:`socialhome.domain.gfs_channel`); the
 real item type travels only inside the ciphertext, bound in the author
 signature. This module names those types, the writer-cert scope each one
 needs at the receivers (the GFS can see none of them, so it checks only
@@ -17,7 +17,7 @@ Two author-signed inner shapes carry them:
   (its own signature domain and suite) for comments, the post delete and
   reactions.
 
-**Authority kinds** ride the host's ``space_post_public`` relay instead
+**Authority kinds** ride the channel as authority items instead
 (:data:`SUPPORTED_AUTHORITY_KINDS`): a space-authority-signed removal of a
 post or comment (:class:`AuthorityRemoval`) — no author signature, the
 authority signature over the envelope its only authorizer — and the
@@ -36,7 +36,6 @@ Pure module — no I/O.
 from __future__ import annotations
 
 import unicodedata
-import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TypeGuard
@@ -44,9 +43,9 @@ from typing import TypeGuard
 import orjson
 
 from .errors import CodedError
-from .item_zdict import ZDICT_V1
+from .space import SpaceFeatures
 from .user import looks_like_emoji
-from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
+from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 
 ITEM_TYPE_POST: str = "post"
 #: The author's own edit of their post (full signed snapshot + ``edited_at``).
@@ -126,6 +125,44 @@ def required_scope(item_type: str) -> str:
         return _REQUIRED_SCOPE[item_type]
     except KeyError:
         raise ValueError(f"unsupported space item type {item_type!r}") from None
+
+
+#: v_96 — what a follower's ``reader`` cert may carry, by the follower switch
+#: that must be on in the RECEIVER's pinned space config.
+_READER_COMMENT_TYPES: frozenset[str] = frozenset(
+    {ITEM_TYPE_COMMENT, ITEM_TYPE_COMMENT_EDIT}
+)
+_READER_REACTION_TYPES: frozenset[str] = frozenset(
+    {ITEM_TYPE_REACTION_ADD, ITEM_TYPE_REACTION_REMOVE}
+)
+
+
+def reader_cert_permits(
+    cert: WriterCert, item_type: str, features: SpaceFeatures
+) -> bool:
+    """Whether ``cert`` may authorize an ``item_type`` item under the
+    receiver's pinned ``features`` (v_96), on top of its scope.
+
+    A non-reader cert → ``True`` (its scope decides). A follower's
+    ``reader`` cert carries comments (and their edits) only while
+    ``allow_subscriber_comment`` is on, reactions only while
+    ``allow_subscriber_react`` is on, and the author's delete of their own
+    comment always (owner decision F6, 2026-11-23: the receiver decides
+    that one on authorship — the stored comment's author — not on a
+    switch); anything else — posts and their edits / deletes, the v_60
+    ``author_profile`` (a follower is named by the roster and never
+    publishes one), any type this build does not know — is refused. Fail
+    closed: the flags are read from the receiver's own copy, never from the
+    item."""
+    if not cert.reader:
+        return True
+    if item_type == ITEM_TYPE_COMMENT_DELETE:
+        return True
+    if item_type in _READER_COMMENT_TYPES:
+        return bool(features.allow_subscriber_comment)
+    if item_type in _READER_REACTION_TYPES:
+        return bool(features.allow_subscriber_react)
+    return False
 
 
 def item_stamp(raw: object, *, now: datetime | None = None) -> datetime | None:
@@ -249,188 +286,6 @@ def pad_json_object(
     return orjson.dumps(out)
 
 
-# ── Payload suites (how a relayed item's plaintext is encoded) ───────────
-
-#: The item plaintext is the padded JSON of :func:`pad_json_object`. A wire
-#: shape with no ``payload_suite`` field is this suite.
-PAYLOAD_SUITE_JSON: str = "json"
-#: The compact JSON, zlib-compressed (level 9), then padded with zero BYTES
-#: to the smallest :data:`ITEM_SIZE_BUCKETS` size that fits — all of it
-#: inside the AEAD, so the ciphertext length still names only the bucket.
-#: A 300-character post shrinks from the 4 KiB bucket to 1 KiB.
-PAYLOAD_SUITE_ZLIB: str = "zlib1"
-#: As :data:`PAYLOAD_SUITE_ZLIB`, with the preset dictionary
-#: :data:`~socialhome.domain.item_zdict.ZDICT_V1` (the item shapes' keys and
-#: constant values). A post with a link preview drops from the 4 KiB bucket
-#: to 1 KiB; a new dictionary is a new suite.
-PAYLOAD_SUITE_ZLIB_DICT1: str = "zlib1+dict1"
-SUPPORTED_PAYLOAD_SUITES: frozenset[str] = frozenset(
-    {PAYLOAD_SUITE_JSON, PAYLOAD_SUITE_ZLIB, PAYLOAD_SUITE_ZLIB_DICT1}
-)
-#: The compressed suites, most preferred first: a publisher sends a server
-#: the first one it proved and has not refused for the space lately.
-COMPRESSED_PAYLOAD_SUITES: tuple[str, ...] = (
-    PAYLOAD_SUITE_ZLIB_DICT1,
-    PAYLOAD_SUITE_ZLIB,
-)
-#: The preset dictionary of each compressed suite (``None``: plain zlib).
-_ZDICTS: dict[str, bytes | None] = {
-    PAYLOAD_SUITE_ZLIB: None,
-    PAYLOAD_SUITE_ZLIB_DICT1: ZDICT_V1,
-}
-#: The wire field naming the suite (routing-visible, like
-#: ``authority_sig_suite``; the GFS gates compressed items on it).
-PAYLOAD_SUITE_FIELD: str = "payload_suite"
-
-#: Most a compressed item may inflate to. A sender compresses only JSON at
-#: most this long (larger items keep :data:`PAYLOAD_SUITE_JSON`), so a
-#: receiver refuses any stream that would inflate further — a
-#: decompression bomb costs it at most this much memory.
-MAX_INFLATED_ITEM_BYTES: int = ITEM_SIZE_BUCKETS[-1]
-
-_ZLIB_LEVEL: int = 9
-
-
-class UnsupportedPayloadSuite(ValueError):
-    """A relayed item names a payload suite this build does not read."""
-
-
-#: The ``error`` a GFS answers (HTTP 409) when it refuses a compressed item
-#: because a follower of the space does not read it. The publisher sends the
-#: same item as :data:`PAYLOAD_SUITE_JSON` and asks again later.
-PAYLOAD_SUITE_UNSUPPORTED_ERROR: str = "payload_suite_unsupported"
-
-
-class PayloadSuiteRefused(Exception):
-    """The GFS refuses a compressed item: some seat of the space lacks the
-    suite's label (``payload_zlib1`` / ``payload_zlib1_dict1``, see
-    :data:`PAYLOAD_SUITE_UNSUPPORTED_ERROR`)."""
-
-
-def payload_suite_of(raw: object) -> str:
-    """The suite a wire shape names — :data:`PAYLOAD_SUITE_JSON` when the
-    field is absent (first-revision shapes). Raises
-    :class:`UnsupportedPayloadSuite` for any other unknown value; never
-    falls back."""
-    if raw is None:
-        return PAYLOAD_SUITE_JSON
-    if not isinstance(raw, str) or raw not in SUPPORTED_PAYLOAD_SUITES:
-        raise UnsupportedPayloadSuite(str(raw)[:32])
-    return raw
-
-
-def zlib_item_plaintext(
-    body: dict,
-    *,
-    buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS,
-    suite: str = PAYLOAD_SUITE_ZLIB,
-) -> bytes | None:
-    """``body`` under a compressed ``suite`` (:data:`PAYLOAD_SUITE_ZLIB`, or
-    :data:`PAYLOAD_SUITE_ZLIB_DICT1` with its preset dictionary): compact
-    orjson, zlib, zero-padded to a bucket. ``None`` when the suite cannot
-    carry it (its JSON is over :data:`MAX_INFLATED_ITEM_BYTES`, or the
-    stream over the largest bucket) — the caller sends
-    :data:`PAYLOAD_SUITE_JSON`."""
-    if suite not in _ZDICTS:
-        raise UnsupportedPayloadSuite(suite)
-    raw = orjson.dumps({k: v for k, v in body.items() if k != PAD_FIELD})
-    if len(raw) > MAX_INFLATED_ITEM_BYTES:
-        return None
-    zdict = _ZDICTS[suite]
-    if zdict is None:
-        data = zlib.compress(raw, _ZLIB_LEVEL)
-    else:
-        deflater = zlib.compressobj(
-            _ZLIB_LEVEL,
-            zlib.DEFLATED,
-            zlib.MAX_WBITS,
-            9,
-            zlib.Z_DEFAULT_STRATEGY,
-            zdict,
-        )
-        data = deflater.compress(raw) + deflater.flush()
-    bucket = next((b for b in buckets if b >= len(data)), None)
-    if bucket is None:
-        return None
-    return data + b"\0" * (bucket - len(data))
-
-
-def compressed_item_plaintexts(
-    body: dict,
-    *,
-    json_len: int,
-    buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS,
-) -> dict[str, bytes]:
-    """The compressed copies of ``body`` to send, by suite: each of
-    :data:`COMPRESSED_PAYLOAD_SUITES` whose plaintext is **no larger** than
-    what a server would get without it — the next less preferred copy,
-    finally the JSON one (``json_len`` bytes).
-
-    Not only when it saves a bucket: the suite label is routing-visible,
-    and a label that showed up only on items compression (or the
-    dictionary) shrinks past a bucket edge would tell the GFS something
-    about the content — how compressible it is, whether it carries a link
-    preview. Sent whenever it can be, the label says only what the
-    followers read. Left out only when compression would GROW the item
-    into a larger bucket (incompressible text at a bucket edge) or the item
-    is past :data:`MAX_INFLATED_ITEM_BYTES` — the bucket then names its size
-    already."""
-    out: dict[str, bytes] = {}
-    floor = json_len
-    for suite in reversed(COMPRESSED_PAYLOAD_SUITES):
-        sealed = zlib_item_plaintext(body, buckets=buckets, suite=suite)
-        if sealed is not None and len(sealed) <= floor:
-            out[suite] = sealed
-            floor = len(sealed)
-    return out
-
-
-def seal_item_plaintext(
-    body: dict,
-    *,
-    suite: str = PAYLOAD_SUITE_JSON,
-    buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS,
-) -> bytes | None:
-    """The plaintext a relayed item is encrypted as under ``suite``.
-    :data:`PAYLOAD_SUITE_JSON` is :func:`pad_json_object`;
-    the compressed suites are :func:`zlib_item_plaintext` (``None`` when
-    the suite cannot carry the item). Raises
-    :class:`UnsupportedPayloadSuite` for any other suite."""
-    if suite == PAYLOAD_SUITE_JSON:
-        return pad_json_object(body, buckets=buckets)
-    return zlib_item_plaintext(body, buckets=buckets, suite=suite)
-
-
-def open_item_plaintext(plaintext: bytes, suite: str) -> bytes:
-    """The JSON bytes of a decrypted item sealed under ``suite``.
-
-    A compressed suite inflates at most :data:`MAX_INFLATED_ITEM_BYTES` (a
-    stream that would inflate further is refused, never buffered), requires
-    the stream to end, and allows only zero padding after it — under the
-    suite's own preset dictionary, never another one. Raises
-    :class:`ValueError` on any of that and :class:`UnsupportedPayloadSuite`
-    for an unknown suite."""
-    if suite == PAYLOAD_SUITE_JSON:
-        return plaintext
-    if suite not in _ZDICTS:
-        raise UnsupportedPayloadSuite(suite)
-    zdict = _ZDICTS[suite]
-    inflater = (
-        zlib.decompressobj() if zdict is None else zlib.decompressobj(zdict=zdict)
-    )
-    try:
-        out = inflater.decompress(plaintext, MAX_INFLATED_ITEM_BYTES)
-    except zlib.error as exc:
-        raise ValueError(f"corrupt zlib item: {exc}") from exc
-    if inflater.unconsumed_tail:
-        raise ValueError("zlib item inflates past the cap")
-    if not inflater.eof:
-        raise ValueError("zlib item stream does not end")
-    if inflater.unused_data.strip(b"\0"):
-        raise ValueError("zlib item has data after its stream")
-    return out
-
-
 # ── Authority-only notices (host relay, ``space_post_public``) ───────────
 
 #: The inner key naming an authority-only notice. Only ever read on an inner
@@ -449,6 +304,21 @@ AUTHORITY_KIND_APPROVED_POST: str = "approved_post"
 SUPPORTED_AUTHORITY_KINDS: frozenset[str] = frozenset(
     {AUTHORITY_KIND_REMOVAL, AUTHORITY_KIND_APPROVED_POST}
 )
+
+#: v_96 — the ``item_type`` of an authority-only item on a space's opaque
+#: channel: ``{"item_type": "authority", "inner": <inner + authority
+#: signature>}`` inside the channel ciphertext. The channel frame has no
+#: authority signature of its own (the GFS authorizes it on the channel
+#: writer key, which every writer holds), so the space authority signs the
+#: inner itself (``authority_sig`` / ``authority_sig_suite``, event type
+#: ``space_channel_authority``). Never on the space-keyed relay.
+CHANNEL_AUTHORITY_ITEM_TYPE: str = "authority"
+
+#: v_96 — the mark an author's household sets in the ``public_relay`` hint
+#: of its federated post (outside the author signature, inside the encrypted
+#: payload) when it puts the post on the space's channel itself: the host
+#: then does not put it there again. Absent → the host does.
+CHANNEL_SENT_FIELD: str = "channel_sent"
 
 REMOVAL_TARGET_POST: str = "post"
 REMOVAL_TARGET_COMMENT: str = "comment"

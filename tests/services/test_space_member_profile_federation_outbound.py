@@ -147,3 +147,20 @@ async def test_a_change_applied_from_another_household_is_never_echoed(env):
         )
     )
     assert fed.sent == []
+
+
+async def test_every_seated_household_gets_a_copy(env):
+    """P10 (owner 2026-11-27): no follower-specific delivery rule — every
+    household of the space gets the profile, a GFS-reached follower's
+    like a member's."""
+    bus, fed = env
+    await bus.publish(
+        SpaceMemberProfileUpdated(
+            space_id="sp",
+            user_id="u1",
+            space_display_name="Alice in sp",
+            picture_hash="h1",
+            picture_webp=b"RIFF0000WEBP",
+        )
+    )
+    assert sorted(r[0] for r in fed.sent) == ["peer-1", "peer-2"]

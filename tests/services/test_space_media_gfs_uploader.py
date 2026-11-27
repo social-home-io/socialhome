@@ -7,16 +7,13 @@ import asyncio
 import base64
 import os
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import orjson
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_MEDIA_PUT,
-    verify_authority_event,
-)
+from socialhome.canonical_json import canonical_bytes
 from socialhome.crypto import (
     b64url_decode,
     b64url_encode,
@@ -27,7 +24,6 @@ from socialhome.domain.federation import InstanceSource
 from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.gfs_channel import CHANNEL_SUITE_ED25519
 from socialhome.domain.gfs_space_media import (
-    AUTH_AUTHORITY,
     AUTH_CHANNEL,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_PUT_PREFIX,
@@ -50,6 +46,9 @@ MEDIA_KEY = derive_space_media_key(bytes(range(32)))
 #: The item planned and this household (the sealer: both in the AAD).
 ITEM = "post-1"
 OWN = "own-inst"
+CHANNEL_ID = "c" * 32
+#: Default for ``_Spaces(channel=…)``: the channel the seed derives.
+_SEED_CHANNEL = object()
 
 
 @dataclass
@@ -74,7 +73,7 @@ class _Gfs:
         max_blob=9_000_000,
         follower=(),
         status=201,
-        scopes=("space", "channel"),
+        scopes=("channel",),
         ttl_s=259_200,
     ):
         self.conns = {c.inbox_url: c for c in conns}
@@ -92,7 +91,7 @@ class _Gfs:
     def space_media_cache_off(self, conn) -> bool:
         return False
 
-    async def space_media_max_blob(self, conn, *, scope="space"):
+    async def space_media_max_blob(self, conn, *, scope="channel"):
         if scope not in self.scopes:
             return None
         if isinstance(self.max_blob, dict):
@@ -165,7 +164,7 @@ class _Spaces:
         self,
         seed=None,
         *,
-        channel=None,
+        channel=_SEED_CHANNEL,
         private_gfs=False,
         owner=OWN,
         readable=True,
@@ -174,7 +173,18 @@ class _Spaces:
         self.owner = owner
         #: Followers on (the space has a writer group key) or off.
         self.readable = readable
-        #: ``(channel_id, channel_pk)`` of a private space's opaque channel.
+        #: ``(channel_id, channel_pk)`` of the space's opaque channel — by
+        #: default the one ``seed`` derives (since v_96 the only scope a GFS
+        #: keeps space media under); ``None`` for a space with no channel.
+        if channel is _SEED_CHANNEL:
+            channel = (
+                (
+                    CHANNEL_ID,
+                    channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)),
+                )
+                if seed
+                else None
+            )
         self.channel = channel
         self.private_gfs = private_gfs
 
@@ -215,21 +225,6 @@ class _Cert:
         }
 
 
-@dataclass
-class _Certs:
-    writer_key: bytes | None = None
-    cert: object | None = None
-    asked: list = field(default_factory=list)
-
-    async def own_writer_key(self, space_id, epoch):
-        self.asked.append(("key", epoch))
-        return self.writer_key
-
-    async def own_cert(self, space_id, epoch):
-        self.asked.append(("cert", epoch))
-        return self.cert
-
-
 def _write(media_dir: pathlib.Path, name: str, size: int) -> bytes:
     data = os.urandom(size)
     (media_dir / name).write_bytes(data)
@@ -248,25 +243,29 @@ class _MediaRefs:
         return basename not in self.foreign
 
 
+#: The owner's space seed the helper defaults to (so planning has an upload
+#: authorization); pass ``seed=None`` for a household that holds none.
+OWNER_SEED = b"\x01" * 32
+_DEFAULT = object()
+
+
 def _uploader(
     tmp_path,
     *,
     gfs,
     instances=(),
     versions=None,
-    seed=None,
-    certs=None,
+    seed=_DEFAULT,
     spaces=None,
     media_refs=None,
 ):
     u = SpaceMediaGfsUploader(
-        space_repo=spaces or _Spaces(seed),
+        space_repo=spaces or _Spaces(OWNER_SEED if seed is _DEFAULT else seed),
         space_crypto=_Crypto(),
         federation_repo=_FedRepo(instances),
         gfs_service=gfs,
         media_refs=media_refs or _MediaRefs(),
         media_dir=tmp_path,
-        writer_certs=certs,
     )
     u.attach_federation(_Fed(versions or {}))
     return u
@@ -345,21 +344,49 @@ async def test_plan_for_a_relay_seat_describes_each_file(tmp_path):
     # The descriptor's address is the deterministic blob of the file.
     blob = up_mod.seal_file_sync(MEDIA_KEY, SPACE, 4, ITEM, OWN, "a.webp", a)
     # The address is bound to the space scope (sm1), not the bare hash.
-    assert entry["blob_id"] == space_media_address("space", SPACE, blob) == ref.blob_id
+    assert (
+        entry["blob_id"]
+        == space_media_address("channel", CHANNEL_ID, blob)
+        == ref.blob_id
+    )
     assert entry["blob_id"] != blob_id_of(blob)
-    assert (entry["scope"], entry["addr_suite"]) == ("space", "sm1")
+    assert (entry["scope"], entry["addr_suite"]) == ("channel", "sm1")
     assert entry["size"] == len(blob)
 
 
-async def test_followers_target_the_follower_gfs_set(tmp_path):
+async def test_followers_target_the_channel_gfs_set(tmp_path):
+    """v_96 — a global space's followers read through its channel: their
+    GFSs are planned (under the channel scope) only once it runs one."""
     _write(tmp_path, "a.webp", 10)
     g2 = _Conn("g2", "https://g2.example")
-    u = _uploader(tmp_path, gfs=_Gfs([], follower=[g2]))
+    cid = "c" * 32
+    pk = channel_pk_of(derive_channel_seed(OWNER_SEED, SPACE, cid))
+    u = _uploader(
+        tmp_path,
+        gfs=_Gfs([], follower=[g2]),
+        spaces=_Spaces(OWNER_SEED, channel=(cid, pk)),
+    )
     assert (
         await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False) is None
     )
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=True)
     assert [t.id for t in plan.targets] == ["g2"]
+
+
+async def test_a_global_space_without_a_channel_uploads_nothing_for_followers(
+    tmp_path,
+):
+    """v_96 — no channel here, no follower reads through a GFS: nothing is
+    planned (or uploaded) space-scoped for them, so no request names the
+    space to a listing GFS for a reader that does not exist."""
+    _write(tmp_path, "a.webp", 10)
+    g2 = _Conn("g2", "https://g2.example")
+    gfs = _Gfs([], follower=[g2])
+    u = _uploader(tmp_path, gfs=gfs, spaces=_Spaces(b"\2" * 32, channel=None))
+    assert (
+        await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=True) is None
+    )
+    assert gfs.puts == []
 
 
 async def test_a_gfs_without_the_capability_is_left_out(tmp_path):
@@ -433,7 +460,7 @@ async def _upload(u, plan):
         await u.stop()
 
 
-async def test_the_owner_uploads_with_the_space_authority(tmp_path):
+async def test_the_owner_uploads_with_the_channel_key(tmp_path):
     data = _write(tmp_path, "a.webp", 5000)
     kp = generate_identity_keypair()
     g1 = _Conn("g1", "https://g1.example")
@@ -444,15 +471,17 @@ async def test_the_owner_uploads_with_the_space_authority(tmp_path):
         instances=[RELAY],
         versions={"e": V},
         seed=kp.private_key,
-        # The owner also holds the writer key; the authority still signs.
-        certs=_Certs(writer_key=generate_identity_keypair().private_key),
     )
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     await _upload(u, plan)
     assert len(gfs.puts) == 1
     conn_id, space_id, blob_id, blob, header = gfs.puts[0]
-    assert (conn_id, space_id) == ("g1", SPACE)
-    assert blob_id == space_media_address("space", SPACE, blob) == plan.refs[0].blob_id
+    assert (conn_id, space_id) == ("g1", CHANNEL_ID)
+    assert (
+        blob_id
+        == space_media_address("channel", CHANNEL_ID, blob)
+        == plan.refs[0].blob_id
+    )
     assert auth_claim_addr_suite(header) == "sm1"
     assert (
         open_space_media(
@@ -467,94 +496,13 @@ async def test_the_owner_uploads_with_the_space_authority(tmp_path):
         == data
     )
     auth = SpaceMediaUploadAuth.from_header(header)
-    assert auth.kind == AUTH_AUTHORITY
+    assert auth.kind == AUTH_CHANNEL
     assert auth.claim.blob_id == blob_id and auth.claim.size == len(blob)
     assert auth.claim.expires_at > auth.claim.ts
-    assert verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_MEDIA_PUT,
-        space_id=SPACE,
-        payload=auth.claim.signing_body(),
-        authority_sig=auth.sig,
-        authority_sig_suite=auth.sig_suite,
-        space_public_key=kp.public_key,
-    )
-
-
-@pytest.mark.security
-async def test_a_delegated_admin_uploads_with_the_writer_key_like_any_writer(
-    tmp_path,
-):
-    """It holds the seed, but an authority-signed upload from a household
-    that is not the owner would mark it as a seed holder: where the space
-    has a writer group key it signs with that, as every writer does."""
-    _write(tmp_path, "a.webp", 10)
-    kp = generate_identity_keypair()
-    wk = generate_identity_keypair()
-    gfs = _Gfs([_Conn("g1", "https://g1.example")])
-    u = _uploader(
-        tmp_path,
-        gfs=gfs,
-        instances=[RELAY],
-        versions={"e": V},
-        spaces=_Spaces(kp.private_key, owner="owner.elsewhere"),
-        certs=_Certs(writer_key=wk.private_key),
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    )
-    auth = SpaceMediaUploadAuth.from_header(gfs.puts[0][4])
-    assert auth.kind == AUTH_WRITER_KEY and auth.epoch == 4
-
-
-@pytest.mark.parametrize("readable", [False, True])
-async def test_a_delegated_admin_signs_as_the_authority_only_without_a_writer_key(
-    tmp_path, readable
-):
-    """A space with no writer group key (nobody may follow it): the seed is
-    the one authorization there is, so members reading through a GFS still
-    get the picture. Where the space HAS a writer key and ours is just not
-    here yet, nothing goes out — never the authority-signed upload."""
-    _write(tmp_path, "a.webp", 10)
-    kp = generate_identity_keypair()
-    gfs = _Gfs([_Conn("g1", "https://g1.example")])
-    u = _uploader(
-        tmp_path,
-        gfs=gfs,
-        instances=[RELAY],
-        versions={"e": V},
-        spaces=_Spaces(kp.private_key, owner="owner.elsewhere", readable=readable),
-        certs=_Certs(),
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    )
-    if readable:
-        assert gfs.puts == []
-    else:
-        assert SpaceMediaUploadAuth.from_header(gfs.puts[0][4]).kind == AUTH_AUTHORITY
-
-
-async def test_writer_key_holder_uploads_anonymously(tmp_path):
-    _write(tmp_path, "a.webp", 10)
-    wk = generate_identity_keypair()
-    g1 = _Conn("g1", "https://g1.example")
-    gfs = _Gfs([g1])
-    u = _uploader(
-        tmp_path,
-        gfs=gfs,
-        instances=[RELAY],
-        versions={"e": V},
-        certs=_Certs(writer_key=wk.private_key),
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    )
-    _c, _s, _b, _blob, header = gfs.puts[0]
-    auth = SpaceMediaUploadAuth.from_header(header)
-    assert auth.kind == AUTH_WRITER_KEY and auth.epoch == 4
+    channel_seed = derive_channel_seed(kp.private_key, SPACE, CHANNEL_ID)
     assert verify_ed25519(
-        wk.public_key,
-        auth.claim.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=4),
+        b64url_decode(channel_pk_of(channel_seed)),
+        CHANNEL_MEDIA_PUT_PREFIX + canonical_bytes(auth.claim.signing_body()),
         b64url_decode(auth.sig),
     )
 
@@ -570,13 +518,29 @@ async def test_a_writer_cert_alone_uploads_nothing(tmp_path):
         gfs=gfs,
         instances=[RELAY],
         versions={"e": V},
-        certs=_Certs(cert=_Cert(instance_pk="pk")),
+        seed=None,
     )
     await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     )
     assert gfs.puts == []
     assert not await u.can_upload(SPACE)
+
+
+async def test_without_an_upload_authorization_nothing_is_sealed_or_described(
+    tmp_path,
+):
+    """A plain member of a space it cannot upload for (no seed, no channel
+    grant): no plan — no blob is sealed and no ``media_refs`` names a blob
+    that will never be on the GFS; its link-joined readers get the push."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _uploader(
+        tmp_path, gfs=_Gfs([g1]), instances=[RELAY], versions={"e": V}, seed=None
+    )
+    assert (
+        await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=True) is None
+    )
 
 
 async def test_no_authorization_uploads_nothing(tmp_path, caplog):
@@ -588,7 +552,7 @@ async def test_no_authorization_uploads_nothing(tmp_path, caplog):
         gfs=gfs,
         instances=[RELAY],
         versions={"e": V},
-        certs=_Certs(cert=_Cert(scope="comment")),
+        seed=None,
     )
     await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
@@ -619,9 +583,14 @@ async def test_two_gfs_get_one_upload_each(tmp_path):
     _write(tmp_path, "a.webp", 10)
     g1 = _Conn("g1", "https://g1.example")
     g2 = _Conn("g2", "https://g2.example")
-    gfs = _Gfs([g1, g2], follower=[g2])
+    e2 = _Instance("e2", InstanceSource.SPACE_SESSION, relay_via="https://g2.example")
+    gfs = _Gfs([g1, g2])
     u = _uploader(
-        tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY, e2],
+        versions={"e": V, "e2": V},
+        seed=b"\2" * 32,
     )
     await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=True)
@@ -765,8 +734,6 @@ async def test_a_stored_upload_is_logged(tmp_path, caplog):
 
 # ── v_51 private spaces: the channel scope ──────────────────────────────
 
-CHANNEL_ID = "c" * 32
-
 
 @dataclass
 class _Grant:
@@ -806,8 +773,8 @@ def _channel_uploader(tmp_path, gfs, *, seed=None, grant=None):
 async def test_a_private_space_with_a_channel_uses_the_channel_scope(tmp_path):
     u = _channel_uploader(tmp_path, _Gfs([]))
     assert await u.scope_of(SPACE) == ("channel", CHANNEL_ID)
-    plain = _uploader(tmp_path, gfs=_Gfs([]))
-    assert await plain.scope_of(SPACE) == ("space", SPACE)
+    none = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(b"\1" * 32, channel=None))
+    assert await none.scope_of(SPACE) is None
 
 
 async def test_a_gfs_without_the_channel_scope_is_left_out(tmp_path):
@@ -1003,11 +970,13 @@ async def test_no_authorization_is_not_a_gfs_refusal_and_is_logged_once(
     plan = await u.plan(
         SPACE, ["api/media/a.webp", "api/media/b.webp"], item_id=ITEM, followers=False
     )
+    # The authorization went between plan and upload (the seed was dropped).
+    u._spaces.seed = None
     with caplog.at_level("WARNING"):
         await _upload(u, plan)
     assert gfs.puts == []
     lines = [r.getMessage() for r in caplog.records]
-    assert sum("no seed or writer key" in m for m in lines) == 1
+    assert sum("no upload authorization" in m for m in lines) == 1
     assert not any("HTTP 403" in m for m in lines)
 
 
@@ -1026,7 +995,7 @@ async def test_a_plan_seals_for_the_item_and_this_household(tmp_path):
     (ref,) = plan.refs
     assert (ref.item_id, ref.origin) == (ITEM, OWN)
     blob = up_mod.seal_file_sync(MEDIA_KEY, SPACE, 4, ITEM, OWN, "a.webp", data)
-    assert ref.blob_id == space_media_address("space", SPACE, blob)
+    assert ref.blob_id == space_media_address("channel", CHANNEL_ID, blob)
     other = await u.plan(SPACE, ["api/media/a.webp"], item_id="post-2", followers=False)
     assert other.refs[0].blob_id != ref.blob_id
 
@@ -1043,127 +1012,42 @@ async def test_no_plan_before_this_household_knows_its_own_id(tmp_path):
 
 async def test_can_upload_answers_with_the_authorization_a_put_would_use(tmp_path):
     """v_82: a link-joined proposer describes a page's files only when it
-    holds an upload authorization — the same one a PUT would sign with."""
+    holds an upload authorization — the same one a PUT would sign with: the
+    channel key of a seed holder (or a channel grant's writer key). A space
+    with no channel here holds none (v_96: no space scope)."""
     gfs = _Gfs([])
     assert await _uploader(tmp_path, gfs=gfs, seed=b"\x02" * 32).can_upload(SPACE)
-    key = _uploader(tmp_path, gfs=gfs, certs=_Certs(writer_key=b"\x03" * 32))
-    assert await key.can_upload(SPACE)
-    for nothing in (
-        # A writer cert alone is no authorization any more (v_90).
-        _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="write"))),
-        _uploader(tmp_path, gfs=gfs),
-        _uploader(tmp_path, gfs=gfs, certs=_Certs()),
-        _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="comment"))),
-    ):
-        assert not await nothing.can_upload(SPACE)
-
-
-# ── On demand (v_83): large videos are uploaded lazily ───────────────────
-
-
-class _OnDemandGfs(_Gfs):
-    def __init__(self, conns, *, wait=25, **kw):
-        super().__init__(conns, **kw)
-        self.wait = wait
-
-    async def space_media_on_demand_wait(self, conn):
-        return self.wait
-
-
-async def test_a_large_video_is_described_but_not_uploaded_eagerly(tmp_path):
-    """v_83 — a video whose blob is ≥ 1 MiB goes to a follower GFS only
-    when a reader plays it (the GFS asks for it); a picture still goes at
-    once."""
-    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
-    _write(tmp_path, "a.webp", 5000)
-    g1 = _Conn("g1", "https://g1.example")
-    gfs = _OnDemandGfs([g1], follower=[g1])
-    u = _uploader(tmp_path, gfs=gfs, seed=generate_identity_keypair().private_key)
-    plan = await u.plan(
-        SPACE, ["api/media/clip.mp4", "api/media/a.webp"], item_id=ITEM, followers=True
+    assert not await _uploader(tmp_path, gfs=gfs, seed=None).can_upload(SPACE)
+    no_channel = _uploader(
+        tmp_path, gfs=gfs, spaces=_Spaces(b"\x02" * 32, channel=None)
     )
-    assert set(plan.wire()) == {"clip.mp4", "a.webp"}
-    await _upload(u, plan)
-    assert [p[2] for p in gfs.puts] == [plan.wire()["a.webp"]["blob_id"]]
+    assert not await no_channel.can_upload(SPACE)
 
 
-@pytest.mark.parametrize(
-    "version",
-    [FederationCapability.MIN_FOR_SPACE_MEDIA_REFS, OURS],
-)
-async def test_a_link_joined_member_gets_a_large_video_eagerly(tmp_path, version):
-    """A member household behind a GFS never asks that GFS for a missed
-    file (a v_80 one cannot; from v_92 it asks the host or a helper with
-    ``SPACE_MEDIA_WANTED``) — a space with one gets the video at once."""
-    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
-    g1 = _Conn("g1", "https://g1.example")
-    gfs = _OnDemandGfs([g1], follower=[g1])
-    u = _uploader(
-        tmp_path,
-        gfs=gfs,
-        instances=[RELAY],
-        versions={"e": version},
-        seed=generate_identity_keypair().private_key,
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=True)
-    )
-    assert len(gfs.puts) == 1
+# ── On demand (v_83): the holder re-uses the upload authorization ────────
 
 
-async def test_a_video_over_8_mib_is_never_uploaded_eagerly(tmp_path):
-    """Past the 8 MiB blob ceiling a video is not even described — so never
-    uploaded, eagerly or not."""
-    _write(tmp_path, "long.mp4", 8 * 1024 * 1024 + 1)
-    g1 = _Conn("g1", "https://g1.example")
-    gfs = _OnDemandGfs([g1])
-    u = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V})
-    assert (
-        await u.plan(SPACE, ["api/media/long.mp4"], item_id=ITEM, followers=False)
-        is None
-    )
-    assert gfs.puts == []
-
-
-async def test_a_gfs_without_on_demand_gets_the_video_eagerly(tmp_path):
-    """A follower GFS that proved no on-demand gets the video at once."""
-    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
-    g1 = _Conn("g1", "https://g1.example")
-    no_od = _OnDemandGfs([g1], wait=None, follower=[g1])
-    u = _uploader(tmp_path, gfs=no_od, seed=generate_identity_keypair().private_key)
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=True)
-    )
-    assert len(no_od.puts) == 1
-
-
-async def test_a_small_clip_is_still_uploaded_eagerly(tmp_path):
-    _write(tmp_path, "tiny.mp4", 10_000)
-    g1 = _Conn("g1", "https://g1.example")
-    gfs = _OnDemandGfs([g1])
-    u = _uploader(
-        tmp_path,
-        gfs=gfs,
-        instances=[RELAY],
-        versions={"e": V},
-        seed=generate_identity_keypair().private_key,
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/tiny.mp4"], item_id=ITEM, followers=False)
-    )
-    assert len(gfs.puts) == 1
-
-
-async def test_authorize_is_the_upload_authorization_for_either_scope(tmp_path):
-    """The holder side re-uses it for a re-upload on demand."""
+async def test_authorize_is_the_channel_upload_authorization(tmp_path):
+    """The holder side re-uses it for a re-upload on demand; the retired
+    ``space`` scope gets none (v_96)."""
     kp = generate_identity_keypair()
     u = _uploader(tmp_path, gfs=_Gfs([]), seed=kp.private_key)
     claim = up_mod.SpaceMediaClaim(
-        scope="space", scope_id=SPACE, blob_id="a" * 64, size=10, expires_at=9, ts=1
+        scope="channel",
+        scope_id=CHANNEL_ID,
+        blob_id="a" * 64,
+        size=10,
+        expires_at=9,
+        ts=1,
     )
     auth = await u.authorize(claim, SPACE)
-    assert auth is not None and auth.kind == AUTH_AUTHORITY
-    assert await _uploader(tmp_path, gfs=_Gfs([])).authorize(claim, SPACE) is None
+    assert auth is not None and auth.kind == AUTH_CHANNEL
+    assert (
+        await _uploader(tmp_path, gfs=_Gfs([]), seed=None).authorize(claim, SPACE)
+        is None
+    )
+    space_claim = SimpleNamespace(scope="space", scope_id=SPACE)
+    assert await u.authorize(space_claim, SPACE) is None
 
 
 async def test_remember_stored_skips_a_later_eager_upload(tmp_path):
@@ -1181,27 +1065,6 @@ async def test_remember_stored_skips_a_later_eager_upload(tmp_path):
     await u.remember_stored(g1, plan.refs[0].blob_id)
     await _upload(u, plan)
     assert gfs.puts == []
-
-
-async def test_a_members_large_video_still_goes_eagerly(tmp_path):
-    """Review H3: the GFS asks only a listed space's OWNER on demand — a
-    member's (or a private channel's) large video skipped eagerly could
-    never be fetched by anyone, so it is uploaded at once."""
-    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
-    g1 = _Conn("g1", "https://g1.example")
-    gfs = _OnDemandGfs([g1])
-    u = _uploader(
-        tmp_path,
-        gfs=gfs,
-        instances=[RELAY],
-        versions={"e": V},
-        spaces=_Spaces(owner="host-inst"),
-        certs=_Certs(writer_key=generate_identity_keypair().private_key),
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
-    )
-    assert len(gfs.puts) == 1
 
 
 # ── v_87: a GFS without a media cache pushes through the relay ───────────
@@ -1303,7 +1166,6 @@ async def test_stored_on_gfs_keeps_only_blobs_the_gfs_holds(tmp_path):
         await u.stop()
     narrowed = u.stored_on_gfs(await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM))
     assert set(narrowed.wire()) == {"a.webp"}
-    assert narrowed.lazy_ok is False
 
     # Rotated epoch: same file, new address — not on the GFS.
     async def _rotated(space_id, *, epoch=None):
@@ -1345,3 +1207,32 @@ async def test_stored_plan_for_reader_seals_nothing(tmp_path):
     assert set(plan.wire()) == {"a.webp"}
     assert len(u._described) == sealed  # b.webp still not sealed
     assert await u.stored_plan_for_reader(SPACE, urls, "b", item_id=ITEM) is None
+
+
+async def test_a_global_space_with_a_channel_uses_the_channel_scope(tmp_path):
+    """v_96 — a global space running a channel uploads under it: its
+    space-keyed writer-key pin is no longer announced once it does."""
+    on = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(channel=(CHANNEL_ID, "pk")))
+    assert await on.scope_of(SPACE) == ("channel", CHANNEL_ID)
+    off = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(channel=None))
+    assert await off.scope_of(SPACE) is None
+
+
+async def test_a_plan_reads_the_space_scope_once(tmp_path, monkeypatch):
+    """P9 (P7 review): a plan read the space and its channel up to four
+    times (plan, _plan, can_upload, _describe_names); once is enough."""
+    _write(tmp_path, "a.webp", 1000)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _uploader(tmp_path, gfs=_Gfs([g1]), instances=[RELAY], versions={"e": V})
+    calls = 0
+    real = type(u).scope_of
+
+    async def counted(self, space_id):
+        nonlocal calls
+        calls += 1
+        return await real(self, space_id)
+
+    monkeypatch.setattr(type(u), "scope_of", counted)
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    assert plan is not None
+    assert calls == 1

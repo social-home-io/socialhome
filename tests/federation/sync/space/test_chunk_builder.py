@@ -259,7 +259,11 @@ async def test_record_batches_wraps_a_plain_exporter_as_one_page():
     assert [b async for b in record_batches(plain, "sp-1")] == [
         [{"id": "a"}, {"id": "b"}]
     ]
-    assert [b async for b in record_batches(_FakeExporter("bans", []), "sp-1")] == []
+    empty = _FakeExporter("members", [])
+    assert [b async for b in record_batches(empty, "sp-1")] == []
+    # Owner decision A (2026-11-26): an empty ``bans`` list is a statement
+    # — one empty page (and one empty chunk) when the resource is sent.
+    assert [b async for b in record_batches(_FakeExporter("bans", []), "sp-1")] == [[]]
 
 
 async def test_the_sentinel_carries_and_signs_the_owner_statement():

@@ -995,7 +995,9 @@ async def test_poll_once_takes_the_hosts_declared_counts(env):
     listing; the relay-seat ``subscriber_count`` is never read."""
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1"))
-    item = _global_space_item(member_count=12, follower_count=40)
+    item = _global_space_item(
+        member_count=12, follower_count=40, allow_subscribers=True
+    )
     item.pop("subscriber_count")
     svc = PublicSpaceDiscoveryService(
         repo,
@@ -1028,7 +1030,9 @@ async def test_a_space_on_two_gfss_keeps_its_number_whatever_the_order(env):
     _, repo, gfs_repo = env
     await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://one.example"))
     await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://two.example"))
-    counted = _global_space_item(member_count=12, follower_count=40)
+    counted = _global_space_item(
+        member_count=12, follower_count=40, allow_subscribers=True
+    )
     bare = _global_space_item()
     for first, second in ((counted, bare), (bare, counted)):
         svc = PublicSpaceDiscoveryService(
@@ -1044,3 +1048,45 @@ async def test_a_space_on_two_gfss_keeps_its_number_whatever_the_order(env):
         await svc.poll_once()
         got = (await repo.list_active())[0]
         assert (got.member_count, got.follower_count) == (12, 40)
+
+
+async def test_followers_turned_off_clears_the_cached_follower_count(env):
+    """The host turned followers off: its GFS listing now declares members
+    only, and the next poll drops the cached follower count (members only
+    on Discover, never a stale number or "0 followers")."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    for item, want in (
+        (
+            _global_space_item(
+                member_count=5, follower_count=0, allow_subscribers=True
+            ),
+            (5, 0),
+        ),
+        (_global_space_item(member_count=5, allow_subscribers=False), (5, None)),
+    ):
+        svc = PublicSpaceDiscoveryService(
+            repo,
+            gfs_connection_repo=gfs_repo,
+            http_client=_StubSession(body={"spaces": [item]}),
+        )
+        await svc.poll_once()
+        got = (await repo.list_active())[0]
+        assert (got.member_count, got.follower_count) == want
+
+
+async def test_a_listing_that_takes_no_followers_caches_no_follower_count(env):
+    """Whatever a GFS serves, a space that takes no followers shows only its
+    members on Discover (a stale or older row's count is dropped)."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1"))
+    item = _global_space_item(member_count=5, follower_count=3)
+    item["allow_subscribers"] = False
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_StubSession(body={"spaces": [item]}),
+    )
+    await svc.poll_once()
+    got = (await repo.list_active())[0]
+    assert (got.member_count, got.follower_count) == (5, None)

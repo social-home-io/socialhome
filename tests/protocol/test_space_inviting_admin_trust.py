@@ -53,6 +53,7 @@ from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
+from socialhome.services.space_service import signed_ban_event
 from socialhome.space_owner_statement import (
     sign_inviter_proof,
     sign_owner_statement,
@@ -406,37 +407,69 @@ async def test_an_owner_invite_records_no_inviting_admin(db):
     assert await spaces.get_invited_by(SPACE) is None
 
 
-def _ban(event_type, sender: str, user: str = "u-third") -> FederationEvent:
-    return _event(
-        event_type,
-        sender,
-        {"space_id": SPACE, "user_id": user, "banned_by": "u-admin"},
+def _ban(
+    event_type, sender: str, user: str = "u-third", *, seed: bytes
+) -> FederationEvent:
+    """A ban / unban as a seed holder sends it since P7b: signed with the
+    space authority seed (``seed``)."""
+    _, payload = signed_ban_event(
+        SPACE,
+        banned=event_type == FederationEventType.SPACE_MEMBER_BANNED,
+        seed=seed,
+        user_id=user,
+        banned_by="u-admin",
     )
+    return _event(event_type, sender, payload)
 
 
 @pytest.mark.parametrize(
     "sender, delegation, applied",
     [
         (ADMIN, True, True),
-        (OTHER_ADMIN, True, False),
+        # P7b: any seed holder in our roster (a live admin household,
+        # delegation on) — the same households whose authority-signed LEFT
+        # gossip already ends seats here; the owner takes a delegated
+        # admin's ban the same way.
+        (OTHER_ADMIN, True, True),
         (ADMIN, False, False),
     ],
 )
 async def test_live_bans_from_the_inviting_admin(joiner, sender, delegation, applied):
-    """Live ``SPACE_MEMBER_BANNED`` / ``_UNBANNED`` follow the same rule as
-    the bans in the inviting admin's catch-up stream."""
+    """Live ``SPACE_MEMBER_BANNED`` / ``_UNBANNED`` from a seed holder: an
+    admin household with a live admin seat while delegation is on, and only
+    with a valid space-authority signature (P7b)."""
     if not delegation:
         space = await joiner.spaces.get(SPACE)
         await joiner.spaces.save(replace(space, features=SpaceFeatures()))
+    seed = joiner.space_kp.private_key
     handlers = SpaceMembershipInboundHandlers(
         bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
     )
-    await handlers._on_banned(_ban(FederationEventType.SPACE_MEMBER_BANNED, sender))
+    await handlers._on_banned(
+        _ban(FederationEventType.SPACE_MEMBER_BANNED, sender, seed=seed)
+    )
     assert await joiner.spaces.is_banned(SPACE, "u-third") is applied
     # The owner's ban always applies; the unban follows the same rule.
-    await handlers._on_banned(_ban(FederationEventType.SPACE_MEMBER_BANNED, OWNER))
-    await handlers._on_unbanned(_ban(FederationEventType.SPACE_MEMBER_UNBANNED, sender))
+    await handlers._on_banned(
+        _ban(FederationEventType.SPACE_MEMBER_BANNED, OWNER, seed=seed)
+    )
+    await handlers._on_unbanned(
+        _ban(FederationEventType.SPACE_MEMBER_UNBANNED, sender, seed=seed)
+    )
     assert await joiner.spaces.is_banned(SPACE, "u-third") is (not applied)
+
+
+@pytest.mark.parametrize("sender", [ADMIN, OTHER_ADMIN, OWNER])
+async def test_a_live_ban_without_the_space_seed_is_refused(joiner, sender):
+    """A ban signed with anything but the space authority seed — the
+    sender's own household key included — is refused, from the owner too."""
+    handlers = SpaceMembershipInboundHandlers(
+        bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
+    )
+    await handlers._on_banned(
+        _ban(FederationEventType.SPACE_MEMBER_BANNED, sender, seed=OTHER_SEED)
+    )
+    assert await joiner.spaces.is_banned(SPACE, "u-third") is False
 
 
 # ── The owner's own people are off limits to the inviting admin ──────────
@@ -462,12 +495,22 @@ async def test_the_inviting_admin_cannot_demote_or_ban_the_owners_people(joiner)
     )
     for user in ("u-o2", "u-owner"):
         await handlers._on_banned(
-            _ban(FederationEventType.SPACE_MEMBER_BANNED, ADMIN, user)
+            _ban(
+                FederationEventType.SPACE_MEMBER_BANNED,
+                ADMIN,
+                user,
+                seed=joiner.space_kp.private_key,
+            )
         )
         assert await joiner.spaces.is_banned(SPACE, user) is False
     # The owner itself still decides about its people.
     await handlers._on_banned(
-        _ban(FederationEventType.SPACE_MEMBER_BANNED, OWNER, "u-o2")
+        _ban(
+            FederationEventType.SPACE_MEMBER_BANNED,
+            OWNER,
+            "u-o2",
+            seed=joiner.space_kp.private_key,
+        )
     )
     assert await joiner.spaces.is_banned(SPACE, "u-o2") is True
 

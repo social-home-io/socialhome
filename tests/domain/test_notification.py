@@ -225,12 +225,13 @@ def test_d5_public_and_global_spaces_default_to_replies_and_mentions():
         )
 
 
-def test_d5_a_followed_space_defaults_to_replies_and_mentions():
+def test_d5_a_followed_space_defaults_like_a_member_seat():
+    """P10 (owner 2026-11-27): a follower is notified like a member — the
+    default depends on the space's kind, never on the role."""
     for space_type in ("household", "private", "public", "global"):
-        assert (
-            default_space_notif_level(space_type, "subscriber")
-            is SpaceNotifLevel.MENTIONS
-        )
+        assert default_space_notif_level(
+            space_type, "subscriber"
+        ) is default_space_notif_level(space_type, "member")
 
 
 def test_d5_an_unknown_space_type_errs_quiet():

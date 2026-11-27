@@ -3,8 +3,8 @@
  * group play §3.1): "Start a game", the games waiting for people (yours
  * first), the games being played, and the ones that just finished.
  *
- * Who sees it: members with a writing seat — never followers, never in a
- * global space. The section is in the bar while the space allows at least
+ * Who sees it: every seat, a follower's included (P10: it sees the
+ * tables, ``watchOnly`` — no Start, no Join), never in a global space. The section is in the bar while the space allows at least
  * one game; the owner, admins and moderators (who choose the games, D9)
  * also see it while the list is empty, with "Choose games" — everyone
  * else sees nothing until there is something to play.
@@ -31,6 +31,8 @@ import { StartGameSheet } from './StartGameSheet'
 interface Props {
   spaceId: string
   state: SpaceGamesState
+  /** A follower: sees the games, never starts or joins one. */
+  watchOnly?: boolean
 }
 
 /** Load this home's apps and the catalog once — the games' names and
@@ -43,7 +45,7 @@ export function useGameApps(enabled = true): void {
   }, [enabled])
 }
 
-export function SpaceGamesSection({ spaceId, state }: Props) {
+export function SpaceGamesSection({ spaceId, state, watchOnly = false }: Props) {
   const [starting, setStarting] = useState(false)
   useGameApps()
 
@@ -57,7 +59,7 @@ export function SpaceGamesSection({ spaceId, state }: Props) {
   const { waiting, playing, finished } = groupTables(
     knownTables(games.tables, catalog.value, catalogLoaded.value && catalogEnabled.value))
   const listEmpty = games.allowed_apps.length === 0
-  const canStart = games.games_possible && games.host_supports && !listEmpty
+  const canStart = !watchOnly && games.games_possible && games.host_supports && !listEmpty
   const chooseHref = addBase(settingsSectionPath(spaceId, 'games'))
 
   const cards = (list: SpaceTable[]) => (
@@ -70,6 +72,7 @@ export function SpaceGamesSection({ spaceId, state }: Props) {
           look={appLook(table.app_id, installedApps.value, catalog.value, lang)}
           entry={catalog.value.find((e) => e.app_id === table.app_id) ?? null}
           canEditGames={games.can_edit_games}
+          watchOnly={watchOnly}
           onChanged={() => { void reload() }}
           headingLevel={4}
         />

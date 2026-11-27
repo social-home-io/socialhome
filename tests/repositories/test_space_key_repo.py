@@ -131,23 +131,6 @@ async def test_get_previous_skips_gaps(repo):
 # ─── Writer group keys (migration 0076) ──────────────────────────────────
 
 
-async def test_writer_key_stored_per_epoch_on_an_existing_row(repo):
-    await repo.save(_key("sp-1", 1))
-    assert await repo.get_writer_key("sp-1", 1) is None
-    assert await repo.set_writer_key("sp-1", 1, "wrapped-1") is True
-    assert await repo.get_writer_key("sp-1", 1) == "wrapped-1"
-    # No key row for the epoch → nothing stored.
-    assert await repo.set_writer_key("sp-1", 9, "x") is False
-    assert await repo.get_writer_key("sp-1", 9) is None
-
-
-async def test_a_baseline_reset_clears_the_writer_key(repo):
-    await repo.save(_key("sp-1", 1))
-    await repo.set_writer_key("sp-1", 1, "old-authority-grant")
-    await repo.reset_to(_key("sp-1", 1, "owner"), authority_epoch=1)
-    assert await repo.get_writer_key("sp-1", 1) is None
-
-
 # ─── Private-space channel grants (migration 0077) ───────────────────────
 
 
@@ -171,3 +154,12 @@ async def test_latest_channel_grant_before_an_epoch(repo):
     assert await repo.latest_gfs_channel_before("sp-1", 3) == (2, "g2")
     assert await repo.latest_gfs_channel_before("sp-1", 2) == (1, "g1")
     assert await repo.latest_gfs_channel_before("sp-1", 1) is None
+
+
+def test_the_space_writer_key_store_is_gone():
+    """v_96 (P7) — the space writer group key is retired: nothing stores or
+    reads ``space_keys.writer_key`` (migration 0076, inert)."""
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+
+    assert not hasattr(SqliteSpaceKeyRepo, "set_writer_key")
+    assert not hasattr(SqliteSpaceKeyRepo, "get_writer_key")

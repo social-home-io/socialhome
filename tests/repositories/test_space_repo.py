@@ -1297,6 +1297,25 @@ async def test_invite_token_role_round_trips(env):
         assert row["role"] == role
 
 
+async def test_consume_reports_the_household_a_token_is_bound_to(env):
+    """An approval's token (bound) says so on consume; a link does not."""
+    await env.repo.save(_space("sp-bound"))
+    bound = await env.repo.create_invite_token(
+        "sp-bound",
+        "uid-alice",
+        role="subscriber",
+        bound_instance_id="peer-1",
+        bound_user_id="uid-bob",
+    )
+    row = await env.repo.consume_invite_token(
+        bound, redeemer_user_id="uid-bob", redeemer_instance_id="peer-1"
+    )
+    assert row is not None and row["bound_instance_id"] == "peer-1"
+    link = await env.repo.create_invite_token("sp-bound", "uid-alice")
+    row = await env.repo.consume_invite_token(link)
+    assert row is not None and row["bound_instance_id"] is None
+
+
 async def test_invite_token_rejects_an_unknown_role(env):
     """The CHECK is the on-disk authority — ``owner`` is not in it, and
     neither is anything invented."""
@@ -1403,6 +1422,51 @@ async def test_list_live_invite_tokens_excludes_spent_links(env):
     )
     rows = await env.repo.list_live_invite_tokens("sp-live-list")
     assert [r["token"] for r in rows] == [live]
+
+
+async def test_list_live_invite_tokens_leaves_out_bound_approval_tokens(env):
+    """A token bound to one household and person is an approval's answer
+    (an admin's or a follow's, v_96), not a link the admins share."""
+    await env.repo.save(_space("sp-bound"))
+    link = await env.repo.create_invite_token("sp-bound", "uid-alice")
+    await env.repo.create_invite_token(
+        "sp-bound",
+        "uid-alice",
+        role="subscriber",
+        bound_instance_id="peer",
+        bound_user_id="uid-bob",
+    )
+    rows = await env.repo.list_live_invite_tokens("sp-bound")
+    assert [r["token"] for r in rows] == [link]
+
+
+async def test_has_live_pending_join_request_ignores_an_expired_row(env):
+    """An applicant's own request past its ``expires_at`` is not "already
+    asked" even before the sweep marks it expired (v_96 follow retry)."""
+    kw = {"remote_applicant_instance_id": "host"}
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    rid = await env.repo.save_join_request(
+        "sp-x", "uid-bob", ttl_days=15 / (24 * 60), **kw
+    )
+    assert await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # Another household, another person: no.
+    assert not await env.repo.has_live_pending_join_request(
+        "sp-x", "uid-bob", remote_applicant_instance_id="other"
+    )
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-x", **kw)
+    await env.db.enqueue(
+        "UPDATE space_join_requests SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), rid),
+    )
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # An answered one is not pending either.
+    rid2 = await env.repo.save_join_request("sp-x", "uid-bob", **kw)
+    assert await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    await env.repo.update_join_request_status(rid2, "denied")
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
+    # A pending admin elevation is not a join request.
+    await env.repo.save_join_request("sp-x", "uid-bob", requested_role="admin", **kw)
+    assert not await env.repo.has_live_pending_join_request("sp-x", "uid-bob", **kw)
 
 
 async def test_list_live_invite_tokens_never_leaks_another_space(env):
@@ -2033,19 +2097,6 @@ async def test_gfs_channel_healed_at_round_trip(env):
     assert await env.repo.get_gfs_channel_healed_at("sp-missing") is None
 
 
-async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
-    await env.repo.save(_space("sp-m", space_type=SpaceType.GLOBAL))
-    await env.repo.set_mirror_provenance("sp-m", gfs_id="conn-old", rotation_seq=4)
-    assert not await env.repo.rebind_mirror_provenance(
-        "sp-m", from_gfs_id="conn-other", to_gfs_id="conn-new"
-    )
-    assert await env.repo.rebind_mirror_provenance(
-        "sp-m", from_gfs_id="conn-old", to_gfs_id="conn-new"
-    )
-    # The seq is kept: the heal still needs a strictly higher one.
-    assert await env.repo.get_mirror_provenance("sp-m") == ("conn-new", 4)
-
-
 # ── GFS server list (migration 0093) ──────────────────────────────────────
 
 
@@ -2531,6 +2582,20 @@ async def test_has_approved_join_request(env):
     assert not await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)
 
 
+async def test_an_auto_approved_follow_counts_as_an_approval(env):
+    """v_96: a follow is approved automatically (``reviewed_by`` NULL) only
+    after the local-community check said inside, so its redeem (which
+    carries no location) is seated on it like on an admin's approval."""
+    await env.repo.save(_space("sp-fo"))
+    rid = await env.repo.save_join_request(
+        "sp-fo", "uid-bob", remote_applicant_instance_id="peer"
+    )
+    assert await env.repo.answer_join_request(rid, "approved", reviewed_by=None)
+    assert await env.repo.has_approved_join_request(
+        "sp-fo", "uid-bob", remote_applicant_instance_id="peer", within_days=7
+    )
+
+
 async def test_answer_join_request_moves_a_pending_request_once(env):
     """Two answers racing on one request: exactly one moves it out of
     ``pending``; the other is told it lost and changes nothing."""
@@ -2633,7 +2698,7 @@ async def test_a_purged_item_is_revived_and_open_items_are_listed(env):
 async def test_listing_counts_members_and_live_followers(env):
     """The shared listing builder: members as :data:`MEMBER_COUNT_SQL`,
     followers as live follower seats — local plus remote non-tombstoned."""
-    await env.repo.save(_space("a", "Alpha", SpaceType.GLOBAL))
+    await env.repo.save(_takes_followers(_space("a", "Alpha", SpaceType.GLOBAL)))
     await env.repo.save_member(_member("a", "uid-alice", "owner"))
     await env.repo.save_member(_member("a", "uid-bob"))
     await env.repo.save_member(_member("a", "uid-carol", "subscriber"))
@@ -2651,6 +2716,56 @@ async def test_listing_counts_members_and_live_followers(env):
     assert await env.repo.listing_counts("nope") is None
 
 
+def _takes_followers(space: Space) -> Space:
+    return replace(space, features=SpaceFeatures(allow_subscribers=True))
+
+
+async def test_listing_counts_no_follower_count_when_the_space_takes_no_followers(
+    env,
+):
+    """Followers off: the listing declares no follower count at all — not
+    ``0``, and not a seat left over — so every surface shows only members."""
+    await env.repo.save(_space("off", "Off", SpaceType.GLOBAL))
+    await env.repo.save_member(_member("off", "uid-alice", "owner"))
+    await env.repo.save_member(_member("off", "uid-carol", "subscriber"))
+
+    assert await env.repo.listing_counts("off") == SpaceListingCounts(
+        member_count=1, follower_count=None
+    )
+
+
+async def test_listing_counts_zero_followers_when_the_space_takes_them(env):
+    await env.repo.save(_takes_followers(_space("on", "On", SpaceType.PUBLIC)))
+    await env.repo.save_member(_member("on", "uid-alice", "owner"))
+
+    assert await env.repo.listing_counts("on") == SpaceListingCounts(
+        member_count=1, follower_count=0
+    )
+
+
+async def test_listing_counts_follow_the_followers_switch(env):
+    await env.repo.save(_takes_followers(_space("s", "S", SpaceType.GLOBAL)))
+    await env.repo.save_member(_member("s", "uid-alice", "owner"))
+    await env.repo.save_member(_member("s", "uid-carol", "subscriber"))
+    assert (await env.repo.listing_counts("s")).follower_count == 1
+    await env.repo.save(_space("s", "S", SpaceType.GLOBAL))
+    assert (await env.repo.listing_counts("s")).follower_count is None
+
+
+async def test_list_hosted_listings_follower_count_only_when_taking_followers(env):
+    await env.repo.save(_takes_followers(_space("on", "On", SpaceType.PUBLIC)))
+    await env.repo.save(_space("off", "Off", SpaceType.PUBLIC))
+    for sid in ("on", "off"):
+        await env.repo.save_member(_member(sid, "uid-alice", "owner"))
+        await env.repo.save_member(_member(sid, "uid-carol", "subscriber"))
+
+    rows = await env.repo.list_hosted_listings(
+        "inst-x", "uid-bob", tiers=frozenset({SpaceType.PUBLIC})
+    )
+
+    assert {r.space.id: r.follower_count for r in rows} == {"on": 1, "off": None}
+
+
 async def test_holds_roster_only_with_a_local_member_seat(env):
     """A household holds a space's roster when one of its people holds a
     member seat there (the host's owner always does); a follower-only
@@ -2663,3 +2778,188 @@ async def test_holds_roster_only_with_a_local_member_seat(env):
     assert await env.repo.holds_roster("a") is True
     assert await env.repo.holds_roster("f") is False
     assert await env.repo.holds_roster("nope") is False
+
+
+# ── P5 (v_96): pruning settled remote approvals ──────────────────────────
+
+
+async def _approved_remote_request(
+    env, space_id, user_id, *, household, reviewed_by=None, days_ago: float
+) -> str:
+    rid = await env.repo.save_join_request(
+        space_id, user_id, ttl_days=7, remote_applicant_instance_id=household
+    )
+    assert await env.repo.answer_join_request(rid, "approved", reviewed_by=reviewed_by)
+    await env.db.enqueue(
+        "UPDATE space_join_requests SET reviewed_at=datetime('now', ?) WHERE id=?",
+        (f"-{days_ago} days", rid),
+    )
+    return rid
+
+
+async def _bound_token(
+    env, space_id, user_id, *, household, spent: bool, days_ago: float, live=False
+) -> str:
+    expires = datetime.now(UTC) + (timedelta(hours=1) if live else -timedelta(hours=1))
+    token = await env.repo.create_invite_token(
+        space_id,
+        created_by=user_id,
+        uses=1,
+        expires_at=expires.isoformat(),
+        role="subscriber",
+        bound_instance_id=household,
+        bound_user_id=user_id,
+    )
+    await env.db.enqueue(
+        "UPDATE space_invite_tokens SET created_at=datetime('now', ?),"
+        " uses_remaining=? WHERE token=?",
+        (f"-{days_ago} days", 0 if spent else 1, token),
+    )
+    return token
+
+
+async def _token_exists(env, token) -> bool:
+    return await env.repo.get_invite_token_space_id(token) is not None
+
+
+async def test_prune_settled_remote_approvals_drops_old_follow_rows(env):
+    """An automatic (follow) approval is pruned once it is past the window
+    an approval is honoured for (``has_approved_join_request``) and no
+    live token bound to that household and person is left; an admin's
+    approval, a pending request, a young approval and one whose bound
+    token can still be redeemed stay."""
+    await env.repo.save(_space("sp-p"))
+    old = await _approved_remote_request(
+        env, "sp-p", "u-old", household="h1", days_ago=8
+    )
+    young = await _approved_remote_request(
+        env, "sp-p", "u-young", household="h1", days_ago=6
+    )
+    admin = await _approved_remote_request(
+        env, "sp-p", "u-adm", household="h1", reviewed_by="uid-admin", days_ago=30
+    )
+    held = await _approved_remote_request(
+        env, "sp-p", "u-held", household="h2", days_ago=8
+    )
+    await _bound_token(
+        env, "sp-p", "u-held", household="h2", spent=False, days_ago=0, live=True
+    )
+    pending = await env.repo.save_join_request(
+        "sp-p", "u-pend", ttl_days=7, remote_applicant_instance_id="h3"
+    )
+    pruned = await env.repo.prune_settled_remote_approvals(older_than_days=7)
+    assert pruned == 1
+    assert await env.repo.get_join_request(old) is None
+    for kept in (young, admin, held, pending):
+        assert await env.repo.get_join_request(kept) is not None
+    assert not await env.repo.has_approved_join_request(
+        "sp-p", "u-old", remote_applicant_instance_id="h1", within_days=7
+    )
+
+
+async def test_prune_settled_remote_approvals_drops_dead_bound_tokens(env):
+    """A bound (approval) token that is spent or expired goes once it is
+    older than the window — a lost ACK's retry reads a spent token's space
+    (``get_invite_token_space_id``) only within the relay queue's day. A
+    live bound token, a young dead one and an ordinary link stay."""
+    await env.repo.save(_space("sp-t"))
+    spent_old = await _bound_token(
+        env, "sp-t", "u1", household="h1", spent=True, days_ago=8
+    )
+    expired_old = await _bound_token(
+        env, "sp-t", "u2", household="h1", spent=False, days_ago=8
+    )
+    live_old = await _bound_token(
+        env, "sp-t", "u3", household="h1", spent=False, days_ago=8, live=True
+    )
+    spent_young = await _bound_token(
+        env, "sp-t", "u4", household="h1", spent=True, days_ago=1
+    )
+    link = await env.repo.create_invite_token("sp-t", "uid-alice", uses=1)
+    await env.db.enqueue(
+        "UPDATE space_invite_tokens SET created_at=datetime('now', '-30 days'),"
+        " uses_remaining=0 WHERE token=?",
+        (link,),
+    )
+    assert await env.repo.prune_settled_remote_approvals(older_than_days=7) == 2
+    assert not await _token_exists(env, spent_old)
+    assert not await _token_exists(env, expired_old)
+    for kept in (live_old, spent_young, link):
+        assert await _token_exists(env, kept)
+
+
+# ── Household bans (P7b) ──────────────────────────────────────────────
+
+
+async def test_ban_household_and_unban(env):
+    """A household ban is its own row; unban removes it."""
+    await env.repo.save(_space("sp-hh"))
+    await env.repo.ban_household("sp-hh", "inst-x", reason="spam")
+    assert await env.repo.is_household_banned("sp-hh", "inst-x") is True
+    assert await env.repo.is_household_banned("sp-hh", "inst-y") is False
+    rows = await env.repo.list_household_bans("sp-hh")
+    assert [(r["instance_id"], r["reason"]) for r in rows] == [("inst-x", "spam")]
+    await env.repo.unban_household("sp-hh", "inst-x")
+    assert await env.repo.is_household_banned("sp-hh", "inst-x") is False
+    assert await env.repo.list_household_bans("sp-hh") == []
+
+
+async def test_a_re_ban_never_changes_who_banned(env):
+    """P7b Fable review I1: the first banner stays — a re-ban (an admin's,
+    a forwarded one, gossip or a sync stream) must not turn the owner's ban
+    into an admin's, which an admin could then lift. A ban whose banner is
+    unknown (NULL, before migration 0157) takes the first named one."""
+    await env.repo.save(_space("sp-reban"))
+    await env.repo.ban_member("sp-reban", "uid-x", "uid-owner", reason="a")
+    await env.repo.ban_member("sp-reban", "uid-x", "uid-admin", reason="b")
+    assert await env.repo.ban_banned_by("sp-reban", user_id="uid-x") == "uid-owner"
+    await env.repo.ban_household("sp-reban", "inst-x", banned_by="uid-owner")
+    await env.repo.ban_household("sp-reban", "inst-x", banned_by=None)
+    await env.repo.ban_household("sp-reban", "inst-x", banned_by="uid-admin")
+    assert await env.repo.ban_banned_by("sp-reban", instance_id="inst-x") == "uid-owner"
+    await env.repo.ban_household("sp-reban", "inst-y")
+    await env.repo.ban_household("sp-reban", "inst-y", banned_by="uid-admin")
+    assert await env.repo.ban_banned_by("sp-reban", instance_id="inst-y") == "uid-admin"
+
+
+async def test_a_banned_household_consumes_nothing(env):
+    """The household ban rides the same atomic consume as the person ban:
+    no use spent, for any person of that household."""
+    await env.repo.save(_space("sp-hh-tok"))
+    token = await env.repo.create_invite_token("sp-hh-tok", "uid-alice", uses=5)
+    await env.repo.ban_household("sp-hh-tok", "inst-x")
+
+    assert (
+        await env.repo.consume_invite_token(
+            token, redeemer_user_id="uid-new", redeemer_instance_id="inst-x"
+        )
+        is None
+    )
+    row = await env.repo.consume_invite_token(
+        token, redeemer_user_id="uid-new", redeemer_instance_id="inst-y"
+    )
+    assert row is not None
+    assert row["uses_remaining"] == 4
+
+
+async def test_a_household_ban_in_another_space_does_not_block(env):
+    await env.repo.save(_space("sp-a"))
+    await env.repo.save(_space("sp-b"))
+    await env.repo.ban_household("sp-b", "inst-x")
+    token = await env.repo.create_invite_token("sp-a", "uid-alice", uses=1)
+    row = await env.repo.consume_invite_token(
+        token, redeemer_user_id="uid-new", redeemer_instance_id="inst-x"
+    )
+    assert row is not None
+
+
+async def test_a_household_ban_records_who_banned(env):
+    await env.repo.save(_space("sp-by"))
+    await env.repo.ban_household("sp-by", "inst-x", banned_by="uid-alice")
+    [row] = await env.repo.list_household_bans("sp-by")
+    assert row["banned_by"] == "uid-alice"
+    assert await env.repo.ban_banned_by("sp-by", instance_id="inst-x") == "uid-alice"
+    await env.repo.ban_member("sp-by", "uid-bob", "uid-carol")
+    assert await env.repo.ban_banned_by("sp-by", user_id="uid-bob") == "uid-carol"
+    assert await env.repo.ban_banned_by("sp-by", user_id="uid-nobody") is None
+    assert await env.repo.ban_banned_by("sp-by") is None

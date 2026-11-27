@@ -25,7 +25,7 @@ from socialhome.domain.events import (
 from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.preferences import UserPreferences
-from socialhome.domain.space import SpaceType
+from socialhome.domain.space import SpaceRole, SpaceType
 from socialhome.domain.space_author_profile import (
     PROFILE_PICTURE_FIELD,
     PROFILE_PICTURE_MAX_BYTES,
@@ -62,10 +62,11 @@ class _Spaces:
     space_type: SpaceType = SpaceType.GLOBAL
     allow_subscribers: bool = True
     member: object | None = field(
-        default_factory=lambda: SimpleNamespace(space_display_name=None)
+        default_factory=lambda: SimpleNamespace(
+            space_display_name=None, role=SpaceRole.MEMBER
+        )
     )
     instances: list[str] = field(default_factory=list)
-    seed: bytes | None = None
 
     async def get(self, space_id):
         return SimpleNamespace(
@@ -79,9 +80,6 @@ class _Spaces:
 
     async def list_member_instances(self, space_id):
         return self.instances
-
-    async def get_space_seed(self, space_id):
-        return self.seed
 
 
 class _Users:
@@ -124,13 +122,6 @@ class _Federation:
     async def get_instance(self, instance_id):
         v = self.versions.get(instance_id)
         return None if v is None else SimpleNamespace(proto_version=v)
-
-
-class _Crypto:
-    epoch = 3
-
-    async def get_current_epoch(self, space_id):
-        return self.epoch
 
 
 class _MemberGfs:
@@ -176,13 +167,11 @@ class _Cache:
         self.rows: dict[tuple[str, str], tuple] = {}
         self.writes: list[tuple] = []
 
-    async def upsert_if_newer(self, profile, *, picture_webp, signed_item, item_epoch):
-        self.writes.append((profile, picture_webp, signed_item, item_epoch))
+    async def upsert_if_newer(self, profile, *, picture_webp):
+        self.writes.append((profile, picture_webp))
         self.rows[(profile.space_id, profile.author_user_id)] = (
             profile,
             picture_webp,
-            signed_item,
-            item_epoch,
         )
         return True
 
@@ -190,9 +179,7 @@ class _Cache:
         row = self.rows.get((space_id, author_user_id))
         if row is None:
             return None
-        return CachedAuthorProfile(
-            profile=row[0], has_picture=row[1] is not None, picture_sidecar=None
-        )
+        return CachedAuthorProfile(profile=row[0], has_picture=row[1] is not None)
 
     async def list_spaces_for_author(self, author_user_id):
         return [space for (space, author) in self.rows if author == author_user_id]
@@ -213,21 +200,6 @@ class _Prefs:
         )
 
 
-class _Certs:
-    def __init__(self, cert=None) -> None:
-        self.cert = cert
-        self.asked: list[tuple] = []
-
-    async def own_cert(self, space_id, epoch):
-        self.asked.append((space_id, epoch))
-        return self.cert
-
-
-class _Cert:
-    def to_wire(self):
-        return {"cert_suite": "ed25519", "scope": "write"}
-
-
 def _svc(**kw):
     gfs = _MemberGfs()
     cache = kw.pop("cache", _Cache())
@@ -237,7 +209,6 @@ def _svc(**kw):
         user_repo=kw.pop("users", _Users()),  # type: ignore[arg-type]
         picture_repo=kw.pop("pictures", _Pictures(user_pic=_webp())),  # type: ignore[arg-type]
         federation_repo=kw.pop("federation", _Federation()),  # type: ignore[arg-type]
-        space_crypto=kw.pop("crypto", _Crypto()),  # type: ignore[arg-type]
         member_gfs=gfs,  # type: ignore[arg-type]
         own_instance_id=OWN,
         own_instance_pk=KP.public_key,
@@ -245,7 +216,7 @@ def _svc(**kw):
         picture_cache=kw.pop("picture_cache", None),
         preferences_repo=kw.pop("prefs", _Prefs()),  # type: ignore[arg-type]
     )
-    svc.attach_profile_cache(cache, writer_certs=kw.pop("certs", _Certs(_Cert())))  # type: ignore[arg-type]
+    svc.attach_profile_cache(cache)  # type: ignore[arg-type]
     return svc, gfs
 
 
@@ -287,7 +258,11 @@ async def test_publishes_a_signed_profile_with_name_bio_and_a_small_picture():
 
 
 async def test_the_per_space_name_and_picture_win():
-    spaces = _Spaces(member=SimpleNamespace(space_display_name="Noor (Imkerei)"))
+    spaces = _Spaces(
+        member=SimpleNamespace(
+            space_display_name="Noor (Imkerei)", role=SpaceRole.MEMBER
+        )
+    )
     svc, gfs = _svc(
         spaces=spaces, pictures=_Pictures(user_pic=_webp(), member_pic=_webp(100))
     )
@@ -343,7 +318,7 @@ async def test_hiding_the_profile_republishes_name_only_and_back_on_the_full():
         assert (p.bio, p.picture_hash) == (None, None)
         assert PROFILE_PICTURE_FIELD not in inner
     assert spaces == {"sp", "sp2"}
-    assert cache.rows[("sp", NOOR)][1] is None  # the bundle forgets the picture
+    assert cache.rows[("sp", NOOR)][1] is None  # the cache forgets the picture
     prefs.hidden.clear()
     await bus.publish(
         UserPreferencesChanged(
@@ -382,12 +357,10 @@ async def test_another_preference_change_republishes_nothing():
 async def test_a_content_key_rotation_sends_nothing():
     """REGRESSION (H2): every rotation re-sent each author's full profile
     to all followers (in-memory dedupe keyed by epoch) ≈ 200 × 10 000 ×
-    64 KiB. A follower who joins later gets the item, under its original
-    epoch, in the host's bundle."""
-    crypto = _Crypto()
-    svc, gfs = _svc(crypto=crypto)
+    64 KiB. The dedupe is the persisted ``profile_rev``; the epoch plays no
+    part (the service no longer reads it)."""
+    svc, gfs = _svc()
     assert await _pub(svc, "sp", NOOR)
-    crypto.epoch = 4
     assert not await _pub(svc, "sp", NOOR)
     assert len(gfs.items) == 1
 
@@ -565,7 +538,6 @@ async def test_without_the_cache_nothing_is_published():
         user_repo=_Users(),  # type: ignore[arg-type]
         picture_repo=_Pictures(user_pic=_webp()),  # type: ignore[arg-type]
         federation_repo=_Federation(),  # type: ignore[arg-type]
-        space_crypto=_Crypto(),  # type: ignore[arg-type]
         member_gfs=_MemberGfs(),  # type: ignore[arg-type]
         own_instance_id=OWN,
         own_instance_pk=KP.public_key,
@@ -579,57 +551,6 @@ async def test_without_the_cache_nothing_is_published():
             user_id=NOOR, changed={"hide_profile_from_followers": True}
         )
     )
-
-
-# ── The host's copy for a new follower's bundle (v_61) ──────────────
-
-
-async def test_a_seed_holder_keeps_the_item_signed_for_its_bundle():
-    """A household never receives its own items back, so a host keeps what
-    it sends: author-signed, with our writer cert and its epoch and the
-    original picture, as a follower receives it."""
-    cache = _Cache()
-    certs = _Certs(_Cert())
-    svc, gfs = _svc(cache=cache, certs=certs, spaces=_Spaces(seed=b"s" * 32))
-    assert await _pub(svc, "sp", NOOR)
-    [(profile, picture, signed, epoch)] = cache.writes
-    sent = _sent(gfs)
-    assert signed == {**sent, "writer_cert": _Cert().to_wire()}
-    assert verify_signed_item_inner(signed)
-    assert epoch == 3 and certs.asked == [("sp", 3)]
-    assert profile.author_pk == KP.public_key.hex()
-    assert picture is not None and profile.picture_hash == profile_picture_digest(
-        picture
-    )
-
-
-async def test_a_seed_holder_keeps_the_picture_with_a_name_only_change():
-    cache = _Cache()
-    users = _Users()
-    svc, _gfs = _svc(cache=cache, users=users, spaces=_Spaces(seed=b"s" * 32))
-    await _pub(svc, "sp", NOOR)
-    users.user.display_name = "Noor H."
-    await _pub(svc, "sp", NOOR)
-    signed = cache.writes[-1][2]
-    assert PROFILE_PICTURE_FIELD in signed  # the bundle still has the bytes
-
-
-async def test_a_household_without_the_seed_keeps_no_signed_item():
-    """M2: only a host builds bundles."""
-    cache = _Cache()
-    svc, _gfs = _svc(cache=cache)
-    assert await _pub(svc, "sp", NOOR)
-    [(profile, _picture, signed, epoch)] = cache.writes
-    assert profile.display_name == "Noor Haddad"
-    assert (signed, epoch) == (None, None)
-
-
-async def test_without_a_writer_cert_only_the_profile_is_cached():
-    cache = _Cache()
-    svc, _gfs = _svc(cache=cache, certs=_Certs(None), spaces=_Spaces(seed=b"s" * 32))
-    assert await _pub(svc, "sp", NOOR)
-    [(_profile_row, _picture, signed, epoch)] = cache.writes
-    assert (signed, epoch) == (None, None)
 
 
 async def test_a_profile_is_recorded_as_sent_only_once_a_gfs_took_it():
@@ -654,9 +575,21 @@ async def test_someone_who_is_not_a_member_publishes_nothing():
     assert gfs.items == []
 
 
+async def test_a_follower_never_publishes_a_profile():
+    """v_96 — a follower is a member with the read-only role: members name
+    it from the roster, and its reader cert does not admit the item."""
+    svc, gfs = _svc(
+        spaces=_Spaces(
+            member=SimpleNamespace(space_display_name=None, role=SpaceRole.SUBSCRIBER)
+        )
+    )
+    assert not await _pub(svc, "sp", NOOR)
+    assert gfs.items == []
+
+
 async def test_leaving_a_space_forgets_the_published_profile():
-    """Review I1: a departed member's profile is not forwarded to new
-    followers from the host's cache."""
+    """Review I1: a departed member's profile is forgotten from the
+    cache."""
     bus = EventBus()
     cache = _Cache()
     svc, _gfs = _svc(cache=cache, bus=bus)

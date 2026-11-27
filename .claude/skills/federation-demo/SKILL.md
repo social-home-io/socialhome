@@ -180,6 +180,11 @@ That single command runs the full sequence:
      attempt on) and the sealed redeem body carries the redeemer's (what
      the issuer stamps on the seat). Both land on the seats, so the seats
      are where the round-trip is provable.
+   - **v_96 subscriber seats.** ``verify`` pins
+     ``MIN_FOR_SUBSCRIBER_SEATS`` = 96: a follow (an auto-approved join with
+     role ``subscriber``) and its reader cert / subscriber grant go only to
+     a household at v_96, so the ``OURS`` round-trip above is what proves
+     every pair can follow.
    - **Sync status (migration 0150).** Beta reads its own space
      ``up_to_date`` (``GET /api/spaces/{id}`` ``sync``), and so must Alpha
      and Gamma — their host answered a sync with ``ok``. A member that
@@ -806,20 +811,20 @@ mesh-member-cert → space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
-admin-revoke-rotation → rotation-offline-catchup → space-chat →
+admin-revoke-rotation → rotation-offline-catchup → space-chat → space-follow-paired →
+space-follow-rotation →
 space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
-gfs-moment-late-delete → gfs-join-request → verify``
+gfs-moment-late-delete → gfs-join-request → gfs-space-follow →
+gfs-global-channel → gfs-follower-comment → gfs-space-bans → members-page-catchup → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
 audit over the whole chain, so ``all`` alone is green-or-red end to end.
 Apart from ``gfs-up`` / ``gfs-pair``, the ``gfs-*`` chain (``gfs-open-signup`` /
 ``gfs-approval`` / ``gfs-traffic``
-/ ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
-``gfs-space-rotate`` / ``gfs-authority-rotate`` /
-``gfs-space-no-subscribers`` / ``gfs-reach-pair`` /
+/ ``gfs-replay`` / ``gfs-authority-rotate`` / ``gfs-reach-pair`` /
 ``gfs-fallback-switch`` / ``gfs-down``)
 stays
 opt-in — it spins up a
@@ -1063,15 +1068,11 @@ python .claude/skills/federation-demo/harness.py sync-pages # v_95 match: true, 
 python .claude/skills/federation-demo/harness.py gfs-up
 python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic
-python .claude/skills/federation-demo/harness.py gfs-space-subscribe
-python .claude/skills/federation-demo/harness.py gfs-space-post
-python .claude/skills/federation-demo/harness.py gfs-space-author-profile
-python .claude/skills/federation-demo/harness.py gfs-space-rotate
+python .claude/skills/federation-demo/harness.py gfs-invite-link   # first: e must still be a stranger to a (a GFS follow seats e — a space_session row for a)
+python .claude/skills/federation-demo/harness.py gfs-space-follow
+python .claude/skills/federation-demo/harness.py gfs-global-channel   # before gfs-invite-link-content: its key rotation 429s the next minute's epoch notices to this GFS, and the new channel's notice waits behind it in the retry queue
 python .claude/skills/federation-demo/harness.py gfs-authority-rotate
-python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
-python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
-python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
 python .claude/skills/federation-demo/harness.py members-mesh-restart
 python .claude/skills/federation-demo/harness.py gfs-moderator-parity
@@ -1079,13 +1080,9 @@ python .claude/skills/federation-demo/harness.py members-parity
 python .claude/skills/federation-demo/harness.py members-parity-apps
 python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
-python .claude/skills/federation-demo/harness.py gfs-member-publish
-python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
-python .claude/skills/federation-demo/harness.py gfs-follower-comment
 python .claude/skills/federation-demo/harness.py gfs-private-channel
-python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after members-mesh-restart (needs them unpaired), before gfs-multi-listing (needs them paired). By now a and d share a GFS-reached space and hold a space seat for each other: the step proves a seat is not "already paired" (202, then a source=manual row on both sides)
+python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after members-mesh-restart (needs them unpaired), before gfs-private-channel-multi (needs them paired). By now a and d share a GFS-reached space and hold a space seat for each other: the step proves a seat is not "already paired" (202, then a source=manual row on both sides)
 python .claude/skills/federation-demo/harness.py gfs-b-up
-python .claude/skills/federation-demo/harness.py gfs-multi-listing
 python .claude/skills/federation-demo/harness.py gfs-private-channel-multi
 python .claude/skills/federation-demo/harness.py members-page-catchup   # host c down, b catches up from the plain member a, verified (v_95); restarts b and c — before gfs-admin-seed
 python .claude/skills/federation-demo/harness.py gfs-admin-seed   # last before verify: needs relay-pair (a ↔ d) and, for the withdrawn-listing checks, gfs-b-up; restarts a and e
@@ -1110,132 +1107,75 @@ python .claude/skills/federation-demo/harness.py gfs-fallback-switch
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
 
-### ``gfs-space-author-profile`` — a follower names a global space's authors (v_60)
+### Retired with v_96 (P6): the space-keyed GFS steps
 
-Needs ``gfs-space-subscribe`` + ``gfs-space-post``. d follows a's global
-space through the GFS and holds no roster. Erin's post published her
-profile as an ``author_profile`` item (author-signed, encrypted under the
-space content key, over the member relay): d's ``GET /api/spaces/{id}/authors``
-names her "Erin". Then Erin sets a bio and a picture on a; the profile change
-republishes and d gets the bio and a signed picture URL that returns WebP
-bytes. The GFS log (from the step's start) and its envelope queue never carry
-her name or bio, and c (no member, no follower) holds no profile.
-``verify`` (13y) re-checks d's view of Erin.
+``gfs-space-subscribe``, ``gfs-space-post``, ``gfs-space-author-profile``,
+``gfs-space-rotate``, ``gfs-space-no-subscribers``, ``gfs-member-publish``,
+``gfs-member-publish-strict`` and ``gfs-multi-listing`` proved the household
+side of the space-keyed GFS paths — the follow-only mirror and its
+identity-bound ``/gfs/subscribe`` seat, the content-key handoff, the v_61
+profiles bundle, the host relay (``POST /gfs/publish``) and the anonymous
+space-keyed member publish (``/gfs/member-publish-anon``). v_96 removed them
+all: a follower is a member with the read-only role, and a global space's
+content reaches members and followers only through its opaque channel. That
+path is proven by ``gfs-space-follow``, ``gfs-global-channel``,
+``gfs-follower-comment`` and ``gfs-authority-rotate``; the content-blindness
+of the channel by the §27.9 tests (``test_gfs_global_channel_blind.py``).
+``verify``'s former §13 block (gated on the retired steps' state) went with
+them. ``gfs-media-on-demand`` now reads the follower photo
+``gfs-global-channel`` puts through the channel's media cache.
 
-### ``gfs-space-follower-names`` — a new follower is named at once (v_61)
+### ``gfs-space-follower-names`` / ``gfs-space-follower-reconnect`` — retired (v_96, P4)
 
-Needs ``gfs-space-author-profile``; run it **last in its own chain**
-(``up → pair → traffic → calendar → gfs-up → gfs-pair → gfs-traffic →
-gfs-space-subscribe → gfs-space-post → gfs-space-author-profile →
-gfs-space-follower-names → gfs-space-follower-reconnect → verify``) — it
-makes **e** a follower of a's
-global space, which the ``gfs-invite-link*`` steps must not find. e
-subscribes; the GFS notifies a, which seals the content key to e and then
-ONE bundle of its cached, author-signed profiles — both targeted at e alone
-(``POST /gfs/publish`` with ``to``, the GFS's ``targeted_publish``). e must
-name Erin, with her bio, within 30 s without a new post, and then get her
-picture (names come first; the picture follows in a later bundle part,
-checked against the hash she signed). From the subscribe
-on, every ``/gfs/publish`` the GFS took must be targeted with exactly one
-subscriber reached and no member may publish (no ``/gfs/member-publish*``):
-the other follower, d, is sent nothing for e's subscribe. The GFS log never
-carries her name or bio. ``verify`` (13x) re-checks.
+They proved the v_61 new-follower profile bundle and its reconnect rule on
+the legacy GFS subscription (``/gfs/subscribe`` + ``new_subscriber``), which a
+follow no longer uses since v_96 P2. A follower is a roster member now: its
+name, and the members' names, come from the roster like any member's —
+``gfs-follower-comment`` asserts that a and b name the GFS follower e from
+their roster.
 
-### ``gfs-space-follower-reconnect`` — a reconnect never re-sends the bundle (v_61)
+### ``gfs-follower-comment`` — a GFS follower comments like a member (v_96, P4)
 
-Needs ``gfs-space-follower-names``; runs right after it. Restarts **a** (the
-host, so no in-memory "already sent" record survives) and then **e** (the
-follower: its GFS socket reconnects, the GFS sends ``new_subscriber`` with
-``reason: "reconnect"``, and e re-subscribes a seat it already holds, which
-at most repeats that key repair). Between the two restarts Erin posts on a:
-her profile is unchanged, so a must not re-publish it (her own
-``space_author_profiles`` row on a keeps its ``ts``; the dedupe is that
-persisted row, so neither a restart nor a key rotation re-sends a profile). From e's restart on, the GFS log must show at least one
-targeted ``space_subscriber_key_handoff`` reaching e's one socket and **no**
-``space_author_profiles_bundle``; e still names Erin.
+Part of ``all`` (right after ``gfs-global-channel``). Prereqs:
+``gfs-global-channel`` (a's global space: b a member paired with a, e a
+follower reached only through the GFS, both on the space's channel). b posts;
+then a turns ``allow_subscriber_comment`` on: e stores a ``reader`` comment
+cert. e comments: a and b hold it — b over the channel (the GFS accepted e's
+``POST /gfs/channels/publish-anon``) — and both name e from their roster
+(role ``subscriber``). a turns the switch off: exactly one rotation (a's
+content epoch + 1); once e holds the change, its next comment answers 403.
+e deletes its first comment with the switch off (204, owner decision F6): a
+and b drop it. The GFS log never holds the comment's text.
 
-### ``gfs-member-publish`` — a member posts with the host offline (v_49)
+``space-follow-paired`` runs the same round on the paired path (follower b,
+host a) before b unfollows.
 
-Needs ``gfs-space-subscribe`` (d follows a's global space) and
-``gfs-invite-link`` + ``-content`` (e holds a link-joined member seat in
-that same space). Stops **a** — the host and only seed holder — and has e
-post. e publishes the post itself (``POST /gfs/member-publish-anon``,
-signed with the space's writer group key — anonymous, the one mode since
-v_90; its writer cert rides inside the ciphertext), so follower d receives
-it decrypted while a is down; the GFS log shows the member-publish fan-out
-and never the post text. Then a restarts, catches e's post up over the
-member path and sends **no** copy to the GFS (step 12): e is v_57, the GFS
-proved member publish and `space_item_followers`, and every follower there
-reads `space_item` — a's log shows the skip. d holds exactly ONE copy.
-Polls every 3 s.
+Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-global-channel,
+gfs-follower-comment, verify, down``.
 
-Also, with a still down (PR 3): e comments on its post and reacts to it, then
-posts a second post, edits it and deletes it. d (a follower, which no other
-path ever carried these to) reflects the comment, the reaction, the edit and
-the delete from the member relay alone; the GFS log carries none of the text.
-After a restarts and catches up, a holds the second post deleted, and a's
-relayed copy of its create never resurrects it on d (receiver dedupe against
-the soft-deleted row). Reads d's / a's DB for these checks (no REST bucket).
+### ``gfs-space-bans`` — person and household bans on every path (P7b)
 
-Finally, with a back (moderation outcomes on the host relay): e posts, d gets
-it, and a removes it as a moderator — d, a follower no ``SPACE_*`` event
-reaches, drops it from a's authority-signed removal notice. Then a switches
-the space's posts to Reviewed, e's post queues (202) with e's author-signed
-copy attached, a approves it, and d receives it attributed to e — under e's
-own signature, relayed and marked by a (e's writer cert is comment-scope
-under Reviewed, so e could not publish it itself). The GFS
-log carries neither text nor ids. Posts go back to open afterwards.
+Part of ``all`` (right after ``gfs-follower-comment``). a creates a global
+invite-only space with followers on and mints a member link; c and b (paired
+with a) join with the link, e (paired with nobody) follows through the GFS.
 
-Compressed items (``payload_suite: "zlib1+dict1"``): e's first post is fanned
-out compressed (the GFS log's ``gfs.member_publish: space=… suite=zlib1+dict1``),
-since the GFS proved ``payload_zlib1_dict1`` and every seat there carries the
-label (``gfs-space-post`` asserts the same for a's relay copy:
-``GFS: relaying space_post_public … suite=zlib1+dict1``, and that d's socket
-registered for binary frames, ``gfs.ws.register: instance=<d> … binary=True``,
-so the post reached it as a ``ws_binary1`` frame). d's seat carries labels
-7: ``space_item``, ``payload_zlib1`` and ``payload_zlib1_dict1``, so both
-fan-outs above go under the preset dictionary suite (``suite=zlib1+dict1``,
-which both checks assert). Last, the step stages an
-older follower: it clears bits 2 and 4 of d's seat (``space_subscribers
-.reads_space_item``) in the GFS DB, has e post, and asserts the GFS refused
-the compressed item (e logs ``refused a compressed item``), e sent JSON
-(``suite=json``) and d still got the post. The bit is restored afterwards.
+1. **Person ban:** a bans b's person (``POST …/ban {user_id}``). b's seat
+   ends on a and on b; c, a plain member, holds the row (the signed
+   ``SPACE_MEMBER_BANNED`` reached it); b's link redeem is refused and b's
+   follow is refused by a (``refused: applicant banned``) or by b itself.
+2. **Household ban:** a bans e (``POST …/ban {instance_id}``). e's seat
+   ends on a and on e (told over the GFS); c holds the
+   ``space_instance_bans`` row; a fresh follow through the GFS and the
+   invite link (§D2b bootstrap through the GFS) both leave e unseated.
+3. **Unban:** a lifts both (``DELETE …/bans/{user_id}``,
+   ``DELETE …/household-bans/{instance_id}``); c drops both rows (signed
+   ``SPACE_MEMBER_UNBANNED``); nobody is re-seated.
 
-### ``gfs-follower-comment`` — a follower comments like a comment-only member
-
-Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
-global space). a opens the space to readers (``allow_subscribers``, left
-on: only a publicly readable space is published over a GFS), d subscribes to
-it over the GFS (left subscribed), and a turns
-``allow_subscriber_comment`` on: e gets its credentials alone — the same
-``comment`` cert and writer group key a comment-only member holds (e's
-``space_keys``). a posts; e (the follower) comments on the normal member
-path: a holds the comment, the GFS accepted e's anonymous publish (``POST
-/gfs/member-publish-anon`` 200) and d, a GFS subscriber, holds it too. a
-turns the switch off: exactly one rotation (a's content epoch + 1), and e's
-next comment is refused. The comment switch is left off (its default). Reads
-a's / e's DB (no REST bucket).
-
-### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
-
-Needs ``gfs-member-publish``. There is no publish-mode switch any more
-(v_90): the step waits until the GFS has the writer key of the space's
-current epoch pinned (the owner's notice) and e holds that key. Then **a**
-and **d** are stopped and e posts: e's publisher signs ``POST
-/gfs/member-publish-anon`` with the writer key over its cookie-less session.
-Asserts the GFS access log shows the anonymous route and no identified
-``/gfs/member-publish``, no GFS log line about the publish names e, and the
-row the GFS stored for offline d carries no ``writer_cert`` and nothing of
-e's (instance id, identity key). d restarts, drains the queue and decrypts
-the post. The identified ``POST /gfs/member-publish`` — what a pre-v_90
-household would send — has no route (404 / 405). Finally a restarts and
-catches the post up. ``verify`` then checks e's stored writer group key for
-that epoch unwraps and verifies (the v_90 tripwire). Polls every 3 s, backs
-off on 429. (The step keeps its v_50 name so the chain order is unchanged.)
+Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-space-bans, verify, down``.
 
 ### ``gfs-private-channel`` — a private space over an opaque channel (v_51 + ``private_gfs``)
 
-Needs ``gfs-member-publish-strict`` (and everything before it). First b —
+Needs ``pair`` (a ↔ b) and ``gfs-up`` + ``gfs-pair``. First b —
 paired with a directly — becomes a GFS client if it is not one yet (d is no
 use here: it reaches a only over the mesh, a holds no peer row for it and so
 cannot know its version — like writer certs, no grant goes to it). a creates
@@ -1262,28 +1202,13 @@ then checks a, b and e agree on the channel, e's grant is stored
 KEK-wrapped, the GFS row names no space, b holds a seat, a holds none, and
 the OFF space has no channel. Polls every 3 s, backs off on 429.
 
-### ``gfs-b-up`` / ``gfs-multi-listing`` / ``gfs-b-down`` — every listed GFS gets every item (v_57)
+### ``gfs-b-up`` / ``gfs-b-down`` — a second GFS (v_57)
 
 ``gfs-b-up`` boots a SECOND, independent GFS on ``127.0.0.1:18767`` (own data
 dir ``/tmp/sh-demo/gfs-b``, own identity key, public id ``gfs-b``);
-``gfs-b-down`` stops it. ``gfs-multi-listing`` (after the rest of the gfs
-chain, before ``verify``): a and e connect to B; a creates a global,
-publicly readable space and lists it on A and B through the owner's server
-selection (``PUT /api/spaces/{id}/gfs-servers``) — both servers list
-it with the writer key pinned. a invites d (registered on A only); d holds
-the owner's signed two-server list and the writer key (handed to every
-v_90 writer of a publicly readable space). d restarts with loopback treated as public — a
-**harness-only** ``-c`` prelude (``_LOOPBACK_IS_PUBLIC_PRELUDE``): a member
-drops an owner-listed private address it never joined and the pinned session
-refuses non-public addresses, both on purpose, and the demo's B is on
-127.0.0.1. e leaves A, discovers the space on B and follows it there only. a
-goes offline; d posts, comments and reacts; e receives all three over B.
-Asserts B holds no ``client_instances`` row for d, its log shows only
-anonymous ``/gfs/member-publish-anon`` publishes (never the identified
-route), and the log names neither d (id, key hex / base64url) nor the
-content. Clean-up: a and d restart normally, e reconnects to A. ``verify``
-then pins ``MIN_FOR_MULTI_GFS_PUBLISH`` at v_57 and checks d's writer key,
-d's two-server list and e's copy of the post.
+``gfs-b-down`` stops it. ``gfs-private-channel-multi`` and
+``gfs-admin-seed`` use it. ``verify`` pins ``MIN_FOR_MULTI_GFS_PUBLISH`` at
+v_57.
 ``verify`` also pins ``MIN_FOR_MEMBER_PICTURE_RESET_SYNC`` at v_58 (a
 §25.6 ``members`` record's ``picture_hash: null`` resets a stale per-space
 picture when a v_58 provider speaks for the member), and
@@ -1293,7 +1218,7 @@ so the freshness check passes on the real wire).
 
 ### ``gfs-private-channel-multi`` — a private channel on the owner's chosen GFSs (v_57)
 
-After ``gfs-multi-listing`` (a ↔ d paired, a and e on A and B), before
+After ``relay-pair`` (a ↔ d paired) and ``gfs-b-up``, before
 ``verify``. a creates a private space, turns ``private_gfs`` on and
 picks **GFS A only** as its channel server (``PUT
 /api/spaces/{id}/gfs-servers``, ``mode: "channel"``); e joins through a gfs
@@ -1316,9 +1241,7 @@ host-return catch-up settled, so no sync is cut off mid-way. A
 failed run brings a and d back up, puts e back on A and dissolves the space it
 created, so the next run starts clean. ``verify`` checks d's two-server
 list, e's copy of the post and that B's database never names the space.
-``gfs-multi-listing`` waits out a full ``/api/pairing/*`` bucket (HTTP 429,
-``Retry-After`` or a bounded backoff) when it pairs a ↔ d soon after
-``pair``, and waits for e's socket after re-pairing it with A.
+It waits for e's socket after re-pairing it with A.
 
 ### ``gfs-admin-seed`` — a GFS-only admin acts for the owner, and its seed dies with its seat (v_94)
 
@@ -1336,11 +1259,11 @@ and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
    seat, admin pending) and a approves. e holds the seed of the key a pins
    (e's own wrapped copy, opened with e's KEK); a logged the share, e the
    receipt. The GFS log carries no ``space_admin_key_share`` and no seed
-   bytes, and e keeps its fan-out seat (``space_subscribers``) — also
+   bytes, and e keeps its channel seat (``gfs_channel_subscribers``, v_96) — also
    after e restarts and reconnects.
 2. **e acts for the owner.** a is killed. e posts: b and d hold it, and
-   the GFS log shows an anonymous ``/gfs/member-publish-anon`` and **no**
-   ``POST /gfs/publish`` (a delegated admin is a writer to the GFS). e
+   the GFS log shows an anonymous ``/gfs/channels/publish-anon`` and **no**
+   space-keyed request (a delegated admin is a writer to the GFS). e
    renames the space (HTTP 200: executed on e, signed with the seed) — b
    and d show the name. e removes b's person — d drops the seat. a comes
    back and holds all three; its key did not move; and it tells b, which
@@ -1360,14 +1283,17 @@ and a records it (``gfs_withdrawn_listings``). b and d join by invitation.
    — and rotates again (K2 → K3). d holds the K3 seed; both GFS pin K3;
    a tells e, which drops its copy.
 
-**The pin probe.** "The old seed works on no GFS" is asked of each GFS
-directly: ``GET /gfs/spaces/{id}/subscribers?summary=1`` under a fresh
-authority signature made with the seed in question — the request only the
-space key may make, checked against the same pin as a relay, an epoch
-notice or a media upload, and read-only. e's K1 seed answers **200** on A
-and on B while e is an admin (the positive control) and **403** on both
-after step 3; after step 4 K1 and K2 answer 403 on both and d's K3 seed
-200.
+**The pin probe.** "The old seed works on no GFS" is answered from each
+GFS's own pin: the step reads the ``global_spaces`` row of A and of B and
+compares the pinned authority key with the key the seed in question signs
+for (``_authority_probe``). The **200** / **403** it prints are derived from
+that comparison, not HTTP answers — since v_96 (P7) no GFS route takes a
+space-authority-signed request any more (the subscriber roster read, the
+relay, the epoch notice and the space-scope media upload are gone), so the
+pin is the whole question and the demo no longer proves a refusal on the
+wire. e's K1 seed reads **200** on A and on B while e is an admin (the
+positive control) and **403** on both after step 3; after step 4 K1 and K2
+read 403 on both and d's K3 seed 200.
 
 ``verify`` (gated on the ``gfs_admin_seed`` state key) re-checks that every
 GFS pins the key a pins, that d holds its seed and the name e set, that
@@ -1501,14 +1427,9 @@ WS pushes across allocs. The step:
    sequential write pays it; at the old fixed 500 ms every publish took
    ≥ 0.5 s (`GFS_WRITE_BATCH_WINDOW_MS=500` in the environment reproduces
    that: median ~509 ms, the step fails). At the 5 ms default: ~7 ms.
-5. Proves the two single-recipient pushes reach a socket held by ANOTHER
-   node: with the owner's ``/gfs/ws`` on node 0, a follower's subscribe via
-   node 1 must bring the owner a ``new_subscriber`` frame (``reason:
-   subscribe``, ``accepts`` intact — forwarded as ``NODE_DRAIN_HINT.notices``);
-   with the follower's socket on node 1, the owner's targeted ``to`` key
-   handoff via node 0 must reach it (shared relay queue + drain hint).
-   Without the cross-node path the step fails with "no 'new_subscriber'
-   frame within 10 s".
+5. (Its former first leg — a ``new_subscriber`` notice and a targeted
+   ``/gfs/publish`` key handoff crossing nodes — went with the space-keyed
+   relay in v_96.)
    Then **anonymous mailboxes** (GFS redesign PR 1, step 3d''): a mailbox
    (keys derived with ``federation/gfs_mailbox.py``) registered via node 0
    and claimed on node 1 (``/gfs/mailbox/ws``) must get a JSON envelope and
@@ -1531,12 +1452,15 @@ WS pushes across allocs. The step:
    via node 0 — bound to node 0's id — is claimed there and gets an envelope
    and a media frame posted via node 0, byte-identical (a node accepts the
    ids its shared-key siblings serve). The extra node is stopped after.
-   Then a **broadcast**: one follower's socket on EACH node, a signed
-   ``space_post_public`` published via node 0 — every follower must get
-   exactly one ``relay`` frame (a further 2 s window must stay empty). The
+   Then a **channel broadcast**: a space's opaque channel registered via
+   node 1 (channel key, epoch notice pinning the channel writer key), one
+   seated household's socket on EACH node, an item published anonymously
+   via node 0 (``POST /gfs/channels/publish-anon``, signed with the channel
+   writer key) — every seat must get exactly one ``relay`` frame naming the
+   channel and no space (a further 2 s window must stay empty). The
    accepting node forwards the item once per peer node in the coalesced
    ``NODE_DRAIN_HINT.relays``; before that fan-out was node-local and the
-   step fails with "the follower on node 1 got 0 copies".
+   step fails with "the seat on node 1 got 0 copies".
    Then a **public moment**: an author registered via node 1, one follower
    household per node (each following through a different node), an
    encrypted moment published via node 0 and its tombstone via node 1 —
@@ -1557,28 +1481,26 @@ WS pushes across allocs. The step:
    bytes) must all succeed. Before, the offer on a node without the
    author's socket answered 503 and the polls, answers and uploads reached
    nodes that did not hold the session.
-   Then the **space media cache** (step 3h): a space published with an
-   authority key the step holds; one encrypted, padded blob uploaded via
-   node 0 under that authority must be served **byte-identical by node 1**
+   Then the **space media cache** (steps 3h + 3i), under a space's opaque
+   channel (since v_96 its only scope, owner decision Q5): a channel
+   registered via node 1 gets the uniform ``403`` until a member household
+   holds a seat (ONE seat is enough: the owner never subscribes to its own
+   channel); then one encrypted, padded blob uploaded via node 0 under the
+   channel key must be served **byte-identical by node 1**
    (``Cache-Control: public, max-age=3600, immutable``) — files under the
    shared ``space_media`` dir, rows in the shared DB; the same upload via
    node 1 must coalesce (``200 already_stored``) and a miss via node 1 must
    be ``404`` with ``no-store`` (every write and fetch at the ONE
    scope-free ``/gfs/media/{blob}``, the scope only in what is signed).
-   Then (step 3i) the same for a **private space's opaque channel**: a
-   channel registered via node 1 gets the uniform ``403`` until a member
-   household holds a seat (epoch notice, pass, subscribe — ONE seat is
-   enough: the owner never subscribes to its own channel); then a blob
-   uploaded via node 0 under the channel key must be served byte-identical
-   by node 1. Every address is bound to its scope
+   Every address is bound to its scope
    (``sha256("sm1|" + scope + "|" + scope_id + "|" + ciphertext)``): the
-   space step's ciphertext uploaded under that channel via node 1 is a NEW
-   blob (``201``) at another address; the channel's delete of the space's
-   address answers ``deleted: false`` (still ``200`` to fetch); the space's
-   own delete via node 1 removes it on every node (``404``) while the
-   channel's copy stays.
+   same ciphertext under a SECOND channel via node 1 is a NEW blob
+   (``201``) at another address; that channel's delete of the first one's
+   address answers ``deleted: false`` (still ``200`` to fetch); the first
+   channel's own delete via node 1 removes it on every node (``404``) while
+   the second channel's copy stays.
    Then (step 3j) **space media on demand** (v_83) across nodes: a fake
-   holder household (real Ed25519 key) owns a listed space and holds its
+   holder household (real Ed25519 key) holds the one seat of a channel and its
    socket on node 0 (hello ``accepts: ["space_media_serve"]``). Ten readers
    (distinct ``X-Forwarded-For`` prefixes) POST ``/gfs/media/{blob}/wanted``
    at once DIRECTLY to node 1 for a blob the cache never held: the holder
@@ -1590,7 +1512,7 @@ WS pushes across allocs. The step:
    — and every reader gets it byte-identical with ``Cache-Control:
    no-store``; node 2 does not serve it (nothing stored). Then cache mode: a
    second blob with a fresh ``gfs_space_media_demand`` row gets one
-   ``cache`` request, the holder's serve carries its upload authorization,
+   ``cache`` request, the holder's serve carries its channel upload authorization,
    ``{"stored": true}``, and node 2 serves it from the shared cache
    (immutable). Node 1's admin overview counts 2 holder requests, 2 streams,
    1 re-upload over both legs.
@@ -1632,10 +1554,8 @@ under the hood. Verifies the GFS is reachable by polling ``/healthz``.
 
 The subprocess calls ``logging.basicConfig(level=DEBUG)`` **before**
 ``main()`` (whose own ``basicConfig(level=INFO)`` is then a no-op), so the
-GFS runs at DEBUG. ``gfs-space-post``'s anonymity assertion needs it: the
-GFS's relay bookkeeping (``GFS: relaying <event> for space <id> to N
-subscriber(s)``) is a DEBUG record, and at INFO there would be no relay
-line to scan for a leaked household id.
+GFS runs at DEBUG, so the steps that scan the GFS log for a leaked
+household id or space id see its DEBUG relay bookkeeping too.
 
 State is persisted under ``/tmp/sh-demo/gfs/`` (same parent as the
 HFS sandboxes); ``gfs-down`` (or the broader ``down``) tears it down.
@@ -1680,14 +1600,11 @@ a paired client of the GFS so the registration sig verifies).
 The step then PATCHes the space to turn ``features.allow_subscribers``
 **on**. That flag — not ``join_mode`` — is what makes a public/global
 space publicly readable, and it defaults **off**, so a fresh space relays
-nothing and seats no subscriber; the downstream readable chain
-(``gfs-space-subscribe`` → ``gfs-space-post`` → ``gfs-space-rotate``)
-would correctly relay nothing without it. ``POST /api/spaces`` takes no
+nothing and seats no follower. ``POST /api/spaces`` takes no
 ``features`` block, hence the PATCH — and since a PATCH replaces the whole
 features dict, the step reads the current one back first. The create body
 still passes ``join_mode="open"``, but that is now purely about who may
-JOIN. The not-readable rule gets its own step:
-``gfs-space-no-subscribers``.
+JOIN.
 
 ### ``gfs-replay`` — owning-HFS downtime survives the publish
 
@@ -1718,203 +1635,20 @@ Failure modes this catches:
 - The publication mirror in ``gfs_publications`` gets wiped by a
   migration or a misfired ``unpublish_space_from_all`` on shutdown.
 
-### ``gfs-space-subscribe`` — discovery → mirror → GFS subscriber set
+### ``gfs-authority-rotate`` — the GFS and a follower follow a v_44 rotation
 
-Delta finds Alpha's published global space in the GFS directory and
-subscribes to it. Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` +
-``gfs-traffic`` (Alpha owns the published ``space_type=global`` space).
-
-0. Waits until the GFS has REGISTERED Delta's SH↔GFS WebSocket
-   (``gfs.ws.register: instance=<d>`` in the GFS log). Not cosmetic: the
-   ``new_subscriber`` → sealed-key handoff triggered by the subscribe is
-   fire-and-forget, and if Delta's socket isn't up the GFS falls back to
-   Delta's HTTPS ``/federation/inbox``, which answers 401 for relay frames
-   — Delta then stays permanently keyless for that epoch. In production
-   the socket has been up for hours; in the harness Delta pairs seconds
-   earlier and the supervisor's reconcile loop can take ~30 s.
-1. ``POST /api/public_spaces/refresh`` on Delta (admin-only, 202) runs
-   ``PublicSpaceDiscoveryService.refresh_now`` inline instead of waiting
-   for the scheduled poll.
-2. Asserts Alpha's space now appears on Delta's ``GET /api/public_spaces``
-   with the published ``name`` and with ``instance_id`` equal to Alpha's
-   instance id.
-3. ``POST /api/spaces/{id}/subscribe`` on Delta.
-4. Asserts Delta now holds a local ``spaces`` row whose
-   ``identity_public_key`` is byte-identical to Alpha's own pin for the
-   same space (read straight out of both SQLite DBs).
-5. Asserts the GFS registered **Delta specifically**: ``subscriber_count``
-   on ``GET /gfs/spaces/{id}`` moved, and the GFS's own
-   ``space_subscribers`` table names Delta's instance id. (The
-   ``GET /gfs/spaces/{id}/subscribers`` endpoint would be the pure-REST
-   check but it is space-authority-signature gated by design, so the
-   harness reads the GFS DB read-only instead.)
-
-Failure modes this catches:
-
-- The discovery poll hits the wrong GFS URL — nothing ever lands in
-  ``public_space_cache`` and step 2 times out.
-- The listing's ``owning_instance`` is mapped onto the wrong local
-  field — the row appears but points at nobody, so a join can never be
-  routed. Step 2's ``instance_id`` assertion is the tripwire.
-- ``GfsSpaceMirrorService`` never seats the local stub — subscribe still
-  returns 200, but with no pinned space-authority key every relayed
-  frame is dropped at ``SpacePublicInbound._verify_authority``, at
-  WARNING, invisibly. Step 4 is the tripwire.
-- The SH side never calls ``POST /gfs/spaces/{id}/subscribe`` — the GFS
-  relay fan-out simply never targets this household. Step 5.
-
-### ``gfs-space-post`` — public space content actually crosses the GFS
-
-**Pictures through the GFS media cache (v_80).** The step ends with a
-~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
-the file byte-identical, the GFS's own ``gfs_space_media`` holds the blob
-for the space (scope ``space``), the reader's ``space_media_refs`` names
-it, the author logged ``uploaded blob <id>`` and the reader ``fetched blob
-<id> … from GFS``.
-
-Prereqs: ``gfs-space-subscribe``. Alpha posts in the global space via
-``POST /api/spaces/{id}/posts`` (the space endpoint — the household feed
-endpoint ignores ``space_id`` and lands a non-federating household post),
-then the harness polls Delta's ``GET /api/spaces/{id}/feed``.
-
-Alpha posts **twice**, deliberately covering both author-id shapes — the
-relay fail-closes on a non-derivable author id (``verify_signed_author_inner``
-runs the self-cert ``derive_user_id(author_pk, anchor_or_username) ==
-author_user_id`` on both the relaying seed-holder and the subscriber), and
-the two shapes are minted by different rules:
-
-* a **provisioned** local user (``erin``, seated by ``_seat_local_member``),
-  whose id is uuid4-anchored via ``UserService.provision``;
-* Alpha's **setup admin**, whose id is username-anchored via
-  ``identity_bootstrap.derive_local_user_id`` — the one minting rule now
-  shared by ``StandaloneAdapter.provision_admin`` and the ``/api/setup``
-  routes. Delta's copy must be attributed to Alpha's own admin ``user_id``,
-  so a regression back to the old synthetic ``uid-<username>`` shape (which
-  failed the self-cert and silently dropped every first-user post at the
-  subscriber; migration 0049 repairs already-deployed installs) fails loudly
-  here. ``verify`` re-checks this post separately.
-
-The positive assertion — Delta sees each post **decrypted**, with the right
-``author`` user id and the exact body — covers six mechanisms at
-once: the GFS relay fan-out, the space-authority signature, the
-``new_subscriber`` notify fired when Delta subscribed, the sealed
-content-key handoff that notify triggers, the per-author household
-signature (``verify_signed_author_inner``), and the AES-GCM decrypt
-under the current epoch key.
-
-The negative control is **c**: not a space member, not a subscriber, not
-GFS-paired. The harness asserts c holds no ``space_posts`` row for either
-post and that c's space feed does not expose them — the
-§"non-member households MUST NOT see space content" hard rule, checked
-on the real wire rather than in a unit test.
-
-Failure modes this catches: a relay that drops the frame; an authority
-signature that no longer verifies against the mirrored pin; a
-``new_subscriber`` notify that never fires (Delta holds no content key
-and drops everything with "no key for epoch"); a broken author
-self-cert; and — on the c side — any regression that fans space content
-at non-member households.
-
-The step also asserts the relay is **identity-free** (the "the GFS must not
-see who relayed" property): the GFS log names Alpha's instance id on no
-relay line (scoped to relay lines — the GFS legitimately knows that id from
-``/gfs/register``, the ``/gfs/ws`` hello and the public directory listing's
-``owning_instance``) and never mentions ``from_instance`` at all; Delta's
-``gfs.relay.received: space=… event=space_post_public`` records carry no
-``from=``; and Alpha never logged the legacy downgrade WARNING ("does not
-advertise anonymous_publish"). ``verify`` re-checks Delta's log-line shape.
-
-### ``gfs-authority-rotate`` — the GFS and a subscriber follow a v_44 rotation
-
-Prereqs: ``gfs-space-post``. **a** turns ``delegated_admin_authority`` on
+Prereqs: ``gfs-global-channel`` (e follows a's global space and reads it over
+its channel). **a** turns ``delegated_admin_authority`` on
 and off on its global space — the off-flip rotates the space AUTHORITY key
 unconditionally. Asserts the GFS re-pinned from the owner's cert
 (``global_spaces.identity_public_key`` is **a**'s new key and
 ``authority_cert`` is stored) and that **a** took the GFS's publish answer
 as the confirmation (no "did not confirm the space key" / "still pin the
 retired key" line in **a**'s log — the durable re-pin left nothing owed),
-then **a** posts and **d** — a subscriber
-still pinned to the old key — heals its pin from the GFS listing's cert and
-reads the post.
-
-### ``gfs-space-rotate`` — a key rotation must not cut subscribers off
-
-Prereqs: ``gfs-space-post``. Removing a space member rotates the
-per-space AES-256 content key (forward secrecy — the removed member must
-not read future posts). Members are re-keyed through the
-``space_instances`` fan-out, but GFS subscribers hold a read-only
-subscription and are **never** in ``space_instances``: they need the
-separate ``SpaceSubscriberKeyOutbound`` re-seal.
-
-1. Seats a SECOND provisioned member on Alpha (``frank``) purely as the
-   one to remove — the author from ``gfs-space-post`` (``erin``) has to
-   survive the rotation to write the post in step 4. Re-run tolerant (an
-   existing user / existing membership is reused).
-2. ``DELETE /api/spaces/{id}/members/{user_id}`` on frank — which runs
-   ``_rotate_and_distribute_space_key``.
-3. Settles ~10 s for the new epoch key to be re-sealed to every GFS
-   subscriber.
-4. Erin posts again, now under the new epoch.
-5. Asserts Delta can still read the new post, with the right author.
-
-Failure mode this catches: the rotation re-keys ``space_instances``
-members only, so a GFS subscriber silently goes dark after the first
-rotation — everything it receives fails to decrypt until its next GFS-WS
-reconnect happens to re-trigger a handoff. Before the fix the first post
-still read fine and only the post-rotation one vanished, which is
-exactly what step 5 pins down.
-
-``verify`` re-asserts all three at the end of a run (gated on the
-``gfs_space_id`` state key, so it self-skips when the chain wasn't run):
-Delta still sees both posts, c still sees neither, and Delta's mirrored
-``identity_public_key`` still matches Alpha's.
-
-### ``gfs-space-no-subscribers`` — listed for discovery, never relayed
-
-Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` (independent of the readable
-chain above). A space carries three independent dials: its ``space_type``
-(private / household / public / global), its ``join_mode``
-(``invite_only`` / ``open`` / ``request``) saying how a person becomes a
-posting **member**, and ``features.allow_subscribers`` saying whether
-**strangers** may follow it read-only. The product rule: **a public/global
-space with ``allow_subscribers`` off is listed in the GFS directory but is
-not publicly readable** — its content is never relayed to the GFS and its
-per-space content key is never sealed to a subscriber, so a stranger
-cannot read a group nobody let them into. Members (including mesh-only
-remote members) are unaffected — they are fanned out over
-``space_instances``.
-
-The space in this step is deliberately ``join_mode=open``: anyone may
-**join** it, and that still buys them nothing to **read**. Under the old
-(wrong) model where ``open`` implied readable, this space would have
-relayed — so the step doubles as a guard against regressing to it.
-
-1. Alpha creates a second ``space_type=global`` space and leaves
-   ``allow_subscribers`` at its default (off).
-2. Asserts the GFS directory LISTS it (``GET /gfs/spaces``) and reports
-   ``allow_subscribers: false`` alongside ``join_mode: "open"``. Listing
-   is how people discover the space and ask for an invite — a "fix" that
-   suppressed the metadata publish instead of the content fails here.
-3. Asserts Delta discovers it too (``POST /api/public_spaces/refresh``
-   then ``GET /api/public_spaces``), flag included, so Delta's browser
-   can suppress the Subscribe button.
-4. Delta asks to subscribe — and must be **refused**. This is a hard
-   assertion now: the mirrored stub carries the owner's truthful flag, so
-   Delta refuses locally, and the GFS 403s ``POST /gfs/subscribe``
-   independently.
-5. Alpha posts into the space; the step settles ~10 s (the readable
-   equivalent in ``gfs-space-post`` lands well inside that window).
-6. Asserts Delta logged **no** ``gfs.relay.received: space=<id>`` record
-   and that neither Delta nor c holds the post by row or in the feed.
-
-The gates live on the host side: ``space_public_outbound`` (both the
-local-author and the owner-offline remote-author relay),
-``space_subscriber_key_outbound`` (the ``new_subscriber`` handoff and
-every reconcile entry point) and ``space_post_outbound`` (the pre-signed
-``public_relay`` hint on the member broadcast) — plus
-``SpaceService.subscribe_to_space`` and the GFS's own subscribe refusal.
-``verify`` re-asserts the directory listing (with both dials), and the two
-no-content checks, gated on the ``gfs_no_subscribers_space_id`` state key.
+then **a** posts and **e** — a follower is a member with the read-only
+role (v_96), so the rotation bundle reaches it by federation, never from a
+GFS listing — moves its pin to the new key and reads the post over the
+channel.
 
 ### ``gfs-invite-link`` — a stranger joins from a published link (§D2b)
 
@@ -2047,7 +1781,8 @@ space. e's reply rides a's mailbox the same way.
 **Pictures through the GFS media cache (v_80).** The step ends with a
 ~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
 the file byte-identical, the GFS's own ``gfs_space_media`` holds the blob
-for the space (scope ``space``), the reader's ``space_media_refs`` names
+under the space's opaque channel (scope ``channel``; never the space id),
+the reader's ``space_media_refs`` names
 it, the author logged ``uploaded blob <id>`` and the reader ``fetched blob
 <id> … from GFS``.
 
@@ -2092,31 +1827,32 @@ on the one wire that cannot fall back to a peer row — see below.
 
 ### ``gfs-media-on-demand`` — a picture that left the GFS cache comes back on a view (v_83)
 
-Prereqs: the chain through ``gfs-invite-link-content`` (the photo
-``gfs-space-post`` proved through the GFS media cache: d, a follower, holds
-a's space photo). Since v_92 only a **follower** asks its GFS on demand; a
-member household (the link-joined e) asks the host and helpers with
-``SPACE_MEDIA_WANTED`` instead (``gfs-space-healing``). The blob is expired exactly as the GFS
+Prereqs: ``gfs-global-channel`` — member **b**'s photo in a's global space
+reached the follower **e** through the GFS media cache, under the space's
+opaque channel (since v_96 the cache's only scope). Since v_92 only a
+**follower** asks its GFS on demand; a member household asks the host and
+helpers with ``SPACE_MEDIA_WANTED`` instead (``gfs-space-healing``). The blob is expired exactly as the GFS
 store does it (``gfs_space_media`` row + ``data_dir/space_media/<blob>``
 deleted, ``gfs_space_media_demand`` upserted with ``stored_at`` as
 ``_remember_left`` writes it) and the reader's own copy is deleted;
 then the reader VIEWS it (``GET /api/media/<name>``) — a miss everywhere
-→ ``POST /gfs/media/{blob}/wanted`` → the GFS asks the host a
-(``space_media_request``) → a re-seals and serves the ticket.
+→ ``POST /gfs/media/{blob}/wanted`` → the GFS asks a household seated on
+the channel (``space_media_request``: b, which holds the file — e, seated
+too, declines; the owner a holds no seat and is never asked) → b re-seals
+and serves the ticket.
 
 1. **Fresh** (``stored_at`` = the row's ``created_at``) → cache: the reader
-   gets the photo byte-identical; the GFS row and file are back; a logged
+   gets the photo byte-identical; the GFS row and file are back; b logged
    exactly one ``re-uploaded on demand`` line for the blob; the admin
-   overview (``/admin/api/overview`` → ``space_media``) counts +1 holder
-   request, +1 re-upload. e, when it holds the same blob, then views it
-   from the cache (``fetched blob … from GFS``) with no new holder request.
+   overview (``/admin/api/overview`` → ``space_media``) counts one or two
+   holder requests (e may be asked first) and +1 re-upload.
 2. **Old** (``stored_at`` 30 days ago) → stream: byte-identical again, but
    no row and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
-   a logged ``streamed on demand``. Waits first until the GFS has no live
+   b logged ``streamed on demand``. Waits first until the GFS has no live
    sessions (a delivered session stays joinable ``coalesce_seconds``).
 
-Both legs run for the follower d. Not
-re-runnable within ~10 min (a attaches its upload authorization once per
+Both legs run for the follower e. Not
+re-runnable within ~10 min (b attaches its upload authorization once per
 (GFS, blob) per ``REUPLOAD_COALESCE_S``). ``verify`` asserts
 ``MIN_FOR_SPACE_MEDIA_ON_DEMAND`` is v_83 and covered by the ``OURS``
 round-trip.
@@ -2484,6 +2220,70 @@ the request with e's message and approves, e is seated and reads a's post,
 and e is still no paired connection of a. Before v_84 the ask answered
 ``403 NOT_PAIRED``. The host's keys come off the GFS listing (``join_contact``,
 signed by the space authority key) — the GFS is asked for nothing.
+
+### ``space-follow-paired`` — a paired follow is an auto-approved join (v_96)
+
+Part of ``all`` (after ``space-chat``). Prereqs: ``up`` + ``pair``. a creates
+a ``public`` ``invite_only`` space and turns ``allow_subscribers`` on (join
+mode does not matter for a follow). b finds it in its paired directory (``GET /api/peer_spaces``) and
+``POST /subscribe`` → ``{pending: true, subscribed: false}``; a auto-approves (no admin step).
+b then holds a ``subscriber`` seat in ``space_members`` and a holds it in
+``space_remote_members``; a's post reaches b; b's post is refused (403).
+Then the follower comment round (v_96 P4, shared with ``gfs-follower-comment``):
+a turns follower comments on, b's reader-cert comment reaches a (named from
+a's roster), the switch off rotates once and refuses b's next comment (403),
+and b's delete of its own comment with the switch off reaches a.
+``DELETE /subscribe`` is b's own leave: a tombstones the seat and the
+content-key epoch (``space_keys``) does not move.
+
+### ``space-follow-rotation`` — the person-ID anchor and owed rotations (v_96 P5)
+
+Part of ``all`` (after ``space-follow-paired``). Prereqs: ``up`` + ``pair``.
+a creates a ``public`` invite-only space with followers on. **Squat
+refused:** the harness rewrites b's person's ``identity_anchor`` on b, so b's
+follow names a user id b's identity key does not derive with that anchor; a
+logs "is not proven by the household's identity key" and seats nobody (no
+seat, no bound token). Anchor restored (and b's 15-minute pending follow
+expired), b follows and is seated — no lockout; c follows too. **Unfollow:**
+b leaves, a tombstones the seat, the epoch stays and a owes a rotation.
+**Owed rotation:** the harness moves b's ``removed_at`` and the current key's
+``created_at`` back past 24 h and restarts a (the hourly sweep ticks at
+start): a rotates exactly once, owes nothing, and c holds the new epoch.
+**Ban:** a bans c and the epoch moves at once.
+
+### ``gfs-space-follow`` — an unpaired follow through the GFS (v_96)
+
+Part of ``all`` (right after ``gfs-join-request``). Prereqs: ``gfs-up`` +
+``gfs-pair``. a creates a global ``invite_only`` space with followers on,
+listed on the GFS (our GFS proves ``subscriber_seats``, so the listing carries
+a ``join_contact``). e (paired with nobody) sees it ``gfs_followable``,
+``POST /subscribe`` → ``{pending: true, subscribed: false}`` through the sealed bootstrap with
+``requested_role: subscriber``; no approval by a. e is seated as
+``subscriber`` (a's ``space_remote_members`` too), reads a's post, cannot post
+(403), and holds only a ``space_session`` row for a.
+
+Mini-chain: ``up, pair, space-follow-paired, gfs-up, gfs-pair,
+gfs-space-follow, verify, down``.
+
+### ``gfs-global-channel`` — a global space's members and followers on one channel (v_96, P3)
+
+Part of ``all`` (right after ``gfs-space-follow``). Prereqs: ``pair`` (a↔b),
+``gfs-up`` + ``gfs-pair``. a creates a global ``invite_only`` space with
+followers on; b (paired with a, made a GFS client) joins it as a member with
+an internal link; e (paired with nobody) follows it through the GFS. a
+registers the space's opaque channel (the GFS proves ``private_channels`` +
+``subscriber_seats``); b and e hold grants and seats,
+a never a seat. a is killed; b posts; e receives the post over the channel —
+exactly one channel frame, no space-keyed relay frame for the space — and
+the GFS log and database never hold its text. a restarts and catches b's post
+up — and adds no channel copy of it (b marked it ``channel_sent``; e still saw
+one frame), b never tried to reach e directly; then a's own post reaches e
+over the channel (the owner publishes into it, holding no seat). Last, b
+posts a photo: e holds it byte-identical, fetched from the GFS media cache,
+which keeps it under the channel id, never the space (``gfs-media-on-demand``
+expires it later).
+
+Mini-chain: ``up, pair, gfs-up, gfs-pair, gfs-global-channel, verify, down``.
 
 ### ``gfs-join-request-offline`` — the same ask with each side down > 5 min (v_84)
 

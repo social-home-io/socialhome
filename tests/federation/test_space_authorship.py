@@ -44,12 +44,17 @@ class _Spaces:
     def __init__(self, spaces: dict[str, _Space], banned=()) -> None:
         self._spaces = spaces
         self.banned = set(banned)
+        #: P7b household bans: (space_id, instance_id).
+        self.household_banned: set[tuple[str, str]] = set()
 
     async def get(self, space_id: str):
         return self._spaces.get(space_id)
 
     async def is_banned(self, space_id: str, user_id: str) -> bool:
         return (space_id, user_id) in self.banned
+
+    async def is_household_banned(self, space_id: str, instance_id: str) -> bool:
+        return (space_id, instance_id) in self.household_banned
 
 
 class _Seats:
@@ -83,6 +88,14 @@ class _Seats:
             if (r.space_id, r.user_id) == (space_id, user_id):
                 return r
         return None
+
+    async def list_live_instances_of_user(self, space_id, user_id):
+        # Live seats only, like the real repo.
+        return {
+            r.instance_id
+            for r in self.rows
+            if (r.space_id, r.user_id) == (space_id, user_id) and not r.tombstoned
+        }
 
 
 class _Users:
@@ -336,6 +349,48 @@ async def test_a_read_only_seat_authors_nothing() -> None:
 async def test_a_read_only_seat_may_still_change_its_own_row() -> None:
     a = _auth([_seat(AUTHOR_HOUSE, "u-f", role="subscriber")])
     assert await a.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-f")
+
+
+@pytest.mark.parametrize("any_role", [False, True])
+async def test_a_seat_under_somebody_elses_id_acts_for_nobody(any_role) -> None:
+    """P4 adversarial review: a user id belongs to one household. A seat
+    held under one of OUR people's ids, or under an id that holds a LIVE
+    seat under another household (only a legacy, pre-proof seat can: since
+    P5 a host seats only ids proven by the seated household's own key),
+    proves nothing — for a write or an own-row change alike (the
+    own-comment delete needs no switch, F6)."""
+    local = _auth([_seat(AUTHOR_HOUSE, "u-local")], local={"u-local"})
+    assert not await local.acts_for(
+        _ev(AUTHOR_HOUSE), SPACE, "u-local", any_role=any_role
+    )
+    assert not await local.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-local")
+    twice = _auth(
+        [
+            _seat(OTHER_HOUSE, "u-v"),
+            _seat(AUTHOR_HOUSE, "u-v", role="subscriber"),
+        ]
+    )
+    assert not await twice.acts_for(_ev(AUTHOR_HOUSE), SPACE, "u-v", any_role=True)
+    assert not await twice.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-v")
+    own = _auth([_seat(AUTHOR_HOUSE, "u-v")])
+    assert await own.acts_for(_ev(AUTHOR_HOUSE), SPACE, "u-v", any_role=any_role)
+
+
+@pytest.mark.parametrize("any_role", [False, True])
+async def test_a_removed_squat_seat_no_longer_blocks_the_real_household(
+    any_role,
+) -> None:
+    """P5: a tombstoned seat under another household (a legacy squat an
+    admin removed) no longer blocks the id's real household — no permanent
+    lockout. A live one still does."""
+    removed = _auth(
+        [
+            _seat(OTHER_HOUSE, "u-v", tombstoned=True),
+            _seat(AUTHOR_HOUSE, "u-v"),
+        ]
+    )
+    assert await removed.acts_for(_ev(AUTHOR_HOUSE), SPACE, "u-v", any_role=any_role)
+    assert await removed.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-v")
 
 
 async def test_a_follower_comment_needs_the_spaces_opt_in() -> None:
@@ -1211,6 +1266,44 @@ async def test_item_seat_admits_a_follower_only_when_asked():
     auth = _access_authorship()
     assert not await _seat_ok(auth, AUTHOR_HOUSE, "u-sub")
     assert await _seat_ok(auth, AUTHOR_HOUSE, "u-sub", subscriber_ok=True)
+
+
+async def test_a_known_follower_is_refused_while_its_switch_is_off():
+    """v_96 — a follower-only household's roster check: only a known
+    follower with the switch off is refused; a writer or an author it does
+    not know is left to the cert."""
+    auth = _access_authorship()
+
+    async def refused(author, *, subscriber_ok=False):
+        return await auth.known_follower_refused(
+            origin_instance_id=AUTHOR_HOUSE,
+            space_id=SPACE,
+            author_user_id=author,
+            subscriber_ok=subscriber_ok,
+        )
+
+    assert await refused("u-sub")
+    assert not await refused("u-sub", subscriber_ok=True)
+    assert not await refused("u-author")
+    assert not await refused("u-unknown")
+    assert not await refused("")
+
+
+async def test_a_banned_households_items_are_refused_on_the_gfs_relay():
+    """P7b — an item relayed through the GFS (no §24.11 ban step for its
+    origin) from a household banned here: refused with a seat, and refused
+    by a follower-only receiver that knows no seat of it (on the cert alone
+    it would take it)."""
+    auth = _access_authorship()
+    auth._spaces.household_banned.add((SPACE, AUTHOR_HOUSE))
+    assert not await _seat_ok(auth, AUTHOR_HOUSE, "u-author")
+    for author in ("u-author", "u-unknown"):
+        assert await auth.known_follower_refused(
+            origin_instance_id=AUTHOR_HOUSE,
+            space_id=SPACE,
+            author_user_id=author,
+            subscriber_ok=True,
+        )
 
 
 # ── may_author_writer: the strict create rule of the v_55 space chat ───

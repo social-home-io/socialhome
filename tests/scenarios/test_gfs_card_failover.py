@@ -133,7 +133,7 @@ async def test_a_member_on_two_gfss_still_receives_after_its_cards_gfs_goes_down
     member.dir = SpaceMemberDirectory(
         space_repo=member.spaces,
         federation_repo=member.fed_repo,
-        writer_households=member.writers,
+        seated_households=member.writers,
         mailboxes=mailboxes,
         instance_id=member.me["id"],
         identity_seed=member.me["seed"],
@@ -174,7 +174,7 @@ async def test_a_member_on_two_gfss_still_receives_after_its_cards_gfs_goes_down
     host_world.dir = SpaceMemberDirectory(
         space_repo=host_world.spaces,
         federation_repo=host_world.fed_repo,
-        writer_households=host_world.writers,
+        seated_households=host_world.writers,
         mailboxes=host_world.mailboxes,
         instance_id=host["id"],
         identity_seed=host["seed"],

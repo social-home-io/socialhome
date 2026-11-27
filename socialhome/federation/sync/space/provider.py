@@ -166,12 +166,6 @@ _OWN_PEOPLE_RESOURCES: frozenset[str] = frozenset(
     {"bans", "members", "member_pictures"}
 )
 
-#: Resources only a member household (a writer seat) receives by
-#: catch-up — the members' places; the chat has its own version gate too.
-_MEMBER_ONLY_RESOURCES: frozenset[str] = frozenset(
-    {"space_zones", "space_zones_deleted"}
-)
-
 
 def _user_of(record: dict[str, Any]) -> str | None:
     return str(record.get("user_id") or "")
@@ -446,6 +440,23 @@ class _WithFileHashes:
             yield await self._add(batch)
 
 
+class _WithoutBanReasons:
+    """The ``bans`` resource without each ban's free-text ``reason`` — for
+    a household holding no owner / admin seat (owner 2026-11-27)."""
+
+    __slots__ = ("_inner", "resource")
+
+    def __init__(self, inner: ResourceExporter) -> None:
+        self._inner = inner
+        self.resource = inner.resource
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return [
+            {k: v for k, v in r.items() if k != "reason"}
+            for r in await self._inner.list_records(space_id)
+        ]
+
+
 class _OwnPeopleOnly:
     """A resource narrowed to this household's own people: a record is kept
     when its owner (``owner_of``, by default its ``user_id``) is one of them,
@@ -572,6 +583,7 @@ class SpaceSyncService:
     """Streams encrypted space content over a negotiated DataChannel."""
 
     __slots__ = (
+        "_admin_gate",
         "_builder",
         "_exporters",
         "_federation",
@@ -599,9 +611,8 @@ class SpaceSyncService:
         """v_95: the stream ends — when the requester's BEGIN ``page`` shows
         it missed a push, the page service sends it the newest page as its
         own ``SPACE_SYNC_PAGE`` event (never on the sentinel), and a seal due
-        here starts. Only to a member household (a writer seat): the page's
-        vector covers member-only resources (zones), which a follower never
-        gets."""
+        here starts. To any seated household — a follower's too (P10: a
+        follower syncs like a member, the page commits the rows it holds)."""
         if (
             self._sync_pages is None
             or self._member_gate is None
@@ -685,12 +696,17 @@ class SpaceSyncService:
         #: for HTTPS-mode chunk delivery (``session.transport_mode ==
         #: "https"``); ``_send`` falls back to RTC when ``None``.
         self._federation = None
-        #: Who may receive the member-only resources (the chat, v_55, and
-        #: the zones): ``(space_id, requester_instance_id) -> bool`` — a
-        #: household holding a writer seat
-        #: (:meth:`SpaceWriterHouseholds.may_receive`). ``None`` streams
-        #: none of them (fail closed).
+        #: Who may receive the chat (v_55) by catch-up:
+        #: ``(space_id, requester_instance_id) -> bool`` — a household
+        #: holding a seat, a follower's included (P10;
+        #: :meth:`SpaceWriterHouseholds.may_receive` with ``SEAT_ROLES``).
+        #: ``None`` streams none of it (fail closed).
         self._member_gate: Callable[[str, str], Awaitable[bool]] | None = None
+        #: Who may receive a ban's free-text ``reason``:
+        #: ``(space_id, requester_instance_id) -> bool`` — a household
+        #: holding an owner / admin seat (owner 2026-11-27, every role
+        #: alike). ``None`` strips it for everyone (fail closed).
+        self._admin_gate: Callable[[str, str], Awaitable[bool]] | None = None
         #: Whether this household may speak for a space's roster:
         #: ``space_id -> bool`` (the host, or a seed-holding delegated admin
         #: that may be a member's trusted inviter). ``None``: every session
@@ -776,9 +792,14 @@ class SpaceSyncService:
         self._own_members = own_members
 
     def attach_member_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
-        """Wire who may receive a space's member-only resources by
-        catch-up — never a follower-only household (owner decision 13)."""
+        """Wire who may receive a space's chat by catch-up — any seated
+        household, a follower's included (P10, owner 2026-11-26)."""
         self._member_gate = gate
+
+    def attach_admin_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
+        """Wire who may receive a ban's ``reason`` by catch-up: a household
+        holding an owner / admin seat (owner 2026-11-27)."""
+        self._admin_gate = gate
 
     async def _exporter_for(
         self, resource: str, session: SyncSessionRecord
@@ -788,6 +809,21 @@ class SpaceSyncService:
         (:data:`_OWN_CONTENT_OWNERS`, step 16). v_80: toward a link-joined
         member, records that show files carry ``media_refs``."""
         exporter = await self._shaped_exporter(resource, session)
+        if (
+            exporter is not None
+            and resource == "bans"
+            and not (
+                self._admin_gate is not None
+                and await self._admin_gate(
+                    session.space_id, session.requester_instance_id
+                )
+            )
+        ):
+            # Who is banned and by whom (authorship checks, a person ban's
+            # lift) reach every seated household; why only an owner / admin
+            # household (owner 2026-11-27, every role alike). ``bans`` is not
+            # committed by a sync page, so no checksum differs.
+            exporter = _WithoutBanReasons(exporter)
         owner_of = _OWN_CONTENT_OWNERS.get(resource)
         if not (
             exporter is None
@@ -853,14 +889,11 @@ class SpaceSyncService:
         ``member`` (:class:`PreModeratorMembersExporter`).
 
         v_55: the space chat (``chat_messages``) goes only to a requester at
-        ``MIN_FOR_SPACE_CHAT`` or later that holds a writer seat in the
-        space (the chat gate) — a follower-only household, an older one, or
-        one we cannot ask gets no exporter at all.
-
-        Zones (``space_zones`` / ``space_zones_deleted``) are the members' places: only
-        a requester holding a writer seat gets them (the same gate) — a
-        follower-only household gets no exporter, as it gets no live
-        ``SPACE_ZONE_*`` either.
+        ``MIN_FOR_SPACE_CHAT`` or later that holds a seat in the space (the
+        seat gate — a follower's included, P10) — an older one, or one we
+        cannot ask, gets no exporter at all. Every other resource goes to
+        every seated household alike: a follower reads everything a member
+        does (owner 2026-11-26).
         """
         exporter = self._exporters.get(resource)
         if (
@@ -904,11 +937,6 @@ class SpaceSyncService:
                 and await self._member_gate(
                     session.space_id, session.requester_instance_id
                 )
-            )
-            return exporter if allowed else None
-        if exporter is not None and resource in _MEMBER_ONLY_RESOURCES:
-            allowed = self._member_gate is not None and await self._member_gate(
-                session.space_id, session.requester_instance_id
             )
             return exporter if allowed else None
         if exporter is None or resource != "members":
@@ -1099,8 +1127,8 @@ class SpaceSyncService:
         record_limit: int | None,
     ) -> AsyncIterator[dict[str, Any]]:
         """``__listing__`` chunks for the ``buckets`` the BEGIN named (v_95,
-        sync pages): only to a member household (a writer seat); the page
-        service gates on its version. Nothing when none were asked.
+        sync pages): to any seated household, a follower's included (P10);
+        the page service gates on its version. Nothing when none were asked.
 
         Phase 3 (``rows: true`` — a verified fetch, which any member
         household may be asked): the listings of the buckets this household

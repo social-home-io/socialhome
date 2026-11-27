@@ -324,7 +324,9 @@ async def test_the_eleventh_join_of_the_day_is_429(client, space):
     assert error["params"] == {"whose": "own"}
 
 
-async def test_follow_is_refused_outside_and_reviewed_near_the_edge(client, space):
+async def test_follow_is_refused_outside_and_near_the_edge(client, space):
+    """Owner 2026-11-23: following a local community is inside only — near
+    the edge is refused like outside (no request for the admins)."""
     sid, hdr = space
     await client._db.enqueue("UPDATE spaces SET allow_subscribers=1 WHERE id=?", (sid,))
     await _set_home(client, BERN)
@@ -334,7 +336,7 @@ async def test_follow_is_refused_outside_and_reviewed_near_the_edge(client, spac
     await _set_home(client, EDGE)
     r = await client.post(f"/api/spaces/{sid}/subscribe", headers=hdr["neighbour"])
     assert r.status == 403, await r.text()
-    assert (await r.json())["error"]["code"] == "JOIN_REQUEST_SENT"
+    assert (await r.json())["error"]["code"] == "OUTSIDE_AREA"
 
 
 async def test_invite_link_is_refused_outside_and_reviewed_near_the_edge(client, space):

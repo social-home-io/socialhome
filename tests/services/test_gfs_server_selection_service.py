@@ -1816,3 +1816,31 @@ async def test_the_default_does_not_overwrite_a_pick_made_meanwhile(
     )
     assert await env.svc.default_channels("sp-1") is False
     assert await _chosen_ids(env) == ["inst-g2"]
+
+
+# ── v_96: a global space's channel follows its listing list ──────────────
+
+
+async def test_a_global_list_change_runs_the_channel_hook(owner_env):
+    """A global space's channel lives on its listing servers proving
+    ``subscriber_seats``: every list change lets the channel follow, even
+    before the space stores one (the change may make it qualify)."""
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    calls = _hooked(env)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    assert calls == ["sp-1"]
+
+
+async def test_a_global_channel_withdraws_only_where_the_list_dropped(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await env.spaces.set_gfs_channel("sp-1", _CH, "pk")
+    await _connected(env, "g1", "g2")
+    _hooked(env)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1", "g2"])
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    assert await env.gfs.list_channel_withdrawals(space_id="sp-1") == [
+        ("sp-1", "g2", _CH)
+    ]

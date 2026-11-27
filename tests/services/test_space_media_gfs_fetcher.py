@@ -58,6 +58,9 @@ def _blob(
     )
 
 
+CHANNEL_ID = "c" * 32
+
+
 def _L(
     name: str, origin: str = ORIGIN, space_id: str = SPACE, item_id: str = ITEM
 ) -> str:
@@ -65,10 +68,7 @@ def _L(
     return gfs_space_media_name(space_id, origin, item_id, name)
 
 
-CHANNEL_ID = "c" * 32
-
-
-def _addr(blob: bytes, scope: str = "space", scope_id: str = SPACE) -> str:
+def _addr(blob: bytes, scope: str = "channel", scope_id: str = CHANNEL_ID) -> str:
     """The blob's scope-bound GFS address (sm1)."""
     return space_media_address(scope, scope_id, blob)
 
@@ -79,7 +79,7 @@ def _wire(
     *,
     epoch: int = 2,
     suite: str = SUITE,
-    scope: str = "space",
+    scope: str = "channel",
     blob_id: str | None = None,
 ) -> dict:
     scope_id = SPACE if scope == "space" else CHANNEL_ID
@@ -231,7 +231,7 @@ class _Spaces:
     """The reader's own channel id of a private space, and its seat: a
     follower household by default (v_92: only a follower asks its GFS)."""
 
-    def __init__(self, channel_id: str | None = None, *, member: bool = False):
+    def __init__(self, channel_id: str | None = CHANNEL_ID, *, member: bool = False):
         self.channel_id = channel_id
         self.role = SpaceRole.MEMBER if member else SpaceRole.SUBSCRIBER
 
@@ -251,8 +251,13 @@ class _Spaces:
 class _Fed:
     """``space_member_supports`` over fixed household versions."""
 
-    def __init__(self, versions):
+    def __init__(self, versions, *, direct: bool = False):
         self.versions = dict(versions)
+        #: This household reaches the host other than through a GFS (P10).
+        self.direct = direct
+
+    async def reaches_host_directly(self, space_id):
+        return self.direct
 
     async def space_member_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 0) >= min_version
@@ -264,9 +269,10 @@ def _fetcher(
     *,
     conns=(),
     insts=(HOST,),
-    channel_id=None,
+    channel_id=CHANNEL_ID,
     member=False,
     host_version=V92,
+    direct=None,
 ):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
@@ -275,7 +281,11 @@ def _fetcher(
         gfs_repo=_GfsRepo(conns),
         federation_repo=_FedRepo(insts),
         space_repo=_Spaces(channel_id, member=member),
-        federation=_Fed({SPACE_HOST: host_version}),
+        # By default a member reaches the host directly and a follower only
+        # through its GFS — the path, not the role, decides (P10).
+        federation=_Fed(
+            {SPACE_HOST: host_version}, direct=member if direct is None else direct
+        ),
         media_dir=tmp_path,
     )
 
@@ -413,7 +423,7 @@ async def test_unknown_suite_is_refused(tmp_path, caplog):
                 suite="future-suite",
                 epoch=2,
                 size=len(blob),
-                scope="space",
+                scope="channel",
                 addr_suite="sm1",
             )
         ]
@@ -535,11 +545,11 @@ async def test_a_refused_blob_is_not_retried(tmp_path, monkeypatch):
 
 
 async def test_a_blob_at_another_scopes_address_is_refused(tmp_path, caplog):
-    """The descriptor says ``space``: the reader re-derives the address with
-    its own space id. A blob whose bytes hash right but that sits at an
-    address of another scope (a channel's copy) is refused."""
+    """The reader re-derives the address with its own channel id. A blob
+    whose bytes hash right but that sits at another channel's address is
+    refused."""
     blob = _blob("a.webp", b"x")
-    other = _addr(blob, "channel", CHANNEL_ID)
+    other = _addr(blob, "channel", "d" * 32)
     gfs = _Gfs({other: blob})
     f = _fetcher(tmp_path, gfs)
     await _recv(
@@ -574,7 +584,7 @@ async def test_a_channel_blob_is_checked_with_the_readers_own_channel_id(tmp_pat
 async def test_a_channel_blob_without_a_channel_here_is_refused(tmp_path, caplog):
     blob = _blob("a.webp", b"x")
     gfs = _Gfs({_addr(blob, "channel", CHANNEL_ID): blob})
-    f = _fetcher(tmp_path, gfs)
+    f = _fetcher(tmp_path, gfs, channel_id=None)
     await _recv(
         f,
         SPACE,
@@ -616,7 +626,7 @@ async def test_a_stored_row_for_a_reserved_name_is_never_fetched(tmp_path):
                 suite=SUITE,
                 epoch=2,
                 size=len(blob),
-                scope="space",
+                scope="channel",
                 addr_suite="sm1",
             )
         ]
@@ -829,7 +839,7 @@ async def test_only_a_gfs_space_media_name_is_ever_fetched(tmp_path):
                 suite=SUITE,
                 epoch=2,
                 size=len(blob),
-                scope="space",
+                scope="channel",
                 addr_suite="sm1",
             )
         ]
@@ -1171,10 +1181,10 @@ async def test_a_view_that_misses_asks_once_and_gets_the_bytes(tmp_path):
     assert (url, bid) == ("https://g1.example", _addr(blob))
     # The body names the scope and a sealed hint — nothing about the reader.
     assert set(body) == {"scope", "scope_id", "hint"}
-    assert (body["scope"], body["scope_id"]) == ("space", SPACE)
+    assert (body["scope"], body["scope_id"]) == ("channel", CHANNEL_ID)
     hint = parse_hint_wire(body["hint"])
     loc = open_space_media_hint(
-        hint, media_key=KEY, scope="space", scope_id=SPACE, blob_id=_addr(blob)
+        hint, media_key=KEY, scope="channel", scope_id=CHANNEL_ID, blob_id=_addr(blob)
     )
     assert (loc.item_id, loc.origin, loc.filename) == (ITEM, ORIGIN, "a.webp")
 

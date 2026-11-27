@@ -4,7 +4,7 @@ One module; all repos share the same :class:`AsyncDatabase`.
 
 Split into three protocols:
 - :class:`AbstractGfsFederationRepo` — core relay state
-  (`client_instances` / `global_spaces` / `space_subscribers`).
+  (`client_instances` / `global_spaces`).
 - :class:`AbstractGfsAdminRepo` — admin-portal bookkeeping
   (`server_config`, `admin_sessions`, `admin_login_attempts`,
   `admin_audit_log`, `gfs_fraud_reports`, `gfs_appeals`,
@@ -17,6 +17,7 @@ business logic.
 
 from __future__ import annotations
 
+import heapq
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -42,12 +43,8 @@ from .domain import (
     GfsPendingDeleteCert,
     GfsQueuedEnvelope,
     GfsQueuedMedia,
-    GfsSpaceEpoch,
     GfsSpaceMedia,
     GfsSpaceMediaDemand,
-    GfsSpaceWriterKeys,
-    GfsSubscriber,
-    GfsSubscriberWithKeys,
     GfsUserPicture,
     GfsUserRegistration,
     GlobalSpace,
@@ -144,47 +141,7 @@ class AbstractGfsFederationRepo(Protocol):
         self,
         instance_id: str,
     ) -> list[GlobalSpace]: ...
-    async def list_subscribed_spaces(
-        self,
-        instance_id: str,
-    ) -> list[GlobalSpace]: ...
-
-    # Subscribers
-    async def add_subscriber(
-        self,
-        *,
-        space_id: str,
-        instance_id: str,
-    ) -> bool: ...
-    async def remove_subscriber(
-        self,
-        *,
-        space_id: str,
-        instance_id: str,
-    ) -> None: ...
-    async def purge_subscribers(self, space_id: str) -> int: ...
-    async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
-    async def set_seat_accepts(
-        self, space_id: str, instance_id: str, *, bits: int
-    ) -> None: ...
-    async def count_subscribers_without_space_item(
-        self, space_id: str
-    ) -> tuple[int, int]: ...
-    async def count_subscribers_without_seat_bit(
-        self, space_id: str, bit: int
-    ) -> int: ...
-    async def get_subscriber(
-        self, space_id: str, instance_id: str
-    ) -> GfsSubscriber | None: ...
-    async def list_recently_seen_subscribers(
-        self, space_id: str, *, within_s: int
-    ) -> set[str]: ...
     async def mark_relay_seen(self, instance_id: str, *, at: int) -> None: ...
-    async def list_subscribers_with_keys(
-        self,
-        space_id: str,
-    ) -> list[GfsSubscriberWithKeys]: ...
-
     # RTC transport state (spec §24.12)
     async def upsert_rtc_connection(
         self,
@@ -202,14 +159,6 @@ class SqliteGfsFederationRepo:
     """SQLite-backed :class:`AbstractGfsFederationRepo`."""
 
     __slots__ = ("_db",)
-
-    #: One seat by its ``(space_id, instance_id)`` PRIMARY KEY, active
-    #: instance only — same JOIN as :meth:`list_subscribers`.
-    GET_SUBSCRIBER_SQL: str = (
-        "SELECT ci.instance_id FROM space_subscribers ss"
-        " JOIN client_instances ci USING (instance_id)"
-        " WHERE ss.space_id = ? AND ss.instance_id = ? AND ci.status = 'active'"
-    )
 
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
@@ -376,13 +325,9 @@ class SqliteGfsFederationRepo:
                 accent_color = excluded.accent_color,
                 primary_color = excluded.primary_color,
                 status = excluded.status,
-                -- ``subscriber_count`` is NOT updated here: it counts relay
-                -- seats and only the subscribe / unsubscribe recount and
-                -- ``purge_subscribers`` set it. A publish builds its row
-                -- from a read taken before the upsert, so carrying the old
-                -- value over would undo a subscribe that landed in between;
-                -- a cluster peer's count is its own bookkeeping, never ours.
-                -- A NEW row still inserts the given value.
+                -- ``subscriber_count`` is NOT updated here: it counted the
+                -- space-keyed relay seats, inert since v_96 (GFS migration
+                -- 0033). A NEW row still inserts the given value.
                 posts_per_week = excluded.posts_per_week,
                 -- The pinned space authority key never moves on an upsert
                 -- (see the pin comment in ``federation.publish_space``): an
@@ -407,12 +352,16 @@ class SqliteGfsFederationRepo:
                 -- or replayable publish, a peer that never got counts) — in
                 -- one statement, so a racing publish cannot wipe them. ISO
                 -- strings in UTC at fixed microsecond width compare in time
-                -- order.
+                -- order. A space that takes no followers has NO follower
+                -- count, whatever was declared or stamped before (owner
+                -- request 2026-11-24): a count-less publish that turns
+                -- followers off, or a peer's row, must not leave one.
                 member_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
                     global_spaces.member_count ELSE excluded.member_count END,
-                follower_count = CASE WHEN {_COUNTS_KEEP_SQL} THEN
-                    global_spaces.follower_count ELSE excluded.follower_count
-                    END,
+                follower_count = CASE
+                    WHEN excluded.allow_subscribers = 0 THEN NULL
+                    WHEN {_COUNTS_KEEP_SQL} THEN global_spaces.follower_count
+                    ELSE excluded.follower_count END,
                 counts_ts = CASE WHEN {_COUNTS_KEEP_SQL} THEN
                     global_spaces.counts_ts ELSE excluded.counts_ts END
             """,
@@ -446,7 +395,7 @@ class SqliteGfsFederationRepo:
                 ),
                 _dump_cert(space.join_contact),
                 space.member_count,
-                space.follower_count,
+                space.follower_count if space.allow_subscribers else None,
                 space.counts_ts,
             ),
         )
@@ -470,17 +419,8 @@ class SqliteGfsFederationRepo:
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE global_spaces SET identity_public_key=?, authority_cert=?,"
-            # v_49: the proven content epoch belongs to the OLD authority key
-            # (certs under it stop verifying now) — a revoked seed holder must
-            # not leave an inflated epoch behind, so it is forgotten here.
-            " content_epoch=NULL, content_epoch_confirmed=NULL,"
-            " content_epoch_prev=NULL, content_epoch_seen_at=NULL,"
-            " content_epoch_raised_at=NULL,"
-            # v_50: so are the writer-key pins — a key cert signed by the old
-            # authority means nothing now. The publish mode stays (it is the
-            # owner's household-signed statement, not an authority one).
-            " writer_key_epoch=NULL, writer_key_pk=NULL,"
-            " writer_key_prev_epoch=NULL, writer_key_prev_pk=NULL,"
+            # The member-publish epoch and writer-key columns (GFS 0014 /
+            # 0015) are inert since v_96: nothing reads or writes them.
             " authority_rotation_seq=CASE WHEN authority_rotation_seq >= ?"
             " THEN ? ELSE authority_rotation_seq + 1 END"
             " WHERE space_id=? AND COALESCE(identity_public_key, '')=?"
@@ -584,233 +524,12 @@ class SqliteGfsFederationRepo:
         )
         return [s for s in (_row_to_space(_to_dict(r)) for r in rows) if s]
 
-    async def list_subscribed_spaces(
-        self,
-        instance_id: str,
-    ) -> list[GlobalSpace]:
-        """Spaces *instance_id* SUBSCRIBES to (not the ones it owns).
-
-        Drives the Phase-5b-d reconnect notify: when a subscriber's own GFS
-        socket comes up, the owner of each of these spaces is re-notified so it
-        can re-seal the content key. Hits ``idx_instance_spaces``.
-        """
-        rows = await self._db.fetchall(
-            """
-            SELECT gs.*
-            FROM space_subscribers ss
-            JOIN global_spaces gs USING (space_id)
-            WHERE ss.instance_id = ?
-            ORDER BY gs.published_at DESC
-            """,
-            (instance_id,),
-        )
-        return [s for s in (_row_to_space(_to_dict(r)) for r in rows) if s]
-
-    # ── Subscribers ────────────────────────────────────────────────────
-
-    async def add_subscriber(
-        self,
-        *,
-        space_id: str,
-        instance_id: str,
-    ) -> bool:
-        """Take a seat; ``True`` only when this call created it (an
-        existing seat is left as is). Decided by the INSERT itself, so two
-        concurrent subscribes for one new seat never both see "new"."""
-        inserted = await self._db.enqueue_rowcount(
-            "INSERT OR IGNORE INTO space_subscribers(space_id, instance_id) "
-            "VALUES(?, ?)",
-            (space_id, instance_id),
-        )
-        await self._db.enqueue(
-            "UPDATE global_spaces SET subscriber_count = "
-            "(SELECT COUNT(*) FROM space_subscribers WHERE space_id=?) "
-            "WHERE space_id=?",
-            (space_id, space_id),
-        )
-        return inserted > 0
-
-    async def remove_subscriber(
-        self,
-        *,
-        space_id: str,
-        instance_id: str,
-    ) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_subscribers WHERE space_id=? AND instance_id=?",
-            (space_id, instance_id),
-        )
-        await self._db.enqueue(
-            "UPDATE global_spaces SET subscriber_count = "
-            "(SELECT COUNT(*) FROM space_subscribers WHERE space_id=?) "
-            "WHERE space_id=?",
-            (space_id, space_id),
-        )
-
-    async def purge_subscribers(self, space_id: str) -> int:
-        """Drop EVERY subscriber seat on *space_id* and zero its count.
-
-        Called when a publish carries an EXPLICIT ``allow_subscribers: false``
-        — the owner has withdrawn public readability, so a seat taken while the
-        space was readable must not linger in ``space_subscribers`` and keep
-        pulling relayed content. Returns how many seats were removed so the
-        caller can log the repair.
-
-        Deliberately NOT called when the publish omits the key: that is an
-        older household that does not know the field, and evicting everyone on
-        a mixed-version server is not what the owner asked for. The publish
-        handler still stores the fail-closed ``0`` in that case, so no NEW
-        subscribe is seated — gate without purge. Not ``join_mode`` either:
-        readability and the membership gate are independent dials.
-        """
-        row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM space_subscribers WHERE space_id=?",
-            (space_id,),
-        )
-        removed = int((_to_dict(row) or {}).get("n") or 0)
-        if removed == 0:
-            return 0
-        await self._db.enqueue(
-            "DELETE FROM space_subscribers WHERE space_id=?",
-            (space_id,),
-        )
-        await self._db.enqueue(
-            "UPDATE global_spaces SET subscriber_count=0 WHERE space_id=?",
-            (space_id,),
-        )
-        return removed
-
-    async def set_seat_accepts(
-        self, space_id: str, instance_id: str, *, bits: int
-    ) -> None:
-        """Record what the seat's household reads — its own word from the
-        subscribe ``accepts``, as the
-        :func:`~socialhome.domain.subscriber_accepts.seat_bits` bitmask in
-        ``reads_space_item`` (migration 0023; bit 1 ``space_item``, bit 2
-        ``payload_zlib1``, bit 4 ``payload_zlib1_dict1``)."""
-        await self._db.enqueue(
-            "UPDATE space_subscribers SET reads_space_item=?"
-            " WHERE space_id=? AND instance_id=?",
-            (int(bits), space_id, instance_id),
-        )
-
-    async def count_subscribers_without_space_item(
-        self, space_id: str
-    ) -> tuple[int, int]:
-        """``(active subscribers, those not known to read space_item)`` of
-        *space_id* — a seat with no answer (NULL) counts as not reading it."""
-        row = await self._db.fetchone(
-            """
-            SELECT COUNT(*) AS total,
-                   COALESCE(SUM(CASE WHEN (ss.reads_space_item & 1) = 1
-                                     THEN 0 ELSE 1 END), 0) AS without
-            FROM space_subscribers ss
-            JOIN client_instances ci USING (instance_id)
-            WHERE ss.space_id = ? AND ci.status = 'active'
-            """,
-            (space_id,),
-        )
-        if row is None:
-            return 0, 0
-        return int(row["total"]), int(row["without"])
-
-    async def count_subscribers_without_seat_bit(self, space_id: str, bit: int) -> int:
-        """Active subscribers of *space_id* whose seat lacks label *bit*
-        (:data:`~socialhome.domain.subscriber_accepts.SEAT_BIT_FOR_SUITE`;
-        NULL counts as unset)."""
-        row = await self._db.fetchone(
-            """
-            SELECT COUNT(*) AS without
-            FROM space_subscribers ss
-            JOIN client_instances ci USING (instance_id)
-            WHERE ss.space_id = ? AND ci.status = 'active'
-              AND (COALESCE(ss.reads_space_item, 0) & ?) = 0
-            """,
-            (space_id, int(bit)),
-        )
-        return int(row["without"]) if row is not None else 0
-
-    async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]:
-        rows = await self._db.fetchall(
-            """
-            SELECT ci.instance_id
-            FROM space_subscribers ss
-            JOIN client_instances ci USING (instance_id)
-            WHERE ss.space_id = ? AND ci.status = 'active'
-            """,
-            (space_id,),
-        )
-        return [GfsSubscriber(instance_id=r["instance_id"]) for r in rows]
-
-    async def get_subscriber(
-        self, space_id: str, instance_id: str
-    ) -> GfsSubscriber | None:
-        """The one seat of *instance_id* on *space_id* (an active instance),
-        or ``None`` — a point lookup on the table's PRIMARY KEY, for a
-        targeted (``to``) publish."""
-        row = await self._db.fetchone(self.GET_SUBSCRIBER_SQL, (space_id, instance_id))
-        if row is None:
-            return None
-        return GfsSubscriber(instance_id=row["instance_id"])
-
-    async def list_recently_seen_subscribers(
-        self, space_id: str, *, within_s: int
-    ) -> set[str]:
-        """Active subscribers of *space_id* that held a ``/gfs/ws`` session
-        for the minimum duration within the last *within_s* seconds
-        (``client_instances.relay_seen_at``, migration 0014). Only these get
-        offline items queued: a bare hello costs nothing, so it earns no
-        disk."""
-        rows = await self._db.fetchall(
-            """
-            SELECT ss.instance_id
-            FROM space_subscribers ss
-            JOIN client_instances ci USING (instance_id)
-            WHERE ss.space_id = ? AND ci.status = 'active'
-              AND ci.relay_seen_at IS NOT NULL AND ci.relay_seen_at >= ?
-            """,
-            (space_id, int(time.time()) - int(within_s)),
-        )
-        return {r["instance_id"] for r in rows}
-
     async def mark_relay_seen(self, instance_id: str, *, at: int) -> None:
         """Record that *instance_id* held its WS session long enough."""
         await self._db.enqueue(
             "UPDATE client_instances SET relay_seen_at=? WHERE instance_id=?",
             (at, instance_id),
         )
-
-    async def list_subscribers_with_keys(
-        self,
-        space_id: str,
-    ) -> list[GfsSubscriberWithKeys]:
-        """Subscribers of *space_id* joined with their registered identity +
-        key-wrap pubkeys (Phase-5b-c reconcile). Only the publicly-registered
-        key material is returned (no inbox URL) — a verified seed-holder uses it
-        to re-seal the content key. A subscriber that registered no key-wrap key
-        surfaces with empty key-wrap fields (the caller skips sealing to it)."""
-        rows = await self._db.fetchall(
-            """
-            SELECT ci.instance_id        AS instance_id,
-                   ci.public_key         AS identity_public_key,
-                   ci.keywrap_public_key AS keywrap_public_key,
-                   ci.keywrap_sig        AS keywrap_sig
-            FROM space_subscribers ss
-            JOIN client_instances ci USING (instance_id)
-            WHERE ss.space_id = ?
-              AND ci.status = 'active'
-            """,
-            (space_id,),
-        )
-        return [
-            GfsSubscriberWithKeys(
-                instance_id=r["instance_id"],
-                identity_public_key=r["identity_public_key"] or "",
-                keywrap_public_key=r["keywrap_public_key"] or "",
-                keywrap_sig=r["keywrap_sig"] or "",
-            )
-            for r in rows
-        ]
 
     # ── RTC transport state (spec §24.12) ──────────────────────────────
 
@@ -2474,7 +2193,6 @@ class AbstractGfsSpaceMediaRepo(Protocol):
     async def delete_scope_blob(
         self, blob_id: str, *, scope_kind: str, scope_id: str
     ) -> bool: ...
-    async def scope_blob_ids(self, scope_kind: str, scope_id: str) -> list[str]: ...
     async def totals(self) -> tuple[int, int]: ...
     async def scope_bytes(self, scope_kind: str, scope_id: str) -> int: ...
     async def largest_scopes(self, *, limit: int) -> list[tuple[str, str, int]]: ...
@@ -2674,15 +2392,11 @@ class SqliteGfsSpaceMediaRepo:
         return _space_media(row) if row is not None else None
 
     async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None:
-        """The blob while it may be served: not expired, and its scope is
-        not a moderator-banned space. A space that is no longer listed, or a
-        channel that is gone, keeps its blobs for their short TTL."""
+        """The blob while it may be served: not expired. A channel that is
+        gone keeps its blobs for their short TTL."""
         row = await self._db.fetchone(
             f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media m"
-            " WHERE m.blob_id=? AND m.expires_at > ?"
-            " AND NOT (m.scope_kind = 'space' AND EXISTS ("
-            "  SELECT 1 FROM global_spaces s"
-            "  WHERE s.space_id = m.scope_id AND s.status = 'banned'))",
+            " WHERE m.blob_id=? AND m.expires_at > ?",
             (blob_id, now),
         )
         return _space_media(row) if row is not None else None
@@ -2724,13 +2438,6 @@ class SqliteGfsSpaceMediaRepo:
             )
             > 0
         )
-
-    async def scope_blob_ids(self, scope_kind: str, scope_id: str) -> list[str]:
-        rows = await self._db.fetchall(
-            "SELECT blob_id FROM gfs_space_media WHERE scope_kind=? AND scope_id=?",
-            (scope_kind, scope_id),
-        )
-        return [str(r["blob_id"]) for r in rows]
 
     async def totals(self) -> tuple[int, int]:
         """``(blobs, bytes)`` held — kept by triggers, one row; expired blobs
@@ -3401,6 +3108,18 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         max_kind_row_bytes: int = 0,
     ) -> bool: ...
 
+    async def enqueue_relay_many(
+        self,
+        to_instances: list[str],
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> list[str]: ...
+
     async def count_for(self, to_instance: str) -> int: ...
 
     async def enqueue_media(
@@ -4048,6 +3767,150 @@ class SqliteGfsEnvelopeQueueRepo:
 
         return await self._db.transact(_run)
 
+    async def enqueue_relay_many(
+        self,
+        to_instances: list[str],
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> list[str]:
+        """:meth:`enqueue_relay` (no capped kind) for each of *to_instances*
+        in ONE transaction — the same caps and the same eviction order: the
+        recipient's own oldest rows down to its caps, then the oldest row of
+        the largest holder while the server-wide total is over.
+
+        A channel item fanned out to 10 000 offline seats used to run 10 000
+        transactions, each summing EVERY live relay row for the server-wide
+        cap — quadratic, ~5 s per item and growing with every item queued
+        (T3.6). Here the server-wide total is read once and then tracked,
+        and the holders are ranked once (only when the cap is reached) and
+        kept in a heap, so a batch costs one index scan plus per-recipient
+        index lookups. Callers keep batches bounded
+        (``RELAY_QUEUE_BATCH``) so the write lock is not held long. Returns
+        the recipients that got a row; duplicates are queued once."""
+        size = len(frame_json)
+        if (
+            max_per_recipient <= 0
+            or size > max_bytes_per_recipient
+            or size > max_total_bytes
+        ):
+            return []
+
+        def _run(conn) -> list[str]:
+            live = "frame_type='relay' AND expires_at > ?"
+            total = int(
+                conn.execute(
+                    f"SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+                    f" WHERE {live}",
+                    (created_at,),
+                ).fetchone()[0]
+            )
+            # Bytes per holder and a max-heap of them, built on the first
+            # eviction the server-wide cap needs (most batches never do).
+            holders: dict[str, int] = {}
+            heap: list[tuple[int, str]] = []
+            ranked = False
+
+            def _evict_oldest(holder: str) -> int | None:
+                row = conn.execute(
+                    "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
+                    f" gfs_envelope_queue WHERE to_instance=? AND {live}"
+                    " ORDER BY created_at ASC, id ASC LIMIT 1) RETURNING size_bytes",
+                    (holder, created_at),
+                ).fetchone()
+                if row is None:
+                    return None
+                freed = int(row[0])
+                if ranked:
+                    holders[holder] = holders.get(holder, 0) - freed
+                    if holders[holder] > 0:
+                        heapq.heappush(heap, (-holders[holder], holder))
+                return freed
+
+            def _pop_valid() -> str | None:
+                while heap:
+                    neg, holder = heapq.heappop(heap)
+                    held = holders.get(holder, 0)
+                    if held > 0 and held == -neg:  # else a stale entry
+                        return holder
+                return None
+
+            def _largest(recipient: str) -> str | None:
+                # On a tie, someone other than the recipient being written
+                # to (it must not evict itself while an equal holder exists).
+                first = _pop_valid()
+                if first != recipient or first is None:
+                    return first
+                second = _pop_valid()
+                while second == first:  # a second live entry for the same holder
+                    second = _pop_valid()
+                if second is not None and holders[second] == holders[first]:
+                    heapq.heappush(heap, (-holders[first], first))
+                    return second
+                if second is not None:
+                    heapq.heappush(heap, (-holders[second], second))
+                return first
+
+            queued: list[str] = []
+            for to in dict.fromkeys(to_instances):
+                fits = True
+                while True:
+                    count, held = conn.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)"
+                        f" FROM gfs_envelope_queue WHERE {live} AND to_instance=?",
+                        (created_at, to),
+                    ).fetchone()
+                    if (
+                        int(count) < max_per_recipient
+                        and int(held) + size <= max_bytes_per_recipient
+                    ):
+                        break
+                    freed = _evict_oldest(to)
+                    if freed is None:
+                        fits = False
+                        break
+                    total -= freed
+                while fits and total + size > max_total_bytes:
+                    if not ranked:
+                        ranked = True
+                        holders = {
+                            str(r[0]): int(r[1])
+                            for r in conn.execute(
+                                "SELECT to_instance, SUM(size_bytes) FROM"
+                                f" gfs_envelope_queue WHERE {live}"
+                                " GROUP BY to_instance",
+                                (created_at,),
+                            )
+                        }
+                        heap = [(-b, h) for h, b in holders.items() if b > 0]
+                        heapq.heapify(heap)
+                    victim = _largest(to)
+                    freed = _evict_oldest(victim) if victim is not None else None
+                    if freed is None:
+                        fits = False
+                        break
+                    total -= freed
+                if not fits:
+                    continue
+                conn.execute(
+                    "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
+                    " created_at, expires_at, frame_type, size_bytes)"
+                    " VALUES(?,?,?,?, 'relay', ?)",
+                    (to, frame_json, created_at, expires_at, size),
+                )
+                total += size
+                if ranked:
+                    holders[to] = holders.get(to, 0) + size
+                    heapq.heappush(heap, (-holders[to], to))
+                queued.append(to)
+            return queued
+
+        return await self._db.transact(_run)
+
     async def relay_bytes(self, now: int) -> int:
         """Bytes held in unexpired RELAY rows across every recipient — what
         the server-wide relay cap (``RELAY_QUEUE_MAX_TOTAL_BYTES``) bounds."""
@@ -4371,158 +4234,6 @@ class SqliteGfsMailboxTicketRepo:
         await self._db.enqueue(
             "DELETE FROM gfs_ticket_issuer_keys WHERE created_at < ?", (keys_before,)
         )
-
-
-# ─── Space content epochs (member publish, v_49) ─────────────────────────
-
-
-@runtime_checkable
-class AbstractGfsSpaceEpochRepo(Protocol):
-    """What the GFS knows about a space's content epoch (migration 0014)."""
-
-    async def get(self, space_id: str) -> GfsSpaceEpoch | None: ...
-
-    async def confirm(self, space_id: str, epoch: int, *, now: int) -> bool: ...
-
-    async def step(
-        self, space_id: str, epoch: int, *, now: int, min_interval_s: int
-    ) -> bool: ...
-
-    async def get_writer_keys(self, space_id: str) -> GfsSpaceWriterKeys | None: ...
-
-    async def pin_writer_key(
-        self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
-    ) -> bool: ...
-
-
-class SqliteGfsSpaceEpochRepo:
-    """SQLite-backed :class:`AbstractGfsSpaceEpochRepo` over the
-    ``global_spaces.content_epoch*`` columns. Each write is one conditional
-    statement, so concurrent writers can't interleave. The reset on an
-    authority re-pin lives in :meth:`SqliteGfsFederationRepo
-    .set_space_authority`, in the same statement as the re-pin."""
-
-    __slots__ = ("_db",)
-
-    def __init__(self, db: AsyncDatabase) -> None:
-        self._db = db
-
-    async def get(self, space_id: str) -> GfsSpaceEpoch | None:
-        row = _as_dict(
-            await self._db.fetchone(
-                "SELECT content_epoch, content_epoch_confirmed, content_epoch_prev,"
-                " content_epoch_seen_at, content_epoch_raised_at"
-                " FROM global_spaces WHERE space_id=?",
-                (space_id,),
-            )
-        )
-        if not row or row.get("content_epoch_confirmed") is None:
-            return None
-        prev = row.get("content_epoch_prev")
-        confirmed = int(row["content_epoch_confirmed"])
-        return GfsSpaceEpoch(
-            space_id=space_id,
-            current=max(int(row.get("content_epoch") or confirmed), confirmed),
-            confirmed=confirmed,
-            previous=int(prev) if prev is not None else None,
-            confirmed_at=int(row.get("content_epoch_seen_at") or 0),
-            raised_at=int(row.get("content_epoch_raised_at") or 0),
-        )
-
-    async def confirm(self, space_id: str, epoch: int, *, now: int) -> bool:
-        """The OWNER announced ``epoch``: it becomes the confirmed epoch
-        (the old one, or ``epoch - 1`` the first time, becomes ``previous``)
-        iff it is newer than the confirmed one. Callers bound it first
-        (``domain.epoch_ceiling``). Returns whether the row changed."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE global_spaces SET"
-            " content_epoch_prev=COALESCE(content_epoch_confirmed, MAX(? - 1, 0)),"
-            " content_epoch_confirmed=?,"
-            " content_epoch=MAX(COALESCE(content_epoch, ?), ?),"
-            " content_epoch_seen_at=?, content_epoch_raised_at=?"
-            " WHERE space_id=?"
-            " AND (content_epoch_confirmed IS NULL OR content_epoch_confirmed < ?)",
-            (epoch, epoch, epoch, epoch, now, now, space_id, epoch),
-        )
-        return changed > 0
-
-    async def step(
-        self, space_id: str, epoch: int, *, now: int, min_interval_s: int
-    ) -> bool:
-        """A seed-only statement raises ``current`` to ``epoch`` — only when
-        the owner already confirmed an epoch, ``epoch`` is exactly one above
-        ``current``, and the last raise is at least ``min_interval_s`` old.
-        Never touches the confirmed tier. Returns whether the row changed."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE global_spaces SET content_epoch=?, content_epoch_raised_at=?"
-            " WHERE space_id=? AND content_epoch_confirmed IS NOT NULL"
-            " AND content_epoch = ? - 1"
-            " AND COALESCE(content_epoch_raised_at, 0) <= ?",
-            (epoch, now, space_id, epoch, now - min_interval_s),
-        )
-        return changed > 0
-
-    # ── Writer keys (member publish, migration 0015) ─────────────────────
-
-    async def get_writer_keys(self, space_id: str) -> GfsSpaceWriterKeys | None:
-        """The space's writer-key pins, or ``None`` for a space this server
-        does not list."""
-        row = _as_dict(
-            await self._db.fetchone(
-                "SELECT writer_key_epoch, writer_key_pk,"
-                " writer_key_prev_epoch, writer_key_prev_pk"
-                " FROM global_spaces WHERE space_id=?",
-                (space_id,),
-            )
-        )
-        if not row:
-            return None
-
-        def _int(name: str) -> int | None:
-            value = row.get(name)
-            return int(value) if value is not None else None
-
-        return GfsSpaceWriterKeys(
-            space_id=space_id,
-            writer_key_epoch=_int("writer_key_epoch"),
-            writer_key_pk=row.get("writer_key_pk"),
-            writer_key_prev_epoch=_int("writer_key_prev_epoch"),
-            writer_key_prev_pk=row.get("writer_key_prev_pk"),
-        )
-
-    async def pin_writer_key(
-        self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
-    ) -> bool:
-        """Pin ``writer_pk`` (b64url) as the writer key of ``epoch``. A newer
-        epoch than the pinned one moves that pin to the ``prev`` slot; the
-        same epoch is overwritten only with ``replace`` (the OWNER may correct
-        a pin, nobody else may); an older epoch changes nothing. One
-        statement — SET expressions read the pre-update row. Callers verify
-        the authority cert and the epoch tier first. Returns whether the row
-        changed."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE global_spaces SET"
-            " writer_key_prev_epoch=CASE WHEN writer_key_epoch IS NOT NULL"
-            "  AND ? > writer_key_epoch THEN writer_key_epoch"
-            "  ELSE writer_key_prev_epoch END,"
-            " writer_key_prev_pk=CASE WHEN writer_key_epoch IS NOT NULL"
-            "  AND ? > writer_key_epoch THEN writer_key_pk"
-            "  ELSE writer_key_prev_pk END,"
-            " writer_key_epoch=?, writer_key_pk=?"
-            " WHERE space_id=? AND (writer_key_epoch IS NULL"
-            "  OR ? > writer_key_epoch OR (? = 1 AND ? = writer_key_epoch))",
-            (
-                epoch,
-                epoch,
-                epoch,
-                writer_pk,
-                space_id,
-                epoch,
-                1 if replace else 0,
-                epoch,
-            ),
-        )
-        return changed > 0
 
 
 # ─── Opaque channels for private spaces (v_51) ───────────────────────────

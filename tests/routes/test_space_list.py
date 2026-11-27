@@ -159,10 +159,20 @@ async def test_one_member_count_on_every_surface(seeded):  # noqa: F811
     assert listed["member_count"] == 4
 
 
+async def _takes_followers(client, hdr, sid, on: bool) -> None:
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"allow_subscribers": on}},
+        headers=hdr["owner"],
+    )
+    assert r.status == 200, await r.text()
+
+
 async def test_one_follower_count_beside_it(seeded):  # noqa: F811
     """The same surfaces carry the follower count — this household holds
     the roster, so it is the roster's own count: one follower."""
     client, hdr, sid = seeded
+    await _takes_followers(client, hdr, sid, True)
     r = await client.get(f"/api/spaces/{sid}", headers=hdr["follower"])
     assert (await r.json())["follower_count"] == 1
     r = await client.get(f"/api/spaces/{sid}", headers=hdr["guest"])
@@ -170,6 +180,35 @@ async def test_one_follower_count_beside_it(seeded):  # noqa: F811
     r = await client.get("/api/household/spaces", headers=hdr["member"])
     (listed,) = [x for x in await r.json() if x["space_id"] == sid]
     assert listed["follower_count"] == 1
+
+
+async def test_the_followers_switch_decides_whether_a_follower_count_shows(
+    seeded,  # noqa: F811
+):
+    """Followers off: every surface says only how many members (no follower
+    count, not "0"). Back on: the count is back — "0 followers" included."""
+    client, hdr, sid = seeded
+
+    async def shown() -> list[tuple[int | None, int | None]]:
+        out = []
+        for who in ("member", "guest"):
+            body = await (
+                await client.get(f"/api/spaces/{sid}", headers=hdr[who])
+            ).json()
+            out.append((body["member_count"], body["follower_count"]))
+        r = await client.get("/api/household/spaces", headers=hdr["member"])
+        (listed,) = [x for x in await r.json() if x["space_id"] == sid]
+        out.append((listed["member_count"], listed["follower_count"]))
+        return out
+
+    await _takes_followers(client, hdr, sid, True)
+    assert {f for _m, f in await shown()} == {1}
+    await _takes_followers(client, hdr, sid, False)
+    assert {f for _m, f in await shown()} == {None}
+    assert all(m is not None for m, _f in await shown())
+    # Turning it off let the follower go; on again, nobody follows yet.
+    await _takes_followers(client, hdr, sid, True)
+    assert {f for _m, f in await shown()} == {0}
 
 
 async def test_a_follower_only_household_shows_the_hosts_shared_counts(

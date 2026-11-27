@@ -76,6 +76,7 @@ from ..services.space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from ..services.space_member_guard import banned_from_space, user_id_proven
 from ..services.space_service import (
     SUPPORTED_SEED_SUITES,
     admit_join,
@@ -83,9 +84,10 @@ from ..services.space_service import (
     seal_join_snapshot,
     signed_roster_event,
 )
-from ..services.space_writer_households import holds_member_seat
+from ..services.space_writer_households import holds_seat
 from .host_equivalence import acts_as_host, holds_local_admin_seat
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
+from .mesh_member_claim import sender_identity_pk
 from .sync.space.scheduler import PERIODIC_INTERVAL_SECONDS
 
 if TYPE_CHECKING:
@@ -702,10 +704,30 @@ class PrivateSpaceInviteHandler:
         ``SPACE_MEMBER_ROLE_CHANGED``. The role is passed explicitly for
         the same reason: so a future change to ``add``'s default cannot
         quietly promote through here.
+
+        First of all (P5 person-ID anchor) the accept must prove its
+        ``invitee_user_id``: ``derive_user_id(the sender's pinned key — or a
+        mesh-only sender's routed claim —, invitee_anchor)`` must be it
+        (:func:`~socialhome.services.space_member_guard.user_id_proven`).
+        Checked before the invitation or any seat is read, and dropped the
+        same silent way as every other refusal here.
         """
         p = event.payload
         token = str(p.get("invite_token") or "")
         if not token:
+            return
+        invitee_user_id = str(p.get("invitee_user_id") or "")
+        if not user_id_proven(
+            await sender_identity_pk(self._federation, event),
+            p.get("invitee_anchor"),
+            invitee_user_id,
+        ):
+            log.warning(
+                "SPACE_PRIVATE_INVITE_ACCEPT from %s: user id %s is not proven "
+                "by the household's identity key — dropping",
+                event.from_instance,
+                invitee_user_id,
+            )
             return
         invite = await self._space_repo.get_invitation_by_token(token)
         if invite is None:
@@ -714,12 +736,25 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        invitee_user_id = str(p.get("invitee_user_id") or "")
         if not self._accept_matches_invitation(
             event,
             invite=invite,
             invitee_user_id=invitee_user_id,
         ):
+            return
+        if await banned_from_space(
+            self._space_repo,
+            invite["space_id"],
+            user_id=invitee_user_id,
+            instance_id=event.from_instance,
+        ):
+            # P7b — an invitation sent before its person (or household) was
+            # banned is not a way back in.
+            log.info(
+                "SPACE_PRIVATE_INVITE_ACCEPT for %s from %s: banned — dropping",
+                invite["space_id"],
+                event.from_instance,
+            )
             return
         live_seat = await self._remote_members.get(
             invite["space_id"],
@@ -1157,12 +1192,12 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
-        if not await holds_member_seat(self._space_repo, space_id):
-            # We only follow this space: the members' whereabouts are not
-            # ours to keep (owner decision 13), whoever sent them.
+        if not await holds_seat(self._space_repo, space_id):
+            # Nobody here holds a seat (a follower's counts, P10): the
+            # space's whereabouts are not ours to keep, whoever sent them.
             log.info(
                 "SPACE_LOCATION_UPDATED from %s for %s dropped: this "
-                "household holds no member seat there",
+                "household holds no seat there",
                 event.from_instance,
                 space_id,
             )
@@ -1396,8 +1431,8 @@ class PrivateSpaceInviteHandler:
             self._space_repo, self._remote_members, space, event.from_instance
         ):
             return  # only the host (or our trusted inviter) mirrors proposals
-        if not await holds_member_seat(self._space_repo, space_id):
-            return  # governance is the members' — a follower household keeps none
+        if not await holds_seat(self._space_repo, space_id):
+            return  # nobody seated here (a follower counts, P10): keep none
         await self._approval_service.apply_mirror_update(space_id, view)
 
     async def _on_key_exchange_rekey(self, event: FederationEvent) -> None:
@@ -1551,15 +1586,6 @@ class PrivateSpaceInviteHandler:
             and self._writer_certs is not None
         ):
             await self._writer_certs.accept(space_id, event.payload.get("writer_cert"))
-        # v_50 — and the new epoch's writer group key (a v_90 publisher)
-        # (verified against the pinned space key on its own).
-        if (
-            event.payload.get("writer_key") is not None
-            and self._writer_certs is not None
-        ):
-            await self._writer_certs.accept_writer_key(
-                space_id, event.payload.get("writer_key")
-            )
         # v_51 — and, in a private space using a channel, our channel grant
         # for the new epoch (bound to the pinned space key). No grant for the
         # new epoch while an earlier one seated us: drop that seat.
@@ -1570,6 +1596,12 @@ class PrivateSpaceInviteHandler:
                 )
             else:
                 await self._writer_certs.drop_stale_channel(space_id)
+        # v_96 — a seed-holding delegated admin's rotation cannot reach a
+        # follower that came through a GFS; the owner, which holds its
+        # space-session row, passes the same signed rekey on (a no-op on
+        # any other household).
+        if authority_verified and not is_owner and self._space_service is not None:
+            await self._space_service.relay_admin_rekey_to_followers(space_id, meta)
 
     async def _on_admin_key_share(self, event: FederationEvent) -> None:
         """Delegated-admin signing-seed share from the space owner (v_22).
@@ -2023,6 +2055,21 @@ class PrivateSpaceInviteHandler:
                     instance_id,
                 )
                 return
+        if not tombstoned and await banned_from_space(
+            self._space_repo, space_id, user_id=user_id, instance_id=instance_id
+        ):
+            # P7b — a seat for a banned person, or anyone of a banned
+            # household, is never taken from gossip or a snapshot: a seed
+            # holder that has not heard of the ban yet must not seat them
+            # here. A removal (LEFT) still applies.
+            log.warning(
+                "roster-gossip %s for %s would seat a banned person or "
+                "household (%s) — refused",
+                event_type,
+                space_id,
+                instance_id,
+            )
+            return
         applied = await self._remote_members.apply_member_event(
             space_id=space_id,
             user_id=user_id,
@@ -2217,10 +2264,6 @@ class PrivateSpaceInviteHandler:
             and event.from_instance == space.owner_instance_id
         ):
             await self._writer_certs.accept(space_id, p.get("writer_cert"))
-            if p.get("writer_key") is not None:
-                await self._writer_certs.accept_writer_key(
-                    space_id, p.get("writer_key")
-                )
         # v_51 — our private-space channel grant, from the host only (a
         # reader household gets one without a writer cert).
         if (

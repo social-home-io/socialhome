@@ -253,11 +253,12 @@ async def test_a_members_space_reads_never_then_up_to_date_after_the_host_answer
     assert row["sync_ok_at"] == sync["last_ok_at"]
 
 
-async def test_a_follower_gets_no_sync_status(client):
+async def test_a_follower_gets_the_sync_status(client):
+    """P10: a follower syncs like a member — the same status."""
     space_id = await _remote_space(client, role="subscriber")
     r = await client.get(f"/api/spaces/{space_id}", headers=_auth(client._admin_token))
     assert r.status == 200
-    assert (await r.json())["sync"] is None
+    assert (await r.json())["sync"] is not None
 
 
 async def test_sync_now_asks_a_mesh_only_host_for_an_incremental_stream(client):
@@ -352,12 +353,16 @@ async def test_any_member_may_ask_for_sync_now(client):
     assert resp.status == 202
 
 
-async def test_a_follower_may_not_ask_for_sync_now(client):
+async def test_a_follower_may_ask_for_sync_now(client):
+    """P10: "Sync now" is a read of the follower's own household."""
     space_id = await _remote_space(client, role="subscriber")
-    resp = await client.post(
-        f"/api/spaces/{space_id}/sync", headers=_auth(client._admin_token)
-    )
-    assert resp.status == 403
+    with patch.object(
+        FederationService, "begin_mesh_catchup_sync", AsyncMock(return_value=True)
+    ):
+        resp = await client.post(
+            f"/api/spaces/{space_id}/sync", headers=_auth(client._admin_token)
+        )
+    assert resp.status == 202, await resp.text()
 
 
 async def test_sync_now_is_rate_limited_per_space(client):
@@ -441,9 +446,9 @@ async def test_the_spaces_list_marks_a_space_whose_posts_may_be_missing(client):
     assert rows[here]["sync_may_be_missing"] is False
 
 
-async def test_a_follower_row_never_carries_the_warning(client):
+async def test_a_follower_row_carries_the_warning_too(client):
     space_id = await _remote_space(client, role="subscriber")
     await _two_failed_rounds(client, space_id)
     r = await client.get("/api/spaces", headers=_auth(client._admin_token))
     (row,) = [x for x in await r.json() if x["id"] == space_id]
-    assert row["sync_may_be_missing"] is False
+    assert row["sync_may_be_missing"] is True

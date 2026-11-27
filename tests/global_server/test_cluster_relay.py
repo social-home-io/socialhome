@@ -19,7 +19,6 @@ from socialhome.global_server.cluster_relay import (
     AUDIENCE_COUNT_FOLLOWERS,
     AUDIENCE_FOLLOWERS,
     AUDIENCE_INSTANCE,
-    AUDIENCE_SPACE,
     ClusterRelayFanOut,
     ForwardedRelay,
     held_from_replies,
@@ -30,7 +29,7 @@ from socialhome.global_server.federation import SeenPayloadCache
 _A = "homea2222222222222222222222222aa"
 _B = "homeb2222222222222222222222222bb"
 _C = "homec2222222222222222222222222cc"
-_FRAME = {"space_id": "sp", "event_type": "space_post_public", "payload": {"x": 1}}
+_FRAME = {"channel_id": "sp", "event_type": "space_item", "payload": {"x": 1}}
 
 
 class _Registry:
@@ -96,7 +95,7 @@ async def _settle(svc: ClusterRelayFanOut) -> None:
     await svc.close(timeout=2)
 
 
-def _item(frame=None, *, kind=AUDIENCE_SPACE, key="sp", skip="", queue=False):
+def _item(frame=None, *, kind=AUDIENCE_CHANNEL, key="sp", skip="", queue=False):
     frame = frame or _FRAME
     return ForwardedRelay(
         kind=kind,
@@ -142,12 +141,14 @@ def test_an_item_without_the_optional_fields_reads_their_defaults():
 @pytest.mark.parametrize(
     "change",
     [
-        {"aud": ["space"]},
+        {"aud": ["channel"]},
         {"aud": ["planet", "sp"]},
-        {"aud": "space:sp"},
-        {"aud": ["space", ""]},
-        {"aud": ["space", "x" * 129]},
-        {"aud": ["space", "line\nbreak"]},
+        # v_96 (P7): the space-keyed audience is gone (an unknown kind).
+        {"aud": ["space", "sp"]},
+        {"aud": "channel:sp"},
+        {"aud": ["channel", ""]},
+        {"aud": ["channel", "x" * 129]},
+        {"aud": ["channel", "line\nbreak"]},
         {"skip": "not-an-instance-id"},
         {"skip": None},
         {"q": "yes"},
@@ -168,12 +169,12 @@ def test_held_is_the_union_of_the_answering_peers():
     replies = [
         None,
         {"status": "ok"},  # an older node: no ``held`` at all
-        {"status": "ok", "held": {"space:sp": [_A, "junk", 7], "space:x": [_C]}},
-        {"status": "ok", "held": {"space:sp": [_B], "channel:c": "nope"}},
-        {"status": "ok", "held": {"space:sp": "not a list"}},
+        {"status": "ok", "held": {"channel:sp": [_A, "junk", 7], "space:x": [_C]}},
+        {"status": "ok", "held": {"channel:sp": [_B], "channel:c": "nope"}},
+        {"status": "ok", "held": {"channel:sp": "not a list"}},
         {"status": "ok", "held": []},
     ]
-    assert held_from_replies(replies, "space:sp") == frozenset({_A, _B})
+    assert held_from_replies(replies, "channel:sp") == frozenset({_A, _B})
 
 
 # ─── Origin side ─────────────────────────────────────────────────────────
@@ -186,21 +187,21 @@ def test_an_unknown_audience_kind_cannot_be_registered():
 
 def test_forward_without_a_cluster_returns_false():
     svc = _fan_out()
-    assert svc.forward(kind=AUDIENCE_SPACE, key="sp", frame=_FRAME) is False
+    assert svc.forward(kind=AUDIENCE_CHANNEL, key="sp", frame=_FRAME) is False
     assert not svc.seen_frame(_FRAME)
 
 
 def test_a_refused_forward_is_not_remembered():
     cluster = _Cluster(accept=False)
     svc = _fan_out(cluster=cluster)
-    assert svc.forward_to_space("sp", _FRAME) is False
+    assert svc.forward(kind=AUDIENCE_CHANNEL, key="sp", frame=_FRAME) is False
     assert not svc.seen_frame(_FRAME)
 
 
 def test_a_broadcast_forward_asks_for_nothing_back():
     cluster = _Cluster()
     svc = _fan_out(cluster=cluster)
-    assert svc.forward_to_space("sp", _FRAME) is True
+    assert svc.forward(kind=AUDIENCE_CHANNEL, key="sp", frame=_FRAME) is True
     ((item, on_settled),) = cluster.items
     assert item == _item()
     assert on_settled is None
@@ -211,7 +212,7 @@ async def test_a_member_forward_queues_only_what_no_peer_holds():
     cluster, relay = _Cluster(), _Relay()
     svc = _fan_out(relay=relay, cluster=cluster)
     assert svc.forward(
-        kind=AUDIENCE_SPACE, key="sp", frame=_FRAME, skip=_C, queue_for=[_A, _B]
+        kind=AUDIENCE_CHANNEL, key="sp", frame=_FRAME, skip=_C, queue_for=[_A, _B]
     )
     ((item, on_settled),) = cluster.items
     assert (item.queue, item.skip) == (True, _C)
@@ -232,21 +233,21 @@ async def test_forwards_holding_too_many_offline_candidates_are_refused(
     monkeypatch.setattr(mod, "RELAY_FORWARD_MAX_PENDING_TARGETS", 2)
     cluster = _Cluster()
     svc = _fan_out(cluster=cluster)
-    assert svc.forward(kind=AUDIENCE_SPACE, key="sp", frame=_FRAME, queue_for=[_A])
+    assert svc.forward(kind=AUDIENCE_CHANNEL, key="sp", frame=_FRAME, queue_for=[_A])
     other = {**_FRAME, "payload": {"x": 5}}
     assert not svc.forward(
-        kind=AUDIENCE_SPACE, key="sp", frame=other, queue_for=[_B, _C]
+        kind=AUDIENCE_CHANNEL, key="sp", frame=other, queue_for=[_B, _C]
     )
     assert len(cluster.items) == 1
     cluster.items[0][1](frozenset({_A}))  # settled: room again
-    assert svc.forward(kind=AUDIENCE_SPACE, key="sp", frame=other, queue_for=[_B, _C])
+    assert svc.forward(kind=AUDIENCE_CHANNEL, key="sp", frame=other, queue_for=[_B, _C])
     await _settle(svc)
 
 
 async def test_a_failed_offline_queue_is_logged(caplog):
     cluster = _Cluster()
     svc = _fan_out(relay=_Relay(fail=True), cluster=cluster)
-    svc.forward(kind=AUDIENCE_SPACE, key="sp", frame=_FRAME, queue_for=[_A])
+    svc.forward(kind=AUDIENCE_CHANNEL, key="sp", frame=_FRAME, queue_for=[_A])
     with caplog.at_level(logging.WARNING):
         cluster.items[0][1](frozenset())
         await _settle(svc)
@@ -265,7 +266,7 @@ def _receiver(online=(), *, failing=(), audience=(_A, _B, _C)):
         lookups.append(key)
         return list(audience)
 
-    svc.register_audience(AUDIENCE_SPACE, _resolve)
+    svc.register_audience(AUDIENCE_CHANNEL, _resolve)
     return svc, registry, relay, lookups
 
 
@@ -273,7 +274,7 @@ async def test_apply_pushes_to_the_local_sockets_only_and_reports_held():
     svc, registry, relay, lookups = _receiver(online={_A, _B})
     held = await svc.apply([_item(skip=_B, queue=True)])
     await _settle(svc)
-    assert held == {"space:sp": [_A, _B]}  # the publisher is held too
+    assert held == {"channel:sp": [_A, _B]}  # the publisher is held too
     assert registry.sent == [(_A, {"type": "relay", **_FRAME})]
     assert relay.queued == []
     assert lookups == ["sp"]
@@ -298,8 +299,8 @@ async def test_apply_resolves_each_audience_once_per_frame():
 async def test_apply_never_pushes_one_item_twice_but_still_reports_held():
     svc, registry, _relay, _l = _receiver(online={_A})
     item = _item(queue=True)
-    assert await svc.apply([item]) == {"space:sp": [_A]}
-    assert await svc.apply([item]) == {"space:sp": [_A]}
+    assert await svc.apply([item]) == {"channel:sp": [_A]}
+    assert await svc.apply([item]) == {"channel:sp": [_A]}
     await _settle(svc)
     assert len(registry.sent) == 1
     assert svc.seen_frame(_FRAME)
@@ -308,7 +309,7 @@ async def test_apply_never_pushes_one_item_twice_but_still_reports_held():
 async def test_apply_skips_an_item_this_node_forwarded_itself():
     svc, registry, _relay, _l = _receiver(online={_A})
     svc.attach_cluster(_Cluster())
-    svc.forward_to_space("sp", _FRAME)
+    svc.forward(kind=AUDIENCE_CHANNEL, key="sp", frame=_FRAME)
     await svc.apply([_item()])
     await _settle(svc)
     assert registry.sent == []
@@ -330,7 +331,7 @@ async def test_a_failed_push_of_a_broadcast_is_not_queued():
 
 async def test_an_audience_without_a_resolver_is_skipped():
     svc, registry, _relay, _l = _receiver(online={_A})
-    assert await svc.apply([_item(kind=AUDIENCE_CHANNEL, key="c", queue=True)]) == {}
+    assert await svc.apply([_item(kind=AUDIENCE_FOLLOWERS, key="c", queue=True)]) == {}
     await _settle(svc)
     assert registry.sent == []
 
@@ -341,7 +342,7 @@ async def test_a_failing_audience_lookup_is_logged_and_skipped(caplog):
     async def _boom(key: str) -> list[str]:
         raise RuntimeError("db down")
 
-    svc.register_audience(AUDIENCE_SPACE, _boom)
+    svc.register_audience(AUDIENCE_CHANNEL, _boom)
     with caplog.at_level(logging.WARNING):
         assert await svc.apply([_item(queue=True)]) == {}
     assert "lookup failed" in caplog.text
@@ -362,7 +363,7 @@ async def test_apply_refuses_a_frame_when_saturated(monkeypatch, caplog):
     async def _resolve(key: str) -> list[str]:
         return [_A]
 
-    svc.register_audience(AUDIENCE_SPACE, _resolve)
+    svc.register_audience(AUDIENCE_CHANNEL, _resolve)
     await svc.apply([_item()])
     assert svc.in_flight == 1
     other = _item({**_FRAME, "payload": {"x": 3}}, queue=True)
@@ -388,7 +389,7 @@ async def test_close_cancels_work_that_outlives_the_grace():
     async def _resolve(key: str) -> list[str]:
         return [_A]
 
-    svc.register_audience(AUDIENCE_SPACE, _resolve)
+    svc.register_audience(AUDIENCE_CHANNEL, _resolve)
     await svc.apply([_item()])
     await svc.close(timeout=0.01)
     assert svc.in_flight == 0
@@ -397,7 +398,7 @@ async def test_close_cancels_work_that_outlives_the_grace():
 
 async def test_an_item_only_the_publisher_holds_here_is_pushed_to_nobody():
     svc, registry, _relay, _l = _receiver(online={_B})
-    assert await svc.apply([_item(skip=_B, queue=True)]) == {"space:sp": [_B]}
+    assert await svc.apply([_item(skip=_B, queue=True)]) == {"channel:sp": [_B]}
     await _settle(svc)
     assert registry.sent == []
 

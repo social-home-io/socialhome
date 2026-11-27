@@ -767,9 +767,9 @@ async def test_reactions_never_evict_an_offline_authors_moments_or_space_items(
     relay = gfs._app[gfs_envelope_relay_key]
     frames.offline.add("inst-author")
     moment = {"type": "incoming_public_moment", "payload": {"sentinel": True}}
-    space_item = {"space_id": "s-1", "event_type": "space_item", "payload": "ct"}
-    assert await relay.queue_relay("inst-author", moment)
-    assert await relay.queue_relay("inst-author", space_item)
+    space_item = {"channel_id": "c" * 32, "event_type": "space_item", "payload": "ct"}
+    assert await relay.queue_relay_many(["inst-author"], moment) == 1
+    assert await relay.queue_relay_many(["inst-author"], space_item) == 1
     sent = []
     for _minute in range(18):  # 30 a minute: the per-(household, author) limit
         for _ in range(30):

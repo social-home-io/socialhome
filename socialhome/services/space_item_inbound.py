@@ -18,8 +18,10 @@ with the same rules as the federated ``SPACE_COMMENT_*`` /
 * **Member households also check the roster** — the author's live seat on
   the origin household (:meth:`SpaceAuthorship.item_seat_admits`; a
   follower seat only where the space lets followers comment / react — an
-  edit or delete of its own comment needs the comment right like the
-  comment itself); a post delete runs the ``posts`` access level
+  edit of its own comment needs the comment right like the comment
+  itself, while deleting its own comment needs only the seat: an author
+  may always delete their own comment, owner decision F6); a post delete
+  runs the ``posts`` access level
   (:meth:`SpaceAuthorship.item_access_admits`), matching the ``write`` scope
   the cert already proves. A household without the roster (a GFS
   subscriber) relies on the cert scope plus the user binding.
@@ -90,8 +92,6 @@ from ..domain.space_author_profile import (
     SpaceAuthorProfile,
     decode_picture_sidecar,
     decode_profile_content,
-    stored_profile_inner,
-    without_picture_sidecar,
 )
 from ..domain.space_item import (
     ITEM_TYPE_AUTHOR_PROFILE,
@@ -133,7 +133,6 @@ if TYPE_CHECKING:
         AbstractSpaceAuthorProfileRepo,
     )
     from ..repositories.space_post_repo import AbstractSpacePostRepo
-    from ..repositories.space_repo import AbstractSpaceRepo
     from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
@@ -181,18 +180,16 @@ class _Item:
 class SpaceItemInbound:
     """Persist member-published generic items (see the module docstring)."""
 
-    __slots__ = ("_bus", "_mentions", "_posts", "_profiles", "_spaces")
+    __slots__ = ("_bus", "_mentions", "_posts", "_profiles")
 
     def __init__(
         self,
         *,
         bus: EventBus,
-        space_repo: AbstractSpaceRepo,
         space_post_repo: AbstractSpacePostRepo,
         mention_resolver: SpaceMentionResolver | None = None,
     ) -> None:
         self._bus = bus
-        self._spaces = space_repo
         self._posts = space_post_repo
         self._mentions = mention_resolver
         #: v_60 — where verified author profiles are kept. ``None`` drops.
@@ -261,8 +258,7 @@ class SpaceItemInbound:
         The picture bytes ride beside the signed content as a sidecar,
         accepted only when they hash to the signed ``picture_hash``. A
         newer item that names the held hash and carries no bytes keeps
-        the held picture. The author-signed item itself is kept only by a
-        seed holder: only a host builds new-follower bundles."""
+        the held picture."""
         if self._profiles is None:
             return False
         if not (item.author and item.target == item.author == item.post_id):
@@ -301,27 +297,6 @@ class SpaceItemInbound:
         picture: bytes | None = None
         if sidecar is not None and not (same_picture and held and held.has_picture):
             picture = await public_profile_picture(sidecar)
-        signed_item: dict | None = None
-        kept = stored_profile_inner(item.inner)
-        if kept is None:
-            log.warning(
-                "space_item: author_profile for %s in space %s is oversized — "
-                "kept without its signed item",
-                item.author,
-                item.space.id,
-            )
-        if kept is not None and await self._spaces.get_space_seed(item.space.id):
-            signed_item = without_picture_sidecar(kept)
-            # The original bytes are what a follower checks against the
-            # signed hash, so the host keeps them with the item: these ones,
-            # or the ones it held for the same signed hash.
-            keep = (
-                raw_sidecar
-                if sidecar is not None
-                else (held.picture_sidecar if same_picture and held else None)
-            )
-            if keep:
-                signed_item[PROFILE_PICTURE_FIELD] = keep
         return await self._profiles.upsert_if_newer(
             SpaceAuthorProfile(
                 space_id=item.space.id,
@@ -334,47 +309,24 @@ class SpaceItemInbound:
                 ts=item.stamp.astimezone(UTC).isoformat(timespec="microseconds"),
             ),
             picture_webp=picture,
-            signed_item=signed_item,
-            item_epoch=item.epoch if signed_item is not None else None,
-        )
-
-    async def attach_bundled_picture(
-        self, space_id: str, author_user_id: str, picture_hash: str, raw: object
-    ) -> bool:
-        """A picture from a later part of a new-follower bundle: kept when
-        its bytes are the picture the author signed for (the held row's
-        ``picture_hash``), re-encoded like every peer picture. Never raises."""
-        if self._profiles is None:
-            return False
-        held = await self._profiles.get(space_id, author_user_id)
-        if (
-            held is None
-            or held.has_picture
-            or held.profile.picture_hash is None
-            or held.profile.picture_hash != picture_hash
-        ):
-            return False
-        picture = decode_picture_sidecar(raw, held.profile.picture_hash)
-        if picture is None:
-            log.warning(
-                "space_item: a bundled picture for %s in space %s is not the "
-                "signed picture — dropped",
-                author_user_id,
-                space_id,
-            )
-            return False
-        stored = await public_profile_picture(picture)
-        if stored is None:
-            return False
-        return await self._profiles.set_picture(
-            space_id, author_user_id, picture_hash, stored
         )
 
     # ── Shared checks ────────────────────────────────────────────────────
 
     async def _seat_ok(self, item: _Item, *, subscriber_ok: bool) -> bool:
-        if item.authorship is None or not item.member:
+        if item.authorship is None:
             return True
+        if not item.member:
+            # A follower-only household: the cert decides an author it does
+            # not know, but one it knows as a follower still needs the
+            # switch — a plain comment cert issued before v_96 (or by a v_95
+            # delegated admin) carries no ``reader`` flag (v_96).
+            return not await item.authorship.known_follower_refused(
+                origin_instance_id=item.origin,
+                space_id=item.space.id,
+                author_user_id=item.author,
+                subscriber_ok=subscriber_ok,
+            )
         return await item.authorship.item_seat_admits(
             origin_instance_id=item.origin,
             space_id=item.space.id,
@@ -592,9 +544,9 @@ class SpaceItemInbound:
             return False
         if comment.deleted:
             return False
-        if not await self._seat_ok(
-            item, subscriber_ok=item.space.features.allow_subscriber_comment
-        ):
+        # The author's own delete: a follower seat is enough, switch or not
+        # (owner decision F6, 2026-11-23) — authorship decided it above.
+        if not await self._seat_ok(item, subscriber_ok=True):
             return False
         if not await self._posts.soft_delete_comment(cid, space_id=item.space.id):
             return False
@@ -624,9 +576,13 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        await self._await_post(
-            item, subscriber_ok=item.space.features.allow_subscriber_comment
-        )
+        # Unlike the delete of a HELD comment (:meth:`_comment_delete`), a
+        # tombstone for a comment we never saw follows the comment switch:
+        # with it off a follower could plant unbounded permanent rows on
+        # every household (any id it mints is bound to itself), and the
+        # comment it pre-empts could not land with the switch off anyway.
+        subscriber_ok = item.space.features.allow_subscriber_comment
+        await self._await_post(item, subscriber_ok=subscriber_ok)
         post = await self._post_here(item.post_id, item)
         if post is None:
             log.info(
@@ -635,9 +591,7 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        if not await self._seat_ok(
-            item, subscriber_ok=item.space.features.allow_subscriber_comment
-        ):
+        if not await self._seat_ok(item, subscriber_ok=subscriber_ok):
             return False
         tombstone = Comment(
             id=cid,

@@ -1,4 +1,5 @@
-"""Opaque channels for PRIVATE spaces (v_51) — the connection server side.
+"""Opaque channels (v_51 private spaces, v_96 global ones too) — the
+connection server side.
 
 A private space whose members include households seated through an invite
 link gets member publishing through a channel this server knows only by a
@@ -32,7 +33,7 @@ the reason at DEBUG, never logged with anything but the channel id:
   per epoch wins).
 * **unregister** (anonymous, channel-key-signed) — drops the channel and
   every seat.
-* **subscribe** (household-signed, identified like a follower's subscribe)
+* **subscribe** (household-signed, identified by its registered key)
   — must present a :class:`~socialhome.domain.gfs_channel.ChannelPass` the
   channel key issued to THIS household (its registered identity key) for an
   open epoch — households issue passes only to link-joined members, so only
@@ -42,12 +43,13 @@ the reason at DEBUG, never logged with anything but the channel id:
   grace.
 * **publish-anon** (no identity — the only channel publish since v_90) —
   signed with the channel writer key pinned for that epoch;
-  per-(channel, address), per-channel and per-writer-key limits; exact
-  replays refused. The real item type is inside the ciphertext; receivers
-  enforce the real scope.
+  per-(channel, address), per-channel and per-writer-key limits, each
+  cluster-wide (every node admits its :func:`~.public.node_share` over the
+  live nodes); exact replays refused. The real item type is inside the
+  ciphertext; receivers enforce the real scope.
 
-Fan-out reuses the member-publish workers and the offline relay queue
-unchanged: ``{type: "relay", channel_id, event_type: "space_item", epoch,
+Fan-out runs on the background workers (:mod:`.fan_out_workers`) and the
+offline relay queue: ``{type: "relay", channel_id, event_type: "space_item", epoch,
 payload}`` to every open seat (the publisher drops its own echo).
 """
 
@@ -86,20 +88,17 @@ from .addressee import GfsAddressee
 from .cluster_relay import AUDIENCE_CHANNEL
 from .domain import CHANNEL_EPOCH_GRACE_S, GfsChannel
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
-from .federation import MAX_SUBSCRIPTIONS_PER_INSTANCE, SeenPayloadCache
-from .member_publish import (
-    MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP,
-    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP,
-    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE,
-    MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
-    MemberPublishBusy,
-    MemberPublishRateLimited,
+from .federation import SeenPayloadCache
+from .public import (
+    ClientIpResolver,
+    SlidingWindowCounter,
+    build_window_limiter,
+    node_share,
 )
-from .public import ClientIpResolver, SlidingWindowCounter, build_window_limiter
 
 if TYPE_CHECKING:
+    from .fan_out_workers import GfsFanOutWorkers
     from .federation import GfsFederationService
-    from .member_publish import GfsMemberPublishService
     from .repositories import AbstractGfsChannelRepo
 
 log = logging.getLogger(__name__)
@@ -107,15 +106,30 @@ log = logging.getLogger(__name__)
 #: How far an anonymous statement's ``ts`` may be from this server's clock.
 CHANNEL_TS_SKEW_S: int = 300
 
-#: Channel registrations per client address per minute. A household
-#: registers a channel once per private space (and again only on an
+#: NEW channel registrations per client address per minute. A household
+#: registers a channel once per channel space (and again only on an
 #: authority rotation), so this is far above honest use while bounding how
-#: many rows one address can create.
+#: many rows one address can create. A refresh of a known channel (an
+#: owner re-registering all of its channels on a reconnect) spends none.
 CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP: int = 10
 
-#: Channel seats one registered household may hold (on top of, and as many
-#: as, its space subscriptions).
-MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE: int = MAX_SUBSCRIPTIONS_PER_INSTANCE
+#: Channel seats one registered household may hold. Far above what a family
+#: joins or follows; it bounds how many fan-out targets — and queued items —
+#: one registration can stand for.
+MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE: int = 500
+
+#: Accepted publishes per CHANNEL per minute, across every writer — bounds
+#: the fan-out work (and queue writes) one channel can cause.
+CHANNEL_PUBLISH_MAX_PER_MINUTE: int = 120
+
+#: Accepted publishes per channel WRITER KEY (one epoch) per minute. The key
+#: is shared by every writer of the epoch, so this bounds the channel as a
+#: whole, not any one household.
+CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY: int = 120
+
+#: Per-IP/minute cap on every ``/gfs/channels/*`` route, applied BEFORE any
+#: signature work.
+CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP: int = 120
 
 
 #: Highest epoch a channel's FIRST notice may set. Channel epochs carry a
@@ -124,13 +138,39 @@ MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE: int = MAX_SUBSCRIPTIONS_PER_INSTANCE
 MAX_FIRST_CHANNEL_EPOCH: int = 2**62
 
 
+#: Accepted anonymous publishes per (channel, client address) per minute,
+#: cluster-wide. The writer key is shared by every writer of an epoch and
+#: the publish names nobody, so the address is the only thing that tells one
+#: key holder apart from the others: an eighth of the channel's
+#: :data:`CHANNEL_PUBLISH_MAX_PER_MINUTE` (120), so
+#: one holder needs EIGHT addresses (IPv6 counted per /64) to spend the whole
+#: channel budget, where 30 a minute let four do it. Honest use is far below
+#: it — a household's posts, comments and reactions, one every 4 s sustained;
+#: a burst past it gets ``429`` and the household's retry queue lands it.
+CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS: int = CHANNEL_PUBLISH_MAX_PER_MINUTE // 8
+
+
 #: Live channel rows this server keeps at most — anonymous registration's
 #: server-wide bound (with the per-address limit and the unused-row TTL).
 MAX_CHANNELS: int = 100_000
 
 
+class ChannelRateLimited(Exception):
+    """The client address, the writer key or the channel as a whole exceeded
+    its per-minute budget (``429``)."""
+
+
+class ChannelBusy(Exception):
+    """The background fan-out is stopped or full, or the server-wide channel
+    cap is reached (``503``)."""
+
+
 class ChannelPinned(Exception):
     """The channel id is pinned to another key — ``409``. There is no re-pin."""
+
+
+#: The least ``Retry-After`` for a pass whose epoch is not open YET.
+SUBSCRIBE_NOT_YET_RETRY_S: int = 5
 
 
 class ChannelEpochTooSoon(Exception):
@@ -165,9 +205,10 @@ class GfsChannelService:
         "_channel_limiter",
         "_channels",
         "_clock",
+        "_fan_out",
         "_federation",
         "_max_channels",
-        "_member_publish",
+        "_nodes",
         "_register_limiter",
         "_writer_key_limiter",
     )
@@ -177,32 +218,35 @@ class GfsChannelService:
         *,
         federation: GfsFederationService,
         channel_repo: AbstractGfsChannelRepo,
-        member_publish: GfsMemberPublishService,
+        fan_out: GfsFanOutWorkers,
         gfs_instance_id: str,
         addressee: GfsAddressee | None = None,
         clock: Callable[[], float] = time.time,
         register_limiter: SlidingWindowCounter | None = None,
         max_channels: int = MAX_CHANNELS,
+        nodes: Callable[[], int] | None = None,
     ) -> None:
         self._federation = federation
         self._channels = channel_repo
-        self._member_publish = member_publish
+        self._fan_out = fan_out
         #: This server's public id + its transitional aliases (see
         #: :mod:`.addressee`).
         self._addressee = addressee or GfsAddressee(gfs_instance_id)
         self._clock = clock
         self._max_channels = max_channels
+        #: The cluster's live node count (``ClusterService.live_node_count``):
+        #: each node admits its share of every publish limit, so the limits
+        #: hold for the whole cluster behind the round-robin balancer.
+        self._nodes = nodes
         self._register_limiter = register_limiter or SlidingWindowCounter(
             CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP
         )
-        self._channel_limiter = SlidingWindowCounter(
-            MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
-        )
+        self._channel_limiter = SlidingWindowCounter(CHANNEL_PUBLISH_MAX_PER_MINUTE)
         self._writer_key_limiter = SlidingWindowCounter(
-            MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+            CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
         )
         self._anon_ip_limiter = SlidingWindowCounter(
-            MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
+            CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
         )
         self._anon_seen = SeenPayloadCache(ttl_s=float(2 * CHANNEL_TS_SKEW_S))
 
@@ -210,6 +254,19 @@ class GfsChannelService:
 
     def _now(self) -> int:
         return int(self._clock())
+
+    def _allow(self, counter: SlidingWindowCounter, key: str) -> bool:
+        """One hit on *counter* under this node's share of its limit.
+
+        The counters live in this process; behind the round-robin balancer a
+        channel's publishes spread over every node, so a per-node limit of L
+        would let an N-node cluster admit N × L (480 items a minute into one
+        channel on four nodes — 4.8 million queued or pushed frames a minute
+        at 10 000 seats). Each node admitting ``ceil(L / N)`` keeps the
+        cluster at about L; a balancer that pins a client to one node makes
+        it stricter, never looser (:func:`~.public.node_share`)."""
+        nodes = self._nodes() if self._nodes is not None else 1
+        return counter.allow(key, limit=node_share(counter.limit, nodes))
 
     def _addressed(self, gfs_instance_id: str, gfs_key: str | None = None) -> None:
         if not self._addressee.accepts(gfs_instance_id, gfs_key):
@@ -251,10 +308,6 @@ class GfsChannelService:
         return channel_pk_bytes(pinned)
 
     # ── Checks shared with the space media cache ─────────────────────────
-
-    async def require_channel(self, channel_id: str) -> None:
-        """:class:`PermissionError` unless *channel_id* is registered here."""
-        await self._channel(channel_id)
 
     async def require_channel_in_use(self, channel_id: str) -> None:
         """:class:`PermissionError` unless *channel_id* is registered here AND
@@ -320,25 +373,31 @@ class GfsChannelService:
     async def register(self, req: ChannelRegisterRequest, *, client_ip: str) -> str:
         """Register / refresh (module docstring). Returns ``"registered"`` or
         ``"refreshed"``. Raises :class:`PermissionError`,
-        :class:`ChannelPinned`, :class:`MemberPublishRateLimited` or
-        :class:`MemberPublishBusy` (the server-wide cap)."""
+        :class:`ChannelPinned`, :class:`ChannelRateLimited` or
+        :class:`ChannelBusy` (the server-wide cap)."""
         self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
-        if not self._register_limiter.allow(client_ip):
-            raise MemberPublishRateLimited()
+        existing = await self._channels.get(req.channel_id)
+        # Only a NEW channel spends the per-address register budget (it
+        # bounds new rows), still before any signature work. A refresh of a
+        # known one — an owner re-registering every channel it runs on a
+        # reconnect, many at once — is no new row; it is bounded by the
+        # per-address limit on every channel route (which also bounds the
+        # one indexed read an unknown-id flood now costs before its 429).
+        if existing is None and not self._allow(self._register_limiter, client_ip):
+            raise ChannelRateLimited()
         try:
             verify_register(req)
         except (InvalidChannelSignature, UnsupportedChannelSuite) as exc:
             raise PermissionError(f"registration refused: {exc}") from exc
         now = self._now()
-        existing = await self._channels.get(req.channel_id)
         if existing is None:
             if await self._channels.count() >= self._max_channels:
                 log.warning(
                     "gfs.channel: %d channels live — refusing new registrations",
                     self._max_channels,
                 )
-                raise MemberPublishBusy()
+                raise ChannelBusy()
             if await self._channels.register(
                 req.channel_id,
                 channel_suite=req.channel_suite,
@@ -438,7 +497,13 @@ class GfsChannelService:
         if inst.status != "active":
             raise PermissionError("instance is not active")
         self._addressed(req.gfs_instance_id, req.gfs_key)
-        ch = await self._channel(req.channel_id)
+        ch = await self._channels.get(req.channel_id)
+        if ch is None:
+            # A registered household's seat for a channel not registered
+            # here: its grant can beat the owner's register (or follow a
+            # retirement): not yet — it retries, and drops the retry once
+            # its grant moves on.
+            raise ChannelEpochTooSoon(SUBSCRIBE_NOT_YET_RETRY_S)
         try:
             verify_channel_pass(
                 req.channel_pass,
@@ -449,7 +514,17 @@ class GfsChannelService:
         except (InvalidChannelSignature, UnsupportedChannelSuite, ValueError) as exc:
             raise PermissionError(f"pass refused: {exc}") from exc
         now = self._now()
-        if req.channel_pass.epoch not in _open_epochs(ch, now=now):
+        epoch = req.channel_pass.epoch
+        if epoch not in _open_epochs(ch, now=now):
+            if ch.epoch is None or epoch > ch.epoch + 1:
+                # A valid pass AHEAD of the open epochs (the owner rotated
+                # again while its notice waits out the step bound, or the
+                # channel's first notice has not landed): not yet — 429 with
+                # when to retry, never a refusal the member gives up on.
+                # Open once the owner's notice for THIS epoch lands (the
+                # owner announces the newest epoch only).
+                wait = 0 if ch.epoch is None else ch.step_allowance(epoch, now=now)
+                raise ChannelEpochTooSoon(max(SUBSCRIBE_NOT_YET_RETRY_S, wait))
             raise PermissionError("pass epoch is not open here")
         if (
             not await self._channels.has_subscription(req.channel_id, inst.instance_id)
@@ -499,14 +574,14 @@ class GfsChannelService:
         return _resolve
 
     def _submit(self, channel_id: str, publisher_id: str, frame: dict) -> None:
-        if not self._member_publish.submit_fan_out(
+        if not self._fan_out.submit(
             f"ch:{channel_id}",
             publisher_id=publisher_id,
             frame=frame,
             resolve=self._resolver(channel_id),
             audience=(AUDIENCE_CHANNEL, channel_id),
         ):
-            raise MemberPublishBusy()
+            raise ChannelBusy()
 
     async def publish_anon(
         self, req: ChannelPublishAnonRequest, *, client_ip: str
@@ -523,12 +598,14 @@ class GfsChannelService:
             UnsupportedWriterKeySuite,
         ) as exc:
             raise PermissionError(f"writer signature refused: {exc}") from exc
-        if not self._anon_ip_limiter.allow(f"{req.channel_id}\x00{client_ip}"):
-            raise MemberPublishRateLimited()
-        if not self._channel_limiter.allow(req.channel_id):
-            raise MemberPublishRateLimited()
-        if not self._writer_key_limiter.allow(f"{req.channel_id}\x00{req.epoch}"):
-            raise MemberPublishRateLimited()
+        if not self._allow(self._anon_ip_limiter, f"{req.channel_id}\x00{client_ip}"):
+            raise ChannelRateLimited()
+        if not self._allow(self._channel_limiter, req.channel_id):
+            raise ChannelRateLimited()
+        if not self._allow(
+            self._writer_key_limiter, f"{req.channel_id}\x00{req.epoch}"
+        ):
+            raise ChannelRateLimited()
         now = self._now()
         if not ch.admits(req.epoch, now=now):
             raise PermissionError("writer key epoch is not open here")
@@ -545,9 +622,12 @@ def _is_channel_path(path: str) -> bool:
     return path in CHANNEL_ROUTES
 
 
-def build_channel_rate_limit(resolver: ClientIpResolver):
+def build_channel_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
     """Per-IP limiter on every ``/gfs/channels/*`` route, shedding a flood
-    before any signature work."""
+    before any signature work. With *nodes* (the cluster's live node count)
+    it is cluster-wide: each node allows its :func:`~.public.node_share`."""
     return build_window_limiter(
-        resolver, MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP, _is_channel_path
+        resolver, CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP, _is_channel_path, nodes=nodes
     )

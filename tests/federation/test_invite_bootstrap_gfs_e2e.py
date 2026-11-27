@@ -37,6 +37,7 @@ from socialhome.crypto import (
     b64url_decode,
     b64url_encode,
     derive_instance_id,
+    derive_user_id,
     generate_identity_keypair,
     generate_x25519_keypair,
     sign_ed25519,
@@ -118,7 +119,6 @@ from socialhome.services.gfs_relay_inbound import (
 from socialhome.services.peer_unpair_service import PeerUnpairService
 from socialhome.services.space_member_directory import SpaceMemberDirectory
 from socialhome.services.space_service import SpaceService
-from socialhome.services.space_writer_households import SpaceWriterHouseholds
 
 try:
     import pytest_socket  # noqa: F401
@@ -476,9 +476,6 @@ async def _household(
         directory = SpaceMemberDirectory(
             space_repo=space_repo,
             federation_repo=federation_repo,
-            writer_households=SpaceWriterHouseholds(
-                remote_members, own_instance_id=instance_id
-            ),
             mailboxes=mailbox_service,
             instance_id=instance_id,
             identity_seed=ident.private_key,
@@ -496,7 +493,9 @@ async def _household(
         federation._mailbox_sender_check = directory.sender_allowed
         fed_transport._mailbox_targets = directory.target_for
 
-    user_id = f"{name}-user-id"
+    # Minted like every household mints its people (P5 person-ID anchor:
+    # a host seats a redeemer only for an id that derives from its key).
+    user_id = derive_user_id(ident.public_key, f"{name}user")
     await user_repo.save(
         User(
             user_id=user_id,
@@ -2034,9 +2033,12 @@ def _mailbox_of(h, gfs) -> str:
     return mailbox_id
 
 
-async def _link_join(joiner, host, gfs, space, token: str) -> None:
-    """*joiner* redeems a fresh published link to *host*'s *space*."""
-    await host.space_repo.create_invite_token(space.id, host.user_id, uses=1)
+async def _link_join(
+    joiner, host, gfs, space, token: str, *, role: str = "member"
+) -> None:
+    """*joiner* redeems a fresh published link (for *role*) to *host*'s
+    *space*."""
+    await host.space_repo.create_invite_token(space.id, host.user_id, uses=1, role=role)
     await host.db.enqueue(
         "UPDATE space_invite_tokens SET token=? WHERE space_id=? AND token<>?",
         (token, space.id, TOKEN_MARKER),
@@ -2105,6 +2107,46 @@ async def test_space_content_rides_the_mailbox_and_the_gfs_sees_no_instance_id(
     wire = json.dumps([body for _, body in gfs.mailbox])
     for leak in (a.instance_id, b.instance_id, space.id, POST_MARKER):
         assert leak not in wire
+
+
+async def test_a_follow_seated_household_holds_the_hosts_card(mailbox_households, gfs):
+    """Same path (owner 2026-11-24): a follower is a member with the
+    read-only role on every path. A household already seated in one of the
+    host's spaces that then FOLLOWS another takes that seat over the pair
+    it has (no sealed bootstrap, so no card in an ACK): the host's member
+    directory must give it the host's card exactly like a member household,
+    or every frame of the followed space falls back to the
+    instance-addressed relay and the GFS sees both instance ids (the
+    traffic itself: ``tests/protocol/test_gfs_seated_space_mailbox_only``)."""
+    a, b = mailbox_households
+    for h in (a, b):  # the direct §D2 redeem over the existing seat
+        h.coordinator.attach_to(h.federation)
+    await _join(a, b, gfs)  # a member seat in b's first space
+    followed = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Followed",
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    await b.db.enqueue("UPDATE spaces SET private_gfs=1 WHERE id=?", (followed.id,))
+    await _link_join(a, b, gfs, followed, "tok-follow", role="subscriber")
+    for _ in range(3):  # the directory's sends go out from the sweep
+        await b.directory.sweep_once()
+        await a.directory.sweep_once()
+        await gfs.drain()
+    [own] = [
+        m
+        for m in await a.space_repo.list_members(followed.id)
+        if m.user_id == a.user_id
+    ]
+    assert own.role == "subscriber"
+    assert (await _rows(a))[(followed.id, b.instance_id)].get("card", {}).get(
+        "instance_id"
+    ) == b.instance_id, "the follower holds no card of the host"
+    # ... and the host holds the follower's, which members get in turn.
+    assert (await _rows(b))[(followed.id, a.instance_id)]["card"][
+        "instance_id"
+    ] == a.instance_id
 
 
 async def test_one_mailbox_serves_every_space_of_the_household(mailbox_households, gfs):

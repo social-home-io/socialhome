@@ -4,7 +4,7 @@ Every byte the GFS fans out is multiplied by its followers, so this is the
 number that says whether a payload change paid off. :class:`FanoutStats`
 counts what :class:`~socialhome.global_server.ws_registry
 .GfsWebSocketRegistry` actually wrote to sockets — per frame kind
-(``relay:space_post_public``, ``relay:space_item``, ``envelope``, …) and per
+(``relay:space_item``, ``envelope``, …) and per
 size class — since the node started. The admin overview
 (``GET /admin/api/overview``) shows it.
 

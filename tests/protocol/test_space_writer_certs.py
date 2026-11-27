@@ -20,7 +20,6 @@ post with a good cert — or with no cert at all (a pre-v_49 author) — does.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -28,11 +27,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-    strip_authority_sig_fields,
-)
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -56,6 +50,7 @@ from socialhome.services.space_public_author import (
     author_signing_bytes,
     build_signed_author_inner,
 )
+from socialhome.services.space_public_authority import channel_authority_plaintext
 from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_public_outbound import SpacePublicOutbound
 from socialhome.services.space_writer_cert_service import (
@@ -65,6 +60,16 @@ from socialhome.services.space_writer_cert_service import (
 from socialhome.writer_cert import sign_writer_cert
 
 pytestmark = pytest.mark.security
+
+
+async def _channel_relay(inbound, frame: dict) -> None:
+    """Hand an item to the reader the way it arrives since v_96: through the
+    space's opaque channel (the channel id already mapped to the space
+    locally). Space-keyed relay frames are no longer taken."""
+    await inbound.handle_channel_item(
+        frame["space_id"], epoch=frame["epoch"], payload=frame["payload"]
+    )
+
 
 SPACE = "sp-w"
 OTHER = "sp-x"
@@ -176,16 +181,16 @@ async def _relay(env, cert: dict | None, *, post_id: str = "p-1") -> None:
     await _deliver(env, await _envelope(env, cert, post_id=post_id))
 
 
-async def _deliver(env, envelope: dict) -> None:
-    await env.inbound.handle(
-        {"event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC, "payload": envelope}
-    )
+async def _deliver(env, item: dict) -> None:
+    await _channel_relay(env.inbound, item)
 
 
 async def _envelope(
     env, cert: dict | None, *, post_id: str = "p-1", sign: bool = True
 ) -> dict:
-    """One relayed public post envelope at the CURRENT epoch."""
+    """One host-relayed post at the CURRENT epoch: a channel authority item
+    (v_96), the inner signed by the space authority — or, ``sign=False``, by
+    a key that is not the space's."""
     uid = derive_user_id(env.author_kp.public_key, "bob")
     inner = {
         "post_id": post_id,
@@ -205,18 +210,15 @@ async def _envelope(
     )
     if cert is not None:
         inner["writer_cert"] = cert
-    epoch, ct = await env.crypto.encrypt(SPACE, json.dumps(inner).encode())
-    envelope = {"space_id": SPACE, "epoch": epoch, "encrypted_payload": ct}
-    if sign:
-        envelope.update(
-            sign_authority_event(
-                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-                space_id=SPACE,
-                payload=strip_authority_sig_fields(envelope),
-                space_seed=env.space_kp.private_key,
-            )
-        )
-    return envelope
+    epoch = await env.crypto.get_current_epoch(SPACE)
+    plain = channel_authority_plaintext(
+        inner,
+        space_id=SPACE,
+        epoch=epoch,
+        space_seed=env.space_kp.private_key if sign else os.urandom(32),
+    )
+    sealed_epoch, ct = await env.crypto.encrypt(SPACE, plain)
+    return {"space_id": SPACE, "epoch": sealed_epoch, "payload": ct}
 
 
 async def _landed(env, post_id: str = "p-1") -> bool:
@@ -404,10 +406,10 @@ async def test_host_signed_item_at_an_old_epoch_still_lands(env):
     """A host-signed item (the host re-stamped it at ITS current epoch) that
     arrives after later rotations is late delivery, not revocation: the
     authority signature is the authorizer, so no freshness gate."""
-    envelope = await _envelope(env, await _cert(env))
+    item = await _envelope(env, await _cert(env))
     await env.crypto.rotate_epoch(SPACE)
     await env.crypto.rotate_epoch(SPACE)
-    await _deliver(env, envelope)
+    await _deliver(env, item)
     assert await _landed(env)
 
 
@@ -419,6 +421,7 @@ async def _cert_item_ok(env, cert: dict, epoch: int) -> bool:
         epoch=epoch,
         author_pk=env.author_kp.public_key,
         required_scope="write",
+        item_type="post",
     )
 
 
@@ -504,39 +507,44 @@ async def test_own_cert_signed_by_a_retired_key_is_not_handed_out(env):
 # ── Host relay (SpacePublicOutbound) ─────────────────────────────────────
 
 
-class _CaptureGfs:
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
+class _Channel:
+    """The host's channel service: what goes into the space's channel."""
 
-    async def publish_space_event(
-        self, *, space_id, event_type, payload, skip=None, compressed_payloads=None
-    ) -> int:
-        self.calls.append(payload)
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str]] = []
+
+    async def has_channel(self, space_id) -> bool:
+        return True
+
+    async def publish_current(self, space_id, epoch, ct) -> int:
+        self.calls.append((epoch, ct))
         return 1
 
 
 @pytest.fixture
 async def host(env):
-    """The space's host: holds the seed and relays remote-authored posts."""
+    """The space's host: holds the seed and puts remote-authored posts into
+    the global space's channel (v_96)."""
     await env.spaces.set_space_seed(SPACE, env.space_kp.private_key)
     space = await env.spaces.get(SPACE)
     await env.spaces.save(
-        replace(space, features=replace(space.features, allow_subscribers=True))
+        replace(
+            space,
+            space_type=SpaceType.GLOBAL,
+            owner_instance_id="host.home",
+            features=replace(space.features, allow_subscribers=True),
+        )
     )
-    gfs = _CaptureGfs()
+    gfs = _Channel()
     out = SpacePublicOutbound(
         bus=EventBus(),
         space_repo=env.spaces,
         space_crypto=env.crypto,
         user_repo=SimpleNamespace(),
-        gfs_service=gfs,
     )
     host_kp = generate_identity_keypair()
-    out.attach_identity(
-        own_instance_id="host.home",
-        own_instance_public_key=host_kp.public_key,
-        own_identity_seed=host_kp.private_key,
-    )
+    out.attach_identity(own_instance_id="host.home")
+    out.attach_channels(gfs)  # type: ignore[arg-type]
 
     def _certs(seats, pks, versions=None):
         svc = SpaceWriterCertService(

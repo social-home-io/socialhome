@@ -1,5 +1,6 @@
 """Tests for socialhome.services.space_chat_outbound — a space chat's
-messages go to its writer households only, version-gated, never echoed."""
+messages go to every seated household (a follower's included, P10),
+version-gated, never echoed."""
 
 from __future__ import annotations
 
@@ -34,24 +35,26 @@ async def _chat(stack) -> str:
     return summary.conversation_id
 
 
-async def test_writer_households_skip_followers_tombstones_and_ourselves(stack):
-    assert await stack.audience.writer_households(SP) == {HOUSE_B}
+async def test_seated_households_skip_tombstones_and_ourselves(stack):
+    """P10: a follower household reads the chat like a member household."""
+    assert await stack.audience.households(SP) == {HOUSE_B, "house-f"}
     assert await stack.audience.may_receive(SP, HOUSE_B)
-    assert not await stack.audience.may_receive(SP, "house-f")
+    assert await stack.audience.may_receive(SP, "house-f")
     await stack.db.enqueue(
-        "UPDATE space_remote_members SET tombstoned=1 WHERE instance_id=?", (HOUSE_B,)
+        "UPDATE space_remote_members SET tombstoned=1 WHERE instance_id IN (?, ?)",
+        (HOUSE_B, "house-f"),
     )
-    assert await stack.audience.writer_households(SP) == frozenset()
+    assert await stack.audience.households(SP) == frozenset()
     # Our own household is never a target, even when mirrored.
     await stack.db.enqueue(
         "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
         " VALUES(?,?,'u-self','member')",
         (SP, stack.iid),
     )
-    assert await stack.audience.writer_households(SP) == frozenset()
+    assert await stack.audience.households(SP) == frozenset()
 
 
-async def test_create_edit_react_delete_are_broadcast_to_writers(stack):
+async def test_create_edit_react_delete_are_broadcast_to_every_seat(stack):
     chat_id = await _chat(stack)
     msg = await stack.dm.send_message(chat_id, sender_username="anna", content="hi")
     reply = await stack.dm.send_message(
@@ -72,7 +75,7 @@ async def test_create_edit_react_delete_are_broadcast_to_writers(stack):
     ]
     for b in sent:
         assert b.space_id == SP
-        assert b.only_instances == {HOUSE_B}
+        assert b.only_instances == {HOUSE_B, "house-f"}
         # The version gate ran per household above (space_member_supports).
         assert b.min_proto_version is None
         # Each household keeps its own chat: no conversation id travels.
@@ -100,17 +103,15 @@ async def test_create_edit_react_delete_are_broadcast_to_writers(stack):
 
 
 async def test_a_household_below_v55_is_left_out(stack):
-    stack.federation.older.add(HOUSE_B)
+    stack.federation.older.update({HOUSE_B, "house-f"})
     chat_id = await _chat(stack)
     await stack.dm.send_message(chat_id, sender_username="anna", content="hi")
     assert stack.federation.sent == []
     assert FederationCapability.MIN_FOR_SPACE_CHAT == 55
 
 
-async def test_nothing_is_sent_without_a_writer_household(stack):
-    await stack.db.enqueue(
-        "DELETE FROM space_remote_members WHERE role != 'subscriber'"
-    )
+async def test_nothing_is_sent_without_a_seated_household(stack):
+    await stack.db.enqueue("DELETE FROM space_remote_members")
     chat_id = await _chat(stack)
     await stack.dm.send_message(chat_id, sender_username="anna", content="hi")
     assert stack.federation.sent == []

@@ -189,7 +189,22 @@ class InboundRateLimitedError(ValueError):
         self.retry_after_s = retry_after_s
 
 
-class UnpairedPeerRefusedError(ValueError):
+class LoggedRefusal(ValueError):
+    """A refusal the pipeline step that raised it has already logged (at
+    INFO or DEBUG, naming what it may). Every transport (the inbox route,
+    the DataChannel, the GFS WebSocket) drops it quietly — a handled drop,
+    never a WARNING with a traceback per frame."""
+
+
+class NoMemberCardError(LoggedRefusal):
+    """A frame on our GFS mailbox (or the directory-seat relay) from a
+    sender whose member card we do not hold for the envelope's space
+    (:func:`make_check_mailbox_sender`). Expected around a seating: a member
+    that just learned our card can send before the host's directory brings
+    us its card — the item reaches us again through the §25.6 catch-up."""
+
+
+class UnpairedPeerRefusedError(LoggedRefusal):
     """An envelope from a household we are unpairing or just unpaired.
 
     Raised by :func:`make_check_unpairing` (an unpair tombstone) and by
@@ -876,7 +891,7 @@ def make_check_mailbox_sender(
                 "with no card for its space",
                 ctx.envelope.get("event_type"),
             )
-            raise ValueError("no member card of this sender for this space")
+            raise NoMemberCardError("no member card of this sender for this space")
 
     return check_mailbox_sender
 
@@ -1584,10 +1599,11 @@ def make_check_space_writer(
 
     The exceptions (:data:`_SUBSCRIBER_OPT_INS`) are
     ``SPACE_COMMENT_CREATED`` — and the author's own
-    ``SPACE_COMMENT_UPDATED`` / ``SPACE_COMMENT_DELETED`` — when the space
-    has ``allow_subscriber_comment`` on, and (v_93) ``SPACE_POST_REACTION``
-    when it has
-    ``allow_subscriber_react`` on — each only when the payload's acting
+    ``SPACE_COMMENT_UPDATED`` — when the space has
+    ``allow_subscriber_comment`` on, (v_93) ``SPACE_POST_REACTION`` when it
+    has ``allow_subscriber_react`` on, and the author's own
+    ``SPACE_COMMENT_DELETED`` always (owner decision F6: an author may
+    always delete their own comment) — each only when the payload's acting
     user names a LIVE ``subscriber`` seat of that same household: the user
     is bound to a real row, so a flag cannot be used to smuggle the spoof
     back in. They are the same admin opt-ins that decide what a LOCAL
@@ -1714,14 +1730,18 @@ async def _sender_hosts_space(
 
 #: The opt-ins out of the Follower refusal: event type → (the payload field
 #: naming the acting user, the ``SpaceFeatures`` flag that admits a
-#: follower). The same admin toggles that decide what a LOCAL follower may
-#: do.
-_SUBSCRIBER_OPT_INS: dict[FederationEventType, tuple[str, str]] = {
+#: follower, or ``None`` for no flag). The same admin toggles that decide
+#: what a LOCAL follower may do.
+_SUBSCRIBER_OPT_INS: dict[FederationEventType, tuple[str, str | None]] = {
     FederationEventType.SPACE_COMMENT_CREATED: ("author", "allow_subscriber_comment"),
-    #: A follower's edit / delete of its own comment follows the same switch
-    #: (the handler checks the comment is the sending household's own).
+    #: A follower's edit of its own comment follows the same switch (the
+    #: handler checks the comment is the sending household's own).
     FederationEventType.SPACE_COMMENT_UPDATED: ("author", "allow_subscriber_comment"),
-    FederationEventType.SPACE_COMMENT_DELETED: ("author", "allow_subscriber_comment"),
+    #: Owner decision F6 (2026-11-23): an author may always delete their own
+    #: comment, a follower included, whatever the switch says — still bound
+    #: to a live follower seat of the sender here, and the handler deletes
+    #: only a comment that author wrote (authorship, not the switch).
+    FederationEventType.SPACE_COMMENT_DELETED: ("author", None),
     #: v_93 — a follower's reaction on a space post.
     FederationEventType.SPACE_POST_REACTION: ("user_id", "allow_subscriber_react"),
 }
@@ -1733,7 +1753,7 @@ async def _subscriber_opt_in_allowed(
     space_id: str,
     live_seats: list,
     author_user_id: str,
-    flag: str,
+    flag: str | None,
 ) -> bool:
     """An opt-in out of the Follower refusal — see the step's docstring.
 
@@ -1741,6 +1761,7 @@ async def _subscriber_opt_in_allowed(
     comment`` / ``allow_subscriber_react``), and an acting user bound to a
     LIVE ``subscriber`` seat of the sending household. Without the binding
     the flag would re-open the author-spoof hole the gate exists to close.
+    ``flag`` ``None`` (the author's own comment delete) needs the seat only.
     """
     if not author_user_id:
         return False
@@ -1749,6 +1770,8 @@ async def _subscriber_opt_in_allowed(
         for s in live_seats
     ):
         return False
+    if flag is None:
+        return True
     try:
         space = await space_repo.get(space_id)
     except Exception as exc:

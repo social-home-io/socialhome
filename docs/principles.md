@@ -66,16 +66,21 @@ the old space key. A receiver re-pins only when that certificate
   registered key when there is one — and
 - carries a strictly HIGHER `key_epoch` than the one it holds.
 
-One deliberate exception, for a household that merely FOLLOWS a public /
-global space through a connection server (no real seat): it re-pins from
+**Removed in v_96** (see "Sign-off: members know who follows
+(v_96)", point 4). Until v_96 there was one deliberate exception, for
+a household that merely FOLLOWED a public / global space through a
+connection server (no real seat): it re-pinned from
 the directory listing of the ONE GFS that seated its mirror — the key that
 GFS re-pinned after verifying the owner's cert, plus the GFS's own re-pin
 counter — not from the cert itself, which the GFS keeps private so the owner
 household's identity key and the rotation time never reach a public page.
 That is the same trust such a follower already places in that GFS for its
 very first (TOFU) pin; the counter must strictly rise, so the GFS cannot hand
-back an older key, and no other connection server can move the pin. A
-household with a real seat, or a private stub, never takes a pin from a GFS.
+back an older key, and no other connection server can move the pin. Since
+v_96 every follower holds a real `subscriber` seat seated by the host, so no
+follow-only mirror exists any more and **no household ever takes a pin from
+a GFS** — a follower re-pins only from the owner's certificate, like every
+other seat.
 
 What this does not relax: no third party — a relay, a GFS, a delegated
 admin, the demoted household — can produce such a certificate; the owner
@@ -97,12 +102,17 @@ counts, choices, message bodies — sits inside the AES-256-GCM
 payload. There is no `"payload": plaintext_fallback` pattern, and
 there is no "trusted instance" mode that skips encryption.
 
-Names travel the same way. A space's GFS followers learn its authors' names,
+Names travel the same way. A space's followers learn its authors' names,
 bios and pictures from the authors' own `author_profile` items (v_60): inside
 the space payload, encrypted under the space content key and signed by the
 author's household — the GFS relays ciphertext it cannot read and learns
 nothing it did not already. A protected (child) account's profile carries
-its name only.
+its name only. Since v_96 those items ride the space's opaque channel like
+every other item, a new follower gets the members roster in its seat ACK
+instead of the v_61 host bundle (which is gone), and a follower who comments
+publishes its own `author_profile` the same way; members also know its
+people from the roster, as they know any member's (see "Sign-off: members know who follows
+(v_96)").
 
 **Public moments are encrypted from the GFS too (v_62, owner decision
 2026-10-20).** The former "public Momentum is the one plaintext exception"
@@ -150,48 +160,42 @@ and push, but cannot read or forge content.
 - **Household-to-household** federation envelopes are signed with the
   **originating instance's** Ed25519 key (optional ML-DSA-65 hybrid), so the
   GFS cannot impersonate a household there.
-- **`POST /gfs/publish`** carries **no originating-instance signature at all**
-  — that is the point of the identity-free relay below. Forgery is prevented
-  by the **space-authority** signature sealed inside the payload: only a
-  holder of the space seed can mint one, and every subscriber verifies it
-  against the space public key it already mirrors. A GFS that fabricated a
-  relay would have to forge that signature, which it cannot. What the GFS
-  *can* do on this path is relay a captured payload again (the relay is
-  deliberately at-least-once; subscriber-side `post_id` dedupe is the
-  backstop) — it cannot author one.
+- **A space's channel publish** (`POST /gfs/channels/publish-anon`) carries
+  **no originating-instance signature at all** — it is signed with the
+  channel's writer key, which members (and followers allowed to comment or
+  react) hold, never a household key. Forgery is prevented inside the
+  sealed item: the author's own signature and writer cert, verified by
+  every receiving household against keys it already pins. A GFS that
+  fabricated an item would have to forge those, which it cannot. What the
+  GFS *can* do on this path is relay a captured item again (receivers
+  dedupe by item id) — it cannot author one.
 
-**Strengthened:** the GFS no longer learns *which household relayed* a
-public/global space event either. `POST /gfs/publish` carries exactly
-`{space_id, event_type, payload}` — plus, for an event meant for one new
-follower (v_61), the routing `to`: the subscriber the GFS itself named in
-its `new_subscriber` notify, never the relaying household — and is
-authorized purely by the space-authority signature sealed inside the
-opaque payload; the fan-out frame to subscribers is identity-free too. The relaying household's
-identity is not **required, stored, logged or forwarded**.
-
-There is **no identified fallback on the relay**: a household never sends
-`from_instance` or a household signature on `POST /gfs/publish`, and the
-publish rides a separate cookie-less HTTP session so no load-balancer cookie
-from its authenticated GFS calls links the two. (Those other calls are
-identified by design and still are: pairing, the GFS WebSocket, appeals,
-signed subscribe/unsubscribe. A space sync makes no GFS call at all — the
-per-sync signaling-node request is gone.) It relays only to a GFS
-whose `GET /gfs/info` capability block proves `anonymous_publish` under the
-GFS identity key the household pinned at pair time (the answer **ratchets** —
-a capability cannot be un-advertised mid-life — and a public GFS URL must be
-`https://`). A GFS that cannot prove it — an older build, or a response
-stripped on-path — gets no space publishes at all until it upgrades, with one
-WARNING per connection; an unreachable one gets the publish later, from the
-household's retry queue, once it proves the capability. Fail closed: a strip
-costs a relay, never an identity.
+**The channel publish is identity-free.** Since v_96 a space's content
+reaches a GFS only through the space's opaque channel (v_51 private, v_96
+global; the space-id-keyed `POST /gfs/publish`, `POST /gfs/subscribe` and
+`space_subscribers` are removed), plus the sealed household-to-household
+envelope relay, which names no space. A publish carries the channel id, the
+content epoch and the ciphertext — never `from_instance` or a household
+signature — and rides a separate **cookie-less** HTTP session, so no
+load-balancer cookie from the household's authenticated GFS calls links the
+two. (Those other calls are identified by design: pairing, the GFS
+WebSocket, appeals, a seat's signed channel subscribe.) A household uses a
+GFS for channels only once its signed `GET /gfs/info` capability block —
+verified under the GFS identity key pinned at pair time — proves
+`private_channels` (and, for a global space, `subscriber_seats`); a block
+stripped on-path reads as "not proven": fail closed, a strip costs a
+delivery, never an identity. The GFS holds the follow graph as the
+channel's identified seats, without the space id, and never reads what it
+relays.
 
 The honest residual: this is not "the GFS cannot learn it". A household
 normally holds an authenticated WebSocket to the same server from the same
 IP, so an operator can correlate a publish's source IP, timing and size
 with that session. Closing that would need a mix/onion egress and is out of
-scope. One smaller residual is tracked with the relay itself: a per-instance
-GFS ban cannot gate an anonymous relay — the space-level ban is the
-moderation lever there. See
+scope. A per-household GFS ban cannot gate an anonymous publish either:
+the channel's own limits and the household ban on its identified calls
+are the levers (and a moderator's space ban only delists, see "Sign-off: a
+GFS moderator's space ban only delists the space"). See
 [`protocol/discovery.md`](./protocol/discovery.md).
 
 ### A public highlight link is end to end
@@ -303,7 +307,7 @@ exactly:**
   operator willing to read their own access log can therefore correlate
   *sender IP → recipient instance id → time → size bucket* for every relayed
   envelope, which is the pairwise graph the sealed body withholds. This
-  is the same residual `/gfs/publish` carries and has the same answer:
+  is the same residual the channel publish carries and has the same answer:
   closing it needs a mix/onion egress and is out of scope. `to_instance`
   is validated against the exact instance-id shape (32 lowercase base32
   characters) before it reaches any log line, so a caller cannot author a
@@ -316,7 +320,7 @@ exactly:**
   *what* thing, or that a space is involved at all, but the correlation
   is real and is the sharpest edge of this concession.
 - **It can correlate with the household's own WebSocket session** — same
-  server, same IP — exactly as the `/gfs/publish` residual above notes.
+  server, same IP — exactly as the channel-publish residual above notes.
 - **One mailbox per household hides the instance id (v_89; owner
   sign-off 2026-11-09).** When both sides are at v_89 and the GFS proves
   `envelope_mailbox`, `to_instance` is the recipient household's ONE
@@ -442,12 +446,13 @@ them, so the host is no longer a single point of failure and a link-joined
 member reaches every subscriber live. **There is one mode, and it is
 anonymous** (owner decision 2026-11-09, v_90): the trusted / strict
 `gfs_publish_mode` and the identified `POST /gfs/member-publish` are gone.
-The request (`POST /gfs/member-publish-anon`) carries no household id, no
+The request (since v_96 the channel's `POST /gfs/channels/publish-anon`;
+before it `POST /gfs/member-publish-anon`) carries no household id, no
 household signature and no plaintext writer cert — it is authorized by the
 epoch's writer group key, which every household allowed to publish anything
 in the space shares (posters and commenters alike) and nobody else holds.
-This keeps, for publishing, the invariant the identity-free `/gfs/publish`
-relay keeps: **the GFS must not learn which household published.**
+This keeps, for publishing, the invariant of the identity-free channel
+publish: **the GFS must not learn which household published.**
 
 **What it concedes, exactly:**
 
@@ -462,12 +467,19 @@ relay keeps: **the GFS must not learn which household published.**
   exact key set, so nothing can ride alongside the ciphertext in plaintext;
   the writer cert (which names the household and its scope) never leaves
   the ciphertext (pinned by
-  `tests/protocol/test_gfs_member_publish_blind.py` and
-  `tests/protocol/test_gfs_member_publish_strict_blind.py`).
+  `tests/protocol/test_gfs_global_channel_blind.py` and
+  `tests/protocol/test_gfs_private_channel_blind.py`).
 - **It learns the space's subscriber set**, in which writers look exactly
   like followers: a household with a writer seat auto-subscribes to the
   fan-out of each of its public/global spaces on every capable server, with
-  the very same signed request a follower sends.
+  the very same signed request a follower sends. **Since v_96** that set is
+  the seats of the space's opaque channel (members and followers alike,
+  identified, without the space id): a global space's items go to
+  `/gfs/channels/publish-anon` with the same writer group key, and
+  `/gfs/member-publish-anon` and the space-keyed subscribe are removed. A
+  follower allowed to comment or react holds the same writer key, so its
+  publishes look exactly like a member's (see "Sign-off: members know who
+  follows (v_96)").
 - **It learns when the space content key rotates** — from the owner's
   (household-signed) and delegated admins' (authority-signed) epoch notices
   — as it already could from the `epoch` of authority-signed post relays.
@@ -512,8 +524,9 @@ connected to. **What that concedes, exactly:**
   goes to such a server: no instance id, no household signature, no
   household key, no writer cert in the clear, no cookie (each one is reached
   over its own cookie-less session), no subscribe and no pairing. It gets
-  only the anonymous `member-publish-anon` request, a delegated admin's
-  authority-signed epoch notice, the identity-free `/gfs/publish` relay and
+  only the anonymous channel publish (`/gfs/channels/publish-anon`; before
+  v_96 also `member-publish-anon`, a delegated admin's authority-signed
+  epoch notice and the identity-free `/gfs/publish` relay) and
   the anonymous mailbox frames for members whose card mailbox is there
   (`/gfs/envelope`, `/gfs/envelope/multi`, v_91), and it keeps no
   `client_instances` row for the household. IP and timing
@@ -558,7 +571,7 @@ connected to. **What that concedes, exactly:**
   publish there is not refused.
 
 Pinned by `tests/protocol/test_gfs_multi_listing_blind.py` and
-`tests/protocol/test_gfs_member_publish_strict_blind.py`.
+`tests/protocol/test_gfs_global_channel_blind.py`.
 
 ### Sign-off: a private space's opaque channel shows the server its link-joined households (v_51)
 
@@ -568,7 +581,7 @@ every item: a link-joined member reaches the host only over the connection
 server's `/gfs/envelope`, so nobody else saw its posts while the host was
 offline. Since v_51 such a space gets member publishing through an **opaque
 channel** (`/gfs/channels/*`, see
-[`protocol/discovery.md`](./protocol/discovery.md#private-spaces-opaque-channels-v_51)):
+[`protocol/discovery.md`](./protocol/discovery.md#opaque-channels-private-and-global)):
 a random 128-bit id plus a channel key derived from the space seed. **Since
 the owner decision of 2026-10-04 the channel exists only by the owner's
 explicit, per-space opt-in** (`SpaceFeatures.private_gfs`, "use the
@@ -601,8 +614,11 @@ turned OFF or the last remote member leaves. **What it concedes, exactly:**
   never which household (one anonymous mode since v_90, as for public
   spaces above).
 - **The owner is not named, but is inferable.** The owner holds no grant
-  and never subscribes or publishes; its registration and notices are
-  anonymous. But the server already sees the owner's instance id as the
+  and never subscribes; its registration and notices are anonymous. (Until
+  v_96 it never published into the channel either; since v_96 it publishes
+  its own household's items, moderation outcomes and items a member could
+  not get to the channel — see "Sign-off: members know who
+  follows (v_96)", point 3.) But the server already sees the owner's instance id as the
   recipient of every link-joined member's `/gfs/envelope` (the signed-off
   link-pair residual above), the owner registers and announces from the
   same IP as its authenticated WebSocket, and a member's channel publish
@@ -1142,6 +1158,57 @@ network address and timing, as for every envelope it relays (see the
 link-joined pair sign-off above) — the lookup that would have told it
 directly is gone.
 
+### Sign-off: members know who follows (v_96)
+
+**Signed off by the owner on 2026-11-23** (revised the same day: followers
+take the members' path, owner decision "avoid having followers use a
+completely different path"). Until v_96 a household could follow a public
+or global space two ways: as a GFS subscriber the host never saw (the GFS
+held the subscription), or through a follower invite link with a real seat.
+v_96 makes it one seat on every path: **a follower is a member with the
+read-only `subscriber` role** — auto-approved while the space has
+`allow_subscribers` on (ban, age gate and the local-community edge rule
+still apply), on the same roster, reached the same way, and a global space's
+content reaches members and followers alike over the space's opaque channel
+([`protocol/spaces.md`](./protocol/spaces.md#followers-v_96)). What that
+concedes, exactly:
+
+1. **Every household of the space knows who follows.** The host, the
+   admins, the members and the other followers hold follower seats like
+   any seat: the follower household's id, its following users and their
+   role. Until v_96 a GFS follower was unknown to the host and to members.
+   The app may show them grouped as "Followers".
+2. **A follower learns the roster.** A follower that came through a GFS
+   gets the roster in its seat ACK and the live gossip, exactly as a
+   link-joined member does: member and follower household ids and names.
+   It also gets the host's member directory like a member household (same
+   path): every seated household's signed card — its key-wrap key and its
+   one GFS mailbox (GFS URL, mailbox id, mailbox key) — so its traffic and
+   the traffic to it ride the mailboxes, never the instance-addressed relay
+   (the GFS sees neither household's instance id). A card is keys and an
+   address, never a right. (Owner sign-off 2026-11-25.)
+3. **The owner publishes into its own channel** (relaxes the v_51 rule that
+   the owner never publishes there). It sends its own household's items,
+   moderation outcomes and items whose author could not reach the channel,
+   anonymously like any member, into every channel of the space — global
+   spaces and private spaces with `private_gfs` on alike. A GFS can link
+   channel and space by the owner's IP and timing; it already could, by the
+   link-pair residual above.
+4. **The follower TOFU re-pin exception is removed.** There is no
+   follow-only mirror any more, so no household ever takes an authority pin
+   from a GFS listing; the v_44 owner certificate is the only way a pin
+   moves.
+
+What does not change: a follower writes only comments and reactions, only
+through a signed `reader` cert and only while the space allows them, and it
+receives none of the member-only data (zones, location, chat, proposals,
+sync pages) the existing role checks keep from it; the GFS reads nothing it
+relays and still cannot forge an item; the follower set it sees is the
+channel's seats (the channel carries no space id on the wire); households
+met through a GFS still never talk directly; non-member households on the
+mesh still see only `SPACE_ROUTED` ciphertext. Anything that lets a
+follower write more, or read member-only data, is a §2-principle change
+needing a new sign-off.
 ### Sign-off: a GFS learns a listed space's member and follower counts (signed off 2026-11-23)
 
 A global space's listing carries `member_count` (members — never followers)
@@ -1157,10 +1224,26 @@ by every receiver) and a count change is re-published at most once per
 GFS, so a relay or another registered household cannot alter them; it is
 not served onward, so a GFS **can misreport** them to its readers — exactly
 as it could misreport the space's name. Readers treat them as the GFS's
-word. A follower reached
-only through a GFS is no roster seat yet, so it is not counted until the
-subscriber-seats work makes it one. Paired households get the same two
-numbers in the `SPACE_DIRECTORY_SYNC` snapshot.
+word. Since v_96 a follower holds a roster seat on every path (a GFS
+follower too), so `follower_count` counts every live follower seat.
+Paired households get the same two numbers in the
+`SPACE_DIRECTORY_SYNC` snapshot.
+
+### Sign-off: a GFS moderator's space ban only delists the space (v_96)
+
+**Owner sign-off 2026-11-26.** The GFS is content-blind: since v_96 a
+global space's content reaches it only through the space's opaque channel,
+and the GFS can't tell which channel belongs to which space — that is the
+point of the channel. A GFS moderator's space ban (and
+`auto_accept_spaces = false`) therefore removes the space from that GFS's
+listing and refuses its `join_contact`. It cannot stop the space's channel
+or the channel's media. The GFS's lever against abusive content is the
+household (mailbox / connection) ban and the per-channel limits, not the
+space. Rejected: an admin "drop channel" action fed by a seat holder's
+report naming the channel id — the owner mints an unrelated channel at its
+next authority rotation or heal, so a drop is undone at once unless the GFS
+kept a per-channel registrant identity it deliberately doesn't keep, and
+every report would leave the GFS a stored channel ↔ space link.
 
 ### Mailbox tickets hide a household among its epoch's households
 
@@ -1403,7 +1486,15 @@ peer-accept included ([`protocol/pairing.md`](./protocol/pairing.md#home-sharing
 Never via a GFS, never as a side effect of joining a space. The one other
 place a household's location travels is a join to a local community, below:
 coarse (~1 km), with the person's explicit consent, to that space's host only.
-Every other federation payload is location-free.
+A person may also share their live location in a space they hold a seat in,
+under their own per-space switch: off by default, offered only where the
+space's admins turned the map on, GPS rounded to 4 dp (or only the zone's
+name in `zone_only`). That pin reaches everyone seated in the space (members
+and followers alike; owner-approved 2026-11-27: a follower is a limited
+member but still a member). The switch says so, with the follower count. A
+follower never shares a pin of its own. The pin travels sealed to the seated
+households only: never readable by a GFS, never to a household with nobody
+seated. Every other federation payload is location-free.
 
 **The household home reaches a paired household only as an area
 (owner decision 2026-11-20).** What `share_home` sends is the centre of

@@ -10,8 +10,9 @@ import {
   sectionAllowed, sectionLabel, spaceSectionPath, visibleSpaceSections,
 } from './spaceTabs'
 
-const member = { chat: true, follower: false }
-const follower = { chat: false, follower: true }
+const member = { chat: true, seated: true }
+// P10: a follower reads everything a member does — the chat included.
+const follower = { chat: true, seated: true }
 
 describe('visibleSpaceSections', () => {
   it('defaults: every section but the opt-ins (map, timetable), in the one fixed order', () => {
@@ -39,18 +40,18 @@ describe('visibleSpaceSections', () => {
     expect(gamesSectionShown(undefined, chooser)).toBe(true)
   })
 
-  it('no Games without a known writing seat (a non-member, a role still loading)', () => {
-    expect(gamesSectionShown({ allowed_apps: ['chess'] }, { ...member, writer: false })).toBe(false)
-    expect(sectionAllowed('games', { allowed_apps: ['chess'] }, { ...member, writer: false, canModerate: false }))
+  it('no Games without a known seat (a role still loading)', () => {
+    expect(gamesSectionShown({ allowed_apps: ['chess'] }, { ...member, seated: false })).toBe(false)
+    expect(sectionAllowed('games', { allowed_apps: ['chess'] }, { ...member, seated: false, canModerate: false }))
       .toBe(false)
   })
 
-  it('never Games for a follower, nor in a global space', () => {
-    expect(visibleSpaceSections({ allowed_apps: ['chess'] }, follower)).not.toContain('games')
+  it('Games for a follower too (it watches, P10), never in a global space', () => {
+    expect(visibleSpaceSections({ allowed_apps: ['chess'] }, follower)).toContain('games')
     expect(gamesSectionShown({ allowed_apps: ['chess'] }, { ...member, choosesGames: true, global: true }))
       .toBe(false)
     expect(sectionAllowed('games', { allowed_apps: ['chess'] }, { ...follower, canModerate: false }))
-      .toBe(false)
+      .toBe(true)
     expect(sectionAllowed('games', { allowed_apps: ['chess'] }, { ...member, canModerate: false }))
       .toBe(true)
     expect(sectionLabel('games')).toBe('Games')
@@ -77,15 +78,16 @@ describe('visibleSpaceSections', () => {
   })
 
   it('Chat only when the space chat is open to the viewer', () => {
-    expect(visibleSpaceSections(undefined, { chat: false, follower: false })).not.toContain('chat')
+    expect(visibleSpaceSections(undefined, { chat: false })).not.toContain('chat')
   })
 })
 
 describe('visibleSpaceSections — a follower', () => {
-  it("gets no Map (the pins and zones are the members' whereabouts) and no Chat", () => {
-    expect(visibleSpaceSections({ location: true }, follower)).not.toContain('map')
-    expect(visibleSpaceSections({ location: true }, follower)).not.toContain('chat')
-    expect(visibleSpaceSections({ location: true }, member)).toContain('map')
+  it('gets the Map and the Chat like a member (P10: read parity)', () => {
+    expect(visibleSpaceSections({ location: true }, follower)).toContain('map')
+    expect(visibleSpaceSections({ location: true }, follower)).toContain('chat')
+    expect(visibleSpaceSections({ location: true }, follower))
+      .toEqual(visibleSpaceSections({ location: true }, member))
   })
 })
 
@@ -98,7 +100,8 @@ describe('sectionAllowed', () => {
 
   it('a section whose feature is off is not allowed', () => {
     expect(sectionAllowed('gallery', { gallery: false }, { ...member, canModerate: true })).toBe(false)
-    expect(sectionAllowed('map', { location: true }, { ...follower, canModerate: false })).toBe(false)
+    expect(sectionAllowed('map', { location: false }, { ...follower, canModerate: false })).toBe(false)
+    expect(sectionAllowed('map', { location: true }, { ...follower, canModerate: false })).toBe(true)
   })
 })
 

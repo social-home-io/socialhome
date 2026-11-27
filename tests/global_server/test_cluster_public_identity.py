@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import AsyncIterator
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,25 +27,22 @@ from socialhome.crypto import (
     derive_instance_id,
     ed25519_public_key,
 )
-from socialhome.domain.gfs_member_publish import MemberPublishAnonRequest
+from socialhome.domain.gfs_channel import ChannelPublishAnonRequest
+from socialhome.gfs_channel import channel_pk_of, new_channel_id, sign_publish_anon
 from socialhome.global_server.app_keys import (
+    gfs_channel_repo_key,
     gfs_cluster_key,
     gfs_fed_repo_key,
-    gfs_space_epoch_repo_key,
 )
 from socialhome.global_server.cluster import NODE_HELLO
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
-from socialhome.writer_key import (
-    derive_writer_seed,
-    issue_writer_key_grant,
-    sign_with_writer_key,
-)
 
-SPACE_ID = "sp-public"
 SEED_HEX = "5e" * 32
-SPACE_SEED = os.urandom(32)
+CHANNEL_ID = new_channel_id()
+CHANNEL_SEED = os.urandom(32)
+WRITER_SEED = os.urandom(32)
 HOUSEHOLD_SEED = os.urandom(32)
 HOUSEHOLD_PK = ed25519_public_key(HOUSEHOLD_SEED)
 HOUSEHOLD_ID = derive_instance_id(HOUSEHOLD_PK)
@@ -98,45 +94,33 @@ async def _seed_state(server: TestServer) -> None:
             status="active",
         )
     )
-    await fed.upsert_space(
-        GlobalSpace(
-            space_id=SPACE_ID,
-            owning_instance=HOUSEHOLD_ID,
-            name="Public",
-            allow_subscribers=True,
-            status="active",
-            identity_public_key=ed25519_public_key(SPACE_SEED).hex(),
-        )
-    )
     await fed.mark_relay_seen(HOUSEHOLD_ID, at=int(time.time()))
-    # The owner confirmed epoch 3 and pinned its writer key.
-    epochs = server.app[gfs_space_epoch_repo_key]
-    await epochs.confirm(SPACE_ID, 3, now=int(time.time()))
-    await epochs.pin_writer_key(
-        SPACE_ID,
-        3,
-        issue_writer_key_grant(
-            space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=3
-        ).writer_key_cert.writer_pk,
-        replace=True,
+    # A channel at epoch 3 with its writer key pinned and one seat.
+    channels = server.app[gfs_channel_repo_key]
+    now = int(time.time())
+    await channels.register(
+        CHANNEL_ID,
+        channel_suite="ed25519",
+        channel_pk=channel_pk_of(CHANNEL_SEED),
+        now=now,
     )
+    await channels.set_epoch(CHANNEL_ID, 3, expected=None, now=now)
+    await channels.pin_writer_key(CHANNEL_ID, 3, channel_pk_of(WRITER_SEED))
+    await channels.add_subscriber(CHANNEL_ID, HOUSEHOLD_ID, pass_epoch=3, now=now)
 
 
 def _publish_body(gfs_instance_id: str, payload: str) -> dict:
-    req = MemberPublishAnonRequest(
+    req = ChannelPublishAnonRequest(
         gfs_instance_id=gfs_instance_id,
+        channel_id=CHANNEL_ID,
         ts=datetime.now(UTC).isoformat(),
         nonce=b64url_encode(os.urandom(16)),
-        target=SPACE_ID,
         epoch=3,
         payload=payload,
         writer_sig="",
         writer_sig_suite="ed25519",
     )
-    seed = derive_writer_seed(SPACE_SEED, SPACE_ID, 3)
-    return replace(
-        req, writer_sig=sign_with_writer_key(seed, req.signing_bytes())
-    ).to_wire()
+    return sign_publish_anon(req, writer_seed=WRITER_SEED).to_wire()
 
 
 async def _info(server: TestServer) -> dict:
@@ -152,7 +136,7 @@ async def _publish(server: TestServer, gfs_instance_id: str, payload: str) -> in
     async with (
         ClientSession() as http,
         http.post(
-            f"{_url(server)}/gfs/member-publish-anon",
+            f"{_url(server)}/gfs/channels/publish-anon",
             json=_publish_body(gfs_instance_id, payload),
         ) as resp,
     ):

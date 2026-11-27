@@ -295,7 +295,7 @@ async def test_a_banned_household_gets_the_uniform_answer(client, env):
             join_mode=JoinMode.INVITE_ONLY,
         )
     )
-    await env["fed_repo"].ban_instance_from_space("sp1", env["peer"].id)
+    await client.server.app[space_repo_key].ban_household("sp1", env["peer"].id)
     header, sealed = _frame(
         env, event_type=FederationEventType.SPACE_MEDIA_BLOB, space_id="sp1"
     )

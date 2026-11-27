@@ -55,8 +55,8 @@ from ..domain.errors import PayloadTooLargeError
 from ..domain.federation import FederationEventType
 from ..federation.inbound_validator import (
     InboundRateLimitedError,
+    LoggedRefusal,
     ReplayDetectedError,
-    UnpairedPeerRefusedError,
 )
 from ..federation.inbox_reply import INBOX_CODE_REPLAY, INBOX_REPLAY_STATUS
 from ..federation.media_framing import (
@@ -404,7 +404,7 @@ class FederationInboxView(BaseView):
                     },
                     status=INBOX_REPLAY_STATUS,
                 )
-            if isinstance(exc, UnpairedPeerRefusedError):
+            if isinstance(exc, LoggedRefusal):
                 # A household we unpaired while it was offline, still
                 # talking as if paired. The pipeline step logged it once
                 # (INFO when it pulled our UNPAIR forward, DEBUG after) —

@@ -336,7 +336,14 @@ _COUNTS: dict[str, dict[str, int]] = {
     "SPACE_SESSION": {
         "socialhome/app.py": 1,
         "socialhome/domain/federation.py": 3,
-        "socialhome/federation/federation_service.py": 18,
+        # +1 (v_96): gfs_reached_followers — the follower households only
+        # the host reaches (it re-sends a delegated admin's rekey to them).
+        # (P10: the v_96 channel_reached_followers skip is gone — a
+        # follower is reached like a member on the same paths.)
+        # +1 (P10, transport): reaches_host_directly — a GFS seat is no
+        # paired path to the host, so the media fetch goes through the GFS
+        # (by path, never by role).
+        "socialhome/federation/federation_service.py": 20,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,
@@ -372,7 +379,10 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/services/space_media_sync_service.py": 2,
     },
     "is_space_session_peer": {
-        "socialhome/federation/federation_service.py": 3,
+        # +1 (P9): _handle_space_sync_direct_failed takes from an invite-link
+        # household only a capacity refusal of a BEGIN we sent — a
+        # transport rule (no direct connection), not a member special case.
+        "socialhome/federation/federation_service.py": 4,
         "socialhome/federation/sync/space/provider.py": 1,
         "socialhome/federation/sync/space/scheduler.py": 1,
     },

@@ -206,8 +206,8 @@ ENVELOPE_MAX_BODY_BYTES: int = 320 * 1024
 
 #: Per-IP/minute cap on ``POST /gfs/envelope``. The endpoint is anonymous ON
 #: PURPOSE — there is no household identity on the wire to account against —
-#: so the client address is the only shedding handle, exactly as for
-#: ``/gfs/publish``.
+#: so the client address is the only shedding handle, exactly as for the
+#: anonymous channel publish.
 #:
 #: **This is not an invite-only path.** The relay started life carrying two
 #: envelopes per invite redeem, and 30/min was generous for that. It now also
@@ -376,8 +376,8 @@ def queued_relay_push(row: dict) -> dict:
     return {**row, "type": RELAY_FRAME_TYPE}
 
 
-#: Per-recipient caps for queued RELAY items (member-published space items,
-#: ``POST /gfs/member-publish-anon``). Counted separately from the envelope caps
+#: Per-recipient caps for queued RELAY items (channel items,
+#: ``POST /gfs/channels/publish-anon``, and public moments). Counted separately from the envelope caps
 #: above so a busy public space can never crowd out a household's sealed
 #: invite / link-federation envelopes. Past either cap the recipient's OWN
 #: oldest relay item is evicted (``enqueue_relay``) — only authenticated
@@ -410,6 +410,12 @@ QUEUED_REACTION_MAX_BYTES: int = MAX_REACT_BODY_BYTES
 #: refusing the new one — so a group of recipients cannot capture the cap
 #: and starve the rest. Live pushes are unaffected.
 RELAY_QUEUE_MAX_TOTAL_BYTES: int = 256 * 1024 * 1024
+
+#: Offline copies of one item written per transaction
+#: (``enqueue_relay_many``). The server-wide total is summed once per batch,
+#: so 10 000 offline seats cost 20 index scans instead of 10 000, while one
+#: batch holds the shared write lock for only tens of milliseconds.
+RELAY_QUEUE_BATCH: int = 500
 
 #: How long a ``/gfs/ws`` session must last before the household counts as
 #: "seen" for offline relay queueing (``client_instances.relay_seen_at``). A
@@ -1209,9 +1215,9 @@ class GfsEnvelopeRelay:
         audience: tuple[str, str] | None = None,
         skip: str = "",
     ) -> int:
-        """Deliver a member-published space item to *targets*.
+        """Deliver a channel item to *targets* (the channel's seats).
 
-        ``frame`` is the identity-free fan-out frame (``SpaceItemFrame``
+        ``frame`` is the identity-free fan-out frame (``CHANNEL_FRAME_KEYS``
         shape); it goes out as ``{type: "relay", **frame}``. Live sockets on
         THIS node are pushed with at most :data:`RELAY_FAN_OUT_CONCURRENCY`
         sends in flight.
@@ -1273,22 +1279,40 @@ class GfsEnvelopeRelay:
             # ``type`` first, so the row starts with QUEUED_REACTION_PREFIX.
             frame = {"type": FRAME_MOMENT_REACTION, **frame}
         blob = orjson.dumps(frame).decode()  # once, however many targets
-        queued = 0
-        for target in targets:
-            if await self._queue_relay_blob(target, blob, reaction=reaction):
-                queued += 1
-        return queued
-
-    async def queue_relay(self, target: str, frame: dict) -> bool:
-        """Queue one relay *frame* (``{space_id, event_type, payload}`` — the
-        relay push without its ``type``) for *target* and hint the cluster.
-
-        For a push that found no socket for *target* on THIS node: the node
-        that holds it drains the row on the ``NODE_DRAIN_HINT``, or the
-        target's next hello does. Same per-recipient RELAY caps, server-wide
-        cap and fair-share eviction as a member item. ``False`` when the
-        frame alone exceeds a cap (logged)."""
-        return await self._queue_relay_blob(target, orjson.dumps(frame).decode())
+        if reaction:
+            queued = 0
+            for target in targets:
+                if await self._queue_relay_blob(target, blob, reaction=True):
+                    queued += 1
+            return queued
+        # One transaction per RELAY_QUEUE_BATCH targets, not one per target:
+        # a channel item to 10 000 offline seats was quadratic (T3.6).
+        # Each batch's recipients are hinted (cluster drain, hello race) as
+        # soon as their rows are committed — never held back by a later
+        # batch, or lost should one fail.
+        written = 0
+        for i in range(0, len(targets), RELAY_QUEUE_BATCH):
+            now = int(time.time())
+            batch = await self._queue_repo.enqueue_relay_many(
+                targets[i : i + RELAY_QUEUE_BATCH],
+                blob,
+                created_at=now,
+                expires_at=now + self._ttl,
+                max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
+                max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
+                max_total_bytes=RELAY_QUEUE_MAX_TOTAL_BYTES,
+            )
+            for target in batch:
+                await self._after_enqueue(target)
+            written += len(batch)
+        if written < len(targets):
+            log.warning(
+                "gfs.envelope: a relay frame exceeds the relay queue caps for %d of %d "
+                "recipients (relay queue caps)",
+                len(targets) - written,
+                len(targets),
+            )
+        return written
 
     async def _queue_relay_blob(
         self, target: str, blob: str, *, reaction: bool = False
@@ -1508,8 +1532,8 @@ def build_mailbox_rate_limits(
 def build_envelope_rate_limit(resolver: ClientIpResolver):
     """Per-IP rate limiter middleware for ``POST /gfs/envelope``.
 
-    The relay is anonymous by design, so — exactly as for ``/gfs/publish`` —
-    the client address is the only handle available for shedding a flood.
+    The relay is anonymous by design, so — exactly as for the anonymous
+    channel publish — the client address is the only handle available for shedding a flood.
     """
     return build_window_limiter(
         resolver,

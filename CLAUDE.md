@@ -398,8 +398,12 @@ truth; the panel follows it.
   (`RELAY_MAX_ENVELOPE_BYTES`, `RELAY_JSON_CHUNK_BYTES`; a space's cover /
   icon has ONE cap for every member, `SPACE_COVER_MAX_BYTES` /
   `SPACE_ICON_MAX_BYTES`) instead of skipping relay-seated members.
-  Only **followers** (subscribers) may get a subset, decided per feature
-  and written down there — never a member role.
+  **Followers** (subscribers) get the same content on the same paths and
+  sync the same (owner-approved 2026-11-27: a follower is a limited
+  member but still a member); they differ only in writes — no chat send,
+  no proposal create/vote, no own location share, no app-table
+  open/join, and the comment/react switches. Never add an "if follower,
+  deliver less" rule.
 - **"Host" for content and sync means `acts_as_host`** — the owner or the
   delegated admin household that invited this household
   (`federation/host_equivalence.py`: `acts_as_host`, `acting_hosts`,
@@ -422,7 +426,10 @@ truth; the panel follows it.
   Every sender honours that switch (pairing QR / accept included); never via
   a GFS, never as a side effect of joining a space — the one exception is
   the consented ~1 km point a local-community join sends to that space's
-  host (below).
+  host (below). A person's live location shared in a space (their own
+  per-space switch, 4 dp or zone-only) reaches everyone seated there
+  (members and followers alike; owner-approved 2026-11-27), sealed, never
+  readable by a GFS; a follower never shares its own.
 - **Space locations are not people's locations, and still stay minimal:**
   - A *public local community* (a public space bound to an area) keeps its
     centre on the host; other households see only "local community, within
@@ -549,13 +556,20 @@ comments, reactions, calendar events, location pins…):
   wrap with `SPACE_ROUTED` so the relay sees only ciphertext sealed under the
   target's ephemeral X25519 pub (`socialhome/federation/routed_crypto.py`);
   the relay can't derive the shared secret. That sealing is for the mesh, not
-  the GFS. GFS-relayed public/global content is encrypted under the space
-  content key (`SpaceContentEncryption.encrypt`) inside a space-authority-
-  signed envelope the content-blind GFS relays as-is
-  (`services/space_public_outbound.py` / `space_public_inbound.py`). That
-  relay is also **identity-free**: `POST /gfs/publish` carries exactly
-  `{space_id, event_type, payload}` and is authorized on the authority
-  signature alone — never send `from_instance` to a connection server.
+  the GFS. Apart from the sealed household-to-household envelope relay
+  (`/gfs/envelope`, which names no space), a space's content reaches a GFS
+  only through the space's **opaque channel** (`/gfs/channels/*`,
+  `services/gfs_channel_service.py`; v_51 private, v_96 global): the GFS
+  knows only a random channel id and the keys pinned for it, never the
+  space. Each item is encrypted under the
+  space content key, published **identity-free** with
+  `POST /gfs/channels/publish-anon` (signed with the channel writer key,
+  never a household key or `from_instance`), and fanned out to the channel's
+  seats; the host's authority items ride the same channel with the space
+  authority signature inside the ciphertext
+  (`services/space_public_outbound.py` / `space_public_inbound.py`). There
+  is no space-id-keyed GFS route (`/gfs/publish`, `/gfs/subscribe`, … went
+  in v_96).
 - **Content key is membership-gated:** the per-space AES-256 content key
   (`SpaceContentEncryption`) is delivered to a new member via
   the §D1b key handoff (`apply_space_content_key_from_metadata`), never to a
@@ -756,9 +770,11 @@ bang.
   already stores — not a parallel allow-list/roster; reuse an existing content
   key rather than minting a per-audience variant. New persistent structure (a
   key, a table, a migration) has a high bar: reach for it only after reusing an
-  existing primitive is shown insufficient. (E.g. the GFS authorizes a space
-  relay by verifying a space-authority signature against the space pubkey it
-  already pins — no publisher-roster table, no separate subscriber key. The
+  existing primitive is shown insufficient. (E.g. the GFS authorizes a channel
+  publish by verifying the channel writer-key signature against the channel
+  key it pinned when the channel was registered — no publisher-roster table,
+  no separate subscriber key; members and followers publish with the same
+  writer key. The
   §24.11 pipeline + the §"audit before a migration" rule are the same instinct:
   prefer the existing shape.)
 - Import `aiolibdatachannel` without alias — use `import aiolibdatachannel as rtc`.

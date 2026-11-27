@@ -4,8 +4,9 @@ Every household that is a member of a space where some member is reached
 only through a GFS signs ONE small card with its identity key and gives it
 to the space's host once (``SPACE_MEMBER_CARD``, or inside the sealed
 redeem / ACK). The host passes the cards on in its member directory
-(``SPACE_MAILBOX_DIRECTORY``) to the space's writer-seat households, never
-to followers. A card says, under the household's own signature:
+(``SPACE_MAILBOX_DIRECTORY``) to the space's seated households — a
+follower's too since v_96 (same path as a member). A card says, under the
+household's own signature:
 
 * who it is — ``instance_id`` and the ``identity_pk`` it derives from
   (§4.1.2: an instance id IS the fingerprint of the identity key, so the

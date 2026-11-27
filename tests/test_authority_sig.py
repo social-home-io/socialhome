@@ -18,34 +18,32 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome import authority_sig
 from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
-    AUTHORITY_EVENT_SPACE_MEDIA_PUT,
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
-    AUTHORITY_RELAY_EVENT_TYPES,
+    AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
     AUTHORITY_SIG_SUITE_ED25519,
     SUPPORTED_AUTHORITY_SIG_SUITES,
     UnsupportedAuthoritySuite,
+    authority_payload_verified,
     sign_authority_event,
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from socialhome.crypto import generate_space_keypair
+from socialhome.crypto import ed25519_public_key, generate_space_keypair
 
 
 def test_sign_then_verify_round_trips():
     kp = generate_space_keypair()
     payload = {"ciphertext": "opaque", "n": 3}
     signed = sign_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        event_type=AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
         space_id="space-1",
         payload=payload,
         space_seed=kp.private_key,
     )
     assert signed["authority_sig_suite"] == AUTHORITY_SIG_SUITE_ED25519
     assert verify_authority_event(
-        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        event_type=AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
         space_id="space-1",
         payload=payload,
         authority_sig=signed["authority_sig"],
@@ -58,7 +56,7 @@ def test_verify_rejects_unknown_suite():
     kp = generate_space_keypair()
     with pytest.raises(UnsupportedAuthoritySuite):
         verify_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            event_type=AUTHORITY_EVENT_SPACE_CHANNEL_AUTHORITY,
             space_id="space-1",
             payload={},
             authority_sig="AAAA",
@@ -68,24 +66,24 @@ def test_verify_rejects_unknown_suite():
     assert "ed25519+future-pq" not in SUPPORTED_AUTHORITY_SIG_SUITES
 
 
-def test_subscribers_query_event_type_is_not_a_relay_type():
-    """The subscriber-list query is a READ authenticated by a space-authority
-    signature — but it is NOT a relay event type. Keeping it out of
-    ``AUTHORITY_RELAY_EVENT_TYPES`` ensures a query-signed payload can never be
-    replayed onto the GFS relay fan-out (and vice-versa)."""
-    assert AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY == "space_subscribers_query"
-    assert AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY not in AUTHORITY_RELAY_EVENT_TYPES
-
-
-def test_space_media_event_types_are_not_relay_types():
-    """An upload / delete of space media is authorized by a space-authority
-    signature, but is never a relay: a media-signed payload can't be fanned
-    out, and a relay payload can't authorize an upload (the signing bytes
-    bind the event type)."""
-    assert AUTHORITY_EVENT_SPACE_MEDIA_PUT == "space_media_put"
-    assert AUTHORITY_EVENT_SPACE_MEDIA_DELETE == "space_media_delete"
-    assert AUTHORITY_EVENT_SPACE_MEDIA_PUT not in AUTHORITY_RELAY_EVENT_TYPES
-    assert AUTHORITY_EVENT_SPACE_MEDIA_DELETE not in AUTHORITY_RELAY_EVENT_TYPES
+@pytest.mark.parametrize(
+    "name",
+    [
+        "AUTHORITY_EVENT_SPACE_POST_PUBLIC",
+        "AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF",
+        "AUTHORITY_EVENT_SPACE_AUTHOR_PROFILES_BUNDLE",
+        "AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY",
+        "AUTHORITY_EVENT_SPACE_EPOCH_NOTICE",
+        "AUTHORITY_EVENT_SPACE_MEDIA_PUT",
+        "AUTHORITY_EVENT_SPACE_MEDIA_DELETE",
+        "AUTHORITY_RELAY_EVENT_TYPES",
+        "AUTHORITY_TARGET_ONLY_EVENT_TYPES",
+    ],
+)
+def test_the_space_keyed_gfs_event_types_are_gone(name):
+    """v_96 (P7) — no GFS route authorizes a space-keyed relay, notice,
+    roster read or media upload with the space authority any more."""
+    assert not hasattr(authority_sig, name)
 
 
 def test_strip_removes_only_the_two_sig_keys():
@@ -126,4 +124,43 @@ def test_space_crypto_service_reexports_same_objects():
     assert scs.verify_authority_event is verify_authority_event
     assert scs.strip_authority_sig_fields is strip_authority_sig_fields
     assert scs.UnsupportedAuthoritySuite is UnsupportedAuthoritySuite
-    assert scs.AUTHORITY_EVENT_SPACE_POST_PUBLIC == AUTHORITY_EVENT_SPACE_POST_PUBLIC
+    assert scs.AUTHORITY_SIG_SUITE_ED25519 == AUTHORITY_SIG_SUITE_ED25519
+
+
+def test_authority_payload_verified_round_trip_and_fails_closed():
+    seed = b"\x05" * 32
+    pk_hex = ed25519_public_key(seed).hex()
+    payload = {"space_id": "sp", "user_id": "u"}
+    payload.update(
+        sign_authority_event(
+            event_type="space_member_banned",
+            space_id="sp",
+            payload=dict(payload),
+            space_seed=seed,
+        )
+    )
+    kw = {"event_type": "space_member_banned", "space_id": "sp"}
+    assert authority_payload_verified(
+        payload=payload, space_public_key_hex=pk_hex, **kw
+    )
+    # Another target, another event type, another key, no or odd fields.
+    assert not authority_payload_verified(
+        payload={**payload, "user_id": "x"}, space_public_key_hex=pk_hex, **kw
+    )
+    assert not authority_payload_verified(
+        event_type="space_member_unbanned",
+        space_id="sp",
+        payload=payload,
+        space_public_key_hex=pk_hex,
+    )
+    assert not authority_payload_verified(
+        payload=payload, space_public_key_hex="zz", **kw
+    )
+    assert not authority_payload_verified(
+        payload={"space_id": "sp"}, space_public_key_hex=pk_hex, **kw
+    )
+    assert not authority_payload_verified(
+        payload={**payload, "authority_sig_suite": "rot13"},
+        space_public_key_hex=pk_hex,
+        **kw,
+    )

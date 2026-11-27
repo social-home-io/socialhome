@@ -51,7 +51,11 @@ Used when a member shares a `socialhome://invite#…` code with someone
 on a paired peer instance. The receiver pastes the code locally; their
 backend recognises ``issuer_instance_id`` as a CONFIRMED peer and
 sends ``SPACE_INVITE_TOKEN_REDEEM`` to the issuer carrying the token
-and the receiving user's identity. The issuer validates the token
+and the receiving user's identity — ``redeemer_user_id`` plus
+``redeemer_anchor``, the person's identity anchor, inside the encrypted
+payload (P5, see [Person-ID anchor](#the-redeem-proves-the-person-it-names-p5)).
+The issuer first checks that ``derive_user_id(the sender's pinned identity
+key, redeemer_anchor) == redeemer_user_id``, then validates the token
 (exists, not expired, ``uses_remaining > 0``), atomically decrements,
 seats the receiver as a ``SpaceRemoteMember`` + records the
 ``(space, instance)`` mapping, then sends ``SPACE_INVITE_TOKEN_REDEEM_ACK``
@@ -200,7 +204,7 @@ redeemer's key-wrap key — which rode *inside* the request.
   is rebuilt from the recipient id + the sealed box rather than forwarded,
   so no caller can add a third field; there is no `from_instance` and no
   household transport signature, the same identity-free discipline
-  `POST /gfs/publish` follows. The answer is a uniform
+  `POST /gfs/channels/publish-anon` follows. The answer is a uniform
   `202 {"status":"accepted"}` for anything well-formed — a sender learns
   nothing about the recipient — with `400` / `413` / `429` for malformed,
   oversize or throttled. Every non-2xx is a transport failure, logged at
@@ -245,10 +249,14 @@ sorted-key bytes with the sender's own identity key):
  "instance_id": "…", "identity_pk": "<hex>",
  "keywrap_pk": "<hex>", "keywrap_sig": "<b64url>",
  "display_name": "…", "proto_version": 29,
- "redeemer_user_id": "…", "redeemer_public_key": "…",
- "redeemer_display_name": "…",
+ "redeemer_user_id": "…", "redeemer_anchor": "…",
+ "redeemer_public_key": "…", "redeemer_display_name": "…",
  "signature": "<hex>"}
 ```
+
+`redeemer_anchor` proves `redeemer_user_id` against the body's own
+`identity_pk` (bound to `instance_id` by the anti-tamper check below) —
+see [The redeem proves the person it names](#the-redeem-proves-the-person-it-names-p5).
 
 The reply mirrors it with the issuer's identity + key-wrap material and
 either `{space_id, role, space_meta}` (ACK — the same
@@ -266,7 +274,8 @@ sealed ACK. Both keep the other's card on the pair's `space_instances` row,
 and later envelopes to a household whose card names a mailbox go to the
 mailbox id instead of the instance id. Once seated the redeemer also sends
 `SPACE_MEMBER_CARD`, and the host passes the cards on to the space's
-writer members in `SPACE_MAILBOX_DIRECTORY`, so every member can reach it.
+seated households (followers included, v_96) in `SPACE_MAILBOX_DIRECTORY`,
+so every member can reach it.
 An older issuer ignores the field. See [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 **The ACK always fits the relay.** A 1200 px space cover is dimension-capped,
@@ -372,7 +381,7 @@ timestamp. The GFS's own aiohttp access log writes the token segment as
 same for the owner's `DELETE /gfs/spaces/{space_id}/invite/{gfs_token}`),
 so it keeps *visitor IP → time* for "someone opened an invite link", not
 which link. That residual is the same shape of concession
-`POST /gfs/envelope` and `POST /gfs/publish` already make and has the
+`POST /gfs/envelope` and `POST /gfs/channels/publish-anon` already make and has the
 same answer: closing it needs a mix/onion egress and is out of scope. It
 is signed off in [`../principles.md`](../principles.md) alongside those.
 **Operator note:** a reverse proxy in front of the GFS keeps its own
@@ -539,7 +548,7 @@ the point of the relay is that neither household learns the other's
 address and the server learns neither's relationship to the other. There
 is no identity on the wire to authenticate, so a per-IP sliding window
 (`ENVELOPE_MAX_PER_MINUTE`, 600/min → 429) is the accountability handle,
-the same posture `POST /gfs/publish` takes.
+the same posture `POST /gfs/channels/publish-anon` takes.
 
 **Why 600 and not 30.** The first number treated this relay as a
 sideband for the redeem handshake. It is not: for a link-joined
@@ -671,10 +680,15 @@ Cheapest check first; every rung has its own regression test.
     sender is.
 11. **Key-wrap binding** of the redeemer's own key — we refuse to seal
     a space snapshot (content key included) to a key nobody vouched for.
+11b. **Person-ID anchor** (P5) — `derive_user_id(identity_pk,
+    redeemer_anchor)` must be `redeemer_user_id`; otherwise the opaque
+    DENY, before the token, the ban or any seat is read.
 12. **Token + ban, in one statement** — `consume_invite_token`, a single
     atomic UPDATE guarding `uses_remaining > 0`, the expiry, **and** the
     §13.7 ban (`NOT EXISTS (SELECT 1 FROM space_bans …)` correlated on
-    the token's own space). Unknown / expired / exhausted / banned →
+    the token's own space) — and, since P7b, the redeeming household's
+    ban (`space_instance_bans`, by the authenticated instance id). Unknown
+    / expired / exhausted / banned →
     DENY. The ban used to be a second query run *after* the consume with
     no refund, so a banned household could spend a twenty-use link in
     twenty requests — and the distinct reason told it its own ban status
@@ -757,7 +771,8 @@ class until somebody classifies it on purpose.
 | Space content key (`SPACE_KEY_EXCHANGE` / `_ACK` / `_REKEY`) | sent | **accepted** |
 | Space seed delegation (`SPACE_ADMIN_KEY_SHARE`, v_94) | sent to an admin household the owner approved, while delegation is on | **accepted** — only from the acting host, only with a live admin seat of our own, only a seed that is the private half of the pinned key; never in a multi frame |
 | Catch-up sync chunks (`SPACE_SYNC_BEGIN` … `_COMPLETE`) | sent | **accepted** |
-| Direct-sync RTC signalling (`SPACE_SYNC_OFFER` / `_ANSWER` / `_ICE` / `_DIRECT_*`) | never | rejected — it exists to negotiate a *direct* connection, and neither household has the other's address by design |
+| Direct-sync RTC signalling (`SPACE_SYNC_OFFER` / `_ANSWER` / `_ICE` / `_DIRECT_READY`) | never | rejected — it exists to negotiate a *direct* connection, and neither household has the other's address by design |
+| A host's capacity refusal of a sync BEGIN (`SPACE_SYNC_DIRECT_FAILED` with `too_many_sessions` / `node_capacity` / `rate_limited`, v_96) | sent, at most one per space per 10 min | **accepted** — only for a BEGIN we sent to that household (it becomes `SpaceSyncDeferred`); any other `_DIRECT_FAILED` from a seat is ignored, and only a party to a session may end it |
 | Join requests (`SPACE_JOIN_REQUEST*`) | excluded | rejected — they are already a member; this is the ask-an-admin flow |
 | A second invite token from the same household (`SPACE_INVITE_TOKEN_REDEEM` / `_ACK` / `_DENY`) | sent | **accepted** — the pair now exists, so `request_redeem` takes the direct-peer branch and the token is still the whole authorization |
 | Cross-household admin action (`SPACE_REMOTE_ADMIN_KICK` / `_ACTION`) | sent | **accepted** — the host re-validates `space_remote_members.role`, so this authenticates the sender without authorizing them |
@@ -1041,7 +1056,7 @@ when it is back. Receivers map the channel id to the space locally and run
 the strict-frame checks. Turning the option off (refused while link-joined
 members remain) or the last remote member leaving retires the channel.
 Full design, wire and residuals:
-[`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
+[`discovery.md`](./discovery.md#opaque-channels-private-and-global).
 
 ```mermaid
 sequenceDiagram
@@ -1249,7 +1264,23 @@ with). No version or claim → `member` (fail closed).
 A `subscriber` link works regardless of any "strangers may subscribe"
 space setting: that setting governs people who walked up on their own,
 while an explicit invite is the owner deciding otherwise for one named
-link.
+link. Turning the setting **off** still ends every follower seat already
+taken, a link's included: a seat is a seat, and a follower is a member
+with the read-only role on every path (v_96, see
+[spaces.md › Keys and rotation](./spaces.md#keys-and-rotation)).
+
+A **follow** (v_96) is the walk-up case that setting governs. It is no
+link: the host approves the follow request on its own while
+`allow_subscribers` is on and mints a single-use `subscriber` token **bound
+to the applicant household and person** (`bound_instance_id` /
+`bound_user_id`, the same binding an admin's approval of a join request
+uses), which the applicant redeems automatically — over §D2 when paired or
+mesh-reachable, over the §D2b bootstrap leg when the follow came through a
+GFS. Because the seat is written by that redeem, `allow_subscribers` is
+re-checked there for a bound `subscriber` token only (`consume_invite_token`
+reports `bound_instance_id`): switched off between the approval and the
+redeem → `REDEEM_DENY_REASON`, the use handed back. See
+[spaces.md › Followers](./spaces.md#followers-v_96).
 
 #### An `admin`/mod link is approved, never granted straight through (2026-09-19)
 
@@ -1512,6 +1543,36 @@ Every link has a type, chosen by the issuer at mint time
   `gfs_legacy` (`422`), and while the option is OFF a new `gfs` link is
   still `409 PRIVATE_GFS_OFF`. Links of public / global spaces stayed
   `gfs`.
+
+### The redeem proves the person it names (P5)
+
+Every path that seats a person another household names — an invite-link
+redeem (§D2 paired, mesh-routed, §D2b bootstrap), a private invitation's
+accept, a follow approval — proves the user id before it seats:
+the request carries the person's **identity anchor** (`redeemer_anchor` /
+`invitee_anchor` / `user_anchor`, always inside the encrypted payload or the
+sealed body, never a routing field) and the host checks
+`derive_user_id(the sender household's identity key, anchor) == user_id`
+(`space_member_guard.user_id_proven`). The key is the one the host already
+holds: the sender's pinned `remote_instances` key, a mesh-only sender's
+origin-authenticated mesh claim (it derives to the sender), or a §D2b body's
+`identity_pk` (bound to its `instance_id`). A user id is minted as
+`derive_user_id(own key, identity_anchor or username)`, so a household can
+only ever be seated under ids derived from its own key — never somebody
+else's, never one of the host's own people.
+
+The proof is checked **first** — before the re-ACK, the token consume, the
+ban and every roster read — and a failure gets the same opaque
+`REDEEM_DENY_REASON` (the accept and the follow: the same silent drop) with
+the link untouched, so the answer depends only on the requester's own
+anchor: no "is / was user X here" probe through a multi-use link. It
+replaces the P4 first-come rule (refuse an id held — tombstones included —
+under another household), which let whoever redeemed a link under somebody's
+id first lock that person out of the space for good. The anchor is
+mandatory, with no version fallback (a version is the requester's own
+claim, so any fallback would be attacker-downgradable): a redeemer,
+invitee or applicant below v_96 can no longer be seated by a v_96 host.
+The anchor is never logged.
 
 ## Flow — private invite (paired peers)
 

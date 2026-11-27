@@ -1,12 +1,14 @@
-"""Tests for :class:`SpacePublicInbound` (Phase 5a2 consumer).
+"""Tests for :class:`SpacePublicInbound` — a space's opaque channel items.
 
-A relayed ``space_post_public`` envelope is verified (authority sig vs the
-locally-mirrored space public key), decrypted under the per-space content
-key, the author is self-certified, deduped by post id, and persisted.
-
-Security drops (defence-in-depth — the GFS already verified, but the relay
-is never trusted): bad/forged authority sig, author self-cert mismatch,
-missing content key (epoch not held).
+Since v_96 the only GFS-borne space content is the channel's: a member's
+own ``space_item`` (author-signed, writer cert inside) or the host's
+authority item (the inner signed by the space authority, binding the
+epoch). Both are decrypted under the per-space content key, the author is
+self-certified, items dedupe by id and persist. Every check is
+defence-in-depth — the channel and the GFS are never trusted: a forged
+authority signature, an author self-cert mismatch, a missing content key
+(epoch not held) all drop. The space-keyed ``space_post_public`` /
+``space_item`` frames are no longer taken at all (``app`` drops them).
 """
 
 from __future__ import annotations
@@ -18,11 +20,6 @@ from datetime import UTC, datetime
 
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-    strip_authority_sig_fields,
-)
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -52,8 +49,6 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
     AuthorityRemoval,
-    pad_json_object,
-    zlib_item_plaintext,
 )
 from socialhome.domain.space_media_fields import SPACE_MEDIA_ITEMS, item_media_urls
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
@@ -83,13 +78,26 @@ from socialhome.services.space_public_author import (
     link_preview_signing_bytes,
     media_refs_signing_bytes,
 )
+from socialhome.services.space_public_authority import (
+    channel_authority_plaintext,
+    open_channel_authority,
+)
 from socialhome.services.space_public_inbound import (
+    KEY_WAIT_MAX_AHEAD,
     SpacePublicInbound,
     _only_described_files,
 )
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 from tests.space_media_items import synthetic_object
+
+
+async def _relay(inbound, frame: dict, **_kw) -> None:
+    """Hand an item to the reader the way it arrives since v_96: through the
+    space's opaque channel (the channel id already mapped to the space)."""
+    await inbound.handle_channel_item(
+        frame["space_id"], epoch=frame["epoch"], payload=frame["payload"]
+    )
 
 
 @pytest.fixture
@@ -142,7 +150,18 @@ async def env(tmp_dir):
         space_post_repo=post_repo,
     )
     inbound.attach_identity(own_instance_id="us.home")
+    # The channel path refuses to persist anything without the writer-cert
+    # service (a member item's cert, an authority copy's cert).
+    certs = SpaceWriterCertService(
+        space_repo=space_repo,
+        remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+        space_key_repo=SqliteSpaceKeyRepo(db),
+        own_instance_id="us.home",
+        own_identity_pk=generate_identity_keypair().public_key,
+    )
+    inbound.attach_writer_certs(certs)
     yield {
+        "certs": certs,
         "db": db,
         "space_repo": space_repo,
         "crypto_obj": crypto,
@@ -176,7 +195,6 @@ async def _make_envelope(
     tamper_preview: dict | None = None,
     preview_suite: str = "ed25519",
     writer_cert: dict | None = None,
-    payload_suite: str | None = None,
     plaintext: bytes | None = None,
     signed_extra: dict | None = None,
     unsigned_extra: dict | None = None,
@@ -189,8 +207,7 @@ async def _make_envelope(
     ``signed_extra`` joins the inner before the author signs it,
     ``unsigned_extra`` after (like the writer cert or ``media_refs``).
 
-    ``payload_suite`` labels it (signed) and, for ``zlib1``, compresses the
-    inner; ``plaintext`` replaces the encrypted bytes outright.
+    ``plaintext`` replaces the encrypted bytes outright.
 
     By default the inner ``author_sig`` is produced by the real author's
     identity seed (``author_kp.private_key``). ``author_sign_seed`` overrides
@@ -251,39 +268,25 @@ async def _make_envelope(
         inner["writer_cert"] = writer_cert
     inner.update(unsigned_extra or {})
     if plaintext is None:
-        plaintext = (
-            zlib_item_plaintext(inner, suite=payload_suite)
-            if payload_suite in ("zlib1", "zlib1+dict1")
-            else json.dumps(inner).encode()
-        )
-    epoch, ct = await env["crypto"].encrypt(space_id, plaintext)
-    envelope = {"space_id": space_id, "epoch": epoch, "encrypted_payload": ct}
-    if payload_suite is not None:
-        envelope["payload_suite"] = payload_suite
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        plaintext = channel_authority_plaintext(
+            inner,
             space_id=space_id,
-            payload=strip_authority_sig_fields(envelope),
+            epoch=await env["crypto"].get_current_epoch(space_id),
             space_seed=space_seed,
         )
-    )
-    return envelope
+    epoch, ct = await env["crypto"].encrypt(space_id, plaintext)
+    return {"space_id": space_id, "epoch": epoch, "payload": ct}
 
 
 def _frame(envelope: dict) -> dict:
-    return {
-        "type": "relay",
-        "space_id": envelope["space_id"],
-        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        "payload": envelope,
-        "from_instance": "remote.home",
-    }
+    """The channel item as the reader receives it (``space_id`` mapped from
+    the channel id locally)."""
+    return envelope
 
 
 async def test_valid_relay_decrypts_persists_and_publishes(env):
     envelope = await _make_envelope(env)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
     assert got is not None
     space_id, post = got
@@ -292,49 +295,6 @@ async def test_valid_relay_decrypts_persists_and_publishes(env):
     assert post.author == env["author_user_id"]
     assert len(env["events"]) == 1
     assert env["events"][0].origin_instance_id == env["author_origin"]
-
-
-# ── payload_suite "zlib1" ────────────────────────────────────────────────
-
-#: A member holding the content key can seal a tiny stream that inflates to
-#: gigabytes; the follower must stop at the cap, never buffer it.
-_BOMB = zlib.compress(b" " * (512 * 1024 * 1024 // 64), 9)
-
-
-@pytest.mark.parametrize("suite", ["zlib1", "zlib1+dict1"])
-async def test_a_compressed_relay_is_opened_and_persisted(env, suite):
-    envelope = await _make_envelope(
-        env, payload_suite=suite, content="Grüße 漢字 😀 " * 40
-    )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    got = await env["post_repo"].get("post-1")
-    assert got is not None and got[1].content == "Grüße 漢字 😀 " * 40
-
-
-async def test_a_relay_with_an_unknown_suite_is_dropped(env, caplog):
-    envelope = await _make_envelope(env, payload_suite="zlib9")
-    with caplog.at_level(logging.WARNING):
-        await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert await env["post_repo"].get("post-1") is None
-    assert "unsupported payload_suite" in caplog.text
-
-
-async def test_a_relay_whose_suite_label_was_stripped_is_dropped(env):
-    """The label is under the authority signature: a relay that strips it
-    (to make a follower read zlib bytes as JSON) breaks the signature."""
-    envelope = await _make_envelope(env, payload_suite="zlib1")
-    del envelope["payload_suite"]
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert await env["post_repo"].get("post-1") is None
-
-
-async def test_a_relayed_decompression_bomb_is_dropped_without_a_traceback(env, caplog):
-    envelope = await _make_envelope(env, payload_suite="zlib1", plaintext=_BOMB)
-    with caplog.at_level(logging.WARNING):
-        await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert await env["post_repo"].get("post-1") is None
-    assert "undecodable inner payload" in caplog.text
-    assert "Traceback" not in caplog.text
 
 
 async def test_relayed_post_resolves_mentions_against_local_member_view(env):
@@ -358,21 +318,22 @@ async def test_relayed_post_resolves_mentions_against_local_member_view(env):
         ),
     )
     inbound.attach_identity(own_instance_id="us.home")
+    inbound.attach_writer_certs(env["certs"])
     envelope = await _make_envelope(env, content="hi @anna and @dave")
-    await inbound.handle(_frame(envelope), gfs_id="g1")
+    await _relay(inbound, _frame(envelope), gfs_id="g1")
     assert [m.user_id for m in env["events"][0].mentions] == ["u-anna"]
 
 
 async def test_relay_without_resolver_carries_no_mentions(env):
     envelope = await _make_envelope(env, content="hi @anna")
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert env["events"][0].mentions == ()
 
 
 async def test_dedupe_same_envelope_twice_persists_once(env):
     envelope = await _make_envelope(env)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
     assert got is not None
     # The second delivery is dropped — only one bus event published.
@@ -380,10 +341,34 @@ async def test_dedupe_same_envelope_twice_persists_once(env):
 
 
 async def test_forged_authority_sig_dropped(env):
-    envelope = await _make_envelope(env)
-    # Tamper the signature.
-    envelope["authority_sig"] = "AAAA" + envelope["authority_sig"][4:]
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    """The authority signature over the inner is tampered (inside the
+    ciphertext): dropped."""
+    inner = {
+        "post_id": "post-1",
+        "space_id": "sp-1",
+        "author_user_id": env["author_user_id"],
+        "author_pk": env["author_kp"].public_key.hex(),
+        "author_username": "bob",
+        "type": "text",
+        "content": "secret space content",
+        "created_at": datetime(2026, 6, 10, tzinfo=UTC).isoformat(),
+        "origin_instance_id": env["author_origin"],
+    }
+    inner["author_sig"] = b64url_encode(
+        sign_ed25519(env["author_kp"].private_key, author_signing_bytes(inner))
+    )
+    body = json.loads(
+        channel_authority_plaintext(
+            inner,
+            space_id="sp-1",
+            epoch=await env["crypto"].get_current_epoch("sp-1"),
+            space_seed=env["space_kp"].private_key,
+        )
+    )
+    sig = body["inner"]["authority_sig"]
+    body["inner"]["authority_sig"] = ("A" if sig[0] != "A" else "B") + sig[1:]
+    epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(body).encode())
+    await _relay(env["inbound"], {"space_id": "sp-1", "epoch": epoch, "payload": ct})
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -392,7 +377,7 @@ async def test_wrong_space_seed_sig_dropped(env):
     """An envelope signed by a DIFFERENT seed (not the space's) → drop."""
     other = generate_space_keypair()
     envelope = await _make_envelope(env, space_seed=other.private_key)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -403,7 +388,7 @@ async def test_author_self_cert_mismatch_dropped(env):
     # Sign correctly with the space seed, but the inner author_pk is the
     # impostor's key while author_user_id stays the real bob.
     envelope = await _make_envelope(env, author_pk=impostor.public_key)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -425,11 +410,11 @@ async def test_a_bound_post_id_claimed_by_another_author_is_dropped(env, caplog)
         author_sign_seed=eve.private_key,
     )
     with caplog.at_level(logging.WARNING):
-        await env["inbound"].handle(_frame(squat), gfs_id="g1")
+        await _relay(env["inbound"], _frame(squat), gfs_id="g1")
     assert await env["post_repo"].get(post_id) is None
     assert "not bound to" in caplog.text
     genuine = await _make_envelope(env, post_id=post_id)
-    await env["inbound"].handle(_frame(genuine), gfs_id="g1")
+    await _relay(env["inbound"], _frame(genuine), gfs_id="g1")
     got = await env["post_repo"].get(post_id)
     assert got is not None and got[1].author == env["author_user_id"]
 
@@ -445,7 +430,7 @@ async def test_anchor_derived_author_accepted(env):
     envelope = await _make_envelope(
         env, author_user_id=anchored_user_id, identity_anchor=anchor
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
     assert got is not None
     _space_id, post = got
@@ -464,7 +449,7 @@ async def test_forged_anchor_dropped(env):
         author_user_id=anchored_user_id,
         identity_anchor="ffffffffffffffffffffffffffffffff",
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -477,7 +462,7 @@ async def test_impersonation_no_author_sig_dropped(env):
     signature this is an impersonation. Must not persist.
     """
     envelope = await _make_envelope(env, omit_author_sig=True)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -493,7 +478,7 @@ async def test_impersonation_author_sig_wrong_key_dropped(env):
     # author_pk stays the real bob (self-cert passes), but the sig is made
     # with the impostor's seed — verification against author_pk fails.
     envelope = await _make_envelope(env, author_sign_seed=impostor.private_key)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -513,17 +498,8 @@ async def test_malformed_author_sig_dropped(env):
         "origin_instance_id": env["author_origin"],
         "author_sig": "!!!not base64!!!",
     }
-    epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(inner).encode())
-    envelope = {"space_id": "sp-1", "epoch": epoch, "encrypted_payload": ct}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env["space_kp"].private_key,
-        )
-    )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    envelope = await _authority_envelope(env, inner)
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -531,40 +507,24 @@ async def test_malformed_author_sig_dropped(env):
 async def test_valid_author_sig_round_trip_persists(env):
     """An envelope with a valid per-author signature → verified + persisted."""
     envelope = await _make_envelope(env)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
     assert got is not None
     assert len(env["events"]) == 1
 
 
 async def test_tampered_ciphertext_invalid_tag_dropped(env):
-    """A base64-valid but TAMPERED encrypted_payload raises InvalidTag inside
+    """A base64-valid but TAMPERED payload raises InvalidTag inside
     aead.decrypt — must be caught and dropped gracefully, no exception
     escapes, nothing persisted."""
     envelope = await _make_envelope(env)
-    ct = envelope["encrypted_payload"]
-    # Flip a byte in the base64 ciphertext while keeping it base64-decodable.
+    ct = envelope["payload"]
     # The format is "<nonce_b64>:<ct_b64>"; mutate the ct portion.
     head, _, tail = ct.partition(":")
     assert tail, "expected nonce:ct ciphertext shape"
     flipped = ("B" if tail[0] != "B" else "C") + tail[1:]
-    envelope["encrypted_payload"] = f"{head}:{flipped}"
-    # Re-sign the envelope so the authority check passes and we reach decrypt.
-    envelope = {
-        k: v
-        for k, v in envelope.items()
-        if k not in ("authority_sig", "authority_sig_suite")
-    }
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env["space_kp"].private_key,
-        )
-    )
-    # Must not raise.
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    envelope["payload"] = f"{head}:{flipped}"
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -575,21 +535,7 @@ async def test_missing_content_key_dropped_gracefully(env):
     envelope = await _make_envelope(env)
     # Bump the epoch to one with no key.
     envelope["epoch"] = 99
-    # Re-sign so the authority check passes and we exercise the decrypt drop.
-    envelope = {
-        k: v
-        for k, v in envelope.items()
-        if k not in ("authority_sig", "authority_sig_suite")
-    }
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env["space_kp"].private_key,
-        )
-    )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -602,22 +548,16 @@ async def _lose_key(env) -> tuple[int, bytes]:
     return epoch, raw
 
 
-async def test_a_frame_under_a_missing_key_asks_for_it_and_lands_once_it_comes(env):
-    """#5b: a follower that misses the key no longer drops the frame and
-    waits for its next reconnect's key repair: it asks for the key (once)
-    and the held frame lands when the key does."""
+async def test_a_frame_under_a_missing_key_is_held_and_lands_once_it_comes(env):
+    """#5b: a frame that beats its key is held (nothing is asked for — the
+    key arrives by federation) and lands when the key does."""
     envelope = await _make_envelope(env)
     epoch, raw = await _lose_key(env)
-    asked: list[str] = []
-
-    async def _pull(space_id: str) -> bool:
-        asked.append(space_id)
-        return True
-
-    env["inbound"].attach_key_pull(_pull, PendingDecryptsCache(bus=env["bus"]))
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert asked == ["sp-1"]
+    pending = PendingDecryptsCache(bus=env["bus"])
+    env["inbound"].attach_key_wait(pending)
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
+    assert len(pending) == 1
 
     await env["crypto"].import_key("sp-1", epoch, raw)
     await env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
@@ -625,10 +565,10 @@ async def test_a_frame_under_a_missing_key_asks_for_it_and_lands_once_it_comes(e
     assert len(env["events"]) == 1
 
 
-async def test_a_missing_key_older_than_ours_is_neither_held_nor_asked(env):
-    """The owner seals its CURRENT key, so an older epoch we lack would never
-    come; and the frame epoch is plaintext, so holding such frames would let
-    a relay fill the hold."""
+async def test_a_missing_key_older_than_ours_is_not_held(env):
+    """A rekey delivers the CURRENT key, so an older epoch we lack would
+    never come; and the frame epoch is plaintext, so holding such frames
+    would let a relay fill the hold."""
     envelope = await _make_envelope(env)
     old_epoch = envelope["epoch"]
     await env["crypto"].rotate_epoch("sp-1")
@@ -636,51 +576,39 @@ async def test_a_missing_key_older_than_ours_is_neither_held_nor_asked(env):
         "DELETE FROM space_keys WHERE space_id='sp-1' AND epoch=?", (old_epoch,)
     )
     await env["db"].fetchone("SELECT 1")
-    asked: list[str] = []
-
-    async def _pull(space_id: str) -> bool:
-        asked.append(space_id)
-        return True
-
     pending = PendingDecryptsCache(bus=env["bus"])
-    env["inbound"].attach_key_pull(_pull, pending)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert asked == []
+    env["inbound"].attach_key_wait(pending)
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert len(pending) == 0
 
 
-async def test_without_a_key_puller_a_missing_key_still_drops(env):
+async def test_a_frame_far_ahead_of_our_key_is_not_held(env):
+    """The frame epoch is plaintext: a frame claiming an epoch far past the
+    next rekey would only crowd genuine waiting frames out of the hold."""
+    envelope = await _make_envelope(env)
+    held = await env["crypto"].get_current_epoch("sp-1")
+    pending = PendingDecryptsCache(bus=env["bus"])
+    env["inbound"].attach_key_wait(pending)
+    far = {**envelope, "epoch": held + KEY_WAIT_MAX_AHEAD + 1}
+    await _relay(env["inbound"], far)
+    assert len(pending) == 0
+    near = {**envelope, "epoch": held + KEY_WAIT_MAX_AHEAD}
+    await _relay(env["inbound"], near)
+    assert len(pending) == 1
+
+
+async def test_without_a_key_wait_a_missing_key_still_drops(env):
     envelope = await _make_envelope(env)
     await _lose_key(env)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
-
-
-async def test_a_failing_key_pull_still_holds_the_frame(env):
-    envelope = await _make_envelope(env)
-    epoch, raw = await _lose_key(env)
-
-    async def _boom(_space_id: str) -> bool:
-        raise RuntimeError("gfs down")
-
-    env["inbound"].attach_key_pull(_boom, PendingDecryptsCache(bus=env["bus"]))
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    await env["crypto"].import_key("sp-1", epoch, raw)
-    await env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
-    assert await env["post_repo"].get("post-1") is not None
 
 
 async def test_unknown_local_space_dropped(env):
     """An envelope for a space we don't mirror locally → drop (no pubkey
     to verify against, no key to decrypt)."""
-    envelope = {
-        "space_id": "sp-unknown",
-        "epoch": 0,
-        "encrypted_payload": "x:y",
-        "authority_sig": "AAAA",
-        "authority_sig_suite": "ed25519",
-    }
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    envelope = {"space_id": "sp-unknown", "epoch": 0, "payload": "x:y"}
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert env["events"] == []
 
 
@@ -706,26 +634,8 @@ async def test_cross_space_inner_dropped(env):
         sign_ed25519(env["author_kp"].private_key, author_signing_bytes(inner))
     )
     # Encrypt + authority-sign under the OUTER space ("sp-1").
-    epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(inner).encode())
-    envelope = {"space_id": "sp-1", "epoch": epoch, "encrypted_payload": ct}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env["space_kp"].private_key,
-        )
-    )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert await env["post_repo"].get("post-1") is None
-    assert env["events"] == []
-
-
-async def test_wrong_event_type_ignored(env):
-    envelope = await _make_envelope(env)
-    frame = _frame(envelope)
-    frame["event_type"] = "some_other_event"
-    await env["inbound"].handle(frame, gfs_id="g1")
+    envelope = await _authority_envelope(env, inner)
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
@@ -734,21 +644,14 @@ async def test_wrong_event_type_ignored(env):
 
 
 def _anonymous_frame(envelope: dict) -> dict:
-    """The identity-free fan-out frame the GFS now pushes — exactly four keys,
-    no ``from_instance``."""
-    return {
-        "type": "relay",
-        "space_id": envelope["space_id"],
-        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        "payload": envelope,
-    }
+    return envelope
 
 
 async def test_frame_without_from_instance_uses_inner_origin(env):
     """A four-key frame (no ``from_instance``) is processed normally and the
     published origin comes from the encrypted, authority-signed inner."""
     envelope = await _make_envelope(env)
-    await env["inbound"].handle(_anonymous_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _anonymous_frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
     assert got is not None
     assert got[1].content == "secret space content"
@@ -764,7 +667,7 @@ async def test_spoofed_outer_from_instance_is_ignored(env, caplog):
     envelope = await _make_envelope(env)
     frame = _anonymous_frame(envelope)
     frame["from_instance"] = "victim.home"
-    await env["inbound"].handle(frame, gfs_id="g1")
+    await _relay(env["inbound"], frame, gfs_id="g1")
 
     got = await env["post_repo"].get("post-1")
     assert got is not None
@@ -798,18 +701,9 @@ async def test_self_echo_dropped_before_any_write(env, caplog):
     inner["author_sig"] = b64url_encode(
         sign_ed25519(env["author_kp"].private_key, author_signing_bytes(inner))
     )
-    epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(inner).encode())
-    envelope = {"space_id": "sp-1", "epoch": epoch, "encrypted_payload": ct}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env["space_kp"].private_key,
-        )
-    )
+    envelope = await _authority_envelope(env, inner)
 
-    await env["inbound"].handle(_anonymous_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _anonymous_frame(envelope), gfs_id="g1")
 
     assert await env["post_repo"].get("post-echo") is None
     assert env["events"] == []
@@ -835,7 +729,7 @@ async def test_relayed_link_preview_kept_when_author_signed(env):
     GFS reader only through a signed descriptor — without one the card
     shows without its picture (never a same-named file of ours)."""
     envelope = await _make_envelope(env, link_preview=_CARD)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     _, post = await env["post_repo"].get("post-1")
     assert post.link_preview is not None
     assert post.link_preview.title == "Card"
@@ -848,7 +742,7 @@ async def test_a_relayed_cards_described_picture_takes_its_gfs_name(env):
     envelope = await _make_envelope(
         env, link_preview=_CARD, media_refs={"lp.webp": _REFS_A["p.webp"]}
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     _, post = await env["post_repo"].get("post-1")
     assert post.link_preview is not None
     assert post.link_preview.thumbnail_url == "api/media/sg-lp.webp"
@@ -860,7 +754,7 @@ async def test_relayed_link_preview_altered_by_relayer_dropped(env):
         link_preview=_CARD,
         tamper_preview={**_CARD, "url": "https://evil.example/"},
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
     assert got is not None  # the post still lands
     assert got[1].link_preview is None
@@ -869,7 +763,7 @@ async def test_relayed_link_preview_altered_by_relayer_dropped(env):
 async def test_relayed_link_preview_unknown_suite_dropped(env, caplog):
     envelope = await _make_envelope(env, link_preview=_CARD, preview_suite="future")
     with caplog.at_level("WARNING"):
-        await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+        await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     got = await env["post_repo"].get("post-1")
     assert got is not None and got[1].link_preview is None
     assert "link preview dropped" in caplog.text
@@ -881,51 +775,21 @@ async def test_a_relayed_post_into_an_archived_space_is_dropped(env, reason):
     relay frame names no household, so not even the host is exempt."""
     await env["space_repo"].set_archived("sp-1", True, reason=reason)
     envelope = await _make_envelope(env)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
 
 
-# ── v_44: lazy pin heal on an authority failure ──────────────────────────
+# ── v_44: a relayed post signed by a retired authority key ─────────────
 
 
-class _Refresher:
-    """Stands in for the GFS mirror's pin refresh: re-pins to ``new_pk``."""
-
-    def __init__(self, space_repo, new_pk_hex: str | None):
-        self._spaces = space_repo
-        self._new = new_pk_hex
-        self.calls: list[str] = []
-
-    async def refresh_authority_pin(self, space_id: str) -> bool:
-        self.calls.append(space_id)
-        if self._new is None:
-            return False
-        await self._spaces.adopt_authority_key(space_id, self._new, 1)
-        return True
-
-
-async def test_new_key_post_heals_the_pin_and_is_accepted(env):
-    """The owner rotated; this subscriber still pins K1. A K2-signed post
-    fails, the refresh re-pins from the GFS cert, the retry accepts it."""
-    k2 = generate_space_keypair()
-    refresher = _Refresher(env["space_repo"], k2.public_key.hex())
-    env["inbound"].attach_pin_refresher(refresher)
-    env_frame = _frame(await _make_envelope(env, space_seed=k2.private_key))
-    await env["inbound"].handle(env_frame)
-    assert refresher.calls == ["sp-1"]
-    assert await env["post_repo"].get("post-1") is not None
-
-
-async def test_old_key_post_is_refused_after_the_heal(env):
-    """Spec §8.5: once healed to K2, a K1-signed relayed post is refused."""
+async def test_old_key_post_is_refused_after_a_rotation(env):
+    """Spec §8.5: once the pin moved to K2, a K1-signed relayed post is
+    refused."""
     k1_seed = env["space_kp"].private_key
     k2 = generate_space_keypair()
     await env["space_repo"].adopt_authority_key("sp-1", k2.public_key.hex(), 1)
-    refresher = _Refresher(env["space_repo"], None)
-    env["inbound"].attach_pin_refresher(refresher)
-    await env["inbound"].handle(_frame(await _make_envelope(env, space_seed=k1_seed)))
-    assert refresher.calls == ["sp-1"]
+    await _relay(env["inbound"], _frame(await _make_envelope(env, space_seed=k1_seed)))
     assert await env["post_repo"].get("post-1") is None
 
 
@@ -955,7 +819,7 @@ async def _cert(env, *, users: object = "author", **over):
 
 async def test_relayed_post_with_a_valid_writer_cert_is_accepted(env):
     envelope = await _make_envelope(env, writer_cert=await _cert(env))
-    await env["inbound"].handle(_frame(envelope))
+    await _relay(env["inbound"], _frame(envelope))
     assert await env["post_repo"].get("post-1") is not None
 
 
@@ -974,7 +838,7 @@ async def test_relayed_post_with_a_bad_writer_cert_is_dropped(env, case, caplog)
         await env["crypto"].rotate_epoch("sp-1")
     envelope = await _make_envelope(env, writer_cert=await _cert(env, **over))
     with caplog.at_level(logging.WARNING):
-        await env["inbound"].handle(_frame(envelope))
+        await _relay(env["inbound"], _frame(envelope))
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
     assert "writer cert" in caplog.text
@@ -983,14 +847,14 @@ async def test_relayed_post_with_a_bad_writer_cert_is_dropped(env, case, caplog)
 async def test_relayed_post_with_a_malformed_writer_cert_is_dropped(env, caplog):
     envelope = await _make_envelope(env, writer_cert={"cert_suite": "ed25519"})
     with caplog.at_level(logging.WARNING):
-        await env["inbound"].handle(_frame(envelope))
+        await _relay(env["inbound"], _frame(envelope))
     assert await env["post_repo"].get("post-1") is None
 
 
 async def test_relayed_post_without_a_cert_keeps_todays_path(env):
     """Pre-v49 author: no cert → accepted on the authority signature."""
     envelope = await _make_envelope(env)
-    await env["inbound"].handle(_frame(envelope))
+    await _relay(env["inbound"], _frame(envelope))
     assert await env["post_repo"].get("post-1") is not None
 
 
@@ -999,17 +863,7 @@ async def test_relayed_post_without_a_cert_keeps_todays_path(env):
 
 @pytest.fixture
 async def item_env(env):
-    """``env`` with the real writer-cert service attached — the space_item
-    path refuses to persist anything without it."""
-    certs = SpaceWriterCertService(
-        space_repo=env["space_repo"],
-        remote_member_repo=SqliteSpaceRemoteMemberRepo(env["db"]),
-        space_key_repo=SqliteSpaceKeyRepo(env["db"]),
-        own_instance_id="us.home",
-        own_identity_pk=generate_identity_keypair().public_key,
-    )
-    env["inbound"].attach_writer_certs(certs)
-    env["certs"] = certs
+    """``env`` (the writer-cert service is attached there)."""
     return env
 
 
@@ -1068,7 +922,8 @@ async def _item_frame(
     body = {"item_type": item_type, "inner": inner}
     if plaintext is None:
         plaintext = (
-            zlib_item_plaintext(body, suite=payload_suite)
+            # What a compressing pre-P7 publisher sealed: zlib bytes.
+            zlib.compress(json.dumps(body).encode(), 9)
             if payload_suite in ("zlib1", "zlib1+dict1")
             else json.dumps(body).encode()
         )
@@ -1089,7 +944,7 @@ async def _item_frame(
 
 
 async def test_a_member_published_post_with_a_valid_cert_is_persisted(item_env):
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     got = await item_env["post_repo"].get("post-1")
     assert got is not None
     space_id, post = got
@@ -1102,7 +957,7 @@ async def test_a_member_item_without_the_frame_cert_is_persisted(item_env):
     check and is the one that counts."""
     frame = await _item_frame(item_env)
     assert "writer_cert" not in frame
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     got = await item_env["post_repo"].get("post-1")
     assert got is not None and got[1].content == "member-published content"
 
@@ -1110,42 +965,28 @@ async def test_a_member_item_without_the_frame_cert_is_persisted(item_env):
 @pytest.mark.security
 async def test_without_the_frame_cert_a_bad_inner_cert_still_drops(item_env):
     frame = await _item_frame(item_env, cert=await _cert(item_env, scope="comment"))
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
 @pytest.mark.parametrize("suite", ["zlib1", "zlib1+dict1"])
-async def test_a_compressed_member_item_is_opened_and_persisted(item_env, suite):
-    await item_env["inbound"].handle(await _item_frame(item_env, payload_suite=suite))
-    got = await item_env["post_repo"].get("post-1")
-    assert got is not None and got[1].content == "member-published content"
-
-
-async def test_a_member_item_bomb_is_dropped(item_env, caplog):
-    frame = await _item_frame(item_env, payload_suite="zlib1", plaintext=_BOMB)
-    with caplog.at_level(logging.WARNING):
-        await item_env["inbound"].handle(frame)
-    assert await item_env["post_repo"].get("post-1") is None
-    assert "undecodable zlib1 space_item" in caplog.text
-
-
-async def test_a_member_item_with_an_unknown_suite_is_dropped(item_env):
-    frame = await _item_frame(item_env)
-    frame["payload_suite"] = "zlib9"
-    await item_env["inbound"].handle(frame)
+async def test_a_compressed_item_on_the_channel_is_never_opened(item_env, suite):
+    """A channel carries JSON only (the frame names no suite): compressed
+    bytes are not inflated and the item is dropped."""
+    await _relay(item_env["inbound"], await _item_frame(item_env, payload_suite=suite))
     assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_a_duplicate_of_the_federated_copy_is_dropped(item_env):
     frame = await _item_frame(item_env)
-    await item_env["inbound"].handle(frame)
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
+    await _relay(item_env["inbound"], frame)
     assert len(item_env["events"]) == 1
 
 
 async def test_our_own_echo_is_dropped(item_env):
     frame = await _item_frame(item_env, inner=_signed_inner(item_env, origin="us.home"))
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
@@ -1163,7 +1004,7 @@ async def test_a_bad_cert_drops_the_item(item_env, case, caplog):
     }[case]
     frame = await _item_frame(item_env, cert=await _cert(item_env, **over))
     with caplog.at_level(logging.WARNING):
-        await item_env["inbound"].handle(frame)
+        await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
@@ -1187,7 +1028,7 @@ async def test_a_stale_epoch_is_dropped_by_the_freshness_gate(item_env, caplog):
         "payload": ct,
     }
     with caplog.at_level(logging.WARNING):
-        await item_env["inbound"].handle(frame)
+        await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
     assert "no longer open" in caplog.text
 
@@ -1197,7 +1038,7 @@ async def test_an_outer_frame_cert_is_ignored_the_inner_one_decides(item_env):
     compared — the inner cert alone decides (here it is valid)."""
     other = await _cert(item_env, issued_at=1)
     frame = await _item_frame(item_env, frame_cert=_v1(other))
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is not None
 
 
@@ -1208,20 +1049,20 @@ async def test_a_valid_outer_frame_cert_never_rescues_a_bad_inner_one(item_env):
         cert=await _cert(item_env, scope="comment"),
         frame_cert=_v1(await _cert(item_env)),
     )
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_a_forged_author_signature_is_dropped(item_env):
     inner = _signed_inner(item_env)
     inner["content"] = "edited after signing"
-    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    await _relay(item_env["inbound"], await _item_frame(item_env, inner=inner))
     assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_an_inner_for_another_space_is_dropped(item_env):
     inner = _signed_inner(item_env, space_id="sp-2")
-    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    await _relay(item_env["inbound"], await _item_frame(item_env, inner=inner))
     assert await item_env["post_repo"].get("post-1") is None
 
 
@@ -1232,7 +1073,7 @@ async def test_an_owner_bound_id_claimed_by_another_author_is_dropped(item_env):
         SPACE_POST_KIND, space_id="sp-1", owner_user_id=other_user
     )
     inner = _signed_inner(item_env, post_id=bound)
-    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    await _relay(item_env["inbound"], await _item_frame(item_env, inner=inner))
     assert await item_env["post_repo"].get(bound) is None
 
 
@@ -1241,7 +1082,7 @@ async def test_an_owner_bound_id_of_the_author_is_accepted(item_env):
         SPACE_POST_KIND, space_id="sp-1", owner_user_id=item_env["author_user_id"]
     )
     inner = _signed_inner(item_env, post_id=bound)
-    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    await _relay(item_env["inbound"], await _item_frame(item_env, inner=inner))
     assert await item_env["post_repo"].get(bound) is not None
 
 
@@ -1255,28 +1096,26 @@ async def test_an_owner_bound_id_of_the_author_is_accepted(item_env):
     ],
 )
 async def test_an_unsupported_or_malformed_item_is_dropped(item_env, plaintext):
-    await item_env["inbound"].handle(await _item_frame(item_env, plaintext=plaintext))
+    await _relay(item_env["inbound"], await _item_frame(item_env, plaintext=plaintext))
     assert item_env["events"] == []
 
 
 async def test_a_malformed_frame_is_dropped(item_env):
-    await item_env["inbound"].handle(
-        {"type": "relay", "event_type": "space_item", "space_id": "sp-1"}
-    )
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=-1, payload="")
     assert item_env["events"] == []
 
 
 async def test_an_undecryptable_item_is_dropped(item_env):
     frame = await _item_frame(item_env)
     frame["epoch"] = 999
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert item_env["events"] == []
 
 
 async def test_an_item_for_an_unknown_space_is_dropped(item_env):
     frame = await _item_frame(item_env)
     frame["space_id"] = "sp-unknown"
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert item_env["events"] == []
 
 
@@ -1289,7 +1128,7 @@ async def test_without_the_cert_service_nothing_is_persisted(env):
         "writer_cert": await _cert(env),
         "payload": "x",
     }
-    await env["inbound"].handle(frame)
+    await _relay(env["inbound"], frame)
     assert env["events"] == []
 
 
@@ -1298,7 +1137,7 @@ async def test_without_the_cert_service_nothing_is_persisted(env):
 
 async def test_a_v1_cert_without_a_user_binding_is_refused(item_env):
     frame = await _item_frame(item_env, cert=await _cert(item_env, users=None))
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
@@ -1308,7 +1147,7 @@ async def test_an_author_outside_the_cert_binding_is_refused(item_env):
     frame = await _item_frame(
         item_env, cert=await _cert(item_env, users=["someone-else"])
     )
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
@@ -1322,39 +1161,26 @@ async def test_the_item_type_and_target_must_be_author_bound(
     """A signed post can't be re-wrapped as another type (or for another
     target) by anybody holding the content key."""
     inner = _signed_inner(item_env, item_type=item_type, target=target)
-    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    await _relay(item_env["inbound"], await _item_frame(item_env, inner=inner))
     assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_an_origin_not_derived_from_the_author_key_is_refused(item_env):
     """P4: a signed inner can't be credited to another household."""
     inner = _signed_inner(item_env, origin="victim.home")
-    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    await _relay(item_env["inbound"], await _item_frame(item_env, inner=inner))
     assert item_env["events"] == []
 
 
 async def test_the_host_relay_path_also_binds_the_origin(env):
     envelope = await _make_envelope(env)
-    pt = await env["crypto"].decrypt(
-        "sp-1", envelope["epoch"], envelope["encrypted_payload"]
-    )
-    inner = json.loads(pt)
+    inner = await _decrypted_inner(env, envelope)
     assert inner["origin_instance_id"] == env["author_origin"]
     bad = dict(inner, origin_instance_id="victim.home")
     bad["author_sig"] = b64url_encode(
         sign_ed25519(env["author_kp"].private_key, author_signing_bytes(bad))
     )
-    epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(bad).encode())
-    env2 = {"space_id": "sp-1", "epoch": epoch, "encrypted_payload": ct}
-    env2.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(env2),
-            space_seed=env["space_kp"].private_key,
-        )
-    )
-    await env["inbound"].handle(_frame(env2))
+    await _relay(env["inbound"], await _authority_envelope(env, bad))
     assert env["events"] == []
 
 
@@ -1385,7 +1211,7 @@ async def test_a_member_household_applies_the_posts_access_level(item_env, level
     await _seat_us(item_env, "member")
     access = _Access(False)
     item_env["inbound"].attach_authorship(access)
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     assert await item_env["post_repo"].get("post-1") is None
     assert access.calls[0] == {
         "origin_instance_id": item_env["author_origin"],
@@ -1398,7 +1224,7 @@ async def test_a_member_household_applies_the_posts_access_level(item_env, level
 async def test_a_member_household_admits_what_its_rules_admit(item_env):
     await _seat_us(item_env, "member")
     item_env["inbound"].attach_authorship(_Access(True))
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     assert await item_env["post_repo"].get("post-1") is not None
 
 
@@ -1407,7 +1233,7 @@ async def test_a_follower_household_relies_on_the_cert_alone(item_env):
     await _seat_us(item_env, "subscriber")
     access = _Access(False)
     item_env["inbound"].attach_authorship(access)
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     assert await item_env["post_repo"].get("post-1") is not None
     assert access.calls == []
 
@@ -1427,7 +1253,7 @@ async def test_the_hosts_mirrored_people_do_not_make_us_a_member_household(
     )
     access = _Access(False)
     item_env["inbound"].attach_authorship(access)
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     assert await item_env["post_repo"].get("post-1") is not None
     assert access.calls == []
 
@@ -1453,27 +1279,28 @@ def _signed_edit(env, *, content: str, edited_at: str, post_id: str = "post-1"):
 
 
 async def test_the_author_edits_their_post_over_the_relay(item_env):
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     frame = await _item_frame(
         item_env,
         inner=_signed_edit(item_env, content="edited", edited_at=_now_iso(-10)),
         item_type="post_edit",
     )
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.content == "edited"
     assert post.edited_at is not None
 
 
 async def test_out_of_order_post_edits_keep_the_newest(item_env):
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     for content, at in (("newer", -5), ("older", -50)):
-        await item_env["inbound"].handle(
+        await _relay(
+            item_env["inbound"],
             await _item_frame(
                 item_env,
                 inner=_signed_edit(item_env, content=content, edited_at=_now_iso(at)),
                 item_type="post_edit",
-            )
+            ),
         )
     assert (await item_env["post_repo"].get("post-1"))[1].content == "newer"
 
@@ -1481,29 +1308,31 @@ async def test_out_of_order_post_edits_keep_the_newest(item_env):
 async def test_a_post_edit_before_its_create_is_the_post_at_its_newest_content(
     item_env,
 ):
-    await item_env["inbound"].handle(
+    await _relay(
+        item_env["inbound"],
         await _item_frame(
             item_env,
             inner=_signed_edit(item_env, content="edited", edited_at=_now_iso(-5)),
             item_type="post_edit",
-        )
+        ),
     )
     # The create lands afterwards and is a duplicate.
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.content == "edited"
     assert len(item_env["events"]) == 1
 
 
 async def test_a_post_edit_never_resurrects_a_deleted_post(item_env):
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     await item_env["post_repo"].soft_delete("post-1", space_id="sp-1")
-    await item_env["inbound"].handle(
+    await _relay(
+        item_env["inbound"],
         await _item_frame(
             item_env,
             inner=_signed_edit(item_env, content="back", edited_at=_now_iso()),
             item_type="post_edit",
-        )
+        ),
     )
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.deleted and post.content is None
@@ -1524,25 +1353,27 @@ async def test_a_post_edit_by_someone_else_is_refused(item_env):
             content="theirs",
         ),
     )
-    await item_env["inbound"].handle(
+    await _relay(
+        item_env["inbound"],
         await _item_frame(
             item_env,
             inner=_signed_edit(item_env, content="hijack", edited_at=_now_iso()),
             item_type="post_edit",
-        )
+        ),
     )
     assert (await item_env["post_repo"].get("post-1"))[1].content == "theirs"
 
 
 async def test_a_comment_scope_cert_cannot_edit_a_post(item_env):
-    await item_env["inbound"].handle(await _item_frame(item_env))
-    await item_env["inbound"].handle(
+    await _relay(item_env["inbound"], await _item_frame(item_env))
+    await _relay(
+        item_env["inbound"],
         await _item_frame(
             item_env,
             inner=_signed_edit(item_env, content="edited", edited_at=_now_iso()),
             cert=await _cert(item_env, scope="comment"),
             item_type="post_edit",
-        )
+        ),
     )
     assert (await item_env["post_repo"].get("post-1"))[1].content == (
         "member-published content"
@@ -1550,20 +1381,22 @@ async def test_a_comment_scope_cert_cannot_edit_a_post(item_env):
 
 
 async def test_a_post_edit_without_a_stamp_is_refused(item_env):
-    await item_env["inbound"].handle(await _item_frame(item_env))
+    await _relay(item_env["inbound"], await _item_frame(item_env))
     inner = _signed_inner(item_env, item_type="post_edit")
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=inner, item_type="post_edit")
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=inner, item_type="post_edit"),
     )
     assert (await item_env["post_repo"].get("post-1"))[1].edited_at is None
 
 
 async def test_a_signed_post_cannot_be_rewrapped_as_an_edit(item_env):
     """A post inner (``item_type: post``) inside a ``post_edit`` wrapper."""
-    await item_env["inbound"].handle(
+    await _relay(
+        item_env["inbound"],
         await _item_frame(
             item_env, inner=_signed_inner(item_env), item_type="post_edit"
-        )
+        ),
     )
     assert await item_env["post_repo"].get("post-1") is None
 
@@ -1590,8 +1423,8 @@ async def _seed_post(env) -> str:
     bound = mint_owner_bound_id(
         SPACE_POST_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
     )
-    await env["inbound"].handle(
-        await _item_frame(env, inner=_signed_inner(env, post_id=bound))
+    await _relay(
+        env["inbound"], await _item_frame(env, inner=_signed_inner(env, post_id=bound))
     )
     return bound
 
@@ -1610,13 +1443,14 @@ async def test_a_member_published_comment_is_persisted(item_env):
     inner = _generic(
         item_env, "comment", cid, post_id, comment_type="text", content="nice"
     )
-    await item_env["inbound"].handle(
+    await _relay(
+        item_env["inbound"],
         await _item_frame(
             item_env,
             inner=inner,
             cert=await _cert(item_env, scope="comment"),
             item_type="comment",
-        )
+        ),
     )
     got = await item_env["post_repo"].get_comment(cid)
     assert got is not None and got.content == "nice"
@@ -1661,8 +1495,9 @@ async def test_a_generic_item_is_refused_unless_signed_for_what_it_is(item_env, 
         inner = _signed_inner(item_env, post_id=post_id, item_type="post_delete")
     elif case == "suite":
         inner["author_sig_suite"] = "mldsa65"
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=inner, item_type=item_type)
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=inner, item_type=item_type),
     )
     assert await item_env["post_repo"].get_comment(cid) is None
     assert not (await item_env["post_repo"].get(post_id))[1].deleted
@@ -1671,17 +1506,19 @@ async def test_a_generic_item_is_refused_unless_signed_for_what_it_is(item_env, 
 async def test_a_post_delete_needs_a_write_cert(item_env):
     post_id = await _seed_post(item_env)
     inner = _generic(item_env, "post_delete", post_id, post_id)
-    await item_env["inbound"].handle(
+    await _relay(
+        item_env["inbound"],
         await _item_frame(
             item_env,
             inner=inner,
             cert=await _cert(item_env, scope="comment"),
             item_type="post_delete",
-        )
+        ),
     )
     assert not (await item_env["post_repo"].get(post_id))[1].deleted
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=inner, item_type="post_delete")
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=inner, item_type="post_delete"),
     )
     assert (await item_env["post_repo"].get(post_id))[1].deleted
 
@@ -1697,7 +1534,8 @@ async def test_a_member_published_delete_is_refused_at_a_stale_epoch(item_env):
     )
     await item_env["crypto"].rotate_epoch("sp-1")
     await item_env["crypto"].rotate_epoch("sp-1")
-    await item_env["inbound"].handle(
+    await _relay(
+        item_env["inbound"],
         {
             "type": "relay",
             "space_id": "sp-1",
@@ -1705,7 +1543,7 @@ async def test_a_member_published_delete_is_refused_at_a_stale_epoch(item_env):
             "epoch": old_epoch,
             "writer_cert": _v1(old_cert),
             "payload": ct,
-        }
+        },
     )
     assert not (await item_env["post_repo"].get(post_id))[1].deleted
 
@@ -1725,8 +1563,9 @@ async def test_a_member_household_hands_its_roster_view_to_the_applier(item_env)
     inner = _generic(
         item_env, "comment", cid, post_id, comment_type="text", content="nice"
     )
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=inner, item_type="comment")
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=inner, item_type="comment"),
     )
     assert await item_env["post_repo"].get_comment(cid) is None
     assert access.calls[-1]["subscriber_ok"] is False
@@ -1741,7 +1580,7 @@ def _strict(frame: dict) -> dict:
 
 
 async def test_a_strict_frame_takes_its_cert_from_inside_the_ciphertext(item_env):
-    await item_env["inbound"].handle(_strict(await _item_frame(item_env)))
+    await _relay(item_env["inbound"], _strict(await _item_frame(item_env)))
     got = await item_env["post_repo"].get("post-1")
     assert got is not None and got[1].content == "member-published content"
 
@@ -1757,7 +1596,7 @@ async def test_a_strict_frame_runs_every_cert_check(item_env, case):
         "comment_scope": {"scope": "comment"},
     }[case]
     frame = _strict(await _item_frame(item_env, cert=await _cert(item_env, **over)))
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
@@ -1773,14 +1612,14 @@ async def test_a_strict_frame_without_an_inner_cert_is_dropped(item_env):
         "epoch": _e,
         "payload": ct,
     }
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
 async def test_a_strict_frame_needs_the_user_binding(item_env):
     cert = await _cert(item_env)
     frame = _strict(await _item_frame(item_env, cert=_v1(cert)))
-    await item_env["inbound"].handle(frame)
+    await _relay(item_env["inbound"], frame)
     assert await item_env["post_repo"].get("post-1") is None
 
 
@@ -1828,29 +1667,18 @@ async def test_a_channel_item_runs_every_cert_check(item_env, case):
 async def _authority_envelope(
     env, inner: dict, *, space_id: str = "sp-1", space_seed: bytes | None = None
 ) -> dict:
-    """An authority-signed ``space_post_public`` envelope over ``inner``
-    (padded, as the seed holder sends it)."""
-    epoch, ct = await env["crypto"].encrypt(space_id, pad_json_object(inner))
-    envelope = {"space_id": space_id, "epoch": epoch, "encrypted_payload": ct}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=space_id,
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=space_seed
-            if space_seed is not None
-            else env["space_kp"].private_key,
-        )
+    """An authority item over ``inner`` on the space's channel (padded, as
+    the seed holder sends it)."""
+    plain = channel_authority_plaintext(
+        inner,
+        space_id=space_id,
+        epoch=await env["crypto"].get_current_epoch(space_id),
+        space_seed=space_seed
+        if space_seed is not None
+        else env["space_kp"].private_key,
     )
-    return envelope
-
-
-def _frame(envelope: dict) -> dict:
-    return {
-        "type": "relay",
-        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        "payload": envelope,
-    }
+    epoch, ct = await env["crypto"].encrypt(space_id, plain)
+    return {"space_id": space_id, "epoch": epoch, "payload": ct}
 
 
 async def _held_post(env, post_id: str = "post-held", *, space_id: str = "sp-1"):
@@ -1891,10 +1719,11 @@ def _record(env, event_type):
 async def test_a_removal_soft_deletes_a_held_post(env):
     await _held_post(env)
     deleted = _record(env, PostDeleted)
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(env, _removal("post", "post-held", "post-held"))
-        )
+        ),
     )
     _space, row = await env["post_repo"].get("post-held")
     assert row.deleted
@@ -1908,11 +1737,12 @@ async def test_a_removal_soft_deletes_a_held_post(env):
 
 async def test_a_late_create_after_a_removal_is_not_resurrected(env):
     await _held_post(env, "post-1")
-    await env["inbound"].handle(
-        _frame(await _authority_envelope(env, _removal("post", "post-1", "post-1")))
+    await _relay(
+        env["inbound"],
+        _frame(await _authority_envelope(env, _removal("post", "post-1", "post-1"))),
     )
     # The host relay re-delivers the original create (a retry, a second GFS).
-    await env["inbound"].handle(_frame(await _make_envelope(env, post_id="post-1")))
+    await _relay(env["inbound"], _frame(await _make_envelope(env, post_id="post-1")))
     _space, row = await env["post_repo"].get("post-1")
     assert row.deleted
 
@@ -1922,12 +1752,13 @@ async def test_a_removal_before_its_create_leaves_a_tombstone(env):
         SPACE_POST_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
     )
     deleted = _record(env, PostDeleted)
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(
                 env, _removal("post", pid, pid, author=env["author_user_id"])
             )
-        )
+        ),
     )
     space_id, row = await env["post_repo"].get(pid)
     assert space_id == "sp-1"
@@ -1935,7 +1766,7 @@ async def test_a_removal_before_its_create_leaves_a_tombstone(env):
     assert row.author == env["author_user_id"]
     # Nothing was visible here, so nothing to announce.
     assert deleted == []
-    await env["inbound"].handle(_frame(await _make_envelope(env, post_id=pid)))
+    await _relay(env["inbound"], _frame(await _make_envelope(env, post_id=pid)))
     _space, row = await env["post_repo"].get(pid)
     assert row.deleted
     assert env["events"] == []
@@ -1958,10 +1789,11 @@ async def test_a_removal_never_tombstones_an_id_not_bound_to_this_space(env, cas
         pid = mint_owner_bound_id(
             SPACE_POST_KIND, space_id="sp-2", owner_user_id=author
         )
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(env, _removal("post", pid, pid, author=author))
-        )
+        ),
     )
     assert await env["post_repo"].get(pid) is None
 
@@ -1970,8 +1802,8 @@ async def test_a_duplicate_removal_changes_nothing(env):
     await _held_post(env)
     deleted = _record(env, PostDeleted)
     env_ = await _authority_envelope(env, _removal("post", "post-held", "post-held"))
-    await env["inbound"].handle(_frame(env_))
-    await env["inbound"].handle(_frame(env_))
+    await _relay(env["inbound"], _frame(env_))
+    await _relay(env["inbound"], _frame(env_))
     assert len(deleted) == 1
 
 
@@ -1990,12 +1822,13 @@ async def test_a_removal_never_touches_another_space(env):
         )
     )
     await _held_post(env, "post-elsewhere", space_id="sp-2")
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(
                 env, _removal("post", "post-elsewhere", "post-elsewhere")
             )
-        )
+        ),
     )
     _space, row = await env["post_repo"].get("post-elsewhere")
     assert not row.deleted
@@ -2020,8 +1853,9 @@ async def test_a_removal_soft_deletes_a_held_comment(env):
     await _held_post(env)
     await _held_comment(env)
     seen = _record(env, CommentDeleted)
-    await env["inbound"].handle(
-        _frame(await _authority_envelope(env, _removal("comment", "c-1", "post-held")))
+    await _relay(
+        env["inbound"],
+        _frame(await _authority_envelope(env, _removal("comment", "c-1", "post-held"))),
     )
     comment = await env["post_repo"].get_comment("c-1")
     assert comment.deleted
@@ -2036,13 +1870,14 @@ async def test_a_comment_removal_before_its_create_leaves_a_tombstone(env):
     cid = mint_owner_bound_id(
         SPACE_COMMENT_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
     )
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(
                 env,
                 _removal("comment", cid, "post-held", author=env["author_user_id"]),
             )
-        )
+        ),
     )
     comment = await env["post_repo"].get_comment(cid)
     assert comment is not None and comment.deleted
@@ -2052,7 +1887,8 @@ async def test_a_comment_removal_before_its_create_leaves_a_tombstone(env):
 
 async def test_a_comment_removal_of_an_unbound_id_leaves_no_tombstone(env):
     await _held_post(env)
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(
                 env,
@@ -2060,14 +1896,15 @@ async def test_a_comment_removal_of_an_unbound_id_leaves_no_tombstone(env):
                     "comment", "c-legacy", "post-held", author=env["author_user_id"]
                 ),
             )
-        )
+        ),
     )
     assert await env["post_repo"].get_comment("c-legacy") is None
 
 
 async def test_a_comment_removal_for_a_post_not_held_is_dropped(env):
-    await env["inbound"].handle(
-        _frame(await _authority_envelope(env, _removal("comment", "c-9", "post-x")))
+    await _relay(
+        env["inbound"],
+        _frame(await _authority_envelope(env, _removal("comment", "c-9", "post-x"))),
     )
     assert await env["post_repo"].get_comment("c-9") is None
 
@@ -2076,8 +1913,11 @@ async def test_a_comment_removal_naming_the_wrong_post_is_dropped(env):
     await _held_post(env)
     await _held_post(env, "post-other")
     await _held_comment(env)
-    await env["inbound"].handle(
-        _frame(await _authority_envelope(env, _removal("comment", "c-1", "post-other")))
+    await _relay(
+        env["inbound"],
+        _frame(
+            await _authority_envelope(env, _removal("comment", "c-1", "post-other"))
+        ),
     )
     assert not (await env["post_repo"].get_comment("c-1")).deleted
 
@@ -2098,8 +1938,8 @@ async def test_a_forged_removal_is_refused(env, case, caplog):
     else:
         inner["author_sig"] = b64url_encode(b"\0" * 64)
     caplog.set_level(logging.INFO)
-    await env["inbound"].handle(
-        _frame(await _authority_envelope(env, inner, space_seed=seed))
+    await _relay(
+        env["inbound"], _frame(await _authority_envelope(env, inner, space_seed=seed))
     )
     _space, row = await env["post_repo"].get("post-held")
     assert not row.deleted
@@ -2115,7 +1955,7 @@ async def test_a_forged_removal_is_refused(env, case, caplog):
 )
 async def test_an_unsigned_inner_that_is_no_known_notice_is_dropped(env, inner):
     await _held_post(env)
-    await env["inbound"].handle(_frame(await _authority_envelope(env, inner)))
+    await _relay(env["inbound"], _frame(await _authority_envelope(env, inner)))
     _space, row = await env["post_repo"].get("post-held")
     assert not row.deleted
 
@@ -2161,8 +2001,9 @@ async def _approved_inner(env, *, cert="comment", post=None, mark=True) -> dict:
 
 async def test_an_approved_post_reaches_the_follower_with_its_author(env):
     post = _approved_post_obj(env)
-    await env["inbound"].handle(
-        _frame(await _authority_envelope(env, await _approved_inner(env, post=post)))
+    await _relay(
+        env["inbound"],
+        _frame(await _authority_envelope(env, await _approved_inner(env, post=post))),
     )
     space_id, row = await env["post_repo"].get(post.id)
     assert space_id == "sp-1"
@@ -2174,12 +2015,13 @@ async def test_an_approved_post_reaches_the_follower_with_its_author(env):
 
 async def test_an_approved_post_with_a_write_cert_is_accepted_too(env):
     post = _approved_post_obj(env)
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(
                 env, await _approved_inner(env, post=post, cert="write")
             )
-        )
+        ),
     )
     assert await env["post_repo"].get(post.id) is not None
 
@@ -2202,7 +2044,7 @@ async def test_an_approved_post_needs_the_mark_and_a_valid_cert(env, case):
             instance_pk=env["author_kp"].public_key,
             scope="comment",
         ).to_wire()
-    await env["inbound"].handle(_frame(await _authority_envelope(env, inner)))
+    await _relay(env["inbound"], _frame(await _authority_envelope(env, inner)))
     assert await env["post_repo"].get(post.id) is None
 
 
@@ -2212,22 +2054,24 @@ async def test_an_unsigned_approved_post_is_dropped(env):
     post = _approved_post_obj(env)
     inner = await _approved_inner(env, post=post)
     del inner["author_sig"]
-    await env["inbound"].handle(_frame(await _authority_envelope(env, inner)))
+    await _relay(env["inbound"], _frame(await _authority_envelope(env, inner)))
     assert await env["post_repo"].get(post.id) is None
 
 
 async def test_an_approved_post_after_its_removal_stays_removed(env):
     post = _approved_post_obj(env)
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(
             await _authority_envelope(
                 env,
                 _removal("post", post.id, post.id, author=env["author_user_id"]),
             )
-        )
+        ),
     )
-    await env["inbound"].handle(
-        _frame(await _authority_envelope(env, await _approved_inner(env, post=post)))
+    await _relay(
+        env["inbound"],
+        _frame(await _authority_envelope(env, await _approved_inner(env, post=post))),
     )
     _space, row = await env["post_repo"].get(post.id)
     assert row.deleted
@@ -2259,8 +2103,9 @@ def _early_comment(env, post_id: str = "post-late") -> dict:
 async def test_an_early_comment_without_a_buffer_is_dropped(item_env, caplog):
     inner = _early_comment(item_env)
     with caplog.at_level(logging.INFO):
-        await item_env["inbound"].handle(
-            await _item_frame(item_env, inner=inner, item_type="comment")
+        await _relay(
+            item_env["inbound"],
+            await _item_frame(item_env, inner=inner, item_type="comment"),
         )
     assert await item_env["post_repo"].get_comment(inner["item_target"]) is None
     assert any("dropped" in r.getMessage() for r in caplog.records)
@@ -2271,11 +2116,12 @@ async def test_an_early_comment_is_held_and_replayed_with_its_post(item_env):
     buffer.attach_bus(item_env["bus"])
     item_env["inbound"].attach_pending_parents(buffer)
     inner = _early_comment(item_env, post_id="post-1")
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=inner, item_type="comment")
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=inner, item_type="comment"),
     )
     assert len(buffer) == 1
-    await item_env["inbound"].handle(await _item_frame(item_env))  # post-1
+    await _relay(item_env["inbound"], await _item_frame(item_env))  # post-1
     assert await item_env["post_repo"].get_comment(inner["item_target"]) is not None
     assert len(buffer) == 0
 
@@ -2338,7 +2184,7 @@ async def test_a_followers_relayed_post_keeps_its_media_refs(env):
         # Signed by the author (#1309 round 3).
         media_refs=refs,
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     held = await env["post_repo"].get("post-1")
     assert held is not None
     assert sink.received == [("sp-1", refs, ["api/media/p.webp"])]
@@ -2354,7 +2200,7 @@ async def test_a_relayed_post_without_media_refs_keeps_nothing(env):
     sink = _GfsMediaSink()
     env["inbound"].attach_gfs_media(sink)
     envelope = await _make_envelope(env)
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert sink.received == []
     assert sink.kept == []
 
@@ -2377,7 +2223,7 @@ async def test_a_republished_inner_with_swapped_media_refs_is_refused(env):
         media_refs=_REFS_A,
         unsigned_extra={"media_refs": _REFS_M},
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is not None
     assert sink.received == []
     assert sink.kept == []
@@ -2391,7 +2237,7 @@ async def test_an_unsigned_media_refs_is_never_taken(env):
         signed_extra={"type": "image", "image_urls": ["api/media/p.webp"]},
         unsigned_extra={"media_refs": _REFS_M},
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is not None
     assert sink.kept == []
 
@@ -2416,8 +2262,9 @@ async def test_an_edit_before_its_create_keeps_the_signed_media_refs(item_env):
     inner["media_refs_sig"] = b64url_encode(
         sign_ed25519(seed, media_refs_signing_bytes(inner))
     )
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=inner, item_type="post_edit")
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=inner, item_type="post_edit"),
     )
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.content == "edited"
@@ -2430,9 +2277,16 @@ async def test_an_edit_before_its_create_keeps_the_signed_media_refs(item_env):
 
 async def _decrypted_inner(env, envelope: dict) -> dict:
     pt = await env["crypto"].decrypt(
-        envelope["space_id"], envelope["epoch"], envelope["encrypted_payload"]
+        envelope["space_id"], envelope["epoch"], envelope["payload"]
     )
-    return json.loads(pt)
+    inner = open_channel_authority(
+        pt,
+        space_id=envelope["space_id"],
+        epoch=envelope["epoch"],
+        space_pubkey_hex=env["space_kp"].public_key.hex(),
+    )
+    assert inner is not None
+    return inner
 
 
 async def test_a_stripped_copy_first_then_the_real_one_brings_the_pictures(env):
@@ -2445,10 +2299,10 @@ async def test_a_stripped_copy_first_then_the_real_one_brings_the_pictures(env):
     picture = {"type": "image", "image_urls": ["api/media/p.webp"]}
     stripped = await _make_envelope(env, signed_extra=picture)
     real = await _make_envelope(env, signed_extra=picture, media_refs=_REFS_A)
-    await env["inbound"].handle(_frame(stripped), gfs_id="g1")
+    await _relay(env["inbound"], _frame(stripped), gfs_id="g1")
     _sid, post = await env["post_repo"].get("post-1")
     assert post.image_urls == ()  # undescribed: never shown on this path
-    await env["inbound"].handle(_frame(real), gfs_id="g2")
+    await _relay(env["inbound"], _frame(real), gfs_id="g2")
     _sid, post = await env["post_repo"].get("post-1")
     assert post.image_urls == ("api/media/sg-p.webp",)
     assert sink.kept == [{"p.webp": "sg-p.webp"}]
@@ -2467,8 +2321,10 @@ async def test_a_relayed_post_never_shows_an_undescribed_file(env):
     sink = _GfsMediaSink()
     env["inbound"].attach_gfs_media(sink)
     picture = {"type": "image", "image_urls": [f"api/media/{_SD}", "api/media/p.webp"]}
-    await env["inbound"].handle(
-        _frame(await _make_envelope(env, signed_extra=picture)), gfs_id="g1"
+    await _relay(
+        env["inbound"],
+        _frame(await _make_envelope(env, signed_extra=picture)),
+        gfs_id="g1",
     )
     _sid, post = await env["post_repo"].get("post-1")
     assert post.image_urls == ()
@@ -2479,7 +2335,8 @@ async def test_a_relayed_post_keeps_a_described_direct_file_under_its_gfs_name(e
     env["inbound"].attach_gfs_media(sink)
     picture = {"type": "image", "image_urls": [f"api/media/{_SD}"]}
     refs = {_SD: _REFS_A["p.webp"]}
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         _frame(await _make_envelope(env, signed_extra=picture, media_refs=refs)),
         gfs_id="g1",
     )
@@ -2493,10 +2350,10 @@ async def test_a_stripped_copy_after_the_real_one_changes_nothing(env):
     picture = {"type": "image", "image_urls": ["api/media/p.webp"]}
     real = await _make_envelope(env, signed_extra=picture, media_refs=_REFS_A)
     stripped = await _make_envelope(env, signed_extra=picture)
-    await env["inbound"].handle(_frame(real), gfs_id="g1")
-    await env["inbound"].handle(_frame(stripped), gfs_id="g2")
+    await _relay(env["inbound"], _frame(real), gfs_id="g1")
+    await _relay(env["inbound"], _frame(stripped), gfs_id="g2")
     # And a second signed copy never replaces what the post has.
-    await env["inbound"].handle(_frame(real), gfs_id="g2")
+    await _relay(env["inbound"], _frame(real), gfs_id="g2")
     _sid, post = await env["post_repo"].get("post-1")
     assert post.image_urls == ("api/media/sg-p.webp",)
     assert sink.kept == [{"p.webp": "sg-p.webp"}]
@@ -2508,8 +2365,10 @@ async def test_a_duplicate_from_another_author_never_heals(env):
     sink = _GfsMediaSink()
     env["inbound"].attach_gfs_media(sink)
     picture = {"type": "image", "image_urls": ["api/media/p.webp"]}
-    await env["inbound"].handle(
-        _frame(await _make_envelope(env, signed_extra=picture)), gfs_id="g1"
+    await _relay(
+        env["inbound"],
+        _frame(await _make_envelope(env, signed_extra=picture)),
+        gfs_id="g1",
     )
     real = await _make_envelope(env, signed_extra=picture, media_refs=_REFS_A)
     inner = await _decrypted_inner(env, real)
@@ -2548,14 +2407,16 @@ async def test_a_real_edit_heals_a_post_a_stripped_copy_created(item_env):
         return inner
 
     first = _edit(_now_iso(-10), with_refs=False)
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=first, item_type="post_edit")
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=first, item_type="post_edit"),
     )
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.image_urls == ()
     second = _edit(_now_iso(-5), with_refs=True)
-    await item_env["inbound"].handle(
-        await _item_frame(item_env, inner=second, item_type="post_edit")
+    await _relay(
+        item_env["inbound"],
+        await _item_frame(item_env, inner=second, item_type="post_edit"),
     )
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.image_urls == ("api/media/sg-p.webp",)
@@ -2603,7 +2464,7 @@ async def test_a_relayed_posts_signed_file_hashes_name_its_files_by_content(env)
         media_refs=_REFS_A,
         files={"p.webp": {"h": "c" * 64}},
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert sink.hashes == [{"p.webp": FileHash("c" * 64)}]
     # …and the stored post shows that content name (regression: the relay's
     # own filter used to keep only ``sg-`` names and dropped it).
@@ -2622,5 +2483,96 @@ async def test_relayed_file_hashes_another_key_signed_are_never_taken(env):
         files={"p.webp": {"h": "c" * 64}},
         files_sig_seed=generate_identity_keypair().private_key,
     )
-    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    await _relay(env["inbound"], _frame(envelope), gfs_id="g1")
     assert sink.hashes == [{}]
+
+
+# ── v_96: authority items on a space's opaque channel ────────────────────
+
+
+async def _channel_authority(env, inner: dict, *, space_seed: bytes | None = None):
+    """The ``(epoch, payload)`` of an authority item on the channel: the
+    inner signed by the space authority inside the ciphertext."""
+    plain = channel_authority_plaintext(
+        inner,
+        space_id="sp-1",
+        epoch=await env["crypto"].get_current_epoch("sp-1"),
+        space_seed=space_seed
+        if space_seed is not None
+        else env["space_kp"].private_key,
+    )
+    return await env["crypto"].encrypt("sp-1", plain)
+
+
+@pytest.mark.security
+async def test_a_channel_removal_soft_deletes_a_held_post(item_env):
+    await _held_post(item_env)
+    epoch, ct = await _channel_authority(
+        item_env, _removal("post", "post-held", "post-held")
+    )
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    _space, row = await item_env["post_repo"].get("post-held")
+    assert row.deleted
+
+
+@pytest.mark.security
+async def test_a_channel_authority_item_with_a_forged_signature_is_dropped(item_env):
+    await _held_post(item_env)
+    epoch, ct = await _channel_authority(
+        item_env,
+        _removal("post", "post-held", "post-held"),
+        space_seed=generate_space_keypair().private_key,
+    )
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    _space, row = await item_env["post_repo"].get("post-held")
+    assert not row.deleted
+
+
+@pytest.mark.security
+async def test_a_channel_authority_item_mapped_to_another_space_is_dropped(item_env):
+    await _held_post(item_env)
+    epoch, ct = await _channel_authority(
+        item_env, _removal("post", "post-held", "post-held")
+    )
+    await item_env["inbound"].handle_channel_item("sp-other", epoch=epoch, payload=ct)
+    _space, row = await item_env["post_repo"].get("post-held")
+    assert not row.deleted
+
+
+async def test_a_member_post_the_host_put_on_the_channel_lands_once(item_env):
+    """The host's authority copy of a member's post and the author's own
+    channel item (or its federation copy) dedupe by post id: one row, one
+    event."""
+    inner = _signed_inner(item_env)
+    inner["writer_cert"] = await _cert(item_env)
+    epoch, ct = await _channel_authority(item_env, inner)
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
+    frame = _strict(await _item_frame(item_env))
+    await item_env["inbound"].handle_channel_item(
+        "sp-1", epoch=frame["epoch"], payload=frame["payload"]
+    )
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    assert len(item_env["events"]) == 1
+
+
+async def test_a_channel_item_that_beats_its_rekey_lands_once_the_key_does(item_env):
+    """A channel item under an epoch whose key has not reached this
+    household yet is held and applied when the key lands by federation —
+    never dropped."""
+    inner = _signed_inner(item_env)
+    inner["writer_cert"] = await _cert(item_env)
+    epoch, ct = await _channel_authority(item_env, inner)
+    _epoch, raw = await _lose_key(item_env)
+    pending = PendingDecryptsCache(bus=item_env["bus"])
+    item_env["inbound"].attach_key_wait(pending)
+    await item_env["inbound"].handle_channel_item("sp-1", epoch=epoch, payload=ct)
+    assert await item_env["post_repo"].get("post-1") is None
+    assert len(pending) == 1
+
+    await item_env["crypto"].import_key("sp-1", epoch, raw)
+    await item_env["bus"].publish(SpaceContentKeyImported(space_id="sp-1", epoch=epoch))
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
+    assert len(item_env["events"]) == 1

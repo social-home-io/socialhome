@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,7 @@ from socialhome.federation.mesh_member_claim import (
     MeshMemberClaim,
     mesh_member_claim,
     parse_mesh_member_claim,
+    sender_identity_pk,
 )
 
 PK = ed25519_public_key(os.urandom(32))
@@ -72,3 +74,50 @@ def test_malformed_identity_key_is_refused(pk):
 
 def test_non_dict_payload_is_none():
     assert parse_mesh_member_claim(None, instance_id=IID) is None  # type: ignore[arg-type]
+
+
+class _Fed:
+    def __init__(self, pinned: dict[str, bytes]) -> None:
+        self.pinned = pinned
+
+    async def peer_identity_public_key(self, instance_id):
+        return self.pinned.get(instance_id)
+
+
+def _ev(payload, *, routed: bool, sender: str = IID):
+    return SimpleNamespace(
+        from_instance=sender,
+        payload=payload,
+        routed_path=[sender, "us"] if routed else None,
+    )
+
+
+async def test_sender_key_is_the_pinned_one_first():
+    pinned = ed25519_public_key(os.urandom(32))
+    fed = _Fed({IID: pinned})
+    got = await sender_identity_pk(fed, _ev(mesh_member_claim(PK), routed=True))
+    assert got == pinned
+
+
+async def test_sender_key_of_a_mesh_only_household_is_its_routed_claim():
+    got = await sender_identity_pk(_Fed({}), _ev(mesh_member_claim(PK), routed=True))
+    assert got == PK
+
+
+@pytest.mark.parametrize(
+    ("payload", "routed"),
+    [
+        (mesh_member_claim(PK), False),  # not origin-authenticated
+        ({}, True),  # no claim
+        (mesh_member_claim(ed25519_public_key(os.urandom(32))), True),  # not ours
+    ],
+    ids=["unrouted", "no-claim", "foreign-key"],
+)
+async def test_sender_key_is_none_without_a_pin_or_a_valid_claim(payload, routed):
+    assert await sender_identity_pk(_Fed({}), _ev(payload, routed=routed)) is None
+
+
+async def test_sender_key_without_federation_is_none():
+    assert (
+        await sender_identity_pk(None, _ev(mesh_member_claim(PK), routed=True)) is None
+    )

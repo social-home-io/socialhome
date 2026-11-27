@@ -1059,3 +1059,31 @@ async def test_held_files_names_only_the_files_that_are_here(tmp_path):
     assert await svc.held_files(
         ["api/media/here.webp", "/api/media/gone.webp", "here.webp?exp=1", "../x", ""]
     ) == ["api/media/here.webp", "here.webp?exp=1"]
+
+
+class _AnyFed:
+    """A federation service: the media queue asks it nothing about roles."""
+
+
+@pytest.mark.parametrize("push", [False, True])
+async def test_a_gfs_reached_follower_is_queued_media_like_a_member(
+    db, outbox, tmp_path, push
+):
+    """P10 (owner 2026-11-27): no follower-specific delivery rule — every
+    target the caller names is queued, a follower reached only through a
+    GFS like a member in the same position (the v_96 skip is gone)."""
+    await _seed_space(db)
+    svc = SpaceMediaSyncService(
+        outbox=outbox,
+        federation=_AnyFed(),  # type: ignore[arg-type]
+        media_dir=tmp_path,
+    )
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b"],
+        media_urls=["api/media/img-1.webp"],
+        push=push,
+    )
+    rows = await outbox.list_for_correlation("p-1")
+    assert {r.target_instance_id for r in rows} == {"peer-a", "peer-b"}

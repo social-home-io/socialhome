@@ -35,6 +35,7 @@ from socialhome.federation.invite_bootstrap import (
     BootstrapEnvelopeTooLarge,
     InviteBootstrapHint,
     UnsupportedBootstrapSigSuite,
+    body_identity_pk,
     canonical_signing_bytes,
     derive_space_session_keys,
     open_bootstrap_envelope,
@@ -623,3 +624,20 @@ def test_the_bootstrap_image_bounds_leave_room_for_the_snapshot(redeemer, issuer
         expected_kinds=frozenset({KIND_REDEEM_ACK}),
     )
     assert len(opened["space_meta"]["roster"]) == 200
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ab" * 32, bytes.fromhex("ab" * 32)),
+        ("zz", None),  # not hex
+        (None, None),
+        (7, None),
+    ],
+    ids=["hex", "not-hex", "absent", "not-a-string"],
+)
+def test_body_identity_pk_decodes_the_senders_key_or_fails_closed(raw, expected):
+    """P5: the key a redeem / join-request body's person id is proven
+    against — ``None`` (the proof then fails) when it is not hex."""
+    body = {} if raw is None else {"identity_pk": raw}
+    assert body_identity_pk(body) == expected

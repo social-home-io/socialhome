@@ -77,6 +77,9 @@ const PAIRED = [
 /** A test's own paired rows, in place of ``PAIRED``. */
 const PAIRED_EXTRA: { value: unknown[] | null } = { value: null }
 
+/** A test's own household rows, in place of ``HOUSEHOLD``. */
+const HOUSEHOLD_EXTRA: { value: unknown[] | null } = { value: null }
+
 interface Wire {
   spaces?: unknown
   unread?: Record<string, unknown>
@@ -91,7 +94,7 @@ function wire({ spaces = SPACES, unread = {}, gfs = [], global = [] }: Wire = {}
       return spaces
     }
     if (url === '/api/spaces/chat-unread') return { spaces: unread }
-    if (url === '/api/household/spaces') return HOUSEHOLD
+    if (url === '/api/household/spaces') return HOUSEHOLD_EXTRA.value ?? HOUSEHOLD
     if (url === '/api/peer_spaces') return PAIRED_EXTRA.value ?? PAIRED
     if (url === '/api/public_spaces') return global
     if (url === '/api/gfs/connections') return gfs
@@ -262,11 +265,11 @@ describe('SpaceListPage — "Some posts may be missing" dot', () => {
     expect(dot(r.getByText('Band').closest('a')!)).toBeNull()
   })
 
-  it('never on a followed space', async () => {
+  it('on a followed space too (P10: a follower syncs like a member)', async () => {
     wire({ spaces: missing('sK') })
     const r = await renderPage()
     const kunst = (await r.findByText('Kunstverein')).closest('a')!
-    expect(dot(kunst)).toBeNull()
+    expect(dot(kunst)).not.toBeNull()
   })
 
   it('sits next to the row\'s count', async () => {
@@ -453,20 +456,22 @@ describe('SpaceListPage — Discover', () => {
         g('gOne', 'One follower', { member_count: 1, follower_count: 1, allow_subscribers: true }),
         // An older host declares no number: no "0 members".
         g('gOld', 'Older host', { member_count: null, follower_count: null, allow_subscribers: true }),
-        // Takes no followers: never "0 followers".
-        g('gNoFollow', 'No followers taken', { member_count: 3, follower_count: 0, allow_subscribers: false }),
+        // Takes no followers: its host declares no follower count.
+        g('gNoFollow', 'No followers taken', { member_count: 3, follower_count: null, allow_subscribers: false }),
         g('gZero', 'Nobody follows yet', { member_count: 3, follower_count: 0, allow_subscribers: true }),
       ],
     })
     const r = await renderPage('/spaces?discover=global')
     const meta = async (name: string) =>
-      (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
-    expect(await meta('Both counts')).toBe('6 members · 12 followers · open')
-    expect(await meta('One follower')).toBe('1 member · 1 follower · open')
-    expect(await meta('Older host')).toBe('open')
-    // (No Follow and no pairing: the row says how people do get in.)
-    expect(await meta('No followers taken')).toBe('3 members · open · members can invite you with a link')
-    expect(await meta('Nobody follows yet')).toBe('3 members · 0 followers · open')
+      (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')?.textContent ?? ''
+    expect(await meta('Both counts')).toBe('6 members · 12 followers')
+    expect(await meta('One follower')).toBe('1 member · 1 follower')
+    expect(await meta('Older host')).toBe('')
+    // (No Follow and no pairing: the row says how people do get in.) P9: an
+    // unpaired host's "open" is how its members get in, not how you do —
+    // no join-mode word on a row nobody here can join from.
+    expect(await meta('No followers taken')).toBe('3 members · members can invite you with a link')
+    expect(await meta('Nobody follows yet')).toBe('3 members · 0 followers')
     expect(r.container.textContent).not.toContain('0 members')
   })
 
@@ -486,6 +491,40 @@ describe('SpaceListPage — Discover', () => {
     }
   })
 
+  it('a paired space that takes followers says "0 followers"; one that takes none shows only its members', async () => {
+    // The paired directory carries no ``allow_subscribers``: the host
+    // declares a follower count exactly when the space takes followers.
+    PAIRED_EXTRA.value = [
+      { ...PAIRED[0], follower_count: 0 },
+      { ...PAIRED[1] },
+    ]
+    try {
+      const r = await renderPage('/spaces?discover=paired')
+      const meta = async (name: string) =>
+        (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
+      expect(await meta('Müller family market')).toBe('Müller household · 6 members · 0 followers · ask to join')
+      expect(await meta('Hottingen bike repair')).toBe('Keller household · 12 members · open')
+    } finally {
+      PAIRED_EXTRA.value = null
+    }
+  })
+
+  it('a household row: followers only for a space that takes them, "0 followers" included', async () => {
+    HOUSEHOLD_EXTRA.value = [
+      { ...HOUSEHOLD[0], member_count: 4, follower_count: null },
+      { ...HOUSEHOLD[0], space_id: 'hRead', name: 'Read along', allow_subscribers: true, member_count: 2, follower_count: 0 },
+    ]
+    try {
+      const r = await renderPage('/spaces?discover=household')
+      const meta = async (name: string) =>
+        (await r.findByText(name)).closest('li')!.querySelector('.sh-spaces-row__m')!.textContent
+      expect(await meta('Hottingen Community Choir')).toBe('4 members · anyone at home can join')
+      expect(await meta('Read along')).toBe('2 members · 0 followers · anyone at home can join')
+    } finally {
+      HOUSEHOLD_EXTRA.value = null
+    }
+  })
+
   it('with a GFS, global spaces list; one you can only read along offers Follow', async () => {
     wire({
       gfs: [{ id: 'g1', status: 'active' }],
@@ -500,7 +539,7 @@ describe('SpaceListPage — Discover', () => {
     // An unpaired host has no name we know — the row leaves the host out
     // rather than showing its instance id.
     const meta = (await r.findByText('Global art')).closest('li')!.querySelector('.sh-spaces-row__m')!
-    expect(meta.textContent).toBe('90 members · open')
+    expect(meta.textContent).toBe('90 members')
     expect(r.getByRole('button', { name: 'Follow: Global art' })).toBeTruthy()
     r.fireEvent.click(r.getByRole('button', { name: 'Follow: Global art' }))
     await r.waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/spaces/gArt/subscribe', {}))

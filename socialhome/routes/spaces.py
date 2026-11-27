@@ -79,7 +79,7 @@ from ..rate_limiter import RateLimiter, client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_attention import needs_you_count, space_attention
-from ..services.space_member_guard import require_member_seat
+from ..services.space_member_guard import require_seat
 from ..services.space_service import (
     _UNSET_MEMBER_PROFILE,
     DEFAULT_INVITE_TOKEN_TTL_SECONDS,
@@ -210,14 +210,15 @@ class SpaceCollectionView(BaseView):
                 # null unless the caller has content authority here.
                 "needs_you": await self._needs_you(s.id, listing.role),
                 # "Some posts may be missing" — the list's dot; the
-                # detail's ``sync.may_be_missing``, never for a follower.
-                "sync_may_be_missing": await self._may_be_missing(s.id, listing.role),
+                # detail's ``sync.may_be_missing`` — a follower's too (P10:
+                # it syncs like a member).
+                "sync_may_be_missing": await self._may_be_missing(s.id),
             }
         )
 
-    async def _may_be_missing(self, space_id: str, role: str) -> bool:
+    async def _may_be_missing(self, space_id: str) -> bool:
         status_svc = self.request.app.get(space_sync_status_key)
-        if status_svc is None or role == SpaceRole.SUBSCRIBER:
+        if status_svc is None:
             return False
         return await status_svc.may_be_missing(space_id)
 
@@ -369,7 +370,7 @@ class SpaceDetailView(BaseView):
                 "join_mode": space.join_mode.value,
                 "category": normalize_category(space.category),
                 # The caller's own role here — the SPA's admin / follower
-                # UI reads it (a follower is not listed in ``/members``).
+                # UI reads it before the roster loads.
                 "my_role": member.role,
                 # Members (never followers) and followers: the roster's own
                 # counts when this household holds it (a member seat here),
@@ -432,9 +433,9 @@ class SpaceDetailView(BaseView):
                 # proposals waiting for the caller — null unless they have
                 # content authority here (owner / admin / moderator).
                 # Does this space need sync? ``{state, last_ok_at,
-                # waiting_to_send}`` — members only (a follower is fed by
-                # the GFS, not the host); null otherwise.
-                "sync": await self._sync_status(space.id, member.role),
+                # waiting_to_send}`` — for every seat, a follower's included
+                # (P10: it syncs like a member); null while none is known.
+                "sync": await self._sync_status(space.id),
                 "attention": await space_attention(
                     space.id,
                     seat=member,
@@ -452,16 +453,16 @@ class SpaceDetailView(BaseView):
         return web.json_response(payload)
 
     async def _gfs_listing(self, space) -> tuple[list[dict] | None, bool]:
-        """Where a global space is listed — only for its members (not
-        followers) and, on the owner household, the household admins (who
-        manage its GFS connections). Anyone else gets ``(None, False)``:
-        which servers list a space is the members' business."""
+        """Where a global space is listed — for every seat, a follower's
+        included (P10), and, on the owner household, the household admins
+        (who manage its GFS connections). Anyone else gets ``(None, False)``:
+        which servers list a space is the seats' business."""
         selection = self.request.app.get(gfs_server_selection_service_key)
         if selection is None:
             return None, False
         ctx = self.user
         member = await self.svc(space_repo_key).get_member(space.id, ctx.user_id)
-        is_member = member is not None and member.role != SpaceRole.SUBSCRIBER
+        is_member = member is not None
         owner_household_admin = bool(ctx.is_admin) and (
             space.owner_instance_id == self.request.app.get(instance_id_key)
         )
@@ -469,9 +470,9 @@ class SpaceDetailView(BaseView):
             return None, False
         return await selection.describe(space)
 
-    async def _sync_status(self, space_id: str, role: str) -> dict | None:
+    async def _sync_status(self, space_id: str) -> dict | None:
         status_svc = self.request.app.get(space_sync_status_key)
-        if status_svc is None or role == SpaceRole.SUBSCRIBER:
+        if status_svc is None:
             return None
         status = await status_svc.status(space_id)
         if status is None:
@@ -933,30 +934,15 @@ def _member_to_dict_signed(
     return payload
 
 
-#: Roster fields a follower never gets (owner decision 13): session
-#: presence, when someone joined, and whether they share their location.
-_FOLLOWER_WITHHELD_FIELDS = frozenset(
-    {"is_online", "is_idle", "last_seen_at", "joined_at", "location_share_enabled"}
-)
-
-
-def _follower_roster_row(row: dict) -> dict:
-    """A roster row as a follower sees it — who, not when or where."""
-    return {k: v for k, v in row.items() if k not in _FOLLOWER_WITHHELD_FIELDS}
-
-
 class SpaceMembersView(BaseView):
     """GET/POST /api/spaces/{id}/members — list or add members."""
 
     async def get(self) -> web.Response:
         space_id = self.match("id")
-        seat = await self.svc(space_service_key).require_reader(
-            space_id, self.user.user_id
-        )
-        # Owner decision 13: a follower reads the posts but is an outsider
-        # to the people — they see the members (never another follower)
-        # by name, picture and role, nothing about when they are around.
-        follower = seat.role not in WRITER_ROLES
+        await self.svc(space_service_key).require_reader(space_id, self.user.user_id)
+        # D3 (v_96): everyone in the space sees the same roster, followers
+        # included — the same rows and fields (P10, owner 2026-11-26: a
+        # follower reads everything a member does).
         members = await self.svc(space_repo_key).list_members(space_id)
         # §D1b — federated peers who accepted a cross-household invite
         # are seated in ``space_remote_members``, NOT ``space_members``.
@@ -967,13 +953,6 @@ class SpaceMembersView(BaseView):
         remote_members = (
             await remote_repo.list_for_space(space_id) if remote_repo else []
         )
-        if follower:
-            members = [m for m in members if m.role in WRITER_ROLES]
-            remote_members = [
-                rm
-                for rm in remote_members
-                if (rm.role or SpaceRole.MEMBER) in WRITER_ROLES
-            ]
         # Resolve global display_name + viewer's personal alias for each
         # member in two bulk calls (no N+1).
         user_repo = self.svc(user_repo_key)
@@ -1110,8 +1089,6 @@ class SpaceMembersView(BaseView):
             name_only(row) if row.get("user_id") in withheld else row
             for row in local_rows + remote_rows
         ]
-        if follower:
-            rows = [_follower_roster_row(row) for row in rows]
         return web.json_response(rows)
 
     async def post(self) -> web.Response:
@@ -1601,19 +1578,35 @@ class SpaceMemberDetailView(BaseView):
 
 
 class SpaceBanView(BaseView):
-    """POST /api/spaces/{id}/ban — ban a member."""
+    """POST /api/spaces/{id}/ban — ban a person (``{user_id}``) or a whole
+    household (``{instance_id}``, P7b). Exactly one of the two, else 422."""
 
     async def post(self) -> web.Response:
         ctx = self.user
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         body = await self.body()
-        await svc.ban(
-            space_id,
-            actor_username=ctx.username,
-            user_id=body["user_id"],
-            reason=body.get("reason"),
-        )
+        user_id = body.get("user_id")
+        instance_id = body.get("instance_id")
+        reason = body.get("reason")
+        reason = reason if isinstance(reason, str) else None
+        named = [v for v in (user_id, instance_id) if v is not None]
+        if len(named) != 1 or not isinstance(named[0], str) or not named[0]:
+            raise ValueError("name exactly one of user_id / instance_id")
+        if instance_id is not None:
+            await svc.ban_household(
+                space_id,
+                actor_username=ctx.username,
+                instance_id=instance_id,
+                reason=reason,
+            )
+        else:
+            await svc.ban(
+                space_id,
+                actor_username=ctx.username,
+                user_id=user_id,
+                reason=reason,
+            )
         return web.json_response({"ok": True})
 
 
@@ -2305,10 +2298,63 @@ class SpaceBanListView(BaseView):
         space_id = self.match("id")
         space = await space_svc._require_space(space_id)
         await space_svc._require_admin_or_owner(space, ctx.username)
-        bans = await self.svc(space_repo_key).list_bans(space_id)
+        repo = self.svc(space_repo_key)
         # Named here, not in the repo rows: ``list_bans`` also feeds the
         # space-sync exporter, whose wire shape must not change.
-        return web.json_response(await self.with_people(bans, space_id=space_id))
+        people = await self.with_people(
+            await repo.list_bans(space_id), space_id=space_id
+        )
+        fed_repo = self.svc(federation_repo_key)
+        names: dict[str, str | None] = {}
+
+        async def household_name(instance_id: str | None) -> str | None:
+            if not instance_id:
+                return None
+            if instance_id not in names:
+                peer = await fed_repo.get_instance(instance_id)
+                names[instance_id] = peer.display_name if peer else None
+            return names[instance_id]
+
+        rows = []
+        for p in people:
+            iid = await space_svc.banned_household_of(space_id, str(p["user_id"]))
+            rows.append(
+                {
+                    **p,
+                    "kind": "person",
+                    "instance_id": iid,
+                    "household_name": await household_name(iid),
+                    # An admin gets no Unban the server would refuse.
+                    "banned_by_owner": await space_svc.ban_made_by_owner(
+                        space, p.get("banned_by")
+                    ),
+                }
+            )
+        for row in await repo.list_household_bans(space_id):
+            rows.append(
+                {
+                    **row,
+                    "kind": "household",
+                    "household_name": await household_name(str(row["instance_id"])),
+                    "banned_by_owner": await space_svc.ban_made_by_owner(
+                        space, row.get("banned_by")
+                    ),
+                }
+            )
+        return web.json_response(rows)
+
+
+class SpaceHouseholdUnbanView(BaseView):
+    """DELETE /api/spaces/{id}/household-bans/{instance_id} — lift a
+    household ban (admin, P7b)."""
+
+    async def delete(self) -> web.Response:
+        await self.svc(space_service_key).unban_household(
+            self.match("id"),
+            actor_username=self.user.username,
+            instance_id=self.match("instance_id"),
+        )
+        return web.json_response({"ok": True})
 
 
 class SpaceUnbanView(BaseView):
@@ -2355,7 +2401,8 @@ def sync_now_wait_s(limiter: RateLimiter | None, space_id: str) -> int:
 
 
 class SpaceSyncTriggerView(BaseView):
-    """POST /api/spaces/{id}/sync — "Sync now", any member (not a follower).
+    """POST /api/spaces/{id}/sync — "Sync now", any seat (a follower syncs
+    like a member, P10).
 
     The small incremental ``SPACE_SYNC_BEGIN`` of one round, right away
     (``SpaceSyncScheduler.sync_now``), to each household acting as the
@@ -2371,8 +2418,7 @@ class SpaceSyncTriggerView(BaseView):
         space_svc = self.svc(space_service_key)
         space_id = self.match("id")
         await space_svc._require_space(space_id)
-        member = await space_svc._require_member(space_id, ctx.user_id)
-        space_svc._assert_writable_member(member, action="sync")
+        await space_svc._require_member(space_id, ctx.user_id)
         limiter = self.request.app.get(rate_limiter_key)
         key = _sync_now_key(space_id)
         if limiter is not None and not limiter.is_allowed(
@@ -2682,10 +2728,10 @@ class SpacePresenceView(BaseView):
             )
         space_id = self.match("id")
         repo = self.svc(space_repo_key)
-        # A member's seat, checked before the space row: the pins are the
-        # members' whereabouts, so a follower gets the outsider's 403, and
-        # an unknown id the same — no existence oracle.
-        await require_member_seat(repo, space_id, ctx.user_id)
+        # A seat, checked before the space row — a follower's included
+        # (P10: it reads the map); an unknown id answers the same 403 —
+        # no existence oracle.
+        await require_seat(repo, space_id, ctx.user_id)
         space = await self.svc(space_service_key)._require_space(space_id)
         if not space.features.location:
             return web.json_response(
@@ -3027,6 +3073,10 @@ class SpaceJoinRequestCollectionView(BaseView):
             self.match("id"),
             user_id=ctx.user_id,
             message=body.get("message"),
+            # Only when the person agreed in the SPA: a follower stepping up
+            # into a local community hosted elsewhere sends its household's
+            # home rounded to ~1 km to that host.
+            share_location=body.get("share_location") is True,
         )
         # ``open`` space hosted here: seated at once, no request to review.
         return web.json_response(
@@ -3337,32 +3387,43 @@ class SpacePostCommentDetailView(BaseView):
 
 
 class SpaceSubscribeView(BaseView):
-    """``POST /api/spaces/{id}/subscribe`` — subscribe to a public or
-    global space as a read-only member (idempotent — double-subscribe
-    is a no-op).
+    """``POST /api/spaces/{id}/subscribe`` — follow a public or global
+    space: a join with the read-only ``subscriber`` role (v_96),
+    idempotent (an existing seat of any role is kept). Optional body
+    ``{"share_location": true}`` — the person agreed to send this
+    household's home (~1 km) to a local community's host. A space hosted
+    here seats at once (``{"subscribed": true, "pending": false}``); one
+    hosted elsewhere sends its host a follow request, which it approves on
+    its own (``{"subscribed": false, "pending": true}``).
 
-    ``DELETE /api/spaces/{id}/subscribe`` — unsubscribe. No-op for
-    users who aren't subscribers (so this can't silently leave a real
-    member's space). Both return ``{"subscribed": bool}``.
-
-    Note on naming: "subscribe" is used here rather than "follow"
-    because the product already uses "follow" for a different concept
-    (the dashboard pin list, see ``corner_service``).
+    ``DELETE /api/spaces/{id}/subscribe`` — unfollow: leave the subscriber
+    seat. No-op for a seat of any other role (so this can't silently leave
+    a real member's space). Returns ``{"subscribed": false, "pending":
+    false}``.
     """
 
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
+        body = await self.body() if self.request.can_read_body else {}
+        share_location = isinstance(body, dict) and body.get("share_location") is True
         svc = self.svc(space_service_key)
-        await svc.subscribe_to_space(ctx.user_id, space_id)
-        return web.json_response({"subscribed": True})
+        result = await svc.follow_space(
+            ctx.user_id, space_id, share_location=share_location
+        )
+        return web.json_response(
+            {
+                "subscribed": bool(result["subscribed"]),
+                "pending": bool(result["pending"]),
+            }
+        )
 
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
         svc = self.svc(space_service_key)
-        await svc.unsubscribe_from_space(ctx.user_id, space_id)
-        return web.json_response({"subscribed": False})
+        await svc.unfollow_space(ctx.user_id, space_id)
+        return web.json_response({"subscribed": False, "pending": False})
 
 
 class MySubscriptionsView(BaseView):
@@ -3599,7 +3660,7 @@ class SpaceNotifPrefsView(BaseView):
                 **choice,
                 "feature_location": feature_location,
                 "location_share_enabled": bool(member.location_share_enabled),
-                # A follower is offered no sharing toggle (owner decision 13).
+                # A follower reads the map but never shares (P10): no toggle.
                 "location_share_allowed": feature_location
                 and member.role in WRITER_ROLES,
             }

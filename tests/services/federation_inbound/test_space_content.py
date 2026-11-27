@@ -141,7 +141,7 @@ class _AllowAuthorship:
     #: household, which keeps no member-only data).
     member_household = True
 
-    async def holds_member_seat(self, space_id):
+    async def holds_seat(self, space_id):
         return self.member_household
 
     async def is_admin_household(self, event, space_id):

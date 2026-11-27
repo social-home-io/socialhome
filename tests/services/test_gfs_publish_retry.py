@@ -1,5 +1,5 @@
 """Tests for :mod:`socialhome.services.gfs_publish_retry` — the bounded,
-in-memory retry queue for ``POST /gfs/publish``."""
+in-memory retry queue for anonymous GFS publishes."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from socialhome.services.gfs_publish_retry import (
     GfsPublishRetryQueue,
     PublishOutcome,
     classify_publish_status,
-    is_payload_suite_refusal,
     parse_retry_after_s,
 )
 
@@ -97,74 +96,6 @@ def test_retry_after_parsing():
 # ── payload_suite refusal ────────────────────────────────────────────────
 
 
-class _Body:
-    def __init__(self, raw: bytes) -> None:
-        self.raw = raw
-        self.asked: int | None = None
-
-    async def read(self, n: int = -1) -> bytes:
-        self.asked = n
-        if isinstance(self.raw, Exception):
-            raise self.raw
-        return self.raw
-
-
-class _Resp:
-    def __init__(self, status: int, raw) -> None:
-        self.status = status
-        self.content = _Body(raw)
-
-
-@pytest.mark.parametrize(
-    ("status", "raw", "expected"),
-    [
-        (409, b'{"error": "payload_suite_unsupported"}', True),
-        (409, b'{"error": "conflict"}', False),
-        (409, b"not json", False),
-        (409, b'["payload_suite_unsupported"]', False),
-        (409, OSError("reset"), False),
-        (400, b'{"error": "payload_suite_unsupported"}', False),
-        (200, b"{}", False),
-    ],
-)
-async def test_is_payload_suite_refusal(status, raw, expected):
-    resp = _Resp(status, raw)
-    assert await is_payload_suite_refusal(resp) is expected
-    if status == 409:
-        # A hostile server can't make us buffer a huge body.
-        assert resp.content.asked == mod._REFUSAL_BODY_MAX_BYTES
-
-
-def test_suite_refused_outcome():
-    assert PublishOutcome.suite_refused().kind == "suite_refused"
-
-
-def test_the_body_picks_the_compressed_copy_only_when_asked_and_present():
-    item = GfsPublish(
-        space_id="sp",
-        event_type="e",
-        payload={"j": 1},
-        compressed={"zlib1": {"z": 1}, "zlib1+dict1": {"d": 1}},
-    )
-    assert item.body()["payload"] == {"j": 1}
-    assert item.body(suite="zlib1")["payload"] == {"z": 1}
-    assert item.body(suite="zlib1+dict1")["payload"] == {"d": 1}
-    assert _item().body(suite="zlib1")["payload"] == _item().payload
-
-
-async def test_a_queued_item_keeps_a_private_copy_of_both_payloads(fast):
-    send = _ScriptedSend([TRANSIENT])
-    queue = GfsPublishRetryQueue(send)
-    compressed = {"zlib1": {"z": [1]}}
-    queue.enqueue(
-        "g1",
-        GfsPublish(space_id="sp", event_type="e", payload={}, compressed=compressed),
-    )
-    compressed["zlib1"]["z"].append(2)
-    queued = queue._queues["g1"].items[0]
-    assert queued.compressed == {"zlib1": {"z": [1]}}
-
-
 # ── The queue ────────────────────────────────────────────────────────────
 
 
@@ -213,7 +144,7 @@ async def test_the_queue_gives_up_after_its_budget(fast, caplog):
     send = _ScriptedSend([TRANSIENT] * (budget + 5))
     queue = GfsPublishRetryQueue(send)
     queue.enqueue("g1", _item(1))
-    queue.enqueue("g1", _item(2, space_id="sp-2"))
+    queue.enqueue("g1", _item(2))  # same space: behind the failing head
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await queue.start()
         try:
@@ -223,7 +154,6 @@ async def test_the_queue_gives_up_after_its_budget(fast, caplog):
     assert len(send.calls) == budget
     assert "giving up on 2 GFS publish(es) to g1" in caplog.text
     assert "space_post_public@sp-1" in caplog.text
-    assert "space_post_public@sp-2" in caplog.text
 
 
 async def test_retry_after_sets_the_next_attempt(fast):
@@ -232,7 +162,7 @@ async def test_retry_after_sets_the_next_attempt(fast):
     queue = GfsPublishRetryQueue(_ScriptedSend([]))
     before = time.monotonic()
     queue.enqueue("g1", _item(), retry_after_s=42.0)
-    due = queue._queues["g1"].due_at
+    due = queue._queues[("g1", "sp-1")].due_at
     assert 42.0 <= due - before < 43.0
 
 
@@ -247,7 +177,7 @@ async def test_retry_after_on_a_retry_sets_the_next_attempt(fast):
                 break
             await asyncio.sleep(0.01)
         await asyncio.sleep(0.01)
-        due_in = queue._queues["g1"].due_at - time.monotonic()
+        due_in = queue._queues[("g1", "sp-1")].due_at - time.monotonic()
     finally:
         await queue.stop()
     assert 29.0 < due_in <= 30.0
@@ -277,7 +207,7 @@ async def test_the_queued_payload_is_a_private_copy():
     payload = {"space_id": "sp-1", "tags": ["a"]}
     queue.enqueue("g1", GfsPublish("sp-1", "space_post_public", payload))
     payload["tags"].append("b")
-    assert queue._queues["g1"].items[0].payload == {
+    assert queue._queues[("g1", "sp-1")].items[0].payload == {
         "space_id": "sp-1",
         "tags": ["a"],
     }
@@ -296,10 +226,10 @@ async def test_caps_refuse_new_work(monkeypatch, caplog):
 
 async def test_pending_reports_a_waiting_gfs():
     queue = GfsPublishRetryQueue(_ScriptedSend([]))
-    assert not queue.pending("g1")
+    assert not queue.pending("g1", "sp-1")
     queue.enqueue("g1", _item())
-    assert queue.pending("g1")
-    assert not queue.pending("g2")
+    assert queue.pending("g1", "sp-1")
+    assert not queue.pending("g2", "sp-1")
 
 
 async def test_stop_drops_pending_work_and_refuses_new(caplog):
@@ -343,3 +273,130 @@ async def test_one_gfs_cannot_crowd_out_the_others(monkeypatch, caplog):
         assert not queue.enqueue("dead", _item(3))
         assert queue.enqueue("alive", _item(4))
     assert "retry queue for dead is full" in caplog.text
+
+
+async def test_pending_is_per_connection_and_space():
+    """Order is kept per (connection, space): a space's failing head (e.g.
+    an epoch notice the GFS's one-epoch-a-minute bound answered 429) never
+    holds back another space's first send to the same GFS."""
+    queue = GfsPublishRetryQueue(_ScriptedSend([]))
+    queue.enqueue("g1", _item(space_id="sp-1"))
+    assert queue.pending("g1", "sp-1")
+    assert not queue.pending("g1", "sp-2")
+    assert not queue.pending("g2", "sp-1")
+
+
+async def test_one_spaces_failing_head_does_not_hold_back_another_space(fast):
+    """sp-1 never gets through (its head is retried until the budget is
+    spent); sp-2's item to the same GFS goes out all the same, and sp-1
+    keeps its own order."""
+    sent: list[int] = []
+
+    async def send(conn_id, item):
+        sent.append(item.payload["n"])
+        return TRANSIENT if item.space_id == "sp-1" else DELIVERED
+
+    queue = GfsPublishRetryQueue(send)
+    queue.enqueue("g1", _item(1, space_id="sp-1"))
+    queue.enqueue("g1", _item(3, space_id="sp-1"))
+    queue.enqueue("g1", _item(2, space_id="sp-2"))
+    await queue.start()
+    try:
+        await _idle(queue)
+    finally:
+        await queue.stop()
+    assert 2 in sent
+    assert 3 not in sent  # behind its own space's failing head
+
+
+async def test_the_per_connection_cap_counts_every_space(monkeypatch):
+    monkeypatch.setattr(mod, "GFS_PUBLISH_RETRY_MAX_PENDING", 10)
+    monkeypatch.setattr(mod, "GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN", 2)
+    queue = GfsPublishRetryQueue(_ScriptedSend([]))
+    assert queue.enqueue("g1", _item(1, space_id="sp-1"))
+    assert queue.enqueue("g1", _item(2, space_id="sp-2"))
+    assert not queue.enqueue("g1", _item(3, space_id="sp-3"))
+
+
+async def test_an_unreachable_gfs_costs_one_probe_per_pass_not_one_per_space(fast):
+    """A connection-level failure (no ``Retry-After``: unreachable, 5xx)
+    skips that GFS's other spaces for the rest of the pass, uncounted — a
+    dead server costs one timeout a pass, and another GFS's due retries
+    are not held behind it."""
+    calls: list[str] = []
+
+    async def send(conn_id, item):
+        calls.append(conn_id)
+        return TRANSIENT if conn_id == "dead" else DELIVERED
+
+    queue = GfsPublishRetryQueue(send)
+    for n, sp in enumerate(("sp-1", "sp-2", "sp-3")):
+        queue.enqueue("dead", _item(n, space_id=sp))
+    queue.enqueue("alive", _item(9, space_id="sp-9"))
+    await queue._run_due()
+    assert calls.count("dead") == 1
+    assert "alive" in calls
+    assert not queue.pending("alive", "sp-9")
+    # The skipped spaces spent no retry of their budget.
+    assert all(
+        q.retries_done == 0
+        for (cid, sp), q in queue._queues.items()
+        if cid == "dead" and sp != "sp-1"
+    )
+
+
+async def test_a_429_of_one_space_does_not_skip_the_gfs_other_spaces(fast):
+    """A 429 with ``Retry-After`` is that space's own bound (an epoch
+    notice too soon): the GFS's other spaces still go in the same pass."""
+    calls: list[str] = []
+
+    async def send(conn_id, item):
+        calls.append(item.space_id)
+        if item.space_id == "sp-1":
+            return PublishOutcome.transient(60.0)
+        return DELIVERED
+
+    queue = GfsPublishRetryQueue(send)
+    queue.enqueue("g1", _item(1, space_id="sp-1"))
+    queue.enqueue("g1", _item(2, space_id="sp-2"))
+    await queue._run_due()
+    assert calls == ["sp-1", "sp-2"]
+
+
+async def test_the_same_send_waiting_twice_is_queued_once():
+    """Callers that ask again while a send waits (a subscribe on every
+    config change) add nothing: one queued item, one POST when it lands."""
+    queue = GfsPublishRetryQueue(_ScriptedSend([]))
+    assert queue.enqueue("g1", _item(1))
+    assert queue.enqueue("g1", _item(1))
+    assert len(queue._queues[("g1", "sp-1")].items) == 1
+    assert queue.enqueue("g1", _item(2))
+    assert len(queue._queues[("g1", "sp-1")].items) == 2
+
+
+async def test_a_solo_kind_gives_up_alone_and_what_waited_behind_it_goes_on(
+    fast, caplog
+):
+    """A seat request that never lands must not take the content queued
+    behind it down with it: the solo head gives up alone."""
+    budget = len(mod.GFS_PUBLISH_RETRY_BACKOFF_S)
+    sent: list[str] = []
+
+    async def send(conn_id, item):
+        sent.append(item.event_type)
+        return TRANSIENT if item.event_type == "channel_subscribe" else DELIVERED
+
+    queue = GfsPublishRetryQueue(send, solo_kinds=frozenset({"channel_subscribe"}))
+    queue.enqueue(
+        "g1", GfsPublish(space_id="sp-1", event_type="channel_subscribe", payload={})
+    )
+    queue.enqueue("g1", _item(2))
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        await queue.start()
+        try:
+            await _idle(queue)
+        finally:
+            await queue.stop()
+    assert sent.count("channel_subscribe") == budget
+    assert sent[-1] == "space_post_public"  # it went on
+    assert "giving up on channel_subscribe@sp-1" in caplog.text

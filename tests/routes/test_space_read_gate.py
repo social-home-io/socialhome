@@ -299,7 +299,8 @@ async def test_non_member_sees_the_landing_of_a_household_space(seeded):
         # The test admin, Olive and Fern — everyone at home but the guest
         # who left.
         "member_count": 3,
-        "follower_count": 0,
+        # A household space takes no followers: no follower count at all.
+        "follower_count": None,
         "local_area": None,
         "place": None,
     }

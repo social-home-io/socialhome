@@ -25,9 +25,10 @@ household, and two paired households signal their WebRTC DataChannel
 with federation events inside their sealed envelopes, which a GFS may carry
 only as ciphertext (see [push-relay.md](protocol/push-relay.md)). The GFS sees
 routing metadata only — never plaintext content, and (since the
-anonymous relay) not even which household relayed a public/global space
-event: `/gfs/publish` is authorized purely by the space-authority
-signature inside the opaque payload.
+anonymous relay) not even which household relayed a space item: since
+v_96 a space's content reaches a GFS only through the space's opaque
+channel (a channel id, never the space; `publish-anon` names no
+household).
 
 For public highlights the GFS adds a **lazy-relay fallback tier**: a guest browser
 always tries a direct WebRTC DataChannel to the author's SH first, and
@@ -514,11 +515,12 @@ selects it in two cases:
   back unless that one fails too
   ([gfs-relay.md](protocol/gfs-relay.md), "Failover").
   **Member directory.** `SpaceMemberDirectory` on the host passes the
-  cards it holds to the space's writer-seat member households (never
-  followers); a member seats each carded household lazily as a
+  cards it holds to every seated household (followers too since v_96,
+  same path); a member seats each carded household lazily as a
   `space_session` row with no `relay_via` (static-static keys from the
   card's key-wrap key), so its own fan-out reaches that household's
-  mailbox. A seat is not a pairing: a pairing handshake between the
+  mailbox — a follower's like a member's (P10: no follower-specific
+  delivery rule). A seat is not a pairing: a pairing handshake between the
   two keeps its pending half in memory beside the seat
   (`federation/pending_pairing.py`) and only the confirmed pair replaces
   the row; an unpair re-seats from the card. Such a directory seat is
@@ -847,10 +849,10 @@ cleared after each pass — so the backoff is never skipped by itself. `Federati
 refuses new ones; app cleanup runs it before the routed handler and the
 transport stop. What the budget does not bridge is healed by §25.6 sync.
 
-**GFS publishes are retried in memory.** `POST /gfs/publish`
-(`GfsConnectionService.publish_space_event`, the identity-free relay of a
-public/global space event) is not a peer envelope, so the outbox does not
-carry it. A *transient* failure — transport error, timeout, 408, 429, 5xx —
+**GFS publishes are retried in memory.** An anonymous GFS publish (the
+opaque channel's requests since v_96; the space-keyed `POST /gfs/publish`
+it was built for has no household sender any more) is not a peer
+envelope, so the outbox does not carry it. A *transient* failure — transport error, timeout, 408, 429, 5xx —
 goes to `services/gfs_publish_retry.py`'s `GfsPublishRetryQueue`: a
 per-connection FIFO retried with backoff (5 s, 30 s, 2 min, 10 min — four
 retries, ~13 minutes), honouring a 429's delta-seconds `Retry-After` as the
@@ -859,14 +861,11 @@ unfollowed redirect, is permanent and not retried. While a connection has
 retries pending, a new publish to it queues behind them, so subscribers see
 order. A queued item is exactly `{space_id, event_type, payload}` — there is
 no slot for `from_instance` or a household signature, so a retry cannot add
-identity. **There is no identified body at all any more:** a publish goes
-only to a GFS that has proved `anonymous_publish` under its signed capability
-block. A cold cache with `/gfs/info` unreachable puts the publish straight
-into the retry queue (nothing is sent until the capability is proven); a
-reachable GFS without the proof — an older build — **receives no space
-publishes until it upgrades**, with one WARNING per connection. Before each
-retry the sender re-checks that the space is still published to that
-connection and re-checks the capability the same way. **Why in memory:** the outbox
+identity. **There is no identified body at all:** a channel publish goes only
+to a GFS whose signed capability block proves what the channel needs
+(`private_channels`, and `subscriber_seats` for a global space). Before each
+retry the sender re-checks that the space still uses that server and
+re-checks the capability the same way. **Why in memory:** the outbox
 row is keyed by a recipient instance and re-signed on redelivery — a GFS
 publish has neither — so carrying it there, or in a new table, would be a
 migration for a payload that is already authority-signed public ciphertext,
@@ -1121,7 +1120,13 @@ and the household gallery trash (`gallery_trash_purge_scheduler.py`,
 hourly: `GalleryService.purge_expired_trash` deletes household photos and
 videos deleted more than 30 days ago — at most 20 × 500 per pass — and
 the trashed albums left empty, then their files through `aiofiles`
-unless another row still names them; spaces have no trash).
+unless another row still names them; spaces have no trash), and owed
+follower rotations (`owed_rotation_scheduler.py`, hourly: a follower's
+leave or removal owes its space a content-key rotation instead of making
+one, v_96; each space whose debt is 24 h old is rotated once by
+`SpaceService.pay_owed_rotation` — the owner, or a seed-holding acting
+host once the debt is 48 h old — and any rotation in between pays it
+first).
 
 The GFS runs its own periodic maintenance sweep
 (`global_server/maintenance.py`, same `_stop: asyncio.Event` lifecycle as
@@ -1330,25 +1335,19 @@ process: during a reconnect that moves a household between nodes, a stale
 socket on the old node can in rare cases take a frame another node also
 delivers. Receivers tolerate it — a relayed §24.11 envelope is dropped by the
 pipeline's replay step (`msg_id`), an invite-bootstrap body by its
-`redeem_nonce` replay guard, a member item by its item-id dedupe. A targeted
-`POST /gfs/publish` (`to`) whose subscriber has no socket on the publishing
-node is queued the same way (`GfsEnvelopeRelay.queue_relay`). Owner notices
-ride the same hint: a `new_subscriber` notice for an owner whose socket is
-elsewhere is added to the next `NODE_DRAIN_HINT` as `notices:[…]` (ids and
-labels only, `ClusterService.hint_subscriber_notice`), and the node holding
-the owner's socket rebuilds it from the shared DB
-(`GfsFederationService.deliver_forwarded_notice`) — no frame of its own, so it
-spends nothing of a peer's 60-a-minute sync budget beyond the hint.
+`redeem_nonce` replay guard, a member item by its item-id dedupe. (The
+targeted `POST /gfs/publish` queue and the `new_subscriber` owner notices
+that rode the same hint went with the space-keyed relay in v_96.)
 
-**Cross-node broadcast fan-out.** A broadcast `POST /gfs/publish`, a member
-publish and a channel item reached only the sockets of the node that took the
-request — on four nodes behind a round-robin balancer about three followers in
-four missed every post (`NODE_RELAY` never had a production caller). Now the
+**Cross-node broadcast fan-out.** A channel item (before v_96 also a
+broadcast `POST /gfs/publish` and a space-keyed member publish) reached only
+the sockets of the node that took the request — on four nodes behind a round-robin balancer about three followers in
+four missed every post (the old `NODE_RELAY` frame never had a production caller; removed in P9). Now the
 accepting node pushes to its own sockets and hands the item to
 `ClusterRelayFanOut.forward` (`global_server/cluster_relay.py`); it rides the
 next `NODE_DRAIN_HINT` as `relays:[…]`, ONE copy per peer node however many
-subscribers. Each receiver resolves the item's audience (`space` / `channel`
-id) from the shared DB, pushes to the members whose socket it holds, never
+subscribers. Each receiver resolves the item's audience (a `channel` id;
+the `space` audience went in v_96) from the shared DB, pushes to the members whose socket it holds, never
 forwards again, and dedupes on its own digest of the frame (10 min). For member
 and channel items it answers with `held` (the audience members it holds), so
 the accepting node queues offline copies only for the recently-seen
@@ -1635,9 +1634,9 @@ by the existing `/api/conversations/{id}/...` routes.
   (`services/system_chat_policy.py`) answers read / write live with one
   access strategy per scope — household: an active local user while
   `feat_household_chat` is on; space (`SpaceChatAccess`): a local
-  `space_members` seat with a writer role (never a follower), not banned,
-  `features.chat` on, the space not dissolved — posting also needs it not
-  archived, and its owner / admins / moderators may delete anyone's
+  `space_members` seat (a follower reads, P10), not banned,
+  `features.chat` on, the space not dissolved — posting needs a writer
+  role and the space not archived, and its owner / admins / moderators may delete anyone's
   message; a scope without registered rules is refused.
   `DmService._require_membership` defers to it whenever `system_scope` is
   set. Seat rows only hold per-user state; `HouseholdChatService`

@@ -40,7 +40,6 @@ def _svc(store: _Store, **cfg) -> GfsSpaceMediaOnDemand:
     return GfsSpaceMediaOnDemand(
         store=store,  # type: ignore[arg-type]
         demand=None,  # type: ignore[arg-type]
-        federation=None,  # type: ignore[arg-type]
         channels=None,  # type: ignore[arg-type]
         config=SpaceMediaOnDemandConfig(**cfg),
     )
@@ -80,7 +79,7 @@ def _session(size: int) -> MediaSession:
     return MediaSession(
         ticket="t",
         blob_id="b",
-        scope_kind="space",
+        scope_kind="channel",
         scope_id="s",
         mode="stream",
         deadline=0,

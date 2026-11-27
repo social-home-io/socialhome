@@ -16,13 +16,14 @@ from socialhome.domain.gfs_space_media_on_demand import (
 from socialhome.space_media_hint import SpaceMediaLocator, seal_space_media_hint
 
 BLOB = "c" * 64
+CH = "0f" * 16
 
 
 def _hint() -> dict:
     return seal_space_media_hint(
         media_key=b"k" * 32,
-        scope="space",
-        scope_id="sp-1",
+        scope="channel",
+        scope_id=CH,
         blob_id=BLOB,
         epoch=1,
         locator=SpaceMediaLocator(item_id="i", origin="o", filename="f.webp"),
@@ -30,9 +31,9 @@ def _hint() -> dict:
 
 
 def test_wanted_round_trip() -> None:
-    raw = {"scope": "space", "scope_id": "sp-1", "hint": _hint()}
+    raw = {"scope": "channel", "scope_id": CH, "hint": _hint()}
     req = WantedRequest.from_wire(raw)
-    assert req.scope == "space" and req.scope_id == "sp-1"
+    assert req.scope == "channel" and req.scope_id == CH
     assert WantedRequest.from_wire(req.to_wire()) == req
 
 
@@ -41,9 +42,11 @@ def test_wanted_round_trip() -> None:
     [
         None,
         {"scope": "galaxy", "scope_id": "x", "hint": {}},
-        {"scope": "space", "scope_id": "a|b", "hint": {}},
-        {"scope": "space", "scope_id": "sp-1", "hint": {"suite": "nope"}},
-        {"scope": "space", "scope_id": "sp-1"},
+        {"scope": "channel", "scope_id": "a|b", "hint": {}},
+        # v_96 (P7): the retired space scope.
+        {"scope": "channel", "scope_id": CH, "hint": {}},
+        {"scope": "channel", "scope_id": CH, "hint": {"suite": "nope"}},
+        {"scope": "channel", "scope_id": CH},
     ],
 )
 def test_wanted_refused(raw) -> None:
@@ -52,18 +55,16 @@ def test_wanted_refused(raw) -> None:
 
 
 def test_wanted_carries_no_reader_field() -> None:
-    raw = {"scope": "space", "scope_id": "sp-1", "hint": _hint(), "from": "me"}
+    raw = {"scope": "channel", "scope_id": CH, "hint": _hint(), "from": "me"}
     assert "from" not in WantedRequest.from_wire(raw).to_wire()
 
 
 def test_frame_round_trip() -> None:
-    req = WantedRequest.from_wire(
-        {"scope": "space", "scope_id": "sp-1", "hint": _hint()}
-    )
+    req = WantedRequest.from_wire({"scope": "channel", "scope_id": CH, "hint": _hint()})
     frame = MediaRequestFrame(
         ticket="node-a." + "0" * 32,
-        scope="space",
-        scope_id="sp-1",
+        scope="channel",
+        scope_id=CH,
         blob_id=BLOB,
         mode=MODE_CACHE,
         hint=req.hint,
@@ -83,13 +84,11 @@ def test_frame_round_trip() -> None:
     ],
 )
 def test_frame_refused(patch) -> None:
-    req = WantedRequest.from_wire(
-        {"scope": "space", "scope_id": "sp-1", "hint": _hint()}
-    )
+    req = WantedRequest.from_wire({"scope": "channel", "scope_id": CH, "hint": _hint()})
     push = MediaRequestFrame(
         ticket="0" * 32,
-        scope="space",
-        scope_id="sp-1",
+        scope="channel",
+        scope_id=CH,
         blob_id=BLOB,
         mode=MODE_CACHE,
         hint=req.hint,

@@ -1,21 +1,33 @@
-"""§27.9 release blocker (v_57): a member publishes to EVERY GFS the space's
-owner listed — including servers its own household never connected to —
-and a server it never connected to learns nothing about who it is.
+"""§27.9 release blocker (v_57): a household reaches EVERY GFS the space's
+owner listed — including servers it never connected to — and a server it
+never connected to learns nothing about who it is.
 
-Drives two real GFS apps end to end with the household's REAL connection
-service and member publisher. The household is registered on GFS A only; the
-owner's signed list names A and B. Checked:
+Since v_96 the household's anonymous space traffic is the opaque channel's
+(:mod:`socialhome.services.gfs_channel_service`: ``publish-anon``, seats,
+notices); it resolves its targets with
+:meth:`GfsConnectionService.server_targets` and sends over
+:meth:`GfsConnectionService.anon_session` — the very path the removed
+space-keyed member publish used. Two real GFS apps; the household's REAL
+connection service; registered on GFS A only, the owner's signed list
+names A and B. Checked:
 
 * nothing that reaches B — over any session — carries the household's
   instance id, identity key, a household signature, a cookie, or a writer
-  cert; B never gets an identified route, and B keeps no ``client_instances``
-  row for the household;
-* once a ciphertext went out anonymously it never goes identified anywhere
-  (not to A, not on a retry after the key is gone);
+  cert; B gets only its proof of possession and the anonymous request, over
+  a listing session, and keeps no ``client_instances`` row for us;
 * targets come only from the owner's list: a list that leaves B out sends
-  nothing to B, and a listed server on a private address we never joined is
-  dropped before any request (SSRF);
-* a server the owner delisted gets no retry.
+  nothing to B; a listed URL B cannot prove possession at gets nothing; a
+  listed server on a private address we never joined is dropped before any
+  request (SSRF);
+* the space-keyed household senders are gone (no ``/gfs/publish``, no
+  ``/gfs/member-publish-anon`` from the household).
+
+Dropped with the space-keyed member publish (v_96): "a ciphertext sent
+anonymously never goes identified on a retry" and "a delisted server gets
+no retry" (that sender and its retry queue no longer exist; the channel
+service re-resolves the list on every retry, ``_retry_listing``), and "the
+host relay reaches an unregistered GFS identity-free" (the host relay is
+gone; its removal is pinned below).
 """
 
 from __future__ import annotations
@@ -32,7 +44,6 @@ import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from socialhome.crypto import (
     b64url_encode,
@@ -41,30 +52,26 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
+from socialhome.domain.gfs_channel import CHANNEL_PUBLISH_ANON_ROUTE
 from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.app_keys import (
-    gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
-    gfs_member_publish_key,
-    gfs_space_epoch_repo_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_member_publish_service import GfsMemberPublishService
-from socialhome.services.gfs_publish_retry import GfsPublish
 from socialhome.services.gfs_server_selection_service import (
     GfsServerSelectionService,
 )
 from socialhome.services.gfs_server_targets import listing_target_id
-from socialhome.writer_cert import bind_writer_users, sign_writer_cert
-from socialhome.writer_key import derive_writer_seed, issue_writer_key_grant
 
 pytestmark = pytest.mark.security
 
@@ -132,67 +139,6 @@ async def _gfs(tmp_dir, gid: str, seen: list) -> TestClient:
     return tc
 
 
-class _Certs:
-    def __init__(self, household: _Household) -> None:
-        self.household = household
-        self.key = True
-
-    async def own_cert(self, space_id, epoch):
-        cert = sign_writer_cert(
-            space_seed=SPACE_SEED,
-            space_id=space_id,
-            epoch=epoch,
-            instance_pk=self.household.pk,
-            scope="write",
-        )
-        return bind_writer_users(cert, space_seed=SPACE_SEED, user_ids=USERS)
-
-    async def current_own_cert_wire(self, space_id):
-        return (await self.own_cert(space_id, EPOCH)).to_wire()
-
-    async def own_writer_key(self, space_id, epoch):
-        return derive_writer_seed(SPACE_SEED, space_id, epoch) if self.key else None
-
-    async def writer_key_cert_wire(self, space_id, epoch):
-        return None
-
-
-class _Crypto:
-    key = AESGCM.generate_key(bit_length=256)
-
-    async def get_current_epoch(self, space_id):
-        return EPOCH
-
-    async def encrypt(self, space_id, plaintext: bytes):
-        nonce = os.urandom(12)
-        return EPOCH, b64url_encode(
-            nonce + AESGCM(self.key).encrypt(nonce, plaintext, None)
-        )
-
-
-class _Spaces:
-    """A TRUSTED, publicly readable global space; we are a plain member."""
-
-    def __init__(self, owner: str) -> None:
-        self.space = Space(
-            id=SPACE_ID,
-            name="Multi",
-            owner_instance_id=owner,
-            owner_username="o",
-            identity_public_key=SPACE_PK.hex(),
-            config_sequence=0,
-            features=SpaceFeatures(allow_subscribers=True),
-            space_type=SpaceType.GLOBAL,
-            join_mode=JoinMode.OPEN,
-        )
-
-    async def get(self, space_id):
-        return self.space if space_id == SPACE_ID else None
-
-    async def get_space_seed(self, space_id):
-        return None
-
-
 class _Session:
     """Wraps a session; records every request it makes."""
 
@@ -240,14 +186,7 @@ async def _prepare_gfs(tc: TestClient, owner: _Household, follower: _Household):
             identity_public_key=SPACE_PK.hex(),
         )
     )
-    await fed.add_subscriber(space_id=SPACE_ID, instance_id=follower.instance_id)
     await fed.mark_relay_seen(follower.instance_id, at=int(time.time()))
-    epochs = tc.app[gfs_space_epoch_repo_key]
-    await epochs.confirm(SPACE_ID, EPOCH, now=int(time.time()))
-    wkc = issue_writer_key_grant(
-        space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=EPOCH
-    ).writer_key_cert
-    await epochs.pin_writer_key(SPACE_ID, EPOCH, wkc.writer_pk, replace=True)
 
 
 @pytest.fixture
@@ -334,18 +273,6 @@ async def world(tmp_dir):
         return servers["list"]
 
     gfs.attach_member_servers(_member_servers)
-    certs = _Certs(me)
-    spaces = _Spaces(owner.instance_id)
-    svc = GfsMemberPublishService(
-        gfs=gfs,
-        conn_repo=repo,
-        space_repo=spaces,  # type: ignore[arg-type]
-        space_crypto=_Crypto(),  # type: ignore[arg-type]
-        writer_certs=certs,  # type: ignore[arg-type]
-        own_instance_id=me.instance_id,
-        own_identity_seed=me.seed,
-    )
-    await svc.start()
     seen_a.clear()
     seen_b.clear()
     yield {
@@ -356,9 +283,7 @@ async def world(tmp_dir):
         "me": me,
         "owner": owner,
         "follower": follower,
-        "svc": svc,
         "gfs": gfs,
-        "certs": certs,
         "servers": servers,
         "sent": sent,
         "listing_opened": listing_opened,
@@ -367,7 +292,6 @@ async def world(tmp_dir):
         "db": db,
         "repo": repo,
     }
-    await svc.stop()
     await identified_raw.close()
     await anon_raw.close()
     await db.shutdown()
@@ -375,38 +299,49 @@ async def world(tmp_dir):
     await b.close()
 
 
-def _inner(me: _Household, n: int = 1) -> dict:
-    return {
-        "post_id": f"p-{n}",
-        "space_id": SPACE_ID,
-        "origin_instance_id": me.instance_id,
-        "author_pk": me.pk.hex(),
-        "content": "hello",
-    }
+_PUBLISH_BODY = {"channel_id": "0" * 32, "epoch": EPOCH, "payload": "Y3Q"}
 
 
-async def _publish(world, n: int = 1) -> list:
-    svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID, USERS[0])
-    accepted = await svc.publish_post(SPACE_ID, _inner(world["me"], n), targets)
-    for tc in (world["a"], world["b"]):
-        await tc.app[gfs_member_publish_key].wait_idle()
-    return accepted
+async def _send_anon(world) -> list:
+    """What the channel service does for an item
+    (``GfsChannelService._anon_targets`` / ``_post_anon``): resolve the
+    owner's list, keep a listing target only once its signed block proves
+    ``private_channels`` (after a proof of possession of the listed key),
+    then one anonymous request per target over :meth:`anon_session`."""
+    gfs = world["gfs"]
+    targets = [
+        t
+        for t in await gfs.server_targets(SPACE_ID)
+        if t.registered or await gfs.private_channels_supported(t)
+    ]
+    for conn in targets:
+        try:
+            async with gfs.anon_session(conn) as client:
+                if client is None:
+                    continue
+                async with client.post(
+                    f"{conn.inbox_url}{CHANNEL_PUBLISH_ANON_ROUTE}",
+                    json=_PUBLISH_BODY,
+                    allow_redirects=False,
+                ):
+                    pass
+        except OutboundFetchRefused:
+            continue
+    return targets
 
 
 async def test_nothing_reaching_an_unregistered_gfs_names_the_household(world, caplog):
     with caplog.at_level(logging.DEBUG):
-        accepted = await _publish(world)
-    assert sorted(c.id for c in accepted) == sorted(["conn-a", world["b_target"]])
+        targets = await _send_anon(world)
+    assert sorted(c.id for c in targets) == sorted(["conn-a", world["b_target"]])
     b_requests = world["seen_b"]
     assert b_requests, "B received nothing"
-    paths = {(r["method"], r["path"]) for r in b_requests}
     # B offers proof of possession: it had to prove the listed key at the
-    # listed URL (a bare nonce — nothing of ours) before we published.
-    assert paths == {
+    # listed URL (a bare nonce — nothing of ours) before we sent anything.
+    assert {(r["method"], r["path"]) for r in b_requests} == {
         ("GET", "/gfs/info"),
         ("POST", "/gfs/proof"),
-        ("POST", "/gfs/member-publish-anon"),
+        ("POST", CHANNEL_PUBLISH_ANON_ROUTE),
     }
     url_b = world["url_b"]
     to_b = [
@@ -439,52 +374,13 @@ async def test_nothing_reaching_an_unregistered_gfs_names_the_household(world, c
     )
     for leak in world["me"].leaks():
         assert leak not in caplog.text
-    # And B's follower still got the item.
-    queued = (
-        await world["b"]
-        .app[gfs_envelope_queue_repo_key]
-        .list_for(world["follower"].instance_id, now=0)
-    )
-    assert len(queued) == 1
-    assert "writer_cert" not in queued[0].sealed
-
-
-async def test_a_ciphertext_sent_anonymously_never_goes_identified(world):
-    await _publish(world)
-    anon_payloads = {
-        body["payload"]
-        for _n, method, url, body in world["sent"]
-        if method == "POST" and url.endswith("/gfs/member-publish-anon")
-    }
-    # One ciphertext per payload suite tried (a server may refuse the
-    # dictionary copy and take the next one), never more.
-    assert 1 <= len(anon_payloads) <= 3
-    # The key is gone (a rotation we have not caught up with): a retry of
-    # the queued anonymous item is dropped — never downgraded to identified.
-    world["certs"].key = False
-    for payload in anon_payloads:
-        item = GfsPublish(
-            space_id=SPACE_ID,
-            event_type="space_item_anon",
-            payload={"epoch": EPOCH, "payload": payload},
-        )
-        for conn_id in ("conn-a", world["b_target"]):
-            outcome = await world["svc"]._retry_send(conn_id, item)
-            assert outcome.kind == "permanent"
-    for _name, method, url, body in world["sent"]:
-        if method == "POST" and url.endswith("/gfs/member-publish"):
-            pytest.fail(f"identified publish sent: {url}")
-        if body and isinstance(body, dict) and body.get("payload") in anon_payloads:
-            assert url.endswith("/gfs/member-publish-anon")
-    for r in (*world["seen_a"], *world["seen_b"]):
-        assert r["path"] != "/gfs/member-publish"
 
 
 async def test_targets_come_only_from_the_owners_list(world):
     # The owner's list names only A: B is never contacted.
     world["servers"]["list"] = world["servers"]["list"][:1]
-    accepted = await _publish(world)
-    assert [c.id for c in accepted] == ["conn-a"]
+    targets = await _send_anon(world)
+    assert [c.id for c in targets] == ["conn-a"]
     assert world["seen_b"] == []
     assert world["listing_opened"] == []
 
@@ -493,15 +389,15 @@ async def test_a_listed_server_that_cannot_prove_the_listed_url_gets_nothing(wor
     """B offers proof of possession, but the owner's entry names it at an
     address its proof is not bound to (``localhost`` instead of its base
     URL — what a relay or an impostor replaying B's descriptor looks like):
-    nothing is published there."""
+    nothing is sent there."""
     a_entry, b_entry = world["servers"]["list"]
     port = world["url_b"].rsplit(":", 1)[1]
     world["servers"]["list"] = (
         a_entry,
         dataclasses.replace(b_entry, inbox_url=f"http://localhost:{port}"),
     )
-    accepted = await _publish(world)
-    assert [c.id for c in accepted] == ["conn-a"]
+    targets = await _send_anon(world)
+    assert [c.id for c in targets] == ["conn-a"]
     assert {(r["method"], r["path"]) for r in world["seen_b"]} == {
         ("GET", "/gfs/info"),
         ("POST", "/gfs/proof"),
@@ -540,47 +436,16 @@ async def test_a_listed_private_address_we_never_joined_is_dropped(world):
         space_repo=spaces, gfs_repo=repo, bus=EventBus()
     )
     world["gfs"].attach_member_servers(selection.member_servers)
-    targets = await world["gfs"].server_targets(SPACE_ID)
+    targets = await _send_anon(world)
     assert [t.id for t in targets] == ["conn-a"]
-    await _publish(world)
     assert world["seen_b"] == []
     assert world["listing_opened"] == []
 
 
-async def test_a_delisted_server_gets_no_retry(world):
-    world["svc"]._writer_certs.key = True
-    item = GfsPublish(
-        space_id=SPACE_ID,
-        event_type="space_item_anon",
-        payload={"epoch": EPOCH, "payload": "Y3Q"},
-    )
-    world["servers"]["list"] = world["servers"]["list"][:1]
-    outcome = await world["svc"]._retry_send(world["b_target"], item)
-    assert outcome.kind == "permanent"
-    assert world["seen_b"] == []
-
-
-async def test_the_host_relay_reaches_an_unregistered_gfs_identity_free(world):
-    """A delegated admin relaying while the owner is offline: B gets the
-    ``{space_id, event_type, payload}`` body over its listing session."""
-    gfs = world["gfs"]
-    gfs.attach_publish_context(
-        space_repo=None,
-        own_instance_id=world["me"].instance_id,
-        own_signing_key=world["me"].seed,
-    )
-    await gfs.publish_space_event(
-        space_id=SPACE_ID, event_type="space_post_public", payload={"x": 1}
-    )
-    posts = [r for r in world["seen_b"] if r["path"] == "/gfs/publish"]
-    assert len(posts) == 1
-    assert "Cookie" not in posts[0]["headers"]
-    [(name, body)] = [
-        (n, b)
-        for n, m, url, b in world["sent"]
-        if m == "POST" and url == f"{world['url_b']}/gfs/publish"
-    ]
-    assert name == "listing"
-    assert set(body) == {"space_id", "event_type", "payload"}
-    for leak in world["me"].leaks():
-        assert leak not in json.dumps(body)
+def test_the_space_keyed_household_senders_are_gone():
+    """The host relay (``POST /gfs/publish``) and the space-keyed member
+    publish (``/gfs/member-publish-anon``, ``/gfs/spaces/{id}/epoch``) have
+    no household sender any more."""
+    assert not hasattr(GfsConnectionService, "publish_space_event")
+    for name in ("_post_anon_item", "_post_notice", "_anon_targets", "_retry_send"):
+        assert not hasattr(GfsMemberPublishService, name), name

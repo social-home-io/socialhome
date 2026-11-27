@@ -38,16 +38,24 @@ Explicit non-goals:
   timing, the subscriber set (it is the directory) and source IPs. Content
   stays opaque to it.
 
-  Hiding the *relaying household's identity* from the GFS is **a goal, and
-  it is now met on the wire**: `POST /gfs/publish` carries
-  `{space_id, event_type, payload}` and nothing else, and the fan-out frame
-  carries no `from_instance` either. The guarantee is precise and worth
-  stating honestly: the GFS does not **require, store, log or forward** the
-  relaying household's identity. It is *not* "the GFS cannot learn it" — a
-  household normally holds an authenticated WebSocket to the same GFS from
-  the same IP, so an operator can correlate a publish's source IP, timing
-  and size with that session. No protocol change closes that short of a
-  mix/onion egress, which is out of scope.
+  Since v_96 a space's content reaches a GFS only through the space's
+  opaque channel (`/gfs/channels/*`: the frame names a channel id, never
+  the space, and `publish-anon` names no household); the space-keyed relay
+  (`POST /gfs/publish` and its siblings) is gone on both sides — the GFS
+  routes answer `404` since P7.
+
+  Hiding the *publishing household's identity* from the GFS is **a goal,
+  and it is met on the wire**: `POST /gfs/channels/publish-anon` carries
+  the channel id, a timestamp, a nonce, the epoch and the ciphertext,
+  signed with the channel writer key — no household key, no
+  `from_instance` — and the fan-out frame carries no `from_instance`
+  either. The guarantee is precise and worth stating honestly: the GFS does
+  not **require, store, log or forward** the publishing household's
+  identity. It is *not* "the GFS cannot learn it" — a household normally
+  holds an authenticated WebSocket to the same GFS from the same IP, so an
+  operator can correlate a publish's source IP, timing and size with that
+  session. No protocol change closes that short of a mix/onion egress,
+  which is out of scope.
 * **Anonymity** — instance IDs are derived from identity public keys
   and are persistent. Users consent to this by accepting the pairing.
 
@@ -250,49 +258,38 @@ removed ex-member can't hijack the content key. An authority-signed rekey
 with a blank `rotated_by` is rejected (the smallest-wins tiebreak compares
 only authenticated, non-empty minter ids).
 
-**GFS-relayed public/global content** (`services/space_public_outbound.py`
-/ `space_public_inbound.py`) — the post inner is encrypted under the
-space's epoch content key (`SpaceContentEncryption.encrypt`) and signed
-per author (`space_public_author.build_signed_author_inner`); the
-envelope around it is **space-authority-signed**
-(`authority_sig.sign_authority_event`) and relayed by the content-blind
-GFS, which verifies only that signature against the space pubkey it
-already pins. The relay is **anonymous**: the household sends no
-`from_instance` and no household transport signature, because the
-authority signature already authorizes the relay and `space_id` already
-routes it. The fan-out therefore reaches *every* subscriber (the GFS can
-no longer exclude the publisher); a subscriber that gets its own post back
-drops it on the post-id / self-echo guard. A current household never sends
-the legacy identified body (a GFS that cannot prove `anonymous_publish` gets
-no publish at all); one from an older household is still accepted by the
-GFS — verified, then discarded: it never
-authorizes, is never forwarded and is never logged. Receivers take
-attribution (`origin_instance_id`) from the encrypted, authority-signed
-inner only; an outer `from_instance` from an old GFS is never read.
+**GFS-carried space content** (`services/gfs_member_publish_service.py`,
+`services/space_public_outbound.py` / `space_public_inbound.py`) — since
+v_96 every item a GFS carries for a space rides the space's opaque channel
+(see "Opaque channels" below): the item inner is encrypted under the
+space's epoch content key (`SpaceContentEncryption.encrypt`) and signed per
+author (`space_item_author` / `space_public_author.build_signed_author_inner`);
+the host's authority items (a removal, an approved post, a remote author's
+post it puts there) add the **space-authority signature inside the
+ciphertext** over `{epoch, inner}` (`space_channel_authority`,
+`authority_sig.py`), never on the outer frame. The GFS sees a channel id,
+an epoch and a ciphertext in a size bucket; it verifies only the channel
+writer key's signature (pinned by the channel key) and fans out to the
+channel's seats. The publish is **anonymous**, so the fan-out reaches every
+seat, the publisher's own included; a household that gets its own item back
+drops it on the id / self-echo guard. Receivers take attribution from the
+encrypted, signed inner only.
 
-The `space_subscriber_key_handoff` payload is identity-free too: it is
-exactly `{space_id, sealed, authority_sig, authority_sig_suite}` and names
-neither the relaying household nor the household being onboarded. The
-**seal is the gate** — the GFS fans the same bytes to every subscriber and
-only the one holding the matching key-wrap private key can `open_keywrap`
-it; everyone else drops it quietly at DEBUG. Receivers still accept the
-legacy `target_instance_id`-bearing shape from an older seed-holder (the
-explicit gate then applies), so nobody is stranded.
+**Removed in v_96:** the space-keyed relay (`POST /gfs/publish`, the
+`space_post_public` envelope authority-signed on the outside, routed by
+`space_id`), the GFS subscriber key handoff
+(`space_subscriber_key_handoff`, sealed to a follower's key-wrap key and
+fanned to every `space_subscribers` seat), the targeted `to` delivery and
+the new-follower `space_author_profiles_bundle`. A follower is a member
+with the read-only role: it gets the content key by federation like any
+member (sealed per peer, or in the redeem ACK) and reads names from the
+roster.
 
-From v_61 a GFS that proves `targeted_publish` is given the handoff with a
-routing `to` (outside the payload — the subscriber it named itself in
-`new_subscriber`) and hands it to that subscriber alone; the payload is
-unchanged. The new follower's `space_author_profiles_bundle` uses the same
-sealing (`seal_to_keywrap`, KEM suite on the wire, unknown suites refused)
-and the same authority signature under its own event type, is only ever
-sent targeted, and carries the authors' own signed items, which the
-follower verifies one by one — no new suite.
-
-The residual limits, stated plainly: the GFS still sees `space_id`,
-`event_type`, payload size and timing; it can correlate a publish with a
-household's own authenticated WebSocket session by IP/timing; and a
-per-instance GFS ban cannot gate an anonymous relay, so the space-level
-ban is the only moderation lever on the relay path.
+The residual limits, stated plainly: the GFS sees a channel id, the epoch
+(offset per channel), payload size and timing; it can correlate a publish
+with a household's own authenticated WebSocket session by IP/timing; and a
+per-instance GFS ban cannot gate an anonymous publish, so revoking the
+channel writer key (a rotation) is the moderation lever on that path.
 
 The whole shape is pinned by the §27.9 release blocker
 `tests/protocol/test_gfs_payload_minimization.py`. See
@@ -523,14 +520,10 @@ registration → `instance_identity.keywrap_public_key` /
 ``space-keywrap:v1``) → AES-256-GCM, binding the ephemeral pub as AAD
 so a relay can't swap it. A fresh ephemeral per seal means no key
 reuse. Same `kem_suite` contract as the routed seal (`"x25519"` today,
-reject-unknown, PQ migration is a suite-bump). This is the channel the
-Phase-5b-b subscriber content-key handoff
-(`space_subscriber_key_handoff`, `services/space_subscriber_key_outbound.py`
-→ `space_subscriber_key_inbound.py`) uses to hand the per-space content
-key to an unpaired GFS subscriber, GFS-blind: the seed-holder seals the
-`{space_content_key:{…}}` meta to the subscriber's key-wrap pubkey and
-authority-signs the sealed envelope so the content-blind GFS relays it
-without learning the key.
+reject-unknown, PQ migration is a suite-bump). The Phase-5b-b subscriber content-key handoff
+(`space_subscriber_key_handoff`) used this channel to hand the per-space
+content key to an unpaired GFS subscriber; it was removed in v_96 (P6) — a
+follower is a member and gets the key like any member.
 
 The same seal carries a **public-moment step key** (v_62,
 `services/moment_public_key_outbound.py` → `moment_public_key_inbound.py`):
@@ -718,7 +711,7 @@ so an older (still validly signed) descriptor can't ride a newer edit.
 
 A follower takes the descriptor only when this verifies against the
 already-verified `author_pk`. Anyone holding the space content key — a
-member with the writer group key — can re-wrap the author's inner and seal
+member with a channel writer key — can re-wrap the author's inner and seal
 blobs with any AAD, so neither the outer authority signature nor the seal's
 AAD tells the follower the descriptor is the author's. An unsigned or
 swapped descriptor is dropped, and the post stands without those pictures.
@@ -821,6 +814,23 @@ the authority signature. No new signed shape and no new suite. Every
 host-relay plaintext is padded to the member relay's size buckets (`_pad`,
 inside the AEAD, outside every author signature's fixed field list). See
 [`protocol/discovery.md`](protocol/discovery.md#moderation-outcomes-on-the-host-relay).
+
+**Authority items on a channel (v_96)** — on a space's opaque channel the
+same three kinds (a removal, an approved post, the host's copy of a member's
+post) travel as `{"item_type": "authority", "inner": …}` inside the channel
+ciphertext, as `{"item_type": "authority", "epoch": E, "inner": …}`. The
+channel frame carries no authority signature (the server checks only the
+channel writer key, which every writer holds), so the space authority signs
+`{"epoch": E, "inner": <inner without its signature fields and padding>}` —
+E the content epoch the item is sealed under — with `sign_authority_event`
+under its own event type `space_channel_authority` (domain-separated from
+`space_post_public`), the usual `authority_sig` + `authority_sig_suite` in
+the inner (unknown suite refused, no default). The receiver requires E to
+equal the epoch the frame decrypted under, so a key holder cannot re-seal an
+old item under a later epoch. Receivers verify
+it against the pinned key of the space the channel id maps to; the shape is
+refused off the channel. Code: `channel_authority_plaintext` /
+`open_channel_authority` in `services/space_public_authority.py`.
 
 The key-wrap pubkey is **self-signed by the identity** so the seal path
 never trusts the GFS-served value. At identity setup each household
@@ -943,11 +953,27 @@ item can be authorized without a host signature on every post. Issued by a
 seed holder (owner or delegated admin, and only while its seed still matches
 the pinned space key) once per writer household per content epoch: `scope:
 "write"` for owner / admin / moderator / member seats, `"comment"` for a
-follower seat while `allow_subscriber_comment` is on; a household with
+follower seat while `allow_subscriber_comment` or (v_96)
+`allow_subscriber_react` is on; a household with
 several seats gets one cert at its strongest scope. Wire shape (every field
 always present) `{cert_suite, space_id, epoch, instance_pk, scope,
 issued_at, cert_sig}` — `instance_pk` is the household's Ed25519 identity
-public key (b64url), `issued_at` unix seconds. Signing bytes
+public key (b64url), `issued_at` unix seconds. Since v_96 a follower's cert
+also carries `"reader": true` (scope `comment` only; the key is ABSENT on
+every other cert — never `false` — so a non-reader cert signs exactly the
+v_49 bytes). `reader` is a signed field: stripping it, or adding it to a
+non-reader cert, breaks `cert_sig`. Receivers apply the space's follower
+switches to a reader cert (`reader_cert_permits` in
+`domain/space_item.py`: comments only with `allow_subscriber_comment`,
+reactions only with `allow_subscriber_react`, `author_profile` with either,
+the author's delete of their own comment always — owner decision F6: the
+receiver decides that one on authorship, the stored comment's author —
+anything else refused). `WriterCert.from_wire` refuses any key outside
+`{cert_suite, space_id, epoch, instance_pk, scope, issued_at, cert_sig,
+writer_user_ids, users_sig, users_sig_suite, reader}`, a `reader` that is
+not exactly `true`, and `reader` on a `write` cert. A pre-v_96 receiver
+ignores `reader`, so the signature fails there: a reader cert is issued only
+to a v_96 household. Signing bytes
 `b"space-writer-cert:v1:"` + canonical JSON (sorted keys, compact) of the
 cert minus `cert_sig`, so the suite tag is signed; the prefix is distinct
 from `space-authority:v1:` so neither signature can be lifted onto the
@@ -1019,105 +1045,33 @@ Suite tag `author_sig_suite` (`ITEM_AUTHOR_SIG_SUITE_ED25519 = "ed25519"`,
 `derive_user_id(author_pk, identity_anchor or author_username) ==
 author_user_id`. No new key: the household identity key every peer pins.
 
-**Member publish** (`domain/gfs_member_publish.py`,
-`global_server/member_publish.py`, v_49; one anonymous mode since v_90 — the
-household-signed `POST /gfs/member-publish` and its `gfs-member-publish:v1`
-action are gone) — `POST /gfs/member-publish-anon`, authorized by the writer
-group key below; the GFS checks the scope `comment` at most (the item type
-is hidden in the ciphertext; receivers enforce the real scope).
-`payload` is AES-256-GCM under the existing per-space epoch content key —
-the GFS holds no key. Its plaintext is padded to a size bucket (1 / 4 / 16 /
-64 / 128 KiB, a `_pad` JSON field) before encryption, so the padding is
-authenticated with the item and the ciphertext length reveals only the
-bucket. **Payload suite** (`domain/space_item.py`): a relayed item's
-plaintext encoding is labelled `payload_suite` on the authority-signed relay
-envelope, the signed member-publish requests and the fan-out frame —
-`"json"` (the padded JSON above; the label is omitted, the first-revision
-default) or `"zlib1"` (compact JSON, `zlib` level 9, then zero bytes up to
-the same buckets, all inside the AEAD, so the length still names only the
-bucket). `SUPPORTED_PAYLOAD_SUITES` / `UnsupportedPayloadSuite`: a receiver
-refuses an unknown suite, never reads it as JSON. A receiver inflates at most
-`MAX_INFLATED_ITEM_BYTES` (128 KiB, the largest bucket; a sender compresses
-only JSON that small) and requires the stream to end with only zero padding
-after it, so a member holding the content key cannot make followers inflate
-a decompression bomb. Compression runs inside the encryption, on content the
-attacker already chose; the bucket padding still hides the length, so a
-compression-ratio side channel only shows the bucket. The fan-out frame's
-label is outside the ciphertext and unsigned in the fan-out frame: a GFS that
-flips it only makes the item undecodable (the author signature inside still
-decides), which it could do by dropping the frame anyway. `"zlib1+dict1"` is
-`zlib1` with a preset dictionary (`domain/item_zdict.ZDICT_V1`: the item
-shapes' keys and constant values, every variable value emptied, so it holds
-no data of any space or person). The dictionary is part of the suite and
-pinned by its SHA-256 in `tests/domain/test_item_zdict.py`: a new dictionary
-is a new suite, never an edit. A dictionary stream does not inflate as plain
-`zlib1` (it names a dictionary that reader lacks); a plain stream read under
-`zlib1+dict1` is the same item, so flipping the label gains nothing. The
-inflation cap and padding rules are the same. **Content-epoch notice** — `POST
-/gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
-signature (Ed25519, the registered key) over canonical JSON of `{action:
-"gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,
-epoch, ts, writer_key_cert?}` — only this form may move the epoch by more
-than one. A
-delegated admin's: a space-authority signature (`authority_sig.py`, suite
-`authority_sig_suite`) over `{space_id, epoch}` under the new event type
-`space_epoch_notice`, which is deliberately outside
-`AUTHORITY_RELAY_EVENT_TYPES` so neither a notice nor a relay payload can be
-lifted onto the other path; it raises the epoch by +1 at most. No new key
-or suite.
+**Member publish** (v_49; since v_96 only into the space's channel) — a
+member household puts its own items on a GFS without a seed holder,
+anonymously: `POST /gfs/channels/publish-anon`, authorized by the channel
+writer key below. `payload` is AES-256-GCM under the existing per-space
+epoch content key — the GFS holds no key. Its plaintext is padded to a size
+bucket (1 / 4 / 16 / 64 / 128 KiB, `ITEM_SIZE_BUCKETS`, a `_pad` JSON field)
+before encryption, so the padding is authenticated with the item and the
+ciphertext length reveals only the bucket. The writer cert and the
+author signature ride inside the ciphertext, where receivers check them;
+the GFS checks no scope (the item type is hidden; receivers enforce it).
 
-**Writer group key + anonymous member publish** (`writer_key.py`,
-`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50; every publicly
-readable space, the only member publish since v_90) — a member household
-publishes WITHOUT identifying itself to the connection server, authorized by the
-space's per-epoch **writer group key**: one Ed25519 key per (space, content
-epoch), shared by every household allowed to publish anything there (both
-`write` and `comment` scopes, so the GFS cannot tell them apart).
-
-- **Derivation.** `writer_seed = HKDF-SHA256(ikm = space authority seed,
-  salt = b"socialhome-writer-key:v1", info = b"<space_id>:<epoch>", 32
-  bytes)`. Every seed holder (owner, delegated admin) derives the same key
-  for an epoch, so no two seed holders pin competing keys and nobody stores
-  it on the issuer side. HKDF is one-way: a publisher holding epoch N's key
-  learns nothing about the authority seed or any other epoch's key. An
-  authority-key rotation (v_44) changes every writer key with the seed.
-- **Pin: `writer_key_cert`** = `{writer_key_suite, space_id, epoch,
-  writer_pk, cert_sig}`, `cert_sig` the space AUTHORITY signature over
-  `b"space-writer-key-cert:v1:"` + canonical JSON of the other four fields.
-  It rides the content-epoch notice: the owner's notice (inside its
-  household signature) pins the key of the epoch it confirms; a delegated
-  admin's pins only an epoch the +1 rule already let the GFS's `current`
-  reach, never over an existing pin.
-- **Delivery: `writer_key`** = `{writer_key_suite, space_id, epoch,
-  writer_seed, writer_key_cert}` — SECRET, so it rides only inside the
-  per-peer encrypted payload of the four channels that carry the writer
-  cert (rekey `per_peer`, roster snapshot, redeem ACK `space_meta`, v_44
-  rotation bundle), only to a household holding a publishing scope, in
-  every publicly readable space, at v_90 (`writer_key_min_version`). The
-  owner's epoch notice pins `writer_key_cert`. The receiver verifies the cert against its pinned space key
-  and that the seed's public half is `writer_pk`, then stores the grant
-  KEK-wrapped (AES-GCM, AAD `socialhome-writer-key:<space_id>:<epoch>`) on
-  that epoch's `space_keys.writer_key`. Rotates with every content epoch, so
-  every revocation (a rotation) retires it.
-- **Anonymous publish** — `POST /gfs/member-publish-anon`: `writer_sig` is
-  Ed25519 under the writer key over `b"gfs-member-publish-anon:v1:"` +
-  canonical JSON of `{gfs_instance_id, ts, nonce, target, event_type:
-  "space_item", epoch, payload, writer_sig_suite}`. `gfs_instance_id` binds
-  it to one server, `ts` (±300 s) and a random `nonce` make every attempt
-  unique (the GFS refuses an exact copy for 600 s); households send `ts` in
-  whole seconds with up to ±60 s of random jitter, so it carries no clock
-  fingerprint. No household key, no
-  household signature, no plaintext cert: the writer cert stays inside the
-  AES-GCM payload, where receivers check it.
-- **Suite.** `writer_key_suite` / `writer_sig_suite` =
-  `WRITER_KEY_SUITE_ED25519 = "ed25519"` (`SUPPORTED_WRITER_KEY_SUITES`,
-  unknown → `UnsupportedWriterKeySuite`, never a default) — the algorithm of
-  `writer_pk`, of `writer_sig` and of the authority signature over the
-  cert. Phase 2 adds a hybrid sibling.
-- **Why a new key** (the "no new key" rule): the content key is held by every
-  reader including GFS followers, so it cannot authorize a write; the
-  authority seed must not spread to every publisher; the household identity
-  key is exactly what member publish withholds from the server.
+**Retired in v_96:** the space-keyed `POST /gfs/member-publish-anon` and
+its `gfs-member-publish-anon:v1:` signing bytes, the content-epoch notice
+`POST /gfs/spaces/{id}/epoch` (owner form `gfs-owner-epoch-notice:v1`,
+delegated-admin form `space_epoch_notice`), the payload suites `zlib1` /
+`zlib1+dict1` (`domain/item_zdict.ZDICT_V1`; a channel carries padded JSON
+only), and the **space writer group key** (v_50: `HKDF-SHA256(ikm = space
+authority seed, salt = b"socialhome-writer-key:v1", info =
+b"<space_id>:<epoch>")`, pinned by the authority-signed
+`space-writer-key-cert:v1:` cert on the epoch notice, delivered KEK-wrapped
+into `space_keys.writer_key`). Nothing signs with that key any more: no GFS
+pins it, no household derives, delivers or stores it (`space_keys.writer_key`,
+migration 0076, is inert). Its job passed to the per-channel **channel
+writer key** below; the suite constants it introduced
+(`WRITER_KEY_SUITE_ED25519`, `SUPPORTED_WRITER_KEY_SUITES`,
+`UnsupportedWriterKeySuite`, `domain/writer_key.py`) and the
+`writer_sig` helper (`writer_key.py`) stay, used by the channel writer key.
 
 **Opaque channels for private spaces** (`gfs_channel.py`, wire shapes in
 `domain/gfs_channel.py`, v_51) — a PRIVATE space with link-joined members
@@ -1142,9 +1096,9 @@ holder derives them and nobody stores them:
   `content epoch + epoch_offset`, so a server cannot match channel epochs to
   content epochs it saw for the space elsewhere.
 
-The salts differ from each other and from the writer group key's, so neither
-key equals or relates to the space key or to the writer key a server sees
-for a PUBLIC space at the same epoch. HKDF is one-way: a server that holds
+The salts differ from each other and from the retired writer group key's,
+so neither key equals or relates to the space key or to any other key a
+server saw for the space. HKDF is one-way: a server that holds
 `channel_pk` — even one that also knows the space public key (a space that
 was public before) — cannot link the two without the seed. A v_44 authority
 rotation changes the seed, and the owner then starts a FRESH channel (a new
@@ -1199,9 +1153,9 @@ identity key would name the owner. The channel key is derived (nothing new
 to store or back up) and lives exactly as long as the authority seed.
 
 **GFS capability block** (`capabilities_sig.py`) — `GET
-/gfs/info` is unauthenticated, so the capability that decides whether a
-household may relay identity-free (`anonymous_publish`) is signed with the
-GFS's own Ed25519 identity key, whose public half the household pinned at
+/gfs/info` is unauthenticated, so the capabilities that decide what a
+household uses a server for (e.g. `private_channels` + `subscriber_seats`
+for a global space's channel) are signed with the GFS's own Ed25519 identity key, whose public half the household pinned at
 pair time (TOFU) and which the same response publishes as `public_key`. No
 new key is minted. Wire fields: `capabilities` (the map), `capabilities_sig`
 (b64url Ed25519) and `capabilities_sig_suite`
@@ -1211,8 +1165,8 @@ default). Signing bytes are `b"gfs-capabilities:v1:"` + canonical JSON
 (`sort_keys`, compact separators) of `{gfs_instance_id, capabilities}` — the
 instance id inside the signed bytes stops a block from being replayed by
 another server, the prefix stops it from being lifted onto another statement
-that key signs. The household additionally **ratchets** a verified `true`
-(in-process) so a stripped-on-path response can't stop the relay mid-life.
+that key signs. (The in-process ratchet of a verified `anonymous_publish`
+went with the space-keyed relay in v_96.)
 There is no identified fallback: a GFS without a verified `true` receives no
 publish.
 
@@ -1622,7 +1576,8 @@ RFC 9578 A.2 test vectors are mandatory tests (`tests/test_privacy_pass.py`).
 Every v_89 household that reaches a space through a GFS — and every member
 of such a space — signs one small **member card** and hands it to the
 space's host (sealed redeem / ACK field `card`, or `SPACE_MEMBER_CARD`); the
-host passes it on to writer-seat members in `SPACE_MAILBOX_DIRECTORY`
+host passes it on to the space's seated households (followers included
+since v_96) in `SPACE_MAILBOX_DIRECTORY`
 ([`protocol/gfs-relay.md`](protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
 It replaces v_88's per-space directory entry (never released). The card is
 `{instance_id, identity_pk, keywrap_pk, keywrap_sig, proto_version, rev,
@@ -1785,7 +1740,25 @@ decryption.
 - ID derivation (public, deterministic, no secret):
   - `instance_id = base32(SHA256(identity_pk)[:20]).lower()`
   - `space_id    = base32(SHA256(space_pk)[:20]).lower()`
-  - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ username)[:20]).lower()`
+  - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ anchor)[:20]).lower()`
+    — `anchor` is the person's `identity_anchor or username`.
+  - **Person-ID anchor proof on seating (P5).** A host seats a person
+    another household names only when that household proves the id:
+    the request carries the person's anchor inside its encrypted payload /
+    sealed body — `redeemer_anchor` (§D2 / mesh `SPACE_INVITE_TOKEN_REDEEM`,
+    §D2b bootstrap redeem), `invitee_anchor` (`SPACE_PRIVATE_INVITE_ACCEPT`),
+    `user_anchor` (`SPACE_JOIN_REQUEST`, GFS join request; a member's request
+    carries it too, its seat proven at the redeem of the answer; checked for a
+    follow) — and the host checks `derive_user_id(sender_pk, anchor) ==
+    user_id` (`space_member_guard.user_id_proven`, fail closed). `sender_pk`
+    is a key the host already holds: the pinned `remote_instances` key, a
+    mesh-only sender's origin-authenticated mesh claim (derives to the
+    sender), or a §D2b body's `identity_pk` (bound to `instance_id` by
+    `derive_instance_id`). No new key, signature or suite: the anchor is a
+    public derivation input, not a secret, and the check reuses the
+    self-certifying id. Checked before any ban / seat / roster / token read,
+    refused like every other refusal (no probing), mandatory (no version
+    fallback — a version is the requester's own claim).
 - Space media key and nonce (v_80, GFS media cache):
   - `media_key = HKDF-SHA256(epoch content key, salt=None, info=b"sh-space-media:v1")`
   - `nonce = HKDF-SHA256(media_key, salt=None, info=b"sh-space-media:v1|nonce|" ‖ filename ‖ "|" ‖ hex(SHA-256(file)))[:12]`

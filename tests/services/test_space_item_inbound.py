@@ -66,9 +66,14 @@ class _Seats:
     """A stand-in for ``SpaceAuthorship.item_seat_admits`` /
     ``item_access_admits`` recording what it was asked."""
 
-    def __init__(self, admits: bool = True) -> None:
+    def __init__(self, admits: bool = True, follower_blocked: bool = False) -> None:
         self.admits = admits
+        self.follower_blocked = follower_blocked
         self.calls: list[tuple[str, dict]] = []
+
+    async def known_follower_refused(self, **kw):
+        self.calls.append(("follower", kw))
+        return self.follower_blocked
 
     async def item_seat_admits(self, **kw):
         self.calls.append(("seat", kw))
@@ -108,7 +113,7 @@ async def env(tmp_dir):
         PostReactionChanged,
     ):
         bus.subscribe(cls, events.append)
-    applier = SpaceItemInbound(bus=bus, space_repo=spaces, space_post_repo=posts)
+    applier = SpaceItemInbound(bus=bus, space_post_repo=posts)
     post_id = mint_owner_bound_id(SPACE_POST_KIND, space_id=SPACE, owner_user_id=AUTHOR)
     await posts.save(
         SPACE,
@@ -278,12 +283,37 @@ async def test_a_member_household_checks_the_comment_seat(env):
     assert await env["posts"].get_comment(cid) is None
 
 
-async def test_a_follower_household_relies_on_the_cert(env):
+async def test_a_follower_household_takes_an_unknown_author_on_the_cert(env):
+    """A follower-only household holds no access levels of its own: an
+    author it does not know as a follower is decided by the cert alone."""
     seats = _Seats(admits=False)
     assert await _apply(
         env, "comment", _comment(env, _cid()), member=False, authorship=seats
     )
-    assert seats.calls == []
+    assert [kind for kind, _ in seats.calls] == ["follower"]
+
+
+async def test_a_follower_household_applies_the_switches_to_a_known_follower(env):
+    """v_96 — a follower household holds the roster too: a comment whose
+    author it knows as a follower is refused while the switch is off, even
+    under a plain (non-reader) cert issued before v_96."""
+    seats = _Seats(admits=True, follower_blocked=True)
+    cid = _cid()
+    assert not await _apply(
+        env, "comment", _comment(env, cid), member=False, authorship=seats
+    )
+    assert seats.calls == [
+        (
+            "follower",
+            {
+                "origin_instance_id": ORIGIN,
+                "space_id": SPACE,
+                "author_user_id": AUTHOR,
+                "subscriber_ok": False,
+            },
+        )
+    ]
+    assert await env["posts"].get_comment(cid) is None
 
 
 # ── comment_edit ─────────────────────────────────────────────────────────
@@ -677,9 +707,7 @@ async def test_a_restart_does_not_let_a_queued_old_add_resurrect_a_reaction(env)
     assert await _apply(env, "reaction_add", add)
     assert await _apply(env, "reaction_remove", _react(env, "reaction_remove", "👍", 2))
     # A process restart: a fresh applier over the same database.
-    env["applier"] = SpaceItemInbound(
-        bus=EventBus(), space_repo=env["spaces"], space_post_repo=env["posts"]
-    )
+    env["applier"] = SpaceItemInbound(bus=EventBus(), space_post_repo=env["posts"])
     # Another connection server's (or the offline queue's) copy of the add.
     assert not await _apply(env, "reaction_add", add)
     assert "👍" not in await _reactions(env)
@@ -851,6 +879,10 @@ class _FollowerSeat(_Seats):
         self.calls.append(("seat", kw))
         return kw["subscriber_ok"]
 
+    async def known_follower_refused(self, **kw):
+        self.calls.append(("follower", kw))
+        return not kw["subscriber_ok"]
+
 
 async def _switches(env, *, comment: bool, react: bool) -> None:
     space = await env["spaces"].get(SPACE)
@@ -942,13 +974,9 @@ async def test_a_relayed_comments_hashes_moved_to_another_comment_are_ignored(en
     assert stored.media_url == "api/media/x.webp"
 
 
-@pytest.mark.parametrize("kind", ["comment_edit", "comment_delete"])
-async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch(
-    env, kind
-):
-    """A follower's edit / delete of its own comment was admitted with the
-    switch off (``subscriber_ok=True``). It needs the comment right, like the
-    comment itself — one rule for every role."""
+async def test_a_follower_edit_over_the_gfs_follows_the_comment_switch(env):
+    """A follower's edit of its own comment needs the comment right, like
+    the comment itself — one rule for every role."""
     cid = _cid()
     await _switches(env, comment=True, react=False)
     assert await _apply(
@@ -960,6 +988,66 @@ async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch
     )
     await _switches(env, comment=False, react=False)
     seats = _FollowerSeat()
-    change = _inner(kind, cid, env["post_id"], content="rewritten", created_at=_ts(5))
-    assert not await _apply(env, kind, change, member=True, authorship=seats)
+    change = _inner(
+        "comment_edit", cid, env["post_id"], content="rewritten", created_at=_ts(5)
+    )
+    assert not await _apply(env, "comment_edit", change, member=True, authorship=seats)
     assert seats.calls and all(not kw["subscriber_ok"] for _k, kw in seats.calls)
+    assert (await env["posts"].get_comment(cid)).content == "hi"
+
+
+@pytest.mark.parametrize("member", [True, False])
+async def test_a_follower_deletes_its_own_comment_after_the_switch_is_off(env, member):
+    """Owner decision F6 (2026-11-23): an author may ALWAYS delete their own
+    comment, a follower included, with the comment switch off — decided on
+    authorship (the stored comment's author), not on the switch."""
+    cid = _cid()
+    await _switches(env, comment=True, react=False)
+    assert await _apply(
+        env, "comment", _comment(env, cid), member=True, authorship=_FollowerSeat()
+    )
+    await _switches(env, comment=False, react=False)
+    seats = _FollowerSeat()
+    assert await _apply(
+        env, "comment_delete", _cdel(env, cid), member=member, authorship=seats
+    )
+    assert (await env["posts"].get_comment(cid)).deleted
+    assert seats.calls and all(kw["subscriber_ok"] for _k, kw in seats.calls)
+
+
+@pytest.mark.parametrize("member", [True, False])
+async def test_a_follower_early_delete_follows_the_comment_switch(env, member):
+    """P4 adversarial review: a tombstone for a comment never seen here is no
+    delete of a held comment — with the switch off a follower (still holding
+    a react cert) could plant unbounded permanent rows on every household.
+    It follows the comment switch, like the comment it pre-empts."""
+    cid = _cid()
+    await _switches(env, comment=False, react=True)
+    assert not await _apply(
+        env,
+        "comment_delete",
+        _cdel(env, cid),
+        member=member,
+        authorship=_FollowerSeat(),
+    )
+    assert await env["posts"].get_comment(cid) is None
+    await _switches(env, comment=True, react=True)
+    assert await _apply(
+        env,
+        "comment_delete",
+        _cdel(env, cid),
+        member=member,
+        authorship=_FollowerSeat(),
+    )
+    assert (await env["posts"].get_comment(cid)).deleted
+
+
+async def test_a_follower_cannot_delete_someone_elses_comment(env):
+    """Authorship is the proof: the switch never opens another's comment."""
+    cid = _cid(OTHER)
+    await _seed_comment(env, cid, author=OTHER)
+    await _switches(env, comment=True, react=True)
+    assert not await _apply(
+        env, "comment_delete", _cdel(env, cid), member=True, authorship=_FollowerSeat()
+    )
+    assert not (await env["posts"].get_comment(cid)).deleted

@@ -23,8 +23,22 @@ from ...domain.events import (
     RemoteSpaceInviteReceived,
 )
 from ...domain.federation import FederationEventType
-from ...domain.local_community import parse_join_location
-from ...domain.space import PUBLIC_SPACE_TIERS, JoinMode, SpacePermissionError
+from ...domain.local_community import Eligibility, parse_join_location
+from ...domain.space import (
+    PUBLIC_SPACE_TIERS,
+    FollowApprover,
+    JoinMode,
+    SpacePermissionError,
+    SpaceRole,
+    takes_follows,
+)
+from ...federation.gfs_join_request import (
+    PER_SENDER_LIMIT,
+    PER_SENDER_WINDOW_S,
+    PER_SPACE_LIMIT,
+    PER_SPACE_WINDOW_S,
+)
+from ...federation.mesh_member_claim import sender_identity_pk
 from ...infrastructure.event_bus import EventBus
 from ..local_community import (
     LocalAreaBudget,
@@ -32,11 +46,13 @@ from ..local_community import (
     pending_join_request_id,
     require_local_eligibility,
 )
+from ..space_member_guard import banned_from_space, user_id_proven
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...domain.space import Space
     from ...federation.federation_service import FederationService
+    from ...rate_limiter import RateLimiter
     from ...repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -57,6 +73,9 @@ class SpaceInviteInboundHandlers:
 
     __slots__ = (
         "_bus",
+        "_federation",
+        "_follow_approver",
+        "_follow_limiter",
         "_local_area_budget",
         "_own_instance_id",
         "_space_repo",
@@ -77,9 +96,28 @@ class SpaceInviteInboundHandlers:
         #: Set by :meth:`attach_to`; until then no space is "ours", so a
         #: join request is refused (fail closed).
         self._own_instance_id = ""
+        #: Approves a follow (v_96) — :meth:`attach_follow_approver`; until
+        #: then a follow is dropped (fail closed).
+        self._follow_approver: FollowApprover | None = None
+        #: Resolves a sender's pinned identity key for the P5 person-ID
+        #: proof of a follow — set by :meth:`attach_to`; until then every
+        #: follow fails that proof (fail closed).
+        self._federation: FederationService | None = None
+        self._follow_limiter: RateLimiter | None = None
+
+    def attach_follow_approver(
+        self, approver: FollowApprover, *, rate_limiter: RateLimiter
+    ) -> None:
+        """Wire the host's automatic approval of a follow
+        (``SpaceService.approve_remote_follow``) and the limiter that bounds
+        each sending household's follows. The service is built after these
+        handlers, so both are attached once it exists."""
+        self._follow_approver = approver
+        self._follow_limiter = rate_limiter
 
     def attach_to(self, federation_service: FederationService) -> None:
         self._own_instance_id = federation_service.own_instance_id
+        self._federation = federation_service
         registry = federation_service._event_registry
         registry.register(FederationEventType.SPACE_INVITE, self._on_invite)
         registry.register(FederationEventType.SPACE_INVITE_VIA, self._on_invite_via)
@@ -146,11 +184,24 @@ class SpaceInviteInboundHandlers:
     # ─── Join requests ──────────────────────────────────────────────────
 
     async def _on_join_request(self, event: FederationEvent) -> None:
-        """A remote user wants to join a local space."""
+        """A remote user wants to join a local space — or, with
+        ``requested_role = subscriber`` (v_96), to follow it."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
             log.debug("SPACE_JOIN_REQUEST missing required field")
+            return
+        requested_role = event.payload.get("requested_role")
+        if requested_role:
+            if requested_role != SpaceRole.SUBSCRIBER.value:
+                log.warning(
+                    "SPACE_JOIN_REQUEST from %s for space %s refused: "
+                    "unknown requested role",
+                    event.from_instance,
+                    space_id,
+                )
+                return
+            await self._on_follow_request(event, space_id=space_id, user_id=user_id)
             return
         space = await self._space_repo.get(space_id)
         if not self._takes_remote_join_requests(space):
@@ -167,7 +218,12 @@ class SpaceInviteInboundHandlers:
                 space_id,
             )
             return
-        if await self._space_repo.is_banned(space_id, user_id):
+        if await banned_from_space(
+            self._space_repo,
+            space_id,
+            user_id=user_id,
+            instance_id=event.from_instance,
+        ):
             log.info(
                 "SPACE_JOIN_REQUEST from %s refused: applicant banned from %s",
                 event.from_instance,
@@ -229,6 +285,152 @@ class SpaceInviteInboundHandlers:
             applicant_pk=str(applicant_pk) if applicant_pk else None,
             message=str(message) if message else None,
             request_id=str(request_id) if request_id else None,
+        )
+
+    async def _on_follow_request(
+        self, event: FederationEvent, *, space_id: str, user_id: str
+    ) -> None:
+        """A remote user wants to follow a local space (v_96): the join path
+        with the read-only role, approved on its own while the space takes
+        followers — whatever its join mode. Banned, already asked, or not
+        inside a local community (outside, near the edge or without a
+        location): dropped — following a local community is inside only
+        (owner 2026-11-23), with no admin review. Everything else is
+        re-checked by the approver.
+
+        FIRST the person-ID anchor (P5): ``user_id`` must derive from the
+        sender's pinned identity key with the ``user_anchor`` the request
+        carries — before the ban, the pending request or the local-area
+        budget is read, so an unproven follow is dropped the same silent way
+        whatever that id holds, and never spends another person's budget."""
+        applicant_identity_pk = await sender_identity_pk(self._federation, event)
+        applicant_anchor = event.payload.get("user_anchor")
+        if not user_id_proven(applicant_identity_pk, applicant_anchor, user_id):
+            log.info(
+                "follow from %s for space %s refused: user id %s is not proven "
+                "by the household's identity key",
+                event.from_instance,
+                space_id,
+                user_id,
+            )
+            return
+        space = await self._space_repo.get(space_id)
+        if not takes_follows(space, self._own_instance_id):
+            log.info(
+                "follow from %s for space %s refused: not a public / global "
+                "space this household hosts that takes followers",
+                event.from_instance,
+                space_id,
+            )
+            return
+        assert space is not None
+        # Follows are bounded before anything is approved (a seat, a token,
+        # a join-request row per follow) — the GFS bootstrap's numbers and
+        # order: per household first, then a peek at the space's budget
+        # (whoever sends them: a routed follow's origin is any
+        # self-authenticating key, so a fresh origin gets a fresh household
+        # budget), which is charged only right before the approval, so a
+        # rate-limited, banned or repeated follow never spends it. Until the
+        # limiter is wired with the approver, nothing is approved anyway.
+        limiter = self._follow_limiter
+        space_budget = f"follow:space:{space_id}"
+        if limiter is not None and not (
+            limiter.is_allowed(
+                f"follow:sender:{event.from_instance}",
+                limit=PER_SENDER_LIMIT,
+                window_s=PER_SENDER_WINDOW_S,
+            )
+            and limiter.has_room(
+                space_budget, limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
+            )
+        ):
+            log.info(
+                "follow from %s for space %s dropped: rate limit",
+                event.from_instance,
+                space_id,
+            )
+            return
+        if await banned_from_space(
+            self._space_repo,
+            space_id,
+            user_id=user_id,
+            instance_id=event.from_instance,
+        ):
+            log.info(
+                "follow from %s refused: applicant banned from %s",
+                event.from_instance,
+                space_id,
+            )
+            return
+        if (
+            await pending_join_request_id(
+                self._space_repo,
+                space_id,
+                user_id,
+                household_instance_id=event.from_instance,
+            )
+            is not None
+        ):
+            log.debug(
+                "follow from %s for %s: already pending", event.from_instance, space_id
+            )
+            return
+        try:
+            verdict = await require_local_eligibility(
+                space,
+                household_instance_id=event.from_instance,
+                own_instance_id=self._own_instance_id,
+                join_point=parse_join_location(event.payload.get("join_location")),
+                budget=self._local_area_budget,
+                seeker_user_id=user_id,
+            )
+        except SpacePermissionError, RuntimeError:
+            log.info(
+                "follow from %s refused: not eligible for the local community %s",
+                event.from_instance,
+                space_id,
+            )
+            return
+        applicant_pk = event.payload.get("applicant_pk")
+        request_id = event.payload.get("request_id")
+        if verdict is Eligibility.EDGE:
+            # Following a local community is inside only (owner
+            # 2026-11-23): near the edge is dropped like outside — no admin
+            # review for a follow (a member's join request keeps it).
+            log.info(
+                "follow from %s refused: near the edge of the local community %s",
+                event.from_instance,
+                space_id,
+            )
+            return
+        if not request_id:
+            log.debug("follow from %s: no request id", event.from_instance)
+            return
+        if self._follow_approver is None:
+            log.warning(
+                "follow from %s for space %s dropped: no approver wired",
+                event.from_instance,
+                space_id,
+            )
+            return
+        if limiter is not None and not limiter.is_allowed(
+            space_budget, limit=PER_SPACE_LIMIT, window_s=PER_SPACE_WINDOW_S
+        ):
+            log.info(
+                "follow from %s for space %s dropped: rate limit",
+                event.from_instance,
+                space_id,
+            )
+            return
+        await self._follow_approver(
+            space_id=space_id,
+            instance_id=event.from_instance,
+            user_id=user_id,
+            request_id=str(request_id),
+            applicant_identity_pk=applicant_identity_pk,
+            applicant_anchor=applicant_anchor,
+            applicant_pk=str(applicant_pk) if applicant_pk else None,
+            area_verdict=verdict,
         )
 
     def _takes_remote_join_requests(self, space: Space | None) -> bool:

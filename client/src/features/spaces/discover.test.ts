@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { DirectoryEntry } from '@/types'
 import {
-  approvalSeatsUs, buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable, entryAreaVerdict,
-  entryRadiusKm, joinCarriesLocation, joinModeChip, joinModeWord,
+  aboutWays, approvalSeatsUs, buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable, entryAreaVerdict,
+  entryRadiusKm, joinCarriesLocation, joinModeChip, joinModeShown, joinModeWord,
   hostLabel, matchesTerm, parseDiscoverSource, sourceOf, withMembership,
 } from './discover'
 
@@ -114,6 +114,16 @@ describe('discoverAction', () => {
     expect(discoverAction(peer)).toBeNull()
     expect(approvalSeatsUs(peer)).toBe(false)
   })
+  it('a follow waiting for its host reads "Following…", not "Requested" (P8)', () => {
+    const far = entry({ scope: 'global', host_is_paired: false, allow_subscribers: true })
+    // The host approves a follow on its own: pending, then the seat being made.
+    expect(discoverAction({ ...far, request_pending: true })).toBe('following')
+    expect(discoverAction({ ...far, request_pending: true, request_joining: true })).toBe('following')
+    // A row whose way in is a request stays "Requested" / "joining".
+    const ask = { ...far, join_mode: 'request' as const, gfs_askable: true }
+    expect(discoverAction({ ...ask, request_pending: true })).toBe('pending')
+    expect(discoverAction({ ...ask, request_pending: true, request_joining: true })).toBe('joining')
+  })
   it('never suggests pairing: an unpaired host is Follow or nothing', () => {
     expect(discoverAction(entry({ host_is_paired: false }))).toBeNull()
     expect(discoverAction(entry({ scope: 'global', host_is_paired: false, join_mode: 'open', allow_subscribers: true }))).toBe('follow')
@@ -124,7 +134,7 @@ describe('canFollow', () => {
   it('needs an explicit opt-in and a followable scope', () => {
     expect(canFollow(entry({ scope: 'global', allow_subscribers: true }))).toBe(true)
     expect(canFollow(entry({ scope: 'global' }))).toBe(false)
-    expect(canFollow(entry({ allow_subscribers: true }))).toBe(false)
+    expect(canFollow(entry({ host_is_paired: false, allow_subscribers: true }))).toBe(false)
     expect(canFollow(entry({ host_instance_id: 'local', allow_subscribers: true }))).toBe(true)
   })
 })
@@ -206,5 +216,74 @@ describe('entryAreaVerdict (local communities)', () => {
       member_count: 1, role: null, local_area: area,
     }], { subIds: new Set(), pendingIds: new Set() })
     expect(e.local_area).toEqual(area)
+  })
+})
+
+describe('P9 — a paired household\'s public space can be followed', () => {
+  it('offers Follow when its host takes followers (peer directory), never without the opt-in', () => {
+    expect(canFollow(entry({ allow_subscribers: true }))).toBe(true)
+    expect(canFollow(entry({ allow_subscribers: false }))).toBe(false)
+    // Not paired (an unpaired peer row never lists, but fail closed).
+    expect(canFollow(entry({ host_is_paired: false, allow_subscribers: true }))).toBe(false)
+  })
+  it('a Discover row keeps ONE button: joining wins over following', () => {
+    expect(discoverAction(entry({ allow_subscribers: true }))).toBe('join')
+    expect(discoverAction(entry({ join_mode: 'request', allow_subscribers: true }))).toBe('request')
+    // Invite only, takes followers: Follow is the one way in.
+    expect(discoverAction(entry({ join_mode: 'invite_only', allow_subscribers: true }))).toBe('follow')
+  })
+})
+
+describe('P9 — aboutWays: Join and Follow side by side on the About page', () => {
+  const both = entry({ allow_subscribers: true })
+  it('join is primary, Follow secondary, when the space offers both', () => {
+    expect(aboutWays(both)).toEqual({ primary: 'join', follow: 'follow', followDisabled: false })
+    expect(aboutWays({ ...both, join_mode: 'request' }))
+      .toEqual({ primary: 'request', follow: 'follow', followDisabled: false })
+  })
+  it('a space that takes no followers shows only the way to join', () => {
+    expect(aboutWays(entry())).toEqual({ primary: 'join', follow: null, followDisabled: false })
+  })
+  it('follow-only spaces keep Follow as the one button', () => {
+    const far = entry({ scope: 'global', host_is_paired: false, allow_subscribers: true })
+    expect(aboutWays(far)).toEqual({ primary: 'follow', follow: null, followDisabled: false })
+    expect(aboutWays({ ...far, request_pending: true }))
+      .toEqual({ primary: 'following', follow: null, followDisabled: false })
+    expect(aboutWays({ ...far, already_subscribed: true }))
+      .toEqual({ primary: null, follow: null, followDisabled: false })
+  })
+  it('while a request to join is out, Follow is shown but disabled', () => {
+    expect(aboutWays({ ...both, join_mode: 'request', request_pending: true }))
+      .toEqual({ primary: 'pending', follow: 'follow', followDisabled: true })
+    const ask = entry({
+      scope: 'global', host_is_paired: false, join_mode: 'request', gfs_askable: true,
+      allow_subscribers: true,
+    })
+    expect(aboutWays({ ...ask, request_pending: true, request_joining: true }))
+      .toEqual({ primary: 'joining', follow: 'follow', followDisabled: true })
+  })
+  it('after following, Join is still offered (step up) and Follow is gone', () => {
+    expect(aboutWays({ ...both, already_subscribed: true }))
+      .toEqual({ primary: 'join', follow: null, followDisabled: false })
+  })
+  it('a follow waiting for its host reads "Following…" beside the way to join', () => {
+    expect(aboutWays({ ...both, request_pending: true, follow_pending: true }))
+      .toEqual({ primary: 'join', follow: 'following', followDisabled: true })
+  })
+  it('a member sees Open, nothing else', () => {
+    expect(aboutWays({ ...both, already_member: true }))
+      .toEqual({ primary: 'open', follow: null, followDisabled: false })
+  })
+})
+
+describe('P9 — no "Open to join" where nobody can join from here', () => {
+  it('a follow-only global space shows no join-mode word or chip', () => {
+    const far = entry({ scope: 'global', host_is_paired: false, allow_subscribers: true })
+    expect(joinModeWord(far)).toBeNull()
+    expect(joinModeShown(far)).toBe(false)
+    // An invite-only space still says so; one you can join says how.
+    expect(joinModeShown(entry({ join_mode: 'invite_only' }))).toBe(true)
+    expect(joinModeShown(entry())).toBe(true)
+    expect(joinModeShown({ ...far, join_mode: 'request', gfs_askable: true })).toBe(true)
   })
 })

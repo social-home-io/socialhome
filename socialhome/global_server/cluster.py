@@ -3,8 +3,8 @@
 Symmetric peer-to-peer — no primary/leader. Every node runs the same
 code, shares ``client_instances`` + ``global_spaces`` registries via
 ``NODE_SYNC_*`` messages, and tells siblings about freshly queued envelopes,
-owner notices and broadcast relay items via the coalesced
-``NODE_DRAIN_HINT`` (``NODE_RELAY`` is a legacy frame nothing sends).
+and broadcast relay items via the coalesced
+``NODE_DRAIN_HINT``.
 State sync is last-write-wins with two exceptions: a ``banned`` record
 always wins over any subsequent non-ban upsert, and a locally-``withdrawn``
 space stays withdrawn against a peer's stale ``withdrawn=0`` row.
@@ -46,7 +46,6 @@ from ..crypto import (
 from ..domain.space import normalize_category, normalize_join_mode
 from ..domain.space_listing_counts import parse_listing_count
 from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
-from ..domain.subscriber_accepts import parse_accepts
 from ..gfs_client_status import StatusRequest, sign_client_status
 from ..gfs_proof import sign_possession_proof
 from ..space_join_contact import parse_join_contact
@@ -236,35 +235,14 @@ NODE_HEARTBEAT = "NODE_HEARTBEAT"
 NODE_SYNC_CLIENT = "NODE_SYNC_CLIENT"
 NODE_SYNC_SPACE = "NODE_SYNC_SPACE"
 NODE_SYNC_REPORT = "NODE_SYNC_REPORT"  # Phase Z — fraud aggregation
-#: Legacy: nothing sends it any more (it never had a production caller).
-#: Broadcast relays ride ``NODE_DRAIN_HINT.relays`` instead — see
-#: :mod:`.cluster_relay`. The receiver still accepts it from an older node.
-NODE_RELAY = "NODE_RELAY"
 NODE_POLICY_PUSH = "NODE_POLICY_PUSH"
-#: Spec §24.10.3 / §4.4.6 — partition-healing pair. ``CATCHUP`` is sent
-#: by a node that just came back online; the receiver replies with one
-#: ``GAP`` per space where its own ``last_relay_ts`` is newer than the
-#: sender's (fire-and-discard posts can't be replayed; subscribers see
-#: a banner instead).
-NODE_PARTITION_CATCHUP = "NODE_PARTITION_CATCHUP"
-NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
 #: "I just queued something for these households" — sent after an envelope or
 #: relay item lands in the shared ``gfs_envelope_queue``. The households'
 #: sockets may live on a sibling node (each node only knows its own), so every
 #: receiver drains the listed ids it holds a socket for. Payload:
 #: ``{"instances": [<instance id>, ...]}`` — ids only, never content.
 #:
-#: The same frame carries the optional ``notices`` list: ``new_subscriber``
-#: notices whose space OWNER had no socket on the sending node, as
-#: ``{owner, space_id, subscriber, reason, accepts}`` — ids and labels the
-#: sender read from the shared DB, never key material. The node holding the
-#: owner's socket rebuilds the frame from the shared DB
-#: (``GfsFederationService.deliver_forwarded_notice``). Riding the drain hint
-#: (rather than a frame of its own) keeps it inside the same coalesced send,
-#: so it costs a peer's per-minute sync budget nothing extra; an older node
-#: ignores the key, which is exactly how it behaved before.
-#:
-#: And the optional ``relays`` list: broadcast relay items this node accepted
+#: The same frame carries the optional ``relays`` list: broadcast relay items this node accepted
 #: (``ForwardedRelay.to_wire``) for every other node to push to the sockets it
 #: holds — one copy per peer, however many subscribers. A newer receiver
 #: answers ``{"status": "ok", "held": {audience: [instance id, ...]}}`` for
@@ -278,7 +256,7 @@ NODE_DRAIN_HINT = "NODE_DRAIN_HINT"
 DRAIN_HINT_DELAY_S: float = 0.5
 
 #: Minimum seconds between two ``NODE_DRAIN_HINT`` frames to one peer, so a
-#: steady stream of relays, ids and notices stays at <= 40 frames a minute —
+#: steady stream of relays and ids stays at <= 40 frames a minute —
 #: inside the receiver's :data:`CLUSTER_RATE_LIMIT_PER_MIN` (60) with room for
 #: heartbeats and syncs. Whatever arrives meanwhile rides the next frame, so
 #: busier traffic means fuller frames, not more of them. Idle, the first frame
@@ -296,40 +274,6 @@ DRAIN_HINT_MAX_IDS: int = 256
 #: Most callers waiting at once for the next ``NODE_DRAIN_HINT`` frame
 #: (:meth:`ClusterService.next_hint_round`). Past it a caller does not wait.
 FLUSH_WAITERS_MAX: int = 1024
-
-#: Max owner notices in one ``NODE_DRAIN_HINT`` frame, and the most a receiver
-#: reads from one. ~250 bytes each, so a full frame stays near 64 KiB.
-SUBSCRIBER_NOTICE_MAX_PER_FRAME: int = 256
-
-#: Max owner notices waiting for the next flush. Past it a notice is dropped
-#: (WARNING once per flush window): the owner's 5b-c reconcile and the
-#: follower's next reconnect still repair the key.
-SUBSCRIBER_NOTICE_MAX_PENDING: int = 4096
-
-#: Longest ``space_id`` a forwarded notice may name — the relay routes' own
-#: bound on identifier-shaped wire fields.
-SUBSCRIBER_NOTICE_SPACE_ID_MAX_LEN: int = 128
-
-#: The ``new_subscriber.reason`` values a forwarded notice may carry (mirrors
-#: ``federation.NEW_SUBSCRIBER_REASONS``; the receiver re-checks).
-_NOTICE_REASONS: frozenset[str] = frozenset({"subscribe", "reconnect"})
-
-
-@dataclass(slots=True, frozen=True)
-class SubscriberNotice:
-    """One forwarded ``new_subscriber`` notice, validated off the wire."""
-
-    owner: str
-    space_id: str
-    subscriber: str
-    reason: str
-    accepts: tuple[str, ...]
-
-
-#: ``GfsFederationService.deliver_forwarded_notice`` — set by
-#: :meth:`ClusterService.attach_subscriber_notice`.
-NoticeDelivery = Callable[..., Awaitable[bool]]
-
 
 #: Longest ``node_id`` the admin API accepts for a peer.
 CLUSTER_NODE_ID_MAX_LEN: int = 128
@@ -622,15 +566,9 @@ class ClusterService:
         "_identity_transitional",
         "_instance_id",
         "_instance_id_aliases",
-        "_local_last_relay_ts",
         "_node_id",
-        "_notice_cb",
-        "_notice_dropped",
-        "_notice_pending",
-        "_notice_tasks",
         "_online_peers",
         "_own_pk_hex",
-        "_partition_gaps",
         "_peers",
         "_process_start",
         "_relay_cb",
@@ -640,7 +578,6 @@ class ClusterService:
         "_relay_warned_at",
         "_repo",
         "_seen_frames",
-        "_seen_relays",
         "_self_url",
         "_signing_key",
         "_stop",
@@ -706,27 +643,11 @@ class ClusterService:
         #: misses fewer than :data:`HEARTBEAT_FAIL_THRESHOLD` pings still
         #: counts) — :meth:`live_node_count`.
         self._online_peers = 0
-        #: 10-minute TTL dedup for relayed message ids.
-        self._seen_relays: dict[str, float] = {}
         #: Spec §24.10.7 — local view of each node's active sync-signaling
         #: load. The own count is authoritative; peer counts are refreshed
         #: from incoming ``NODE_HEARTBEAT`` payloads. Local-per-node, no
         #: cluster-wide consensus required.
         self._active_sync_count: dict[str, int] = {}
-        #: Spec §4.4.6 / §24.10.3 — last unix-ts at which we relayed
-        #: anything for ``space_id``. Updated by ``record_relay_ts`` (the
-        #: federation service calls this on successful relay). Used to
-        #: emit ``NODE_PARTITION_GAP`` when a peer's ``CATCHUP`` payload
-        #: shows it missed posts during a partition. In-memory only —
-        #: a restart loses the timeline, which is acceptable since
-        #: gap-reporting is best-effort.
-        self._local_last_relay_ts: dict[str, float] = {}
-        #: Inbound ``NODE_PARTITION_GAP`` accumulator. Keyed by
-        #: ``space_id``; each value is the most recent gap range we saw
-        #: from any peer. Read by
-        #: :meth:`pending_partition_gaps` so SH-side fan-out can drain
-        #: them after a partition heals.
-        self._partition_gaps: dict[str, dict] = {}
         self._ws_registry = ws_registry
         #: Spec §24.10 — local view of each peer's live connected-client
         #: count (the GFS-side WebSocket sessions, one per paired SH
@@ -781,17 +702,6 @@ class ClusterService:
         self._hint_drains: dict[str, asyncio.Task] = {}
         #: Households hinted again while their drain ran — drained once more.
         self._hint_rerun: set[str] = set()
-        #: Owner notices waiting for the next ``NODE_DRAIN_HINT`` flush, keyed
-        #: by ``(owner, space_id, subscriber)`` → ``(reason, accepts)``.
-        self._notice_pending: dict[
-            tuple[str, str, str], tuple[str, tuple[str, ...]]
-        ] = {}
-        #: Notices dropped at the pending cap since the last flush.
-        self._notice_dropped = 0
-        #: ``deliver_forwarded_notice``, set by :meth:`attach_subscriber_notice`.
-        self._notice_cb: NoticeDelivery | None = None
-        #: Running inbound notice deliveries, awaited / cancelled in ``stop``.
-        self._notice_tasks: set[asyncio.Task] = set()
         #: Broadcast relay items waiting for the next ``NODE_DRAIN_HINT``
         #: flush: ``(item, its wire dict, its wire size, settle callback)``.
         self._relay_pending: list[
@@ -1055,7 +965,6 @@ class ClusterService:
                     log.debug("cluster: %s ended with an error", attr, exc_info=True)
                 setattr(self, attr, None)
         self._drain_hint_pending.clear()
-        self._notice_pending.clear()
         self._hint_rerun.clear()
         # Relay items that never went out: no peer reported a socket for
         # anybody, so the origin queues every offline copy it would have.
@@ -1066,12 +975,6 @@ class ClusterService:
                 on_settled(frozenset())
         waiters, self._flush_waiters = self._flush_waiters, []
         self._release_flush_waiters(waiters)
-        if self._notice_tasks:
-            tasks = set(self._notice_tasks)
-            _done, still = await asyncio.wait(tasks, timeout=5.0)
-            for task in still:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
         if self._hint_drains:
             pending = set(self._hint_drains.values())
             _done, still = await asyncio.wait(pending, timeout=5.0)
@@ -1317,25 +1220,6 @@ class ClusterService:
             return
         await self._broadcast(NODE_POLICY_PUSH, policy)
 
-    async def relay_to_peers(
-        self,
-        space_id: str,
-        envelope: dict,
-        *,
-        session: aiohttp.ClientSession | None = None,
-    ) -> None:
-        """Forward a post-relay to peer nodes (fire-and-forget)."""
-        if not self._enabled:
-            return
-        asyncio.create_task(
-            self._broadcast(
-                NODE_RELAY,
-                {"space_id": space_id, "envelope": envelope},
-                ignore_errors=True,
-                session=session,
-            )
-        )
-
     # ─── Cross-node envelope-queue drain (NODE_DRAIN_HINT) ────────────
 
     def attach_drain(
@@ -1473,66 +1357,11 @@ class ClusterService:
             )
             return {}
 
-    def hint_subscriber_notice(
-        self,
-        owner: str,
-        space_id: str,
-        subscriber: str,
-        *,
-        reason: str,
-        accepts: tuple[str, ...] = (),
-    ) -> None:
-        """Note a ``new_subscriber`` notice for an *owner* with no socket here.
-
-        Synchronous and cheap — called from the subscribe / hello path. Rides
-        the next coalesced ``NODE_DRAIN_HINT`` as ids only; the node holding
-        the owner's socket rebuilds the notice from the shared DB. Repeats for
-        one seat collapse, a NEW seat (``subscribe``) winning over a key
-        repair. No-op when cluster mode is off (a single node has nobody to
-        tell); past :data:`SUBSCRIBER_NOTICE_MAX_PENDING` the notice is
-        dropped (the 5b-c reconcile and the next reconnect still repair it).
-        """
-        if not self._enabled:
-            return
-        key = (owner, space_id, subscriber)
-        held = self._notice_pending.get(key)
-        if held is None and len(self._notice_pending) >= SUBSCRIBER_NOTICE_MAX_PENDING:
-            if not self._notice_dropped:
-                log.warning(
-                    "cluster: %d subscriber notices already wait for the next "
-                    "drain hint — dropping more (the owners' reconcile repairs "
-                    "them)",
-                    len(self._notice_pending),
-                )
-            self._notice_dropped += 1
-            return
-        if held is None or reason == "subscribe":
-            self._notice_pending[key] = (reason, tuple(accepts))
-        self._schedule_hint_flush()
-
     def _schedule_hint_flush(self) -> None:
         if self._drain_hint_task is None or self._drain_hint_task.done():
             self._drain_hint_task = asyncio.get_running_loop().create_task(
                 self._flush_drain_hints(), name="gfs-cluster-drain-hint"
             )
-
-    def _take_pending_notices(self) -> list[dict]:
-        notices = [
-            {
-                "owner": owner,
-                "space_id": space_id,
-                "subscriber": subscriber,
-                "reason": reason,
-                "accepts": list(accepts),
-            }
-            for (owner, space_id, subscriber), (
-                reason,
-                accepts,
-            ) in self._notice_pending.items()
-        ]
-        self._notice_pending.clear()
-        self._notice_dropped = 0
-        return notices
 
     async def _hint_wait(self, *, min_delay: float) -> bool:
         """Sleep at least *min_delay*, and until :data:`DRAIN_HINT_MIN_GAP_S`
@@ -1566,26 +1395,21 @@ class ClusterService:
         return chunks
 
     async def _flush_drain_hints(self) -> None:
-        """Send pending ids, owner notices and relay items after the
+        """Send pending ids and relay items after the
         coalescing delay, paced to :data:`DRAIN_HINT_MIN_GAP_S` between
         frames; repeat while new ones arrived during a send. Ends on ``stop``
         (the ``_stop`` event), which settles relay items still unsent."""
         while (
-            self._drain_hint_pending
-            or self._notice_pending
-            or self._relay_pending
-            or self._flush_waiters
+            self._drain_hint_pending or self._relay_pending or self._flush_waiters
         ) and not self._stop.is_set():
             if not await self._hint_wait(min_delay=DRAIN_HINT_DELAY_S):
                 return
             waiters, self._flush_waiters = self._flush_waiters, []
             batch = sorted(self._drain_hint_pending)
             self._drain_hint_pending.clear()
-            notices = self._take_pending_notices()
             chunks = self._take_relay_chunks()
             frames = max(
                 math.ceil(len(batch) / DRAIN_HINT_MAX_IDS),
-                math.ceil(len(notices) / SUBSCRIBER_NOTICE_MAX_PER_FRAME),
                 len(chunks),
                 # Waiters alone still send one (empty) frame.
                 1,
@@ -1597,13 +1421,8 @@ class ClusterService:
                         self._relay_pending.extend(chunk)
                     return
                 ids = batch[index * DRAIN_HINT_MAX_IDS :][:DRAIN_HINT_MAX_IDS]
-                notes = notices[index * SUBSCRIBER_NOTICE_MAX_PER_FRAME :][
-                    :SUBSCRIBER_NOTICE_MAX_PER_FRAME
-                ]
                 chunk = chunks[index] if index < len(chunks) else []
                 payload: dict = {"instances": ids}
-                if notes:
-                    payload["notices"] = notes
                 if chunk:
                     payload["relays"] = [wire for _item, wire, _size, _cb in chunk]
                 replies: list[dict | None] = []
@@ -1618,14 +1437,13 @@ class ClusterService:
                     raise
                 except Exception as exc:
                     # Best effort: the household still gets the rows on its
-                    # next hello, an owner its notice from its reconcile, an
-                    # offline subscriber its copy from the origin's queue.
+                    # next hello, an offline subscriber its copy from the
+                    # origin's queue.
                     # Logged so a broken roster read is visible.
                     log.warning(
-                        "cluster: drain hint for %d household(s), %d "
-                        "subscriber notice(s) and %d relay item(s) not sent: %r",
+                        "cluster: drain hint for %d household(s) and %d relay "
+                        "item(s) not sent: %r",
                         len(ids),
-                        len(notes),
                         len(chunk),
                         exc,
                         exc_info=True,
@@ -1680,67 +1498,6 @@ class ClusterService:
             task.add_done_callback(partial(self._forget_hint_drain, raw))
             started += 1
         return started
-
-    def attach_subscriber_notice(self, deliver: NoticeDelivery) -> None:
-        """Register ``GfsFederationService.deliver_forwarded_notice`` — what
-        an inbound notice runs for an owner whose socket is on THIS node."""
-        self._notice_cb = deliver
-
-    async def apply_subscriber_notices(self, notices: object) -> int:
-        """Inbound ``NODE_DRAIN_HINT.notices`` — deliver the ones whose owner
-        has a socket on THIS node.
-
-        Every field is validated before use: owner and subscriber must be
-        well-formed instance ids, the space id a short printable string, the
-        reason a known one; ``accepts`` is filtered like a subscribe's. At
-        most :data:`SUBSCRIBER_NOTICE_MAX_PER_FRAME` are read. A notice for an
-        owner without a socket here is ignored — its node got the same hint.
-        Deliveries run as ONE background task so the sender's
-        ``/cluster/sync`` POST is answered at once. Returns how many were
-        scheduled."""
-        if self._notice_cb is None or self._ws_registry is None:
-            return 0
-        if not isinstance(notices, list):
-            return 0
-        accepted: list[SubscriberNotice] = []
-        for raw in notices[:SUBSCRIBER_NOTICE_MAX_PER_FRAME]:
-            notice = _parse_notice(raw)
-            if notice is None or not self._ws_registry.is_connected(notice.owner):
-                continue
-            accepted.append(notice)
-        if not accepted:
-            return 0
-        task = asyncio.get_running_loop().create_task(
-            self._deliver_notices(self._notice_cb, accepted),
-            name="gfs-cluster-subscriber-notices",
-        )
-        self._notice_tasks.add(task)
-        task.add_done_callback(self._notice_tasks.discard)
-        return len(accepted)
-
-    async def _deliver_notices(
-        self, deliver: NoticeDelivery, notices: list[SubscriberNotice]
-    ) -> None:
-        # Bounded (≤ SUBSCRIBER_NOTICE_MAX_PER_FRAME); ``stop`` awaits it like
-        # a hinted drain, cancelling past its 5 s grace.
-        for notice in notices:
-            try:
-                await deliver(
-                    notice.owner,
-                    notice.space_id,
-                    notice.subscriber,
-                    reason=notice.reason,
-                    accepts=notice.accepts,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning(
-                    "cluster: subscriber notice delivery failed for space %s: %r",
-                    notice.space_id,
-                    exc,
-                    exc_info=True,
-                )
 
     def _forget_hint_drain(self, instance_id: str, task: asyncio.Task) -> None:
         if self._hint_drains.get(instance_id) is task:
@@ -2126,7 +1883,7 @@ class ClusterService:
             cert=space.authority_cert,
             stored_cert=existing.authority_cert if existing else None,
         )
-        # A peer's ``subscriber_count`` is its own relay-seat bookkeeping:
+        # A peer's ``subscriber_count`` is inert since v_96 (no space-keyed relay):
         # ``upsert_space`` never overwrites ours with it. A peer's counts are
         # taken only with a stamp (an OLDER node gossips none, a node that
         # never got counts gossips ``null``) that is not in the future (a
@@ -2179,148 +1936,6 @@ class ClusterService:
         for key in ("auto_accept_clients", "auto_accept_spaces", "fraud_threshold"):
             if key in policy:
                 await self._admin_repo.set_config(key, str(policy[key]))
-
-    async def apply_relay(self, space_id: str, envelope: dict) -> None:
-        """Inbound NODE_RELAY — dedup; local fan-out lives in the
-        federation service.
-        """
-        msg_id = str(envelope.get("msg_id") or envelope.get("message_id") or "")
-        if msg_id and msg_id in self._seen_relays:
-            return
-        if msg_id:
-            self._seen_relays[msg_id] = time.monotonic()
-            self._gc_seen()
-        if space_id:
-            self._local_last_relay_ts[space_id] = time.time()
-
-    def record_relay_ts(self, space_id: str) -> None:
-        """Bump the local high-water mark for ``space_id``.
-
-        Called by the federation service after a successful own-node
-        post-relay. Pairs with :meth:`apply_relay` (which records the
-        timestamp on inbound NODE_RELAY) so partition-catchup math
-        sees both inbound and locally-originated traffic.
-        """
-        if space_id:
-            self._local_last_relay_ts[space_id] = time.time()
-
-    async def apply_partition_catchup(
-        self,
-        from_node_id: str,
-        last_relay_ts: dict,
-        *,
-        session: aiohttp.ClientSession | None = None,
-    ) -> list[dict]:
-        """Inbound ``NODE_PARTITION_CATCHUP`` (spec §4.4.6).
-
-        For every space the peer mentions, compare its ``last_relay_ts``
-        to ours. If we have newer data the peer must have missed posts
-        during the partition (fire-and-discard — they can't be replayed).
-        Reply with one ``NODE_PARTITION_GAP`` per affected space so the
-        peer can surface the banner to its SH subscribers.
-
-        Returns the list of gap descriptors (also useful for tests).
-        """
-        if not isinstance(last_relay_ts, dict):
-            return []
-        gaps: list[dict] = []
-        for space_id, peer_ts_raw in last_relay_ts.items():
-            try:
-                peer_ts = float(peer_ts_raw)
-            except TypeError, ValueError:
-                continue
-            local_ts = self._local_last_relay_ts.get(str(space_id), 0.0)
-            if local_ts > peer_ts:
-                gaps.append(
-                    {
-                        "space_id": str(space_id),
-                        "gap_start": peer_ts,
-                        "gap_end": local_ts,
-                    }
-                )
-        if not gaps or not self._enabled:
-            return gaps
-        peer_url = await self._lookup_node_url(from_node_id)
-        if not peer_url:
-            return gaps
-        for gap in gaps:
-            try:
-                await self._post_to_peer(
-                    peer_url,
-                    NODE_PARTITION_GAP,
-                    gap,
-                    to=from_node_id,
-                    session=session,
-                )
-            except Exception as exc:
-                log.debug(
-                    "cluster: NODE_PARTITION_GAP to %r failed: %r",
-                    peer_url,
-                    exc,
-                    exc_info=True,
-                )
-        return gaps
-
-    async def apply_partition_gap(self, payload: dict) -> None:
-        """Inbound ``NODE_PARTITION_GAP``.
-
-        Records the gap so the federation service can drain it via
-        :meth:`pending_partition_gaps` and emit ``SPACE_PARTITION_GAP``
-        WS frames to subscribed SH instances.
-        """
-        space_id = str(payload.get("space_id") or "")
-        if not space_id:
-            return
-        try:
-            gap_start = float(payload.get("gap_start") or 0.0)
-            gap_end = float(payload.get("gap_end") or 0.0)
-        except TypeError, ValueError:
-            return
-        if gap_end <= gap_start:
-            return
-        self._partition_gaps[space_id] = {
-            "space_id": space_id,
-            "gap_start": gap_start,
-            "gap_end": gap_end,
-        }
-
-    def pending_partition_gaps(self) -> list[dict]:
-        """Drain + return all ``NODE_PARTITION_GAP`` messages received."""
-        gaps = list(self._partition_gaps.values())
-        self._partition_gaps.clear()
-        return gaps
-
-    async def announce_partition_catchup(
-        self,
-        peer_url: str,
-        *,
-        to: str = "",
-        session: aiohttp.ClientSession | None = None,
-    ) -> None:
-        """Send ``NODE_PARTITION_CATCHUP`` to a peer that just came back.
-
-        Triggered by the heartbeat loop on offline → online transition.
-        Broadcasts our current ``_local_last_relay_ts`` per space so the
-        peer can compute gaps and reply with ``NODE_PARTITION_GAP``.
-        """
-        if not self._enabled or not peer_url:
-            return
-        snapshot = {sid: ts for sid, ts in self._local_last_relay_ts.items()}
-        try:
-            await self._post_to_peer(
-                peer_url,
-                NODE_PARTITION_CATCHUP,
-                {"last_relay_ts": snapshot},
-                to=to,
-                session=session,
-            )
-        except Exception as exc:
-            log.debug(
-                "cluster: NODE_PARTITION_CATCHUP to %r failed: %r",
-                peer_url,
-                exc,
-                exc_info=True,
-            )
 
     async def _lookup_node_url(self, node_id: str) -> str:
         if not node_id:
@@ -2577,15 +2192,13 @@ class ClusterService:
         for r in await self.member_peers():
             url = member_url(r)
             if r.status == "offline":
-                # Probe offline peers too — coming back triggers
-                # a partition-catchup handshake (spec §4.4.6).
+                # Probe offline peers too: one that answers is back.
                 if await self._ping_peer(url):
                     online += 1
                     self._fail_counts[url] = 0
                     await self._repo.touch_node(
                         r.node_id, status="online", last_seen=_now_iso()
                     )
-                    await self.announce_partition_catchup(url, to=r.node_id)
                 continue
             ok = await self._ping_peer(url)
             fails = self._fail_counts.get(url, 0)
@@ -2667,7 +2280,6 @@ class ClusterService:
         msg_type: str,
         payload: dict,
         *,
-        ignore_errors: bool = False,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         for r in await self.member_peers():
@@ -2680,15 +2292,13 @@ class ClusterService:
                 )
                 self._fail_counts[url] = 0
             except Exception as exc:
-                if ignore_errors:
-                    log.debug(
-                        "cluster: %s to %r failed: %r",
-                        msg_type,
-                        url,
-                        exc,
-                        exc_info=True,
-                    )
-                    continue
+                log.debug(
+                    "cluster: %s to %r failed, retrying once: %r",
+                    msg_type,
+                    url,
+                    exc,
+                    exc_info=True,
+                )
                 await asyncio.sleep(SYNC_RETRY_DELAY_S)
                 try:
                     await self._post_to_peer(
@@ -2822,12 +2432,6 @@ class ClusterService:
             )
             return False
 
-    def _gc_seen(self) -> None:
-        cutoff = time.monotonic() - 600.0
-        stale = [k for k, v in self._seen_relays.items() if v < cutoff]
-        for k in stale:
-            self._seen_relays.pop(k, None)
-
 
 # ─── Wire shape helpers ──────────────────────────────────────────────────
 
@@ -2859,33 +2463,6 @@ def _key_view(row: ClusterNode, own_key_lower: str) -> dict:
     if own_key_lower and row.public_key.lower() == own_key_lower:
         return {"public_key": own_key_lower, "key_source": "own"}
     return {"public_key": "", "key_source": "none"}
-
-
-def _parse_notice(raw: object) -> SubscriberNotice | None:
-    """A forwarded owner notice off the wire, or ``None`` if malformed."""
-    if not isinstance(raw, dict):
-        return None
-    owner, space_id = raw.get("owner"), raw.get("space_id")
-    subscriber, reason = raw.get("subscriber"), raw.get("reason")
-    if not (
-        isinstance(owner, str)
-        and ENVELOPE_INSTANCE_ID_RE.fullmatch(owner)
-        and isinstance(subscriber, str)
-        and ENVELOPE_INSTANCE_ID_RE.fullmatch(subscriber)
-        and isinstance(space_id, str)
-        and 0 < len(space_id) <= SUBSCRIBER_NOTICE_SPACE_ID_MAX_LEN
-        and space_id.isprintable()
-        and isinstance(reason, str)
-        and reason in _NOTICE_REASONS
-    ):
-        return None
-    return SubscriberNotice(
-        owner=owner,
-        space_id=space_id,
-        subscriber=subscriber,
-        reason=reason,
-        accepts=parse_accepts(raw.get("accepts")),
-    )
 
 
 def _node_address_key(node_id: str, client_ip: str) -> str:

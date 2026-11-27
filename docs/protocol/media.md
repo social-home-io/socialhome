@@ -648,6 +648,16 @@ fallback) instead of a replay.
 
 ## Older files on view — `SPACE_MEDIA_WANTED` (v_92)
 
+**Who asks this way (P10, owner 2026-11-27: by path, never by role).** A
+household with a paired row to the host, or a version it claimed over the
+mesh, asks with `SPACE_MEDIA_WANTED` (host first, a helper as fallback),
+member or follower alike. A household that reaches the space only through a
+GFS — a relay seat and/or a channel seat, no paired row, no mesh claim —
+fetches a missed file through its GFS's v_83 on-demand path instead, member
+or follower alike (`FederationService.reaches_host_directly`). So v_92
+media healing now covers paired / mesh households only; GFS spaces deliver
+through their GFS.
+
 **Why.** A member household can hold a live space item whose file never
 reached it: a push the GFS relay accepted and dropped, a catch-up that
 left the file out for its budget, a picture past the GFS media cache's few
@@ -864,7 +874,7 @@ Paired and mesh members keep the `SPACE_MEDIA_BLOB` push above, unchanged.
 **Descriptor.** The item carries, INSIDE its encrypted payload:
 
 ```json
-"media_refs": {"<local filename>": {"blob_id": "<sm1 address>", "suite": "aesgcm-256-pad-det", "epoch": 3, "size": 1048604, "scope": "space", "addr_suite": "sm1"}}
+"media_refs": {"<local filename>": {"blob_id": "<sm1 address>", "suite": "aesgcm-256-pad-det", "epoch": 3, "size": 1048604, "scope": "channel", "addr_suite": "sm1"}}
 ```
 
 one entry per file of the item. Which files an item has is ONE rule,
@@ -884,10 +894,11 @@ sealed blob's byte count.
 `blob_id` is the GFS's **scope-bound address** —
 `sha256("sm1|" + scope + "|" + scope_id + "|" + blob)`
 (`domain/gfs_space_media.space_media_address`, `addr_suite: "sm1"`) — and
-`scope` says which kind (`space` / `channel`); the descriptor never names the
-scope id: a reader re-derives the address with the id it knows itself (the
-space id, or its own channel id). An unknown scope or address suite is
-refused (WARNING), never defaulted. No GFS URL: every reader fetches from the
+`scope` says which kind — `channel` only since v_96 (the `space` scope is
+gone, owner decision Q5; a descriptor naming it is dropped like an unknown
+scope); the descriptor never names the scope id: a reader re-derives the
+address with the channel id it knows itself. An unknown scope or address
+suite is refused (WARNING), never defaulted. No GFS URL: every reader fetches from the
 GFS it reaches the space through.
 It rides:
 
@@ -922,28 +933,23 @@ the space is ever sealed under its key, live or in a catch-up.
 **Upload** (`SpaceMediaGfsUploader`). When an item with local media is
 created in a space that has link-joined v_80 members or (for posts)
 followers, the author's household plans the GFSs those readers use — each
-link-joined member's `relay_via` connection, plus every GFS the space is
-relayed to for followers — keeps the ones whose signed block proved
-`space_media` (and whose `max_blob_bytes` the blob fits), seals each file
-once, computes its scope-bound address and `PUT`s it once per GFS to the one
-scope-free path `PUT /gfs/media/{blob_id}` — the scope rides only inside the
-signed claim header (`scope`, `scope_id`, `addr_suite`), never in a URL. Authorization: the
-space's owner signs as the **space authority** (its seed); every other
-household signs with the **writer group key** — a delegated admin too,
-although it holds the seed, so its uploads look like any writer's (it signs
-as the authority only where the space has no writer key). Both are
-anonymous; the
-identified writer-cert kind is gone since v_90. A **private** space that
-uses an opaque channel (v_51, `private_gfs` on) uploads under the GFS's
-**channel scope** instead (the claim names the channel), only to a GFS whose
-signed `space_media.scopes` lists `channel` — so the GFS learns the random
-channel id, never the space; a channel takes media once ONE member household
-holds a seat on it (the owner never subscribes): the **channel key** (a seed
-holder whose seed derives the stored channel key), else the member's
-**channel writer key** from its grant, else its **channel cert** (identified),
-always with the grant's shifted channel epoch. The request never names
-`from_instance`. Only a space the GFS holds `active` (approved) takes media:
-a pending one answers 403 and the item goes without the picture there.
+link-joined member's `relay_via` connection, plus every GFS the space's
+opaque channel lives on — keeps the ones whose signed block proved
+`space_media` with the `channel` scope (and whose `max_blob_bytes` the blob
+fits), seals each file once, computes its scope-bound address and `PUT`s it
+once per GFS to the one scope-free path `PUT /gfs/media/{blob_id}` — the
+scope rides only inside the signed claim header (`scope`, `scope_id`,
+`addr_suite`), never in a URL. Since v_96 the claim always names the
+space's **channel** (v_51 private with `private_gfs` on, v_96 global), so
+the GFS learns the random channel id, never the space: signed by the
+**channel key** (a seed holder whose seed derives the stored channel key),
+else the member's **channel writer key** from its grant, always with the
+grant's shifted channel epoch. A space without a channel plans nothing: its
+link-joined readers get the files by the push (`SPACE_MEDIA_BLOB`). A
+channel takes media once ONE member household holds a seat on it (the owner
+never subscribes). The request never names `from_instance` (the identified
+writer-cert and channel-cert kinds are gone since v_90, the `space` scope's
+authority and writer-group-key kinds since v_96).
 `200 already_stored` is success (coalescing; it does not refresh the
 blob's expiry) and is remembered per (GFS, blob) until min(7 days, that
 GFS's signed `ttl_s`) — after that the GFS may have dropped it, so a repeat
@@ -1026,8 +1032,8 @@ sequenceDiagram
     G-->>A: 201 stored (200 already_stored)
     A->>G: POST /gfs/envelope (sealed SPACE_POST_CREATED + media_refs)
     G->>E: relay envelope
-    A->>G: POST /gfs/publish (encrypted inner + media_refs)
-    G->>F: relay space_post_public
+    A->>G: POST /gfs/channels/publish-anon (encrypted item + media_refs, v_96)
+    G->>F: channel frame (follower's channel seat)
     E->>G: GET /gfs/media/{blob_id} (prefetch / on view)
     G-->>E: ciphertext
     Note over E: scope-bound address check, decrypt, write-once
@@ -1052,8 +1058,8 @@ anyway.
 **Deferred.** Files over 8 MiB (long videos). A blob the cache evicted or
 expired comes back on view since v_83 (below). Tracked follow-ups: **comment media** and **a seed holder's
 relayed copy of an approved post** carry no descriptor yet. A private space whose owner left `private_gfs`
-off has no channel: its link-joined members are reached through the space
-scope only while the space is listed on that GFS.
+off has no channel: its link-joined members get the files by the push
+(`SPACE_MEDIA_BLOB`), not through a GFS cache.
 
 ## Space media on demand (v_83)
 
@@ -1093,14 +1099,13 @@ applies.
 **Holder** (`SpaceMediaGfsResponder`). A household lists
 `space_media_serve` in its GFS hello and answers the GFS's
 `space_media_request {ticket, scope, scope_id, blob_id, mode, hint}` — but
-only where the GFS may ask it: for a listed space only the **owner**
-household (`owner_instance_id` is its own) and only for a space it LISTED on
-that GFS; for a private channel a household holding a seat on that GFS.
-Every other request — a space it doesn't own, didn't list there, or a
-private space — is declined `not_held` before any key or crypto is touched,
-so a GFS can't probe who is a member or which spaces a household owns.
-(Member fallback for listed spaces is planned as a follow-up; it needs a
-design that doesn't tell the GFS who the members are.) Otherwise it opens the hint (a stale or
+only where the GFS may ask it: a household holding a seat on that GFS for
+the space's channel (the only scope since v_96 — the owner's answer for a
+listed space's `space` scope went with that scope; the owner holds no seat
+on its own channel, so it is never asked). Every other request is declined
+`not_held` before any key or crypto is touched, so a GFS can't probe which
+spaces a household belongs to beyond the seats it already knows.
+Otherwise it opens the hint (a stale or
 unopenable one: `bad_hint`), finds the file under its own name for it (the
 author's name, the `sd-` / `sg-` name it got the file under, or for a
 page's file (v_82) its page-scoped `sp-` copy — never a
@@ -1128,39 +1133,32 @@ per GFS and 1 GiB in all (past either: `not_held`) — charged BEFORE the
 bytes go (a GFS that reads them and answers an error still spent the
 budget), refunded only when no connection was made.
 
-**Large videos are lazy.** A video whose blob is at least 1 MiB is
-described but no longer uploaded at once — only when the uploading
-household **owns** the listed space (the one household the GFS would ask
-for it), to a GFS that proves `on_demand`, while no member household of the
-space reads through a GFS (a member gets the video at once). It goes
-only when someone plays it. A member's large video, and any large video of a
-private space's channel, still goes at once, as before; so do pictures.
+**Large videos go at once (since v_96).** Until v_96 a video whose blob
+was at least 1 MiB was described but uploaded only on demand — and only by
+the household that **owned** the listed space, because the GFS asked a
+`space`-scope blob's owner. Under the channel scope the owner holds no
+seat, so the GFS never asks it; the lazy path went with the `space` scope
+(decided with the GFS removal in v_96): every file of a space with a channel
+is uploaded eagerly (≤ 8 MiB), pictures and videos alike, and a blob that
+later leaves the cache comes back from a seated holder below.
 
 **Followers don't get pages.** Page files on demand (v_82 × v_83) reach
 members only: followers of a global space never receive a space's pages, so
 they never hold a page descriptor to ask with (see
 [pages.md](./pages.md#scope)) — an allowed follower subset.
 
-**Follower subset (written down per the "members equal" rule).** Followers
-are not told apart by version, so a follower household below v_83 gets no
-lazy video: it never asks, and the video is not in the cache until a v_83
-reader plays it (after that, while it stays cached, it gets it like any
-blob). Members are never in this subset: a space with a link-joined
-member keeps the eager upload, and paired / mesh members get the bytes from
-the household.
-
 **Cache or stream.** The GFS decides per request: content asked
 `cache_after_requests` (3) times within the hour, or content it stored
 within `fresh_seconds` (7 days) while the cache is below 95 % full, is
 re-uploaded into the cache; anything else — old content, a one-off view, a
 full cache — is streamed to the waiting reader(s) and not stored
-(`Cache-Control: no-store`). Only one household is asked at a time: the
-space's owner household for a listed space, a seated member household for a
-private space's channel (at most 3 in turn). Readers of one blob arriving
+(`Cache-Control: no-store`). Only one household is asked at a time: a
+seated household of the space's channel (at most 3 in turn, those with a
+socket on the node first). Readers of one blob arriving
 together share one decision and one session.
 
 **Wanted → one re-upload** (a cluster: the reader's request lands on node B,
-the owner's socket is on node A):
+the holder's socket is on node A):
 
 ```mermaid
 sequenceDiagram
@@ -1169,7 +1167,7 @@ sequenceDiagram
     participant B as GFS node B
     participant DB as Shared gfs.db + data dir
     participant A as GFS node A
-    participant H as Holder (space owner)
+    participant H as Holder (a seat of the channel)
     R->>LB: POST /gfs/media/{blob_id}/wanted {scope, scope_id, hint}
     LB->>B: (any node)
     B->>DB: not cached, count the request — stored lately or asked often?
@@ -1178,7 +1176,7 @@ sequenceDiagram
     Note over B: session, ticket = route_tag(B).random
     B->>A: NODE_DRAIN_HINT typed instance frame
     A->>H: WS space_media_request {ticket, mode: cache, hint}
-    Note over H: owner of the space? fresh hint? find the file,<br/>confined_to_space + live_in_space, re-seal, check the address
+    Note over H: seat on this channel? fresh hint? find the file,<br/>confined_to_space + live_in_space, re-seal, check the address
     H->>LB: PUT /gfs/media/serve/{tag}.{rand}<br/>signed op serve + X-SH-Space-Media-Auth
     LB->>B: routed by the ticket's tag
     B-->>R: chunks as they arrive (last byte held back)
@@ -1208,7 +1206,7 @@ sequenceDiagram
     else hint stale or unusable
         H->>G: POST /gfs/media/serve/{ticket}/decline {reason: bad_hint}
         G->>H: same request with the next waiting reader's hint (≤ 4 kept)
-    else not the owner, no live file, over its budget
+    else no seat here, no live file, over its budget
         H->>G: POST /gfs/media/serve/{ticket}/decline {reason: not_held}
         G-->>R: 404 no-store (after the next holder, if any)
     end
@@ -1246,9 +1244,8 @@ unchanged (an immutable `GET`, served by the CDN).
 
 **Fallback.** A reader below v_83 never asks (a blob that left the cache
 stays missing for it, as before). A holder below v_83 never listed
-`space_media_serve` and is never asked. A space with a link-joined member
-keeps eager video uploads; a follower below v_83 gets no lazy video (the
-follower subset above). A GFS without `on_demand` is never asked.
+`space_media_serve` and is never asked. A GFS without `on_demand` is
+never asked.
 
 ## A space's cover and icon
 

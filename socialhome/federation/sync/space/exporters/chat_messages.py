@@ -14,8 +14,8 @@ chunk is encrypted under the space content key.
 
 Nothing streams while the space's chat is off here. WHO may receive the
 resource at all is the provider's call (``SpaceSyncProvider._exporter_for``):
-only a household holding a writer seat, at v_55 or later — a follower-only
-household never gets the chat by catch-up either.
+any household holding a seat (a follower's included, P10), at v_55 or
+later.
 
 Deleted messages are never streamed as messages. They travel as their own
 resource, ``chat_messages_deleted`` (:class:`ChatMessagesDeletedExporter`),

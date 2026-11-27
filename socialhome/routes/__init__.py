@@ -422,6 +422,7 @@ from .spaces import (
     SpaceFeedReadView,
     SpaceFeedView,
     SpaceGfsJoinRequestsDeclineView,
+    SpaceHouseholdUnbanView,
     SpaceIconView,
     SpaceInviteLinkView,
     SpaceInviteTokenItemView,
@@ -789,6 +790,9 @@ def setup_routes(app: web.Application) -> None:
     )
     app.router.add_view("/api/spaces/{id}/bans", SpaceBanListView)
     app.router.add_view("/api/spaces/{id}/bans/{user_id}", SpaceUnbanView)
+    app.router.add_view(
+        "/api/spaces/{id}/household-bans/{instance_id}", SpaceHouseholdUnbanView
+    )
     # Ownership transfer (owner-only).
     app.router.add_view("/api/spaces/{id}/ownership", SpaceOwnershipView)
     # Join-request review.

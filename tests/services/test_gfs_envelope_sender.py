@@ -215,7 +215,7 @@ async def test_capability_is_probed_once_and_cached(gfs, http_session):
 
 async def test_refuses_a_server_without_the_capability(gfs, http_session):
     """The mutation guard: drop the capability check and this test fails."""
-    gfs.capabilities = {"anonymous_publish": True}
+    gfs.capabilities = {"subscriber_seats": True}
     sender, conn = _wire(gfs, http_session)
     with pytest.raises(EnvelopeRelayUnavailable) as exc:
         await sender.send_sealed_envelope(

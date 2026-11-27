@@ -149,7 +149,15 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
         user_id: str,
     ) -> SpaceRemoteMember | None: ...
 
+    async def list_live_instances_of_user(
+        self, space_id: str, user_id: str
+    ) -> set[str]: ...
+
     async def latest_display_name(self, user_id: str) -> str | None: ...
+
+    async def owed_rotation_since(self, space_id: str) -> str | None: ...
+
+    async def list_spaces_owing_rotation(self) -> list[tuple[str, str]]: ...
 
 
 class SqliteSpaceRemoteMemberRepo:
@@ -575,6 +583,22 @@ class SqliteSpaceRemoteMemberRepo:
         dicts = rows_to_dicts(rows)
         return _row(dicts[0]) if dicts else None
 
+    async def list_live_instances_of_user(
+        self, space_id: str, user_id: str
+    ) -> set[str]:
+        """Every household ``user_id`` holds a LIVE seat in ``space_id``
+        under — tombstones excluded. A user id belongs to one household, so
+        one other than a claimant's is a sign the id is reused by someone
+        else (only a legacy seat a pre-proof host gave can do that; an admin
+        removing it clears it). The receivers' rule
+        (:func:`~socialhome.services.space_member_guard.user_id_of_another_household`)."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT instance_id FROM space_remote_members"
+            " WHERE space_id=? AND user_id=? AND tombstoned=0",
+            (space_id, user_id),
+        )
+        return {str(r["instance_id"]) for r in rows}
+
     async def latest_display_name(self, user_id: str) -> str | None:
         """The name the newest seat of *user_id* in any space carries
         (tombstones included — a seat is the only record of a member of a
@@ -586,6 +610,48 @@ class SqliteSpaceRemoteMemberRepo:
             (user_id,),
         )
         return str(rows[0]["display_name"]) if rows else None
+
+    async def owed_rotation_since(self, space_id: str) -> str | None:
+        """Since when ``space_id`` owes a content-key rotation (v_96), or
+        ``None``.
+
+        A follower's leave or removal does not rotate at once; the rotation
+        is *owed* while a tombstoned ``subscriber`` seat ended at or after
+        the moment the current (highest-epoch) key was minted. Any new key
+        pays it by construction — no state of its own. Returns the oldest
+        such ``removed_at`` as naive UTC ``YYYY-MM-DD HH:MM:SS``.
+        """
+        rows = await self._db.fetchall(
+            _OWED_ROTATION_SQL + " AND m.space_id=? GROUP BY m.space_id",
+            (space_id,),
+        )
+        return str(rows[0]["since"]) if rows else None
+
+    async def list_spaces_owing_rotation(self) -> list[tuple[str, str]]:
+        """Every ``(space_id, since)`` that :meth:`owed_rotation_since`
+        answers for — the daily sweep's work list."""
+        rows = await self._db.fetchall(
+            _OWED_ROTATION_SQL + " GROUP BY m.space_id ORDER BY m.space_id", ()
+        )
+        return [(str(r["space_id"]), str(r["since"])) for r in rows]
+
+
+#: The owed-rotation question in one statement. ``removed_at`` is SQLite's
+#: naive ``datetime('now')`` and ``space_keys.created_at`` a tz-aware ISO
+#: string, so both go through ``datetime()`` — a raw string comparison
+#: would order ``" "`` before ``"T"``. ``removed_at`` keeps whole seconds
+#: only, so a leave in the same second as the key's minting counts as
+#: owed: one extra rotation at worst, never a missed one.
+_OWED_ROTATION_SQL = """
+    SELECT m.space_id AS space_id, MIN(datetime(m.removed_at)) AS since
+    FROM space_remote_members m
+    JOIN space_keys k ON k.space_id = m.space_id
+     AND k.epoch = (SELECT MAX(epoch) FROM space_keys WHERE space_id = m.space_id)
+    WHERE m.tombstoned = 1
+      AND m.role = 'subscriber'
+      AND m.removed_at IS NOT NULL
+      AND datetime(m.removed_at) >= datetime(k.created_at)
+"""
 
 
 def _row(row: dict) -> SpaceRemoteMember:

@@ -120,7 +120,7 @@ export function matchesTerm(
     || (description ?? '').toLocaleLowerCase().includes(q)
 }
 
-export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | 'joining' | null
+export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | 'joining' | 'following' | null
 
 function hostedHere(entry: DirectoryEntry): boolean {
   return entry.host_instance_id === 'local' || entry.scope === 'household'
@@ -175,15 +175,16 @@ export function approvalSeatsUs(e: DirectoryEntry): boolean {
 }
 
 /**
- * Whether Follow is offered: a public / global space this household hosts,
- * or a global space found on a GFS (the GFS relays it, no pairing needed)
- * — and only when its owner explicitly takes followers. A paired
- * household's public space is joined through a request instead (there is
- * no remote follow path for it).
+ * Whether Follow is offered: a public space this household hosts or a
+ * paired household hosts (v_96: a follow is a join for the read-only role,
+ * which its host approves on its own), or a global space found on a GFS
+ * (followed through the GFS, no pairing needed) — and only when its owner
+ * explicitly takes followers. A paired household says so by declaring a
+ * follower count (``GET /api/peer_spaces`` ``allow_subscribers``).
  */
 export function canFollow(e: DirectoryEntry): boolean {
   const followable = e.scope === 'global'
-    || (e.host_instance_id === 'local' && e.scope === 'public')
+    || (e.scope === 'public' && (e.host_instance_id === 'local' || e.host_is_paired))
   return followable && e.allow_subscribers === true && !e.already_member
 }
 
@@ -195,18 +196,75 @@ export function canFollow(e: DirectoryEntry): boolean {
  * through the GFS that lists it; any other space whose host we aren't
  * paired with offers Follow when it takes followers and nothing otherwise —
  * members can still invite you with a link (its row opens the About page,
- * which says so).
+ * which says so). A follow waiting for its host (it approves follows on
+ * its own) is "Following…"; any other request out is "Requested".
  */
 export function discoverAction(e: DirectoryEntry): DiscoverAction {
-  if (e.request_joining) return 'joining'
-  if (e.request_pending) return 'pending'
+  const way = wayIn(e)
+  if (e.request_joining || e.request_pending) {
+    // The only thing this row ever offered was Follow: what's out is a
+    // follow, which its host approves on its own — "Following…".
+    if (way === 'follow') return 'following'
+    return e.request_joining ? 'joining' : 'pending'
+  }
+  return way
+}
+
+/** How you become a member from here — Join (open) or Ask to join — or
+ *  ``null``: no way from this household (an invite-only space, or one you
+ *  can only follow; members can still invite you with a link). */
+export function joinWay(e: DirectoryEntry): 'join' | 'request' | null {
   if (reachable(e)) {
     if (e.join_mode === 'open') return 'join'
     if (e.join_mode === 'request') return 'request'
   }
   if (askableThroughGfs(e)) return 'request'
-  if (canFollow(e)) return 'follow'
   return null
+}
+
+/** The row's way in when nothing is out yet: joining wins over following. */
+function wayIn(e: DirectoryEntry): DiscoverAction {
+  return joinWay(e) ?? (canFollow(e) ? 'follow' : null)
+}
+
+/** The About page's buttons (owner 2026-11-26). */
+export interface AboutWays {
+  /** The main button: Open (a member), the way to join, else Follow — or
+   *  its waiting state; ``null`` for none. */
+  primary: 'open' | DiscoverAction
+  /** Follow as a second button beside a way to join, when the space takes
+   *  followers too: ``'following'`` while that follow waits for its host. */
+  follow: 'follow' | 'following' | null
+  /** Follow is shown but can't be pressed (a request is out). */
+  followDisabled: boolean
+}
+
+/**
+ * Where a space offers a way to join AND takes followers, the About page
+ * shows both: Join / Ask to join first, Follow second (Discover rows keep
+ * ONE button, {@link discoverAction}). After following, the way to join
+ * stays (a follower may step up to member); while a request to join is
+ * out, Follow is disabled. ``follow_pending`` is the follow this page sent
+ * that its host has not seated yet (after a reload a pending row reads as
+ * the request it most likely is: a follow is approved on its own).
+ */
+export function aboutWays(e: DirectoryEntry): AboutWays {
+  if (e.already_member) return { primary: 'open', follow: null, followDisabled: false }
+  const join = joinWay(e)
+  if (join === null) {
+    const way = discoverAction(e)
+    const primary = way === 'follow' && e.already_subscribed ? null : way
+    return { primary, follow: null, followDisabled: false }
+  }
+  const followOut = e.follow_pending === true
+  const requestOut = e.request_joining === true || (e.request_pending === true && !followOut)
+  const primary: DiscoverAction = e.request_joining ? 'joining'
+    : requestOut ? 'pending'
+    : join
+  const follow = !canFollow(e) || e.already_subscribed ? null
+    : followOut ? 'following'
+    : 'follow'
+  return { primary, follow, followDisabled: follow !== null && (followOut || requestOut) }
 }
 
 /**
@@ -270,10 +328,20 @@ export function joinModeChip(mode: DirectoryEntry['join_mode'], local = false) {
   }
 }
 
+/** Whether a space's join mode is worth saying to this viewer: not "Open
+ *  to join" / "Approval required" for a space nobody here can join that way
+ *  (one you can only follow, from a host we never paired with) — that
+ *  says how its members get in, not how you do. Invite only always shows. */
+export function joinModeShown(e: DirectoryEntry): boolean {
+  return e.join_mode === 'invite_only' || e.scope === 'household' || joinWay(e) !== null
+}
+
 /** The join mode as a word in a Discover row's meta line ("ask to join",
  *  "open", "open to the area" for a local community), or ``null`` for an
- *  invite-only space (the row says nothing about it). */
+ *  invite-only space (the row says nothing about it) and for one nobody
+ *  here can join ({@link joinModeShown}). */
 export function joinModeWord(e: DirectoryEntry): string | null {
+  if (!joinModeShown(e)) return null
   if (e.join_mode === 'request') return t('spaces.discover.mode_request')
   if (e.join_mode !== 'open') return null
   if (e.scope === 'household') return t('spaces.discover.mode_household')

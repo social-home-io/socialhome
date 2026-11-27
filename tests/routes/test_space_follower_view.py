@@ -1,17 +1,11 @@
-"""A follower's (``subscriber``) view of a space is reduced (owner
-decision 13, 2026-10-18).
+"""A follower's (``subscriber``) view of a space is a member's view, read
+only (P10, owner 2026-11-26: "a follower is a limited member but still a
+member"; it replaces owner decision 13).
 
-A follower reads the posts, but is an outsider to the people: elsewhere
-the space chat refuses them, the GFS listing is hidden from them and the
-roster never syncs to a follower-only household. So:
-
-* ``GET /api/spaces/{id}/members`` shows a follower the space's members
-  only — never another follower — by name, picture and role, without
-  session presence (online / idle / last seen), join time or the
-  location-share opt-in.
+* ``GET /api/spaces/{id}/members`` shows a follower the same roster, with
+  the same fields, as a member (v_96, D3: every seat, themselves included).
 * ``GET /api/spaces/{id}/proposals``, ``/presence`` (the map pins) and
-  ``/zones`` are for members only: a follower gets the same 403 as an
-  outsider.
+  ``/zones`` answer a follower like a member; an outsider gets 403.
 * ``GET /api/spaces/{id}`` carries ``my_role`` so the SPA learns the
   viewer's own role without finding itself in the roster.
 """
@@ -25,8 +19,8 @@ _MEMBER = ("mia", "uid-mia")
 _FOLLOWER = ("fern", "uid-fern")
 _OTHER_FOLLOWER = ("fred", "uid-fred")
 
-#: Presence / bookkeeping fields a follower never sees on a roster row.
-_WITHHELD = (
+#: Presence / bookkeeping fields every seat sees on a roster row.
+_FIELDS = (
     "is_online",
     "is_idle",
     "last_seen_at",
@@ -74,23 +68,30 @@ async def _roster(client, headers) -> list[dict]:
     return await r.json()
 
 
-async def test_follower_roster_lists_members_without_presence(seeded):
+async def test_follower_roster_is_the_members_roster(seeded):
+    """D3 (v_96) + P10: a follower sees the same roster as a member — every
+    seat, other followers and themselves included — with the same fields."""
     client, hdr = seeded
     rows = await _roster(client, hdr["follower"])
     assert {r["user_id"] for r in rows} == {
         _OWNER[1],
         _MEMBER[1],
+        _FOLLOWER[1],
+        _OTHER_FOLLOWER[1],
         "uid-r-member",
+        "uid-r-follower",
     }
-    for row in rows:
-        for key in _WITHHELD:
-            assert key not in row, (row["user_id"], key)
-        assert row["role"] != "subscriber"
+    assert rows == await _roster(client, hdr["member"])
+    local = {r["user_id"]: r for r in rows if r["user_id"] == _OWNER[1]}
+    for key in _FIELDS:
+        assert key in local[_OWNER[1]], key
     by_id = {r["user_id"]: r for r in rows}
     assert by_id[_OWNER[1]]["role"] == "owner"
     assert by_id[_OWNER[1]]["is_owner"] is True
     assert by_id[_MEMBER[1]]["display_name"] == "Mia"
     assert by_id["uid-r-member"]["household_name"] is None
+    for uid in (_FOLLOWER[1], _OTHER_FOLLOWER[1], "uid-r-follower"):
+        assert by_id[uid]["role"] == "subscriber"
 
 
 async def test_member_roster_is_unchanged(seeded):
@@ -111,18 +112,35 @@ async def test_member_roster_is_unchanged(seeded):
             assert "is_online" in row and "last_seen_at" in row
 
 
+async def test_members_name_a_follower_from_the_roster(seeded):
+    """T4.3 (v_96): a follower's name reaches members through the roster
+    like any member's — the roster row's display name, role ``subscriber``
+    — so a follower's comment needs no v_60 ``author_profile`` item."""
+    client, hdr = seeded
+    for who in ("owner", "member"):
+        by_id = {r["user_id"]: r for r in await _roster(client, hdr[who])}
+        assert by_id["uid-r-follower"]["display_name"] == "uid-r-follower"
+        assert by_id["uid-r-follower"]["role"] == "subscriber"
+        assert by_id[_FOLLOWER[1]]["display_name"] == "Fern"
+        assert by_id[_FOLLOWER[1]]["role"] == "subscriber"
+
+
 @pytest.mark.parametrize("path", ["/proposals", "/presence", "/zones"])
-async def test_member_only_reads_refuse_a_follower(seeded, path):
+async def test_a_follower_reads_like_a_member(seeded, path):
+    """P10: proposals, the map pins and the zones answer a follower like a
+    member; the same answer, the owner's shared pin included."""
     client, hdr = seeded
     url = f"/api/spaces/{_SID}{path}"
-    await _forbidden(await client.get(url, headers=hdr["follower"]))
-    for who in ("owner", "member"):
+    answers = []
+    for who in ("owner", "member", "follower"):
         r = await client.get(url, headers=hdr[who])
         assert r.status == 200, (who, await r.text())
+        answers.append(await r.json())
+    assert answers[1] == answers[2]
 
 
-@pytest.mark.parametrize("path", ["/presence", "/zones"])
-async def test_member_only_reads_hide_unknown_ids(seeded, path):
+@pytest.mark.parametrize("path", ["/proposals", "/presence", "/zones"])
+async def test_reads_hide_unknown_ids(seeded, path):
     """An unknown id answers the outsider's 403 — no existence oracle."""
     client, hdr = seeded
     await _forbidden(
@@ -139,3 +157,40 @@ async def test_detail_carries_my_role(seeded, who, role):
     r = await client.get(f"/api/spaces/{_SID}", headers=hdr[who])
     assert r.status == 200, await r.text()
     assert (await r.json())["my_role"] == role
+
+
+async def test_a_follower_deletes_its_own_comment_after_the_switch_is_off(seeded):
+    """Owner decision F6 (2026-11-23): an author may always delete their own
+    comment, a follower included, with the comment switch off — while an
+    edit still needs the switch, and another's comment stays out of reach."""
+    client, hdr = seeded
+    await client._db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (_SID,)
+    )
+    await client._db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES('p-f6', ?, ?, 'text', 'hello')",
+        (_SID, _OWNER[1]),
+    )
+    base = f"/api/spaces/{_SID}/posts/p-f6/comments"
+    r = await client.post(base, json={"content": "mine"}, headers=hdr["follower"])
+    assert r.status == 201, await r.text()
+    cid = (await r.json())["id"]
+    r = await client.post(base, json={"content": "theirs"}, headers=hdr["member"])
+    assert r.status == 201, await r.text()
+    other = (await r.json())["id"]
+    await client._db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=0 WHERE id=?", (_SID,)
+    )
+    r = await client.patch(
+        f"{base}/{cid}", json={"content": "edited"}, headers=hdr["follower"]
+    )
+    assert r.status == 403, await r.text()
+    r = await client.delete(f"{base}/{other}", headers=hdr["follower"])
+    assert r.status == 403, await r.text()
+    r = await client.delete(f"{base}/{cid}", headers=hdr["follower"])
+    assert r.status == 204, await r.text()
+    rows = await client._db.fetchall(
+        "SELECT id, deleted FROM space_post_comments WHERE post_id='p-f6'"
+    )
+    assert {row["id"]: row["deleted"] for row in rows} == {cid: 1, other: 0}

@@ -578,6 +578,11 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
         " ?, 'global')",
         ("ab" * 32,),
     )
+    # Since v_96 a GFS keeps space media only under the space's channel.
+    await db.enqueue(
+        "UPDATE spaces SET gfs_channel_id=?, gfs_channel_pk='pk' WHERE id='sp-gfs'",
+        ("c" * 32,),
+    )
     crypto = app[space_crypto_service_key]
     await crypto.initialise_for_space("sp-gfs")
     epoch, key = await crypto.media_key("sp-gfs")
@@ -595,11 +600,11 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
         "sp-gfs",
         {
             name: {
-                "blob_id": space_media_address("space", "sp-gfs", blob),
+                "blob_id": space_media_address("channel", "c" * 32, blob),
                 "suite": SPACE_MEDIA_SUITE_AESGCM256_PADDED,
                 "epoch": epoch,
                 "size": len(blob),
-                "scope": "space",
+                "scope": "channel",
                 "addr_suite": "sm1",
             }
         },

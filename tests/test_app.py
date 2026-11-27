@@ -18,6 +18,9 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from socialhome import __version__
 from socialhome import app_keys as K
 from socialhome.app import (
+    GFS_CHANNEL_BUDGET_SWEEP_AT,
+    GFS_CHANNEL_FRAMES_PER_MINUTE,
+    GFS_CHANNEL_FRAMES_PER_MINUTE_ALL,
     MAP_TILE_USER_AGENT,
     SIGNED_MEDIA_GET_LIMIT,
     SIGNED_MEDIA_GET_RULES,
@@ -34,10 +37,6 @@ from socialhome.app import (
 )
 from socialhome.app_keys import gfs_connection_service_key, http_session_key
 from socialhome.auth import SIGNED_URL_PRINCIPAL, USER_KEY
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-)
 from socialhome.config import Config
 from socialhome.dashboard.advertiser import DisplayAdvertiser, display_short_id
 from socialhome.db.database import AsyncDatabase
@@ -50,6 +49,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.file_hashes import space_content_media_name
+from socialhome.domain.gfs_server import MAX_GFS_SERVERS
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -59,6 +59,7 @@ from socialhome.domain.space import (
 )
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.pairing_gfs_reach import PairingGfsReach
+from socialhome.federation.sync.space.pages import PAGE_KEY_WAIT_MAX
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.infrastructure.gfs_route_discovery_scheduler import (
     GfsRouteDiscoveryScheduler,
@@ -253,6 +254,11 @@ async def test_sync_pages_wire_the_verified_member_fetch(tmp_dir):
         assert scheduler._sync_page_have == pages.have_for
         assert pages._apply_verified.__name__ == "apply_verified"
         assert pages._silent.__name__ == "is_silent"
+        # A page ahead of its key waits in a hold of its own (never the
+        # shared cache the §25.6 chunks park in).
+        hold = pages._pending_decrypts
+        assert hold is not None and hold is not app[K.pending_decrypts_cache_key]
+        assert hold._max == PAGE_KEY_WAIT_MAX
 
 
 async def test_cleanup_publishes_queued_highlight_events(tmp_dir, monkeypatch):
@@ -461,41 +467,13 @@ def test_map_tile_user_agent_identifies_the_app_and_a_contact():
     assert "@social-home.io" in MAP_TILE_USER_AGENT
 
 
-async def test_gfs_space_mirror_wired_into_space_service(tmp_dir):
-    """The GFS on-ramp is constructed, attached to the LIVE space service
-    (the real-instance one built during startup), and carries the shared
-    HTTP session — without all three, subscribing to a GFS-discovered space
-    404s."""
-    from socialhome.app_keys import gfs_connection_service_key, space_service_key
-    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
-
-    cfg = Config(
-        data_dir=str(tmp_dir),
-        db_path=str(tmp_dir / "test.db"),
-        media_path=str(tmp_dir / "media"),
-        mode="standalone",
-        log_level="WARNING",
-    )
-    app = create_app(cfg)
-    async with TestClient(TestServer(app)):
-        space_svc = app[space_service_key]
-        mirror = space_svc._gfs_mirror
-        assert isinstance(mirror, GfsSpaceMirrorService)
-        assert mirror._http_client is not None
-        assert mirror._gfs is app[gfs_connection_service_key]
-
-
-async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
-    """F4b: the GFS-WS (re)connect hook re-registers this household's
-    subscriber seats beside the space-pin heal.
-
-    Without the hook a seat the GFS purged is never re-taken — the local row
-    says "subscribed" forever while nothing is delivered.
-    """
+async def test_gfs_connect_hook_heals_the_space_pins(tmp_dir):
+    """F4b: the GFS-WS (re)connect hook runs the bulk reconcile — the
+    space-pin heal among it. No space-keyed seat is taken there any more."""
     from unittest.mock import AsyncMock, patch
 
     from socialhome.app_keys import gfs_ws_supervisor_key
-    from socialhome.services.gfs_space_mirror_service import GfsSpaceMirrorService
+    from socialhome.services.gfs_connection_service import GfsConnectionService
 
     cfg = Config(
         data_dir=str(tmp_dir),
@@ -509,30 +487,17 @@ async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
         on_connected = app[gfs_ws_supervisor_key]._on_connected
         assert on_connected is not None
         with patch.object(
-            GfsSpaceMirrorService, "resubscribe_all", new_callable=AsyncMock
-        ) as resub:
+            GfsConnectionService, "heal_space_pins", new_callable=AsyncMock
+        ) as heal:
             await on_connected("gfs-1")
-        resub.assert_awaited_once()
-        assert resub.await_args.args == ("gfs-1",)
-        # v_50 — writer spaces ride the same (shuffled) batch.
-        assert list(resub.await_args.kwargs["also"]) == []
+        heal.assert_awaited_once_with("gfs-1")
 
 
 # ── GFS relay fan-out dispatch (identity-free frame) ──────────────────────
 
 
-class _RecordingConsumer:
-    """Stand-in relay consumer that records the frames handed to it."""
-
-    def __init__(self) -> None:
-        self.frames: list[dict] = []
-
-    async def handle(self, frame: dict, **kwargs) -> None:
-        self.frames.append(frame)
-
-
 def _relay_frame(event_type: str) -> dict:
-    """The four-key frame the GFS now fans out — no ``from_instance``."""
+    """A legacy space-keyed relay frame (names a space, no channel)."""
     return {
         "type": "relay",
         "space_id": "sp-1",
@@ -541,41 +506,30 @@ def _relay_frame(event_type: str) -> dict:
     }
 
 
-async def test_gfs_relay_dispatches_a_public_post_frame_without_from_instance():
-    posts, keys = _RecordingConsumer(), _RecordingConsumer()
-    frame = _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC)
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "space_post_public",
+        "space_item",
+        "space_subscriber_key_handoff",
+        "space_author_profiles_bundle",
+        "some_other_event",
+    ],
+)
+async def test_gfs_relay_drops_every_space_keyed_frame(event_type, caplog):
+    """v_96 — the only GFS-borne space content is the opaque channel. A
+    space-keyed frame from a GFS still running the legacy code (a post, a
+    member item, a key handoff, a profiles bundle, anything else) reaches no
+    consumer, is logged at DEBUG only, and never names its space."""
+    caplog.set_level(logging.DEBUG, logger="socialhome")
+    channels = _RecordingChannels()
     await dispatch_gfs_relay_frame(
-        frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=keys,
+        _relay_frame(event_type),
+        gfs_channels=channels,  # type: ignore[arg-type]
     )
-    assert posts.frames == [frame]
-    assert keys.frames == []
-
-
-async def test_gfs_relay_dispatches_a_key_handoff_frame_without_from_instance():
-    posts, keys = _RecordingConsumer(), _RecordingConsumer()
-    frame = _relay_frame(AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF)
-    await dispatch_gfs_relay_frame(
-        frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=keys,
-    )
-    assert keys.frames == [frame]
-    assert posts.frames == []
-
-
-async def test_gfs_relay_dispatches_a_member_published_space_item():
-    """v_49: ``space_item`` frames go to the same public-content consumer."""
-    posts, keys = _RecordingConsumer(), _RecordingConsumer()
-    frame = _relay_frame("space_item")
-    await dispatch_gfs_relay_frame(
-        frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=keys,
-    )
-    assert posts.frames == [frame]
-    assert keys.frames == []
+    assert channels.frames == []
+    assert not [r for r in caplog.records if r.levelno > logging.DEBUG]
+    assert not [r for r in caplog.records if "sp-1" in r.getMessage()]
 
 
 class _RecordingChannels:
@@ -587,9 +541,9 @@ class _RecordingChannels:
 
 
 async def test_gfs_relay_routes_a_private_channel_frame_to_the_channel_service():
-    """v_51: a channel frame names no space — it never reaches the
-    public-content consumer, only the channel service (which maps it)."""
-    posts, channels = _RecordingConsumer(), _RecordingChannels()
+    """v_51: a channel frame names no space — only the channel service
+    (which maps it) takes it."""
+    channels = _RecordingChannels()
     frame = {
         "type": "relay",
         "channel_id": "a" * 32,
@@ -599,32 +553,107 @@ async def test_gfs_relay_routes_a_private_channel_frame_to_the_channel_service()
     }
     await dispatch_gfs_relay_frame(
         frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=None,
         gfs_channels=channels,  # type: ignore[arg-type]
     )
     assert channels.frames == [frame]
-    assert posts.frames == []
-    # Without a channel service it is dropped, never handed to the space path.
+    # Without a channel service it is dropped.
+    await dispatch_gfs_relay_frame(frame)
+
+
+def _channel_frame(channel_id: str = "a" * 32) -> dict:
+    return {
+        "type": "relay",
+        "channel_id": channel_id,
+        "event_type": "space_item",
+        "epoch": 3,
+        "payload": "ct",
+    }
+
+
+async def test_gfs_channel_frames_over_the_per_channel_budget_are_dropped(caplog):
+    """F5-c: before any decrypt / verify, a channel spends a budget on the
+    federation inbound limiter keyed by its id — past it the frame is
+    dropped (one WARNING a minute) and other channels are unaffected."""
+    caplog.set_level(logging.WARNING, logger="socialhome")
+    channels, limiter = _RecordingChannels(), RateLimiter()
+    for _ in range(GFS_CHANNEL_FRAMES_PER_MINUTE + 5):
+        await dispatch_gfs_relay_frame(
+            _channel_frame(),
+            gfs_channels=channels,  # type: ignore[arg-type]
+            inbound_limiter=limiter,
+        )
+    assert len(channels.frames) == GFS_CHANNEL_FRAMES_PER_MINUTE
+    assert GFS_CHANNEL_FRAMES_PER_MINUTE == 120 * MAX_GFS_SERVERS
+    warned = [r for r in caplog.records if "over budget" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
     await dispatch_gfs_relay_frame(
-        frame, space_public_inbound=posts, space_subscriber_key_inbound=None
+        _channel_frame("b" * 32),
+        gfs_channels=channels,  # type: ignore[arg-type]
+        inbound_limiter=limiter,
     )
-    assert posts.frames == []
+    assert channels.frames[-1]["channel_id"] == "b" * 32
+
+
+async def test_gfs_channel_frames_share_a_household_wide_budget():
+    """Invented channel ids each get a fresh per-channel budget, so the
+    household-wide one bounds them all — and the per-channel keys they mint."""
+    channels, limiter = _RecordingChannels(), RateLimiter()
+    for i in range(GFS_CHANNEL_FRAMES_PER_MINUTE_ALL + 10):
+        await dispatch_gfs_relay_frame(
+            _channel_frame(f"{i:032x}"),
+            gfs_channels=channels,  # type: ignore[arg-type]
+            inbound_limiter=limiter,
+        )
+    assert len(channels.frames) == GFS_CHANNEL_FRAMES_PER_MINUTE_ALL
+    assert limiter.key_count <= GFS_CHANNEL_FRAMES_PER_MINUTE_ALL + 2
+
+
+async def test_a_malformed_channel_id_makes_no_budget_key():
+    """A channel id that is not 32 lowercase hex never becomes a limiter key
+    (a hostile GFS could otherwise pin arbitrarily large keys) and is not
+    handed on."""
+    channels, limiter = _RecordingChannels(), RateLimiter()
+    for bad in ("*", "x" * 100_000, "A" * 32):
+        await dispatch_gfs_relay_frame(
+            _channel_frame(bad),
+            gfs_channels=channels,  # type: ignore[arg-type]
+            inbound_limiter=limiter,
+        )
+    assert channels.frames == []
+    assert limiter.key_count == 0
+
+
+async def test_gfs_channel_budget_sweeps_idle_channel_keys():
+    clock = [0.0]
+    limiter = RateLimiter(monotonic=lambda: clock[0])
+    channels = _RecordingChannels()
+    for i in range(GFS_CHANNEL_BUDGET_SWEEP_AT + 1):
+        limiter.is_allowed(f"gfs_channel:{i:032x}", limit=1, window_s=60)
+    limiter.is_allowed("peer:keep", limit=1, window_s=3600)
+    clock[0] = 120.0
+    await dispatch_gfs_relay_frame(
+        _channel_frame(),
+        gfs_channels=channels,  # type: ignore[arg-type]
+        inbound_limiter=limiter,
+    )
+    assert len(channels.frames) == 1
+    # Only the idle channel keys went; the fresh ones and other keys stay.
+    assert limiter.key_count <= 4
 
 
 async def test_gfs_relay_never_logs_an_outer_from_instance(caplog):
     """A legacy GFS may still ship ``from_instance``. It is a household
-    identity the GFS is not supposed to know — it must reach no log line."""
+    identity the GFS is not supposed to know — it must reach no log line,
+    on a channel frame or a dropped space-keyed one."""
     caplog.set_level(logging.DEBUG, logger="socialhome")
-    frame = _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC)
-    frame["from_instance"] = "victim.home"
-    posts = _RecordingConsumer()
-    await dispatch_gfs_relay_frame(
-        frame,
-        space_public_inbound=posts,
-        space_subscriber_key_inbound=None,
-    )
-    assert posts.frames == [frame]
+    channels = _RecordingChannels()
+    for frame in (_relay_frame("space_post_public"), _channel_frame()):
+        frame["from_instance"] = "victim.home"
+        await dispatch_gfs_relay_frame(
+            frame,
+            gfs_channels=channels,  # type: ignore[arg-type]
+        )
+    assert len(channels.frames) == 1
     leaked = [
         r.getMessage()
         for r in caplog.records
@@ -636,16 +665,8 @@ async def test_gfs_relay_never_logs_an_outer_from_instance(caplog):
 async def test_gfs_relay_is_a_noop_without_consumers():
     """Before the crypto-dependent consumers are built they are ``None`` —
     a frame arriving then must not raise."""
-    await dispatch_gfs_relay_frame(
-        _relay_frame(AUTHORITY_EVENT_SPACE_POST_PUBLIC),
-        space_public_inbound=None,
-        space_subscriber_key_inbound=None,
-    )
-    await dispatch_gfs_relay_frame(
-        _relay_frame("some_other_event"),
-        space_public_inbound=None,
-        space_subscriber_key_inbound=None,
-    )
+    await dispatch_gfs_relay_frame(_relay_frame("space_post_public"))
+    await dispatch_gfs_relay_frame(_channel_frame())
 
 
 @pytest.mark.parametrize("url", ["", "   "])
@@ -675,7 +696,7 @@ def test_build_link_previews_wires_the_guarded_fetcher(tmp_path):
 
 
 async def test_gfs_publishes_ride_a_cookie_less_session(tmp_dir):
-    """``/gfs/publish`` and its retries use their own session with no cookie
+    """Anonymous publishes and their retries use their own session with no cookie
     jar, so a sticky load-balancer cookie set on the household's
     authenticated GFS calls can never link an anonymous publish back to it."""
     cfg = Config(

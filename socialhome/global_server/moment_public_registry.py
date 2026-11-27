@@ -979,8 +979,7 @@ class MomentPublicRegistry:
         }
         if action == "add":
             # v_62: the follower household's published keys + suites, so the
-            # author seals its moment key to the newcomer right away — the
-            # same material ``new_subscriber`` carries for a space follower.
+            # author seals its moment key to the newcomer right away.
             follower = await self._follower_keys(
                 follow.followed_user_id, follow.follower_instance_id
             )

@@ -27,6 +27,7 @@ from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
 from socialhome.domain.space import JoinMode, SpaceType
+from socialhome.domain.space_item import CHANNEL_SENT_FIELD
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.moderation_release import release_scope
@@ -705,11 +706,11 @@ async def test_public_space_without_identity_omits_public_relay():
 
 @pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.GLOBAL])
 async def test_space_without_subscribers_omits_public_relay(tier):
-    """A public/global space whose owner has not opted into subscribers is
-    listed for discovery but never publicly readable: its content is never
-    relayed to the GFS. The pre-signed ``public_relay`` hint exists solely so
-    a seed-holding member can run that relay, so it must be neither signed nor
-    shipped."""
+    """A PUBLIC space whose owner has not opted into subscribers is never
+    relayed to a GFS: the pre-signed ``public_relay`` hint is neither signed
+    nor shipped. A GLOBAL space carries it whatever ``allow_subscribers``
+    says (v_96): its opaque channel carries the members' content too, and
+    the host puts a post its author could not on the channel from it."""
     bus = EventBus()
     federation = AsyncMock()
     federation.broadcast_to_space_members = AsyncMock()
@@ -742,7 +743,7 @@ async def test_space_without_subscribers_omits_public_relay(tier):
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
 
     payload = federation.broadcast_to_space_members.call_args.args[2]
-    assert "public_relay" not in payload
+    assert ("public_relay" in payload) is (tier is SpaceType.GLOBAL)
 
 
 @pytest.mark.parametrize("tier", [SpaceType.PUBLIC, SpaceType.GLOBAL])
@@ -1083,6 +1084,10 @@ class _MemberGfs:
 
     async def channel_space(self, space_id):
         return self.channel
+
+    async def plan_post(self, space_id, author_user_id):
+        # v_96 — where our own post would go on the channel.
+        return list(getattr(self, "targets", []))
 
     def schedule_post(self, space_id, author_user_id, inner, *, on_published=None):
         self.order.append("schedule")
@@ -1890,3 +1895,23 @@ async def test_relay_hint_carries_the_posts_signed_file_hashes(tmp_path):
     assert verified_file_hashes(relay) == {
         "p.webp": FileHash(hashlib.sha256(b"pixels").hexdigest())
     }
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    ("channel", "targets", "marked"),
+    [(True, ["conn-1"], True), (True, [], False), (False, ["conn-1"], False)],
+)
+async def test_the_hint_says_when_we_put_the_post_on_the_channel(
+    channel, targets, marked
+):
+    """v_96 — ``channel_sent`` in the hint (outside the author signature,
+    inside the encrypted payload) exactly when our member publisher puts
+    the post on the space's channel: the host then adds no copy there."""
+    member = _MemberGfs(channel=channel)
+    member.targets = targets
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert (relay.get(CHANNEL_SENT_FIELD) is True) is marked
+    assert verify_signed_author_inner(relay)

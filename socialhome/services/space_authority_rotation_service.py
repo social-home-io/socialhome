@@ -28,9 +28,10 @@ on → off. Under a per-space lock it
    when delegation is still on;
 6. re-publishes a public/global space so each GFS re-pins from the cert
    (right after the content key, BEFORE the per-member bundles — a GFS that
-   still pins the old key takes the revoked holder's relays), drops every
-   seed share still queued for the space, then — after the bundles —
-   re-seals the content key to GFS subscribers.
+   still pins the old key takes the revoked holder's signed listing
+   contact and media-cache requests), drops every
+   seed share still queued for the space. Followers are member households
+   (v_96): the bundles reach them like any member.
 
 **Member household** (:meth:`_on_rotated`). Requires the bundle to come from
 the space's owner household, applies the cert (shared rules in
@@ -98,7 +99,12 @@ from ..domain.events import (
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import admin_seed_key_prefix
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, mirrorable_remote_role
+from ..domain.space import (
+    PUBLIC_SPACE_TIERS,
+    WRITER_ROLES,
+    SpaceRole,
+    mirrorable_remote_role,
+)
 from ..federation.host_equivalence import holds_local_admin_seat
 from ..infrastructure.event_bus import EventBus
 from ..task_drain import wait_tasks_done
@@ -145,6 +151,14 @@ _MAX_BUNDLE_ROSTER_ENTRIES = 5000
 #: a lagging member gets its bundle again about hourly until it applies it.
 ECHO_REACTION_INTERVAL_S: float = 3600.0
 
+#: At most this many echo-triggered bundle RE-SENDS per space per
+#: :data:`ECHO_REACTION_INTERVAL_S`, whichever households asked (P10: every
+#: seat heals, a follower's too — so 10 000 auto-approved follower
+#: households echoing "behind" can't make the owner send 10 000 bundles,
+#: each with the full roster, every hour). A household over the budget is
+#: answered on a later echo (its next periodic sync).
+ECHO_RESENDS_PER_SPACE: int = 60
+
 #: At most one echo-triggered ROTATION per space this often, whichever
 #: household asked — so N member households (or one malicious one) cannot
 #: drive a rotation storm.
@@ -174,6 +188,7 @@ class SpaceAuthorityRotationService:
         "_closed",
         "_echo_pending",
         "_echo_reacted",
+        "_echo_resends",
         "_echo_rotated",
         "_federation",
         "_federation_repo",
@@ -188,7 +203,6 @@ class SpaceAuthorityRotationService:
         "_space_crypto",
         "_space_service",
         "_spaces",
-        "_subscriber_keys",
         "_tasks",
         "_warned_pending",
         "_writer_certs",
@@ -211,7 +225,6 @@ class SpaceAuthorityRotationService:
         self._space_crypto: SpaceContentEncryption | None = None
         self._space_service: SpaceService | None = None
         self._gfs = None
-        self._subscriber_keys = None
         self._member_gfs = None
         #: v_49 — re-issues each household's writer cert under the NEW
         #: authority key (owner side) and stores ours (member side).
@@ -228,6 +241,9 @@ class SpaceAuthorityRotationService:
         #: by the hosted rosters. In memory: a restart is not something a
         #: member can trigger.
         self._echo_reacted: dict[tuple[str, str], float] = {}
+        #: Per space: (window start, re-sends in it) — the per-space budget
+        #: :data:`ECHO_RESENDS_PER_SPACE`.
+        self._echo_resends: dict[str, tuple[float, int]] = {}
         self._echo_rotated: dict[str, float] = {}
         #: Owner side: last seed re-share per ``(space_id, household)`` an
         #: admin's ``seed_held: false`` echo triggered, monotonic seconds.
@@ -275,14 +291,9 @@ class SpaceAuthorityRotationService:
         cert signed with the new key; a member stores the one it receives."""
         self._writer_certs = writer_certs
 
-    def attach_subscriber_keys(self, subscriber_key_outbound) -> None:
-        """Optional: re-seal the rotated content key to GFS subscribers."""
-        self._subscriber_keys = subscriber_key_outbound
-
     def attach_member_gfs(self, member_gfs) -> None:
         """Optional (v_49): re-announce the current content epoch to each GFS
-        right after the re-pin (which clears the GFS epoch state), before the
-        subscriber re-seal."""
+        right after the re-pin, into the space's channel."""
         self._member_gfs = member_gfs
 
     def attach_restore_gate(self, pending: Callable[[], Awaitable[bool]]) -> None:
@@ -603,7 +614,6 @@ class SpaceAuthorityRotationService:
                 prior_key_epoch=prior_epoch,
                 forgotten_key_epoch=forgotten_key_epoch,
             )
-            await self._refresh_gfs(space)
             return epoch
 
     async def _drop_queued_seed_shares(
@@ -782,21 +792,6 @@ class SpaceAuthorityRotationService:
                         writer_cert = None
                     if writer_cert is not None:
                         payload["writer_cert"] = writer_cert
-                        # v_50 — and the new epoch's writer group key
-                        # (derived from the NEW seed).
-                        try:
-                            writer_key = await self._writer_certs.writer_key_for_peer(
-                                space.id, inst, epoch=writer_cert.get("epoch")
-                            )
-                        except Exception:
-                            log.exception(
-                                "authority rotation: writer key for %s failed in %s",
-                                inst,
-                                space.id,
-                            )
-                            writer_key = None
-                        if writer_key is not None:
-                            payload["writer_key"] = writer_key
                     # v_51 — and its channel grant for the fresh channel the
                     # new seed derives (readers too).
                     grant = await self._writer_certs.channel_grant_for_peer(
@@ -904,21 +899,6 @@ class SpaceAuthorityRotationService:
                     "authority rotation: GFS epoch notice failed for %s", space.id
                 )
 
-    async def _refresh_gfs(self, space: Space) -> None:
-        """After the bundles: re-seal the content key to subscribers of a
-        public/global space — the handoff is signed with the new key, which
-        a GFS only accepts once it re-pinned (:meth:`_repin_gfs`, run
-        before the bundles)."""
-        if space.space_type not in PUBLIC_SPACE_TIERS:
-            return
-        if self._subscriber_keys is not None:
-            try:
-                await self._subscriber_keys.reconcile_space_everywhere(space.id)
-            except Exception:
-                log.exception(
-                    "authority rotation: subscriber re-seal failed for %s", space.id
-                )
-
     # ── Owner: the authority epoch echo (v_46) ──────────────────────────
 
     async def _on_sync_begin(self, event: FederationEvent) -> None:
@@ -971,8 +951,21 @@ class SpaceAuthorityRotationService:
         seats = await self._remote_members.list_for_instance(
             space_id, sender, include_tombstoned=False
         )
-        if not any(r.role != SpaceRole.SUBSCRIBER for r in seats):
-            return  # no writer seat: nothing it holds can be owed
+        if not seats:
+            return  # no seat: nothing it holds can be owed (a follower's
+            # seat counts — P10, it heals like a member's)
+        # Only a writer seat's proof may start a ROTATION (review M3); a
+        # follower's echo gets its bundle re-sent, never more — unless no
+        # other household holds a writer seat at all (owner + followers
+        # only): then nobody else could ever prove a forgotten epoch, and
+        # the cert is the owner's own signature either way.
+        writer = any(r.role != SpaceRole.SUBSCRIBER for r in seats) or not [
+            i
+            for i in await self._remote_members.list_instances_with_roles(
+                space_id, frozenset(r.value for r in WRITER_ROLES)
+            )
+            if i and i != self._own_instance_id
+        ]
         ceiling = int(time.time()) + MAX_ECHO_EPOCH_SKEW_S
         if max(parsed) > ceiling:
             log.warning(
@@ -990,10 +983,15 @@ class SpaceAuthorityRotationService:
         own = space.authority_key_epoch
         record = await self._spaces.get_authority_echo(space_id)
         proven: list[int] = []
-        if held > own and self._cert_proves(space, echo.get("key_cert"), held):
+        if (
+            writer
+            and held > own
+            and self._cert_proves(space, echo.get("key_cert"), held)
+        ):
             proven.append(held)
         if (
-            forgotten
+            writer
+            and forgotten
             and self._in_restore_window(record, forgotten)
             and self._cert_proves(space, echo.get("forgotten_cert"), forgotten)
         ):
@@ -1017,6 +1015,18 @@ class SpaceAuthorityRotationService:
             last = self._echo_reacted.get((space_id, sender))
             if last is not None and now - last < ECHO_REACTION_INTERVAL_S:
                 return
+            start, sent = self._echo_resends.get(space_id, (now, 0))
+            if now - start >= ECHO_REACTION_INTERVAL_S:
+                start, sent = now, 0
+            if sent >= ECHO_RESENDS_PER_SPACE:
+                log.info(
+                    "space %s: echo re-send budget spent this hour — %s "
+                    "is answered on a later echo",
+                    space_id,
+                    sender,
+                )
+                return
+            self._echo_resends[space_id] = (start, sent + 1)
             self._echo_reacted[(space_id, sender)] = now
             log.info(
                 "space %s: %s is behind on the authority key (holds %d, "
@@ -1432,11 +1442,6 @@ class SpaceAuthorityRotationService:
                     space.owner_instance_id
                 ):
                     await self._writer_certs.accept(space_id, p.get("writer_cert"))
-                    # v_50 — the writer group key under the new seed.
-                    if p.get("writer_key") is not None:
-                        await self._writer_certs.accept_writer_key(
-                            space_id, p.get("writer_key")
-                        )
             # v_51 — our private-space channel grant (a fresh channel under
             # the new seed), from the owner household only.
             if p.get("gfs_channel") is not None and self._writer_certs is not None:

@@ -122,8 +122,8 @@ function MemberRow({ space: s, following }: { space: Space; following?: boolean 
     ? [t('spaces.list.following_meta'), activity].filter(Boolean).join(' · ')
     : activity
   const { needs, unread } = rowEnd(s)
-  // Members only: a follower sees none of the sync status.
-  const missing = !following && s.sync_may_be_missing === true
+  // Every seat sees the sync status — a follower's too (P10).
+  const missing = s.sync_may_be_missing === true
   return (
     <SpaceListRow
       to={`/spaces/${s.id}`}

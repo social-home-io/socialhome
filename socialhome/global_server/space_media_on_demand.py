@@ -23,16 +23,14 @@ upload authorization.
 * anything else — old or never-seen content, a one-off view, a cache that
   full — streams, and nothing is stored.
 
-**Who is asked.** For a listed space, its host — the owning household this
-server already knows (its socket must have listed ``space_media_serve``).
-For a private space's channel, the seated member households (key holders
-this server already knows as seats), those connected to this node first.
-At most :data:`MAX_HOLDERS_ASKED` per request, one after another, each
-given :data:`HOLDER_START_TIMEOUT_S` to start (a decline moves on at once),
-all within ``stream_wait_seconds``. Other member households of a listed
-space are NOT asked: this server does not know them, and asking would tell
-it who they are (the GFS-must-not-see-data rule). A privacy-safe member
-fallback is planned as a follow-up.
+**Who is asked.** A space's media lives under its opaque channel (since
+v_96 the only scope): the seated households (key holders this server
+already knows as seats), those connected to this node first and listing
+``space_media_serve``. At most :data:`MAX_HOLDERS_ASKED` per request, one
+after another, each given :data:`HOLDER_START_TIMEOUT_S` to start (a
+decline moves on at once), all within ``stream_wait_seconds``. A household
+that holds no seat (the owner of its own channel) is never asked: this
+server does not know it.
 
 **Coalescing.** One live session per (blob, scope) per node: every reader
 of that blob joins it, and a session that delivered stays joinable in memory
@@ -71,7 +69,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
+from ..domain.gfs_space_media import SCOPE_CHANNEL, space_media_address
 from ..domain.gfs_space_media_on_demand import (
     MODE_CACHE,
     MODE_STREAM,
@@ -89,7 +87,6 @@ if TYPE_CHECKING:
     from .channels import GfsChannelService
     from .cluster_relay import ClusterRelayFanOut
     from .config import SpaceMediaOnDemandConfig
-    from .federation import GfsFederationService
     from .repositories import AbstractGfsSpaceMediaDemandRepo
     from .space_media import GfsSpaceMediaStore
     from .ws_registry import GfsWebSocketRegistry
@@ -278,7 +275,6 @@ class GfsSpaceMediaOnDemand:
         "_demand",
         "_drivers",
         "_fan_out",
-        "_federation",
         "_pending",
         "_pinned",
         "_polls",
@@ -295,7 +291,6 @@ class GfsSpaceMediaOnDemand:
         *,
         store: GfsSpaceMediaStore,
         demand: AbstractGfsSpaceMediaDemandRepo,
-        federation: GfsFederationService,
         channels: GfsChannelService,
         config: SpaceMediaOnDemandConfig,
         fan_out: ClusterRelayFanOut | None = None,
@@ -305,7 +300,6 @@ class GfsSpaceMediaOnDemand:
     ) -> None:
         self._store = store
         self._demand = demand
-        self._federation = federation
         self._channels = channels
         self._cfg = config
         self._fan_out = fan_out
@@ -652,25 +646,18 @@ class GfsSpaceMediaOnDemand:
             self._recent[session.key] = self._clock() + self._cfg.coalesce_seconds
 
     async def _scope_active(self, scope_kind: str, scope_id: str) -> bool:
+        if scope_kind != SCOPE_CHANNEL:
+            return False
         try:
-            if scope_kind == SCOPE_SPACE:
-                space = await self._federation.listed_space(scope_id)
-                return space.status == "active"
-            if scope_kind == SCOPE_CHANNEL:
-                await self._channels.require_channel_in_use(scope_id)
-                return True
+            await self._channels.require_channel_in_use(scope_id)
         except PermissionError:
             return False
-        return False
+        return True
 
     async def _holders(self, scope_kind: str, scope_id: str) -> list[str]:
         """Who may be asked, in order (module docstring)."""
-        if scope_kind == SCOPE_SPACE:
-            try:
-                space = await self._federation.listed_space(scope_id)
-            except PermissionError:
-                return []
-            return [space.owning_instance] if space.owning_instance else []
+        if scope_kind != SCOPE_CHANNEL:
+            return []
         seats = list(await self._channels.audience_targets(scope_id))
         random.shuffle(seats)
         ws = self._ws

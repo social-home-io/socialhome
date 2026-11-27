@@ -25,7 +25,7 @@ import {
 } from './spaceChat'
 
 const SUMMARY = {
-  enabled: true, conversation_id: 'sc-1', unread: 2,
+  enabled: true, can_post: true, conversation_id: 'sc-1', unread: 2,
   notif_level: 'mentions', muted_until: null, last_read_at: '2026-10-08 12:00:00',
 }
 
@@ -109,8 +109,8 @@ describe('spaceChatOpenTo', () => {
     }
   })
 
-  it('closed to a follower, a non-member, with chat off or a server "off"', () => {
-    expect(spaceChatOpenTo({}, 'subscriber', null)).toBe(false)
+  it('open to a follower (P10: it reads), closed to a non-member, with chat off or a server "off"', () => {
+    expect(spaceChatOpenTo({}, 'subscriber', null)).toBe(true)
     expect(spaceChatOpenTo({}, undefined, null)).toBe(false)
     expect(spaceChatOpenTo({ chat: false }, 'owner', { enabled: true })).toBe(false)
     expect(spaceChatOpenTo(undefined, 'member', { enabled: false })).toBe(false)

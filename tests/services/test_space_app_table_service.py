@@ -129,24 +129,24 @@ async def test_a_card_reaches_member_households_and_nobody_else(net):
         for s, to, p in net.sent
         if net.types.get(id(p)) is FederationEventType.SPACE_APP_TABLE
     }
-    # The follower-only household and the household outside the space hear
-    # nothing; the mesh-only member does (the host knows its version).
-    assert receivers == {h["b"].instance, h["m"].instance}
+    # Every seated household hears it — the follower-only one too (P10: a
+    # follower reads everything a member does); the mesh-only member does
+    # (the host knows its version); the household outside the space not.
+    assert receivers == {h["b"].instance, h["m"].instance, h["f"].instance}
     assert all(s == h["host"].instance for s, _t in cards)
-    for name in ("b", "m"):
+    for name in ("b", "m", "f"):
         kept = await h[name].home.group_repo.get(sid)
         assert kept is not None and kept.space_id == SPACE
         assert kept.card is not None and kept.card.seated == 1
         assert kept.note == "Bring snacks"
-    for name in ("f", "x"):
-        assert await h[name].home.group_repo.get(sid) is None
+    assert await h["x"].home.group_repo.get(sid) is None
     # The card names no player: no roster on the wire.
     for _s, t, p in net.space_events():
         if t == SPACE_TABLE:
             assert "roster" not in p and p["seated"] == 1
 
 
-async def test_members_see_the_open_table_and_followers_see_nothing(net):
+async def test_members_and_followers_see_the_open_table_followers_cant_join(net):
     h = _h(net)
     sid = await _open(net)
     listing = await h["b"].tables.list_tables(
@@ -156,9 +156,14 @@ async def test_members_see_the_open_table_and_followers_see_nothing(net):
     assert table["session_id"] == sid and table["state"] == CARD_OPEN
     assert table["host_name"] == "Anna" and table["app"]["installed"] is True
     assert listing["allowed_apps"] == [APP] and listing["can_edit_games"] is False
+    # P10: a follower sees the space's tables, read-only.
+    seen = await h["f"].tables.list_tables(
+        space_id=SPACE, actor_user_id=h["f"].uid("fred")
+    )
+    assert [t["session_id"] for t in seen["tables"]] == [sid]
     with pytest.raises(SubscriberReadOnlyError):
-        await h["f"].tables.list_tables(
-            space_id=SPACE, actor_user_id=h["f"].uid("fred")
+        await h["f"].tables.join(
+            space_id=SPACE, session_id=sid, actor_user_id=h["f"].uid("fred")
         )
     with pytest.raises(KeyError):
         await h["x"].tables.list_tables(
@@ -545,8 +550,11 @@ async def test_group_messages_ride_the_space_and_reach_unpaired_players(net):
     assert [f["data"] for f in frames] == [{"go": 1}]
     kinds = [p.get("kind") for _s, t, p in net.space_events() if t == SPACE_SESSION]
     assert "message" in kinds
-    # Never anything to the follower or the outsider.
-    assert not net.space_events(to=h["f"].instance)
+    # The follower sees the card (P10) but never a session message; the
+    # outsider gets nothing at all.
+    assert not [
+        t for _s, t, _p in net.space_events(to=h["f"].instance) if t == SPACE_SESSION
+    ]
     assert not net.space_events(to=h["x"].instance)
     assert b'"go"' not in orjson.dumps(
         [p for s, t, p in net.sent if t in (h["f"].instance, h["x"].instance)]

@@ -12,7 +12,7 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
-import { isWriterRole, type SpaceRole } from '@/features/spaces/spaceRoles'
+import type { SpaceRole } from '@/features/spaces/spaceRoles'
 import { isMuteActive } from '@/utils/mute'
 import { parseChatSummary, type SystemChatSummary } from './householdChat'
 
@@ -251,6 +251,8 @@ export function spaceChatOpenTo(
   chat: Pick<SystemChatSummary, 'enabled'> | null,
 ): boolean {
   if (features?.chat === false) return false
-  if (!isWriterRole(role)) return false
+  // Every seat reads the chat — a follower's too (P10); it just can't post
+  // (the summary's ``can_post``).
+  if (role === undefined) return false
   return chat === null || chat.enabled
 }

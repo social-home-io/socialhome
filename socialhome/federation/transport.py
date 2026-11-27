@@ -67,7 +67,7 @@ from .gfs_relay_transport import (
     RELAY_STATUS_TOO_LARGE,
     multi_caps_key,
 )
-from .inbound_validator import UnpairedPeerRefusedError
+from .inbound_validator import LoggedRefusal
 from .inbox_reply import inbox_holds_envelope
 from .media_envelope import (
     MEDIA_HTTPS_CONTENT_TYPE,
@@ -2803,7 +2803,7 @@ class FederationTransport:
                     # ``make_check_unpairing`` / ``make_lookup_instance_by_id``).
                     log.log(
                         logging.DEBUG
-                        if isinstance(exc, UnpairedPeerRefusedError)
+                        if isinstance(exc, LoggedRefusal)
                         else logging.WARNING,
                         "fed RTC inbound rejected from %s: %s",
                         instance_id,

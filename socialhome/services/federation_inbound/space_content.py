@@ -2975,12 +2975,12 @@ class SpaceContentInboundHandlers:
         if not zone_id or not p.get("name"):
             log.debug("SPACE_ZONE_UPSERTED missing required field")
             return
-        if not await self._authorship.holds_member_seat(space_id):
-            # We only follow this space: its members' places are not ours
-            # to keep (owner decision 13), whoever sent them.
+        if not await self._authorship.holds_seat(space_id):
+            # Nobody here holds a seat (a follower's counts, P10): the
+            # space's places are not ours to keep, whoever sent them.
             log.info(
                 "SPACE_ZONE_UPSERTED from %s for %s dropped: this household "
-                "holds no member seat there",
+                "holds no seat there",
                 event.from_instance,
                 space_id,
             )

@@ -32,11 +32,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-    strip_authority_sig_fields,
-)
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -72,11 +67,22 @@ from socialhome.services.space_public_author import (
     author_signing_bytes,
     build_signed_author_inner,
 )
+from socialhome.services.space_public_authority import channel_authority_plaintext
 from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 pytestmark = pytest.mark.security
+
+
+async def _relay(inbound, frame: dict) -> None:
+    """Hand an item to the reader the way it arrives since v_96: through the
+    space's opaque channel (the channel id already mapped to the space
+    locally). Space-keyed relay frames are no longer taken."""
+    await inbound.handle_channel_item(
+        frame["space_id"], epoch=frame["epoch"], payload=frame["payload"]
+    )
+
 
 SPACE = "sp-items"
 
@@ -239,7 +245,8 @@ async def _send(env, item_type: str, inner: dict, cert: dict, *, epoch=None):
         for k, v in cert.items()
         if k not in ("writer_user_ids", "users_sig", "users_sig_suite")
     }
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         {
             "type": "relay",
             "space_id": SPACE,
@@ -247,7 +254,7 @@ async def _send(env, item_type: str, inner: dict, cert: dict, *, epoch=None):
             "epoch": sealed_epoch if epoch is None else epoch,
             "writer_cert": v1,
             "payload": ct,
-        }
+        },
     )
 
 
@@ -373,7 +380,8 @@ async def test_a_stale_epoch_is_refused_for_every_type(env, item_type):
         for k, v in cert.items()
         if k not in ("writer_user_ids", "users_sig", "users_sig_suite")
     }
-    await env["inbound"].handle(
+    await _relay(
+        env["inbound"],
         {
             "type": "relay",
             "space_id": SPACE,
@@ -381,7 +389,7 @@ async def test_a_stale_epoch_is_refused_for_every_type(env, item_type):
             "epoch": old_epoch,
             "writer_cert": v1,
             "payload": ct,
-        }
+        },
     )
     assert not await _landed(env, item_type)
 
@@ -428,23 +436,14 @@ async def test_a_binding_not_naming_the_author_is_refused(env, item_type):
 
 
 async def _host_relay(env, inner: dict) -> None:
-    """The host's ``space_post_public`` copy of a post."""
-    epoch, ct = await env["crypto"].encrypt(SPACE, json.dumps(inner).encode())
-    envelope = {"space_id": SPACE, "epoch": epoch, "encrypted_payload": ct}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=SPACE,
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env["space_kp"].private_key,
-        )
+    """The host's copy of a post, as a channel authority item (v_96)."""
+    epoch = await env["crypto"].get_current_epoch(SPACE)
+    plain = channel_authority_plaintext(
+        inner, space_id=SPACE, epoch=epoch, space_seed=env["space_kp"].private_key
     )
-    await env["inbound"].handle(
-        {
-            "type": "relay",
-            "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            "payload": envelope,
-        }
+    sealed_epoch, ct = await env["crypto"].encrypt(SPACE, plain)
+    await _relay(
+        env["inbound"], {"space_id": SPACE, "epoch": sealed_epoch, "payload": ct}
     )
 
 
@@ -585,10 +584,10 @@ async def test_the_same_item_from_two_gfss_lands_once(env, item_type):
     else:
         inner = _build(env, item_type, BOB)
     frame = await _frame(env, item_type, inner, cert)
-    await env["inbound"].handle(dict(frame))  # via GFS A
+    await _relay(env["inbound"], dict(frame))  # via GFS A
     first, events = await _snapshot(env), len(bus.published)
     assert events >= 1, "the first copy did not land"
-    await env["inbound"].handle(dict(frame))  # the same item via GFS B
+    await _relay(env["inbound"], dict(frame))  # the same item via GFS B
     assert await _snapshot(env) == first
     assert len(bus.published) == events
 
@@ -610,9 +609,9 @@ async def test_a_late_copy_of_a_reaction_never_undoes_its_removal(env):
         ),
         cert,
     )
-    await env["inbound"].handle(dict(add))
-    await env["inbound"].handle(dict(remove))
-    await env["inbound"].handle(dict(add))
+    await _relay(env["inbound"], dict(add))
+    await _relay(env["inbound"], dict(remove))
+    await _relay(env["inbound"], dict(add))
     assert not await _landed(env, "reaction_add")
 
 
@@ -642,6 +641,13 @@ class _HostSpaces:
 class _HostSeats:
     def __init__(self, rows) -> None:
         self.rows = rows
+
+    async def list_live_instances_of_user(self, space_id, user_id):
+        return {
+            r.instance_id
+            for r in self.rows
+            if r.user_id == user_id and not getattr(r, "tombstoned", False)
+        }
 
     async def list_for_instance(
         self, space_id, instance_id, *, include_tombstoned=True

@@ -77,10 +77,14 @@ bytes by the sender's *identity* key, TOFU-verified by the receiver)::
       "instance_id": "...", "identity_pk": "<hex>",
       "keywrap_pk":  "<hex>", "keywrap_sig": "<b64url>",
       "display_name": "...",
-      "redeemer_user_id": "...", "redeemer_public_key": "...",
-      "redeemer_display_name": "...",
+      "redeemer_user_id": "...", "redeemer_anchor": "...",
+      "redeemer_public_key": "...", "redeemer_display_name": "...",
       "signature":   "<hex>"
     }
+
+``redeemer_anchor`` (P5 person-ID anchor) is the person's identity anchor:
+the issuer seats ``redeemer_user_id`` only when ``derive_user_id(
+identity_pk, redeemer_anchor)`` is it (:func:`body_identity_pk`).
 
 The reply (``..._ack`` / ``..._deny``) mirrors it, with the issuer's
 identity + key-wrap material and either ``{space_id, role, space_meta}``
@@ -627,6 +631,20 @@ def derive_space_session_keys(
     if is_redeemer:
         return key_r_to_i, key_i_to_r
     return key_i_to_r, key_r_to_i
+
+
+def body_identity_pk(body: dict[str, Any]) -> bytes | None:
+    """The sender's identity key a bootstrap body carries, as bytes — the
+    key :func:`open_bootstrap_envelope` bound to its ``instance_id``
+    (``derive_instance_id``) and verified the body's signature under.
+    ``None`` when absent or not hex, so a proof against it fails closed."""
+    raw = body.get("identity_pk")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return bytes.fromhex(raw)
+    except ValueError:
+        return None
 
 
 def verify_peer_keywrap(

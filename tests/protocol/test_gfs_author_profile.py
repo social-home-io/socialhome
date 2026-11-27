@@ -59,12 +59,6 @@ def _webp() -> bytes:
     return buf.getvalue()
 
 
-def _other_webp() -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", (32, 32), (10, 200, 90)).save(buf, "WEBP")
-    return buf.getvalue()
-
-
 def _profile(
     signer, *, about=None, ts=None, sidecar: bytes | None | bool = True, **content_kw
 ) -> dict:
@@ -266,48 +260,16 @@ async def test_a_name_change_without_the_picture_keeps_the_held_picture(env, pro
     assert await profiles.get_picture(SPACE, BOB.user_id) == before
 
 
-async def test_a_follower_keeps_no_signed_item(env, profiles):
-    """M2: only a household that can build a bundle (holds the space seed)
-    keeps the author-signed item; a follower keeps the profile alone."""
-    await _send(env, "author_profile", _profile(BOB), await _cert(env, BOB, "comment"))
-    assert await _held(profiles, BOB.user_id) is not None
-    assert await profiles.list_signed_items(SPACE, limit=5) == []
-
-
-async def test_a_seed_holder_keeps_the_signed_item_with_its_picture(env, profiles):
-    """A host (seed holder) forwards a relayed profile to a new follower
-    author-signed, so it keeps the item — writer cert, epoch, and the
-    original picture sidecar the follower will check against the hash."""
-    await env["spaces"].set_space_seed(SPACE, env["space_kp"].private_key)
-    inner = _profile(BOB)
-    cert = await _cert(env, BOB, "comment")
-    await _send(env, "author_profile", inner, cert)
-    epoch = await env["crypto"].get_current_epoch(SPACE)
-    [kept] = await profiles.list_signed_items(SPACE, limit=5)
-    assert kept.epoch == epoch
-    assert kept.item == {**inner, "writer_cert": cert}
-    assert kept.picture_hash == profile_picture_digest(_webp())
-
-
-async def test_a_seed_holder_stores_the_item_without_unsigned_junk(env, profiles):
-    """Review I5: only the signed fields, the signature, the writer cert and
-    the picture are kept for the bundle — never a member's padding."""
+async def test_no_household_keeps_a_signed_copy_for_a_bundle(env, profiles):
+    """v_96 — the v_61 new-follower bundle is gone, so not even a seed
+    holder keeps the author-signed item (or a member's unsigned padding) at
+    rest: the profile alone is stored."""
     await env["spaces"].set_space_seed(SPACE, env["space_kp"].private_key)
     inner = {**_profile(BOB), "junk": "x" * 50_000}
     await _send(env, "author_profile", inner, await _cert(env, BOB, "comment"))
-    [kept] = await profiles.list_signed_items(SPACE, limit=5)
-    assert "junk" not in kept.item
-
-
-async def test_a_seed_holder_drops_the_old_picture_when_the_hash_changes(env, profiles):
-    """Review: the held original picture rides on only while the signed
-    hash is the same; a new hash without bytes leaves no picture to forward."""
-    await env["spaces"].set_space_seed(SPACE, env["space_kp"].private_key)
-    cert = await _cert(env, BOB, "comment")
-    await _send(env, "author_profile", _profile(BOB, ts=_now(-60)), cert)
-    [first] = await profiles.list_signed_items(SPACE, limit=5)
-    assert PROFILE_PICTURE_FIELD in first.item
-    newer = _profile(BOB, picture_webp=_other_webp(), sidecar=False)
-    await _send(env, "author_profile", newer, cert)
-    [kept] = await profiles.list_signed_items(SPACE, limit=5)
-    assert PROFILE_PICTURE_FIELD not in kept.item
+    assert await _held(profiles, BOB.user_id) is not None
+    rows = await env["db"].fetchall(
+        "SELECT signed_item, item_epoch FROM space_author_profiles"
+    )
+    assert [(r["signed_item"], r["item_epoch"]) for r in rows] == [(None, None)]
+    assert not hasattr(profiles, "list_signed_items")

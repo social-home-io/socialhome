@@ -159,28 +159,26 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
     expect(r.getByRole('link', { name: /^Moderation/ }).getAttribute('href')).toBe('/spaces/s1/moderation')
   }, 20000)
 
-  it('a follower on /map falls back to the feed: no Map, no proposals; Settings is theirs too', async () => {
+  it('a follower opens /map like a member (P10), with no Moderation; Settings is theirs too', async () => {
     apiGet.mockImplementation(async (url: string) => {
       if (url === '/api/spaces/s1') {
         return { id: 's1', name: 'Trip', features: { location: true, todo: true }, my_role: 'subscriber' }
       }
-      // A follower's roster lists the members only — never the viewer.
       if (url === '/api/spaces/s1/members') return [{ user_id: 'u9', role: 'owner' }]
       if (url === '/api/spaces/s1/links') return { links: [] }
       return []
     })
     const { tl, r } = await open('map')
-    await tl.waitFor(() => expect(route.go).toHaveBeenCalledWith('/spaces/s1', true))
-    expect(r.queryByRole('link', { name: 'Map' })).toBeNull()
+    await tl.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/presence'))
+    expect(route.go).not.toHaveBeenCalledWith('/spaces/s1', true)
     // A follower's settings: their notifications and Unfollow.
     expect(r.getByRole('link', { name: 'Space settings' }).getAttribute('href'))
       .toBe('/spaces/s1/settings')
     expect(r.getByRole('link', { name: 'Tasks' })).toBeTruthy()
     tl.fireEvent.click(r.getByRole('button', { name: /^More/ }))
-    expect(r.queryByRole('link', { name: /^Map/ })).toBeNull()
     expect(r.queryByRole('link', { name: /^Moderation/ })).toBeNull()
-    expect(apiGet).not.toHaveBeenCalledWith('/api/spaces/s1/proposals')
-    expect(apiGet).not.toHaveBeenCalledWith('/api/spaces/s1/presence')
+    // No "Share my location" for a follower: it reads the map, never shares.
+    expect(r.queryByRole('button', { name: 'Share my location' })).toBeNull()
   }, 20000)
 
   it('a plain member gets no Moderation row, but the gear', async () => {
@@ -371,14 +369,13 @@ describe('the Members row and the member count', () => {
     expect(r.getByRole('link', { name: /Games, open games/ })).toBeTruthy()
   }, 20000)
 
-  it('a follower gets neither Games nor the strip, and never asks for the games', async () => {
+  it('a follower sees Games (it watches, P10) but never the "Open games" strip', async () => {
     wire({}, 'subscriber', { features: { allowed_apps: ['quiz'] } })
     const { tl, r } = await open()
     await tl.waitFor(() => expect(r.getByRole('link', { name: 'Feed' })).toBeTruthy())
-    await tl.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1'))
-    expect(r.queryByRole('link', { name: /^Games/ })).toBeNull()
+    await tl.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/games'))
+    await tl.waitFor(() => expect(r.getByRole('link', { name: /^Games/ })).toBeTruthy())
     expect(r.queryByText('Open games')).toBeNull()
-    expect(apiGet).not.toHaveBeenCalledWith('/api/spaces/s1/games')
   }, 20000)
 
   it('no games allowed: a member gets no Games; a moderator does (to choose them)', async () => {

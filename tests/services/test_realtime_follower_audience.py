@@ -1,10 +1,10 @@
-"""Frames about a space's people never reach its followers (owner decision
-13): approval proposals and zones go to the members only, like the
-``GET …/proposals`` / ``…/zones`` reads they keep live."""
+"""Every space frame reaches every seat, a follower's included (P10, owner
+2026-11-26: a follower reads everything a member does — it replaces owner
+decision 13): approval proposals, zones and the sync status like the
+``GET …/proposals`` / ``…/zones`` reads they keep live, and the roster
+frames (joined / left / profile, D3, v_96)."""
 
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 import orjson
 import pytest
@@ -97,7 +97,7 @@ _EVENTS = [
         updated_at="2026-10-18T00:00:00+00:00",
     ),
     SpaceZoneDeleted(space_id="sp-1", zone_id="z1", deleted_by="own"),
-    # A follower gets no sync status (the GFS feeds it, not the host).
+    # A follower syncs like a member, so it gets the sync status too.
     SpaceSyncStateChanged(
         space_id="sp-1",
         sync={"state": "behind", "last_ok_at": None, "waiting_to_send": 0},
@@ -106,103 +106,48 @@ _EVENTS = [
 
 
 @pytest.mark.parametrize("event", _EVENTS, ids=lambda e: type(e).__name__)
-async def test_people_frames_skip_followers(env, event):
+async def test_people_frames_reach_followers_too(env, event):
     bus, socks = env
     await bus.publish(event)
-    for uid in ("own", "adm", "mod", "mem"):
+    for uid in _ROLES:
         assert len(socks[uid].sent) == 1, uid
-    assert socks["fol"].sent == []
-    assert socks["fol2"].sent == []
 
 
-# ─── Roster frames: a follower learns about members, never other followers ──
+# ─── Roster frames: everyone sees the same roster (D3, v_96) ───────────────
 
-_ABOUT_A_FOLLOWER = [
+_ROSTER_FRAMES = [
     SpaceMemberJoined(space_id="sp-1", user_id="fol2", role=SpaceRole.SUBSCRIBER),
     SpaceMemberLeft(space_id="sp-1", user_id="fol2", role=SpaceRole.SUBSCRIBER),
-    # The seat is gone and the role unknown: fail closed — members only.
     SpaceMemberLeft(space_id="sp-1", user_id="gone"),
     SpaceMemberProfileUpdated(
         space_id="sp-1", user_id="fol2", space_display_name="F", picture_hash=None
     ),
-]
-
-_ABOUT_A_MEMBER = [
     SpaceMemberJoined(space_id="sp-1", user_id="mem", role=SpaceRole.MEMBER),
     SpaceMemberLeft(space_id="sp-1", user_id="gone", role=SpaceRole.MEMBER),
     SpaceMemberProfileUpdated(
         space_id="sp-1", user_id="mem", space_display_name="M", picture_hash=None
     ),
+    # A seat on another household: same frame, same audience.
+    SpaceMemberProfileUpdated(
+        space_id="sp-1",
+        user_id="u-remote",
+        space_display_name="R",
+        picture_hash=None,
+        origin_instance_id="peer-1",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    "event", _ABOUT_A_FOLLOWER, ids=lambda e: type(e).__name__ + ":" + e.user_id
+    "event", _ROSTER_FRAMES, ids=lambda e: type(e).__name__ + ":" + e.user_id
 )
-async def test_frames_about_a_follower_reach_the_members_only(env, event):
+async def test_roster_frames_reach_every_seat(env, event):
+    """A frame about a follower reaches the followers too, and one about a
+    member reaches them as before — a follower's roster lists everyone."""
     bus, socks = env
     await bus.publish(event)
-    for uid in ("own", "adm", "mod", "mem"):
+    for uid in _ROLES:
         assert len(socks[uid].sent) == 1, uid
-    assert socks["fol"].sent == []
-
-
-@pytest.mark.parametrize(
-    "event", _ABOUT_A_MEMBER, ids=lambda e: type(e).__name__ + ":" + e.user_id
-)
-async def test_frames_about_a_member_reach_the_followers_too(env, event):
-    bus, socks = env
-    await bus.publish(event)
-    for uid in ("own", "adm", "mod", "mem", "fol", "fol2"):
-        assert len(socks[uid].sent) == 1, uid
-
-
-class _FakeRemoteSeats:
-    def __init__(self, seats) -> None:
-        self._seats = seats
-
-    async def list_for_space(self, space_id):
-        return [s for s in self._seats if s.space_id == space_id]
-
-
-@pytest.mark.parametrize(
-    ("remote_role", "followers_hear"),
-    [(SpaceRole.SUBSCRIBER, False), (None, True), (SpaceRole.ADMIN, True)],
-)
-async def test_a_remote_seats_profile_frame_follows_its_role(
-    remote_role, followers_hear
-):
-    """A seat on another household (``space_remote_members``; a missing
-    role reads as a member's, like the roster): a remote follower's profile
-    is the members' business only, a remote member's reaches everyone."""
-    bus = EventBus()
-    ws = WebSocketManager()
-    repo = _FakeSpaceRepo(
-        [
-            SpaceMember(space_id="sp-1", user_id=uid, role=role, joined_at="2026")
-            for uid, role in _ROLES.items()
-        ]
-    )
-    remote = _FakeRemoteSeats(
-        [SimpleNamespace(space_id="sp-1", user_id="u-remote", role=remote_role)]
-    )
-    RealtimeService(
-        bus, ws, user_repo=_FakeUserRepo(), space_repo=repo, remote_member_repo=remote
-    ).wire()
-    socks = {uid: _FakeWS() for uid in _ROLES}
-    for uid, sock in socks.items():
-        await ws.register(uid, sock)
-    await bus.publish(
-        SpaceMemberProfileUpdated(
-            space_id="sp-1",
-            user_id="u-remote",
-            space_display_name="R",
-            picture_hash=None,
-            origin_instance_id="peer-1",
-        )
-    )
-    assert len(socks["mem"].sent) == 1
-    assert (len(socks["fol"].sent) == 1) is followers_hear
 
 
 async def test_the_sync_state_frame_carries_the_status(env):
