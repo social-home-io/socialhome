@@ -887,6 +887,7 @@ class SyncPageService:
         "_push_pending",
         "_pushed",
         "_pushed_payload",
+        "_rejudged",
         "_repo",
         "_request_round",
         "_round_left",
@@ -954,6 +955,9 @@ class SyncPageService:
         self._tasks: set[asyncio.Task] = set()
         #: space → the last compare of our copy with its page.
         self._checks: OrderedDict[str, _Compare] = OrderedDict()
+        #: space → the page root a completed stream already had re-judged
+        #: (:meth:`_compare_if_unjudged`) — once per page.
+        self._rejudged: OrderedDict[str, bytes] = OrderedDict()
         #: space → the (epoch, signer) whose equivocation we saw.
         self._conflicts: OrderedDict[str, tuple[int, str]] = OrderedDict()
         #: Parks a page that arrived ahead of its epoch's content key
@@ -1511,8 +1515,15 @@ class SyncPageService:
     def sentinel_seen(self, space_id: str) -> None:
         """A sentinel of a stream of *space_id* arrived (no page rides it any
         more): compare the held page if it has no verdict yet (verdicts are
-        memory only — after a restart the stored page waits otherwise)."""
-        self._spawn(self._compare_if_unjudged(space_id), f"sync-page-seen-{space_id}")
+        memory only — after a restart the stored page waits otherwise), and
+        re-judge once a verdict that found unexplained buckets — formed
+        before this stream's rows landed (the page push can beat a
+        household's first stream), it would otherwise stand until the next
+        round and the household could prove, and so deliver, nothing."""
+        self._spawn(
+            self._compare_if_unjudged(space_id, stream_ended=True),
+            f"sync-page-seen-{space_id}",
+        )
 
     async def on_page_event(self, event: FederationEvent) -> None:
         """The ``SPACE_SYNC_PAGE`` handler (the dispatch registry): the
@@ -1802,15 +1813,37 @@ class SyncPageService:
         made for that older page."""
         self._asked = asked
 
-    async def _compare_if_unjudged(self, space_id: str) -> None:
-        """A sentinel brought no newer page: compare the held page only if
-        it has no verdict yet — compare results live in memory, so after a
-        restart the stored page would otherwise wait for the next page.
-        Never a second compare of a judged page. Fail-soft."""
+    async def _compare_if_unjudged(
+        self, space_id: str, *, stream_ended: bool = False
+    ) -> None:
+        """A sentinel brought no newer page: compare the held page if it has
+        no verdict yet — compare results live in memory, so after a restart
+        the stored page would otherwise wait for the next page — or, when a
+        stream ended (*stream_ended*), once per page re-judge a verdict that
+        left buckets unexplained (see :meth:`sentinel_seen`). A matching verdict is never compared again.
+        Fail-soft."""
         try:
-            if space_id in self._comparing or await self._judged(space_id):
+            if space_id in self._comparing:
                 return
-            self.compare_soon(space_id)
+            if not await self._judged(space_id):
+                self.compare_soon(space_id)
+                return
+            check = self._checks.get(space_id)
+            if (
+                not stream_ended
+                or check is None
+                or check.unexplained == 0
+                or self._rejudged.get(space_id) == check.root
+                or self._judging.get(space_id) == check.root
+            ):
+                return
+            # Once per page, at once (no cadence wait): the stream that just
+            # ended may have brought exactly the rows the verdict lacked.
+            self._rejudged[space_id] = check.root
+            self._rejudged.move_to_end(space_id)
+            while len(self._rejudged) > MAX_TRACKED:
+                self._rejudged.popitem(last=False)
+            await self.compare(space_id)
         except Exception:
             log.exception("sync page: checking the verdict of %s failed", space_id)
 

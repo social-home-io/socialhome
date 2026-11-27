@@ -908,6 +908,13 @@ What shipped, where it is more exact than the design above:
   lost verdict is rebuilt: the held page is compared again and the next
   round asks. Phase 3 adds: the same `buckets` on a BEGIN to any member
   household, and the rows themselves.
+- **A verdict formed before the rows landed is redone when a stream
+  ends.** The page push can beat a household's first stream; its verdict
+  then finds unexplained buckets with the rows still on their way. When a
+  stream's sentinel arrives, such a verdict is re-judged once per page, at
+  once (no cadence wait) — so the household matches and can prove, and
+  deliver, its buckets without waiting for the next round. A matching
+  verdict is never compared again.
 - **Accepted gap.** A missing row that shares a bucket with a row we
   changed after the page stays hidden (the bucket is explained) until a
   later page or the 30-min sync heals it. Change times come from the
