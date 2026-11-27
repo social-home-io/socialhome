@@ -635,9 +635,19 @@ member seat). Cost: one roster gossip per step up, like a promotion.
   host is back. A GFS-reached follower is reached exactly like a
   GFS-reached member in the same position (P10, owner 2026-11-27: no
   follower-specific delivery rule; the v_96 `channel_reached_followers`
-  skip in `broadcast_to_space_members`, the picture queue and the
-  mesh-announce sweep is gone) — the cost is the cost those people would
-  have as members (see the PR's math). A delegated admin's rekey also
+  skip is gone). `broadcast_to_space_members` follows one role-neutral
+  rule: A household we hold no `remote_instances` row for (no pairing, no
+  directory seat from its card) that never claimed a version over the mesh is
+  **not tried** in a space another household hosts or that runs a channel
+  (`DELIVERY_ERROR_HOST_HOP`, not a loss): the host holds its seat and serves
+  its catch-up, the channel carries posts. Role-neutral — a member and a
+  follower in that position alike (P10, owner 2026-11-27). Households with a
+  row go first; at most `MAX_MESH_DISCOVERIES_PER_BROADCAST` = 32 row-less
+  households are tried over the mesh per broadcast, the rest wait in their
+  deferred queue. **Known gap:** what no catch-up carries — a live location
+  pin — reaches such a household only from the host's own people. The
+  follow-up is one general path: every space item type rides the channel like
+  posts. A delegated admin's rekey also
   reaches them through the owner (Keys
   and rotation, above). After a restart, before the channel is
   re-registered in this process (the GFS unreachable), the owner's grants
@@ -835,9 +845,11 @@ the space authority seed and broadcast to every member household
 ```
 
 The free-text reason stays on the household that wrote it (followers of a
-public space are strangers); the catch-up `bans` rows carry it to member
-households only (the ban list's audience) — a follower household gets who is
-banned and by whom, never why.
+public space are strangers); the catch-up `bans` rows carry it only to a
+household holding an **owner / admin** seat (owner 2026-11-27, every role
+alike: a plain member's or a follower's household gets who is banned and by
+whom, never why). `bans` is host-only — no sync page commits it, so the
+page checksum is the same for everyone.
 
 A receiver applies it only when the sender is a seed holder in its own view
 (the owner, or — delegation on — a household with a live `admin` seat in its

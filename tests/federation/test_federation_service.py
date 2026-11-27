@@ -33,6 +33,7 @@ from socialhome.domain.events import (
     PeerUnpaired,
 )
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_HOST_HOP,
     DELIVERY_ERROR_MESH_DEFER_FULL,
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
@@ -7193,20 +7194,46 @@ class _Seats:
 
 
 class _ChannelSpaces:
-    def __init__(self, channel: bool) -> None:
+    """The space repo as the fan-out sees it: a channel or not, and who
+    hosts the space (``host``; ``None`` — hosted here)."""
+
+    def __init__(self, channel: bool, host: str | None = None) -> None:
         self.channel = channel
+        self.host = host
+
+    async def get(self, space_id):
+        return types.SimpleNamespace(owner_instance_id=self.host)
 
     async def get_gfs_channel(self, space_id):
         return ("c" * 32, "pk") if self.channel else None
 
 
-async def _fan_out(monkeypatch, *, channel: bool, event_type) -> list[str]:
+async def _fan_out(
+    monkeypatch,
+    *,
+    channel: bool,
+    event_type=FederationEventType.SPACE_POST_CREATED,
+    host: str | None = None,
+    rows: tuple[str, ...] = (),
+    targets: tuple[str, ...] = ("gfs-follower", "gfs-member", "mesh-follower"),
+    claims: dict[str, int] | None = None,
+) -> tuple[list[str], BroadcastResult]:
+    """Fan out over *targets* (none with a row of ours unless in *rows*;
+    ``mesh-follower`` claimed a version over the mesh by default); returns
+    the households tried, in order, and the broadcast result."""
+    km = _make_kek_manager()
     fed_repo = InMemoryFederationRepo()
-    fed_repo.mesh_claims = {"follower-mesh": 96}
-    for iid in ("follower-gfs", "follower-mesh", "member-mesh"):
+    fed_repo.mesh_claims = {"mesh-follower": 96} if claims is None else claims
+    for iid in rows:
+        row, _ = _make_remote_instance(km)
+        await fed_repo.save_instance(dataclasses.replace(row, id=iid))
+    for iid in targets:
         fed_repo.add_space_member("sp", iid)
     svc, _ = _make_service(federation_repo=fed_repo)
-    svc.attach_space_write_gate(_ChannelSpaces(channel), _Seats({"member-mesh"}))
+    svc.attach_space_write_gate(
+        _ChannelSpaces(channel, host=host),
+        _Seats({"gfs-member", "row-member"}),
+    )
     tried: list[str] = []
 
     async def _send(self, *, to_instance_id, **_kw):
@@ -7214,11 +7241,10 @@ async def _fan_out(monkeypatch, *, channel: bool, event_type) -> list[str]:
         return DeliveryResult(instance_id=to_instance_id, ok=True)
 
     monkeypatch.setattr(type(svc), "send_with_mesh_fallback", _send)
-    await svc.broadcast_to_space_members("sp", event_type, {"space_id": "sp"})
-    return sorted(tried)
+    result = await svc.broadcast_to_space_members("sp", event_type, {"space_id": "sp"})
+    return tried, result
 
 
-@pytest.mark.parametrize("channel", [True, False])
 @pytest.mark.parametrize(
     "event_type",
     [
@@ -7229,15 +7255,62 @@ async def _fan_out(monkeypatch, *, channel: bool, event_type) -> list[str]:
         FederationEventType.SPACE_MEMBER_JOINED,
     ],
 )
-async def test_fan_out_tries_a_gfs_reached_follower_like_a_member(
-    monkeypatch, channel, event_type
+@pytest.mark.parametrize(("channel", "host"), [(True, None), (False, "host-x")])
+async def test_a_household_with_no_path_is_left_to_the_host_member_or_follower(
+    monkeypatch, event_type, channel, host
 ):
-    """P10 (owner 2026-11-27): no follower-specific delivery rule — a
-    follower household reached only through a GFS is tried exactly like a
-    member household in the same position, with or without a channel, for
-    every event type (the old v_96 channel skip is gone)."""
-    tried = await _fan_out(monkeypatch, channel=channel, event_type=event_type)
-    assert tried == ["follower-gfs", "follower-mesh", "member-mesh"]
+    """P10 H1 (role-neutral): a household we hold no row for that never
+    claimed a version over the mesh is not tried — no route discovery flood
+    — when the space reaches it another way (the host's seat and catch-up,
+    or the channel); a member there exactly like a follower. One that
+    claimed over the mesh is tried. Not a loss: nothing terminal."""
+    tried, result = await _fan_out(
+        monkeypatch, channel=channel, host=host, event_type=event_type
+    )
+    assert tried == ["mesh-follower"]
+    skipped = {r.instance_id: r.error for r in result.results if not r.ok}
+    assert skipped == {
+        "gfs-follower": DELIVERY_ERROR_HOST_HOP,
+        "gfs-member": DELIVERY_ERROR_HOST_HOP,
+    }
+    assert result.terminal_failures == ()
+
+
+async def test_the_host_without_a_channel_tries_every_household(monkeypatch):
+    """Hosted here and no channel: nobody else reaches them — every
+    household is tried, row or not."""
+    tried, _ = await _fan_out(monkeypatch, channel=False, host=None)
+    assert sorted(tried) == ["gfs-follower", "gfs-member", "mesh-follower"]
+
+
+async def test_households_with_a_row_go_before_mesh_discoveries(monkeypatch):
+    """P10 H1: the households we hold a row for are sent to first; the
+    ones that need a mesh discovery come after, whatever their ids."""
+    tried, _ = await _fan_out(
+        monkeypatch,
+        channel=False,
+        targets=("a-mesh", "z-row"),
+        rows=("z-row",),
+        claims={"a-mesh": 96},
+    )
+    assert tried == ["z-row", "a-mesh"]
+
+
+async def test_mesh_discoveries_per_broadcast_are_capped(monkeypatch):
+    """P10 H1: at most MAX_MESH_DISCOVERIES_PER_BROADCAST row-less
+    households are tried in one broadcast; the rest wait in their deferred
+    queue (not a loss)."""
+    monkeypatch.setattr(federation_service_mod, "MAX_MESH_DISCOVERIES_PER_BROADCAST", 1)
+    tried, result = await _fan_out(
+        monkeypatch,
+        channel=False,
+        targets=("m-1", "m-2"),
+        claims={"m-1": 96, "m-2": 96},
+    )
+    assert tried == ["m-1"]
+    deferred = [r for r in result.results if r.instance_id == "m-2"]
+    assert deferred and deferred[0].error == DELIVERY_ERROR_MESH_DEFERRED
+    assert result.terminal_failures == ()
 
 
 async def test_gfs_reached_followers_names_follower_only_seat_households():

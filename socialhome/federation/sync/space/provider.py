@@ -440,6 +440,23 @@ class _WithFileHashes:
             yield await self._add(batch)
 
 
+class _WithoutBanReasons:
+    """The ``bans`` resource without each ban's free-text ``reason`` — for
+    a household holding no owner / admin seat (owner 2026-11-27)."""
+
+    __slots__ = ("_inner", "resource")
+
+    def __init__(self, inner: ResourceExporter) -> None:
+        self._inner = inner
+        self.resource = inner.resource
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return [
+            {k: v for k, v in r.items() if k != "reason"}
+            for r in await self._inner.list_records(space_id)
+        ]
+
+
 class _OwnPeopleOnly:
     """A resource narrowed to this household's own people: a record is kept
     when its owner (``owner_of``, by default its ``user_id``) is one of them,
@@ -566,6 +583,7 @@ class SpaceSyncService:
     """Streams encrypted space content over a negotiated DataChannel."""
 
     __slots__ = (
+        "_admin_gate",
         "_builder",
         "_exporters",
         "_federation",
@@ -684,6 +702,11 @@ class SpaceSyncService:
         #: :meth:`SpaceWriterHouseholds.may_receive` with ``SEAT_ROLES``).
         #: ``None`` streams none of it (fail closed).
         self._member_gate: Callable[[str, str], Awaitable[bool]] | None = None
+        #: Who may receive a ban's free-text ``reason``:
+        #: ``(space_id, requester_instance_id) -> bool`` — a household
+        #: holding an owner / admin seat (owner 2026-11-27, every role
+        #: alike). ``None`` strips it for everyone (fail closed).
+        self._admin_gate: Callable[[str, str], Awaitable[bool]] | None = None
         #: Whether this household may speak for a space's roster:
         #: ``space_id -> bool`` (the host, or a seed-holding delegated admin
         #: that may be a member's trusted inviter). ``None``: every session
@@ -773,6 +796,11 @@ class SpaceSyncService:
         household, a follower's included (P10, owner 2026-11-26)."""
         self._member_gate = gate
 
+    def attach_admin_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
+        """Wire who may receive a ban's ``reason`` by catch-up: a household
+        holding an owner / admin seat (owner 2026-11-27)."""
+        self._admin_gate = gate
+
     async def _exporter_for(
         self, resource: str, session: SyncSessionRecord
     ) -> ResourceExporter | None:
@@ -781,6 +809,21 @@ class SpaceSyncService:
         (:data:`_OWN_CONTENT_OWNERS`, step 16). v_80: toward a link-joined
         member, records that show files carry ``media_refs``."""
         exporter = await self._shaped_exporter(resource, session)
+        if (
+            exporter is not None
+            and resource == "bans"
+            and not (
+                self._admin_gate is not None
+                and await self._admin_gate(
+                    session.space_id, session.requester_instance_id
+                )
+            )
+        ):
+            # Who is banned and by whom (authorship checks, a person ban's
+            # lift) reach every seated household; why only an owner / admin
+            # household (owner 2026-11-27, every role alike). ``bans`` is not
+            # committed by a sync page, so no checksum differs.
+            exporter = _WithoutBanReasons(exporter)
         owner_of = _OWN_CONTENT_OWNERS.get(resource)
         if not (
             exporter is None

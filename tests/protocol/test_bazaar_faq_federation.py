@@ -678,6 +678,9 @@ async def test_an_unpaired_member_household_gets_it_sealed_in_space_routed(
     routed = _Routed()
     fed.attach_mesh(route_service=_Route(), routed_handler=routed)
     await s.db.enqueue("DELETE FROM remote_instances WHERE id=?", (b.iid,))
+    # A mesh-only household has claimed its version over the mesh (P10 H1:
+    # one with no row AND no claim is left to the host and its catch-up).
+    await fed._federation_repo.record_space_member_version(b.iid, 96, "ab" * 32)
     direct: list = []
 
     async def _direct(self, **kwargs):

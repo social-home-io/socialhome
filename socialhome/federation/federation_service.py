@@ -64,6 +64,7 @@ from ..domain.events import (
     SpaceSyncDeferred,
 )
 from ..domain.federation import (
+    DELIVERY_ERROR_HOST_HOP,
     DELIVERY_ERROR_MESH_DEFER_FULL,
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_NO_ROUTE,
@@ -313,6 +314,13 @@ MESH_DEFERRED_RETRY_BACKOFF_S: tuple[float, ...] = (0.0, 60.0, 120.0, 240.0)
 #: Ceiling on mesh targets with a deferred-send queue at once. There is one
 #: task per target (a FIFO drained in order), so this also bounds tasks.
 MAX_DEFERRED_MESH_TARGETS: int = 256
+
+#: At most this many households without a row of ours are tried over the
+#: mesh (each a possible ``SPACE_FIND_ROUTE`` flood, up to ~4 s) in ONE
+#: space broadcast; the rest go to their deferred queue (P10, H1). The
+#: household with no row AND no mesh claim in a space with a host hop or a
+#: channel is not tried at all (:data:`DELIVERY_ERROR_HOST_HOP`).
+MAX_MESH_DISCOVERIES_PER_BROADCAST: int = 32
 
 #: Ceiling on queued broadcasts per target. Each lives at most the retry
 #: budget (:data:`MESH_DEFERRED_RETRY_BACKOFF_S`, ~8 minutes) plus the sends
@@ -4231,10 +4239,58 @@ class FederationService:
         # one's mailbox and nobody else's. Everyone else goes per recipient
         # below, in the original order.
         queued = await self._queue_multi_groups(space_id, event_type, planned)
+        # P10 (H1, role-neutral — a member and a follower alike): the
+        # households we hold a row for go first; a household with no row of
+        # ours is a mesh discovery (up to ~4 s each, one after another), so
+        # it goes last, at most MAX_MESH_DISCOVERIES_PER_BROADCAST of them
+        # (the rest wait in their deferred queue) — and none at all when it
+        # never claimed a version over the mesh either and the space reaches
+        # it another way: the host's seat for it and its catch-up, or the
+        # space's channel. Trade-off: what no catch-up carries (live
+        # location) reaches such a household only from the host's people.
+        host_hop: bool | None = None
+        direct: list[tuple[str, dict]] = []
+        rowless: list[tuple[str, dict]] = []
         for iid, peer_payload in planned:
             if iid in queued:
                 results.append(queued[iid])
                 continue
+            if (
+                iid in self._deferred_mesh_queues
+                or await self._federation_repo.get_instance(iid) is not None
+            ):
+                direct.append((iid, peer_payload))
+                continue
+            claim = await self._federation_repo.get_space_member_version(iid)
+            if claim is None or claim[0] <= 0:
+                if host_hop is None:
+                    host_hop = await self._space_reached_another_way(space_id)
+                if host_hop:
+                    results.append(
+                        DeliveryResult(
+                            instance_id=iid, ok=False, error=DELIVERY_ERROR_HOST_HOP
+                        )
+                    )
+                    continue
+            rowless.append((iid, peer_payload))
+        discoveries = 0
+        for iid, peer_payload in direct + rowless:
+            if iid not in self._deferred_mesh_queues and (iid, peer_payload) in rowless:
+                if discoveries >= MAX_MESH_DISCOVERIES_PER_BROADCAST:
+                    results.append(
+                        self._defer_mesh_send(
+                            DeliveryResult(
+                                instance_id=iid,
+                                ok=False,
+                                error=DELIVERY_ERROR_ROUTE_COOLDOWN,
+                            ),
+                            space_id=space_id,
+                            event_type=event_type,
+                            payload=peer_payload,
+                        )
+                    )
+                    continue
+                discoveries += 1
             if iid in self._deferred_mesh_queues:
                 # A deferred send to this target is still pending: queue
                 # behind it rather than overtake it, so the target sees
@@ -4313,6 +4369,26 @@ class FederationService:
                 ", ".join(f"{r.instance_id}={r.error}" for r in terminal),
             )
         return broadcast
+
+    async def _space_reached_another_way(self, space_id: str) -> bool:
+        """Does ``space_id`` reach a household we hold no path for without
+        us (P10, H1)? Yes when another household hosts it (the host holds
+        every seat's row and serves its catch-up) or it runs an opaque
+        channel here. Fail open (``False``: try the mesh) when unknown."""
+        if self._space_repo is None:
+            return False
+        try:
+            space = await self._space_repo.get(space_id)
+            if (
+                space is not None
+                and space.owner_instance_id
+                and space.owner_instance_id != self._own_instance_id
+            ):
+                return True
+            return await self._space_repo.get_gfs_channel(space_id) is not None
+        except Exception:
+            log.debug("space %s: host-hop check failed", space_id, exc_info=True)
+            return False
 
     async def _queue_multi_groups(
         self,

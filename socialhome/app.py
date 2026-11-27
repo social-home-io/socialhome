@@ -69,7 +69,7 @@ from .domain.federation import (
 )
 from .domain.gfs_channel import InvalidChannelWire, valid_channel_id
 from .domain.gfs_server import MAX_GFS_SERVERS
-from .domain.space import ContentAction
+from .domain.space import ContentAction, SpaceRole
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import MULTI_MAX_TRANSIENT, FederationService
@@ -3112,6 +3112,13 @@ def _build_space_chat_federation(
     handlers.attach_child_protection(child_protection)
     handlers.attach_to(federation_service)
     app[K.space_sync_service_key].attach_member_gate(audience.may_receive)
+    # The ban reason: owner / admin households only (owner 2026-11-27).
+    admins = SpaceWriterHouseholds(
+        remote_member_repo,
+        own_instance_id=own_instance_id,
+        roles=frozenset({SpaceRole.OWNER, SpaceRole.ADMIN}),
+    )
+    app[K.space_sync_service_key].attach_admin_gate(admins.may_receive)
     app[K.space_sync_receiver_key].attach_chat_sink(handlers)
 
 

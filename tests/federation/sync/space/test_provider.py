@@ -2619,9 +2619,12 @@ async def test_a_chunk_may_ride_a_route_raw_only_to_a_requester_that_reads_it(
     assert {c.kwargs["routed_raw_body"] for c in calls} == {raw}
 
 
-async def test_a_follower_gets_the_ban_list_like_a_member(encoder):
-    """P10: full read parity — the ``bans`` catch-up carries each ban's
-    reason to every seated household (the P9 follower cut is gone)."""
+@pytest.mark.parametrize("admin", [True, False, None])
+async def test_the_ban_reason_reaches_admin_households_only(encoder, admin):
+    """Owner 2026-11-27 (M2): every seated household gets who is banned and
+    by whom; the free-text ``reason`` only an owner / admin household —
+    every role alike (a plain member's household too). No gate wired
+    (``None``) strips it: fail closed."""
     builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
     row = {"space_id": "sp", "user_id": "u-x", "banned_by": "u-a", "reason": "spam"}
     svc = SpaceSyncService(
@@ -2629,7 +2632,14 @@ async def test_a_follower_gets_the_ban_list_like_a_member(encoder):
         exporters={"bans": _FakeExporter("bans", [row])},
         sig_suite="ed25519",
     )
+    if admin is not None:
+
+        async def _gate(_space_id: str, _instance_id: str) -> bool:
+            return admin
+
+        svc.attach_admin_gate(_gate)
     session = _FakeSession()
     await svc.stream_initial(session)
     (got,) = _records(session)["bans"]
-    assert got["reason"] == "spam" and got["banned_by"] == "u-a"
+    assert got["banned_by"] == "u-a" and got["user_id"] == "u-x"
+    assert got.get("reason") == ("spam" if admin else None)

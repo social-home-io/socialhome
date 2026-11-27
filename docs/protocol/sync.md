@@ -1057,9 +1057,10 @@ whose acting host is a delegated admin is repaired only when it also syncs
 with the owner; and a delegated admin's fresh ban that has not reached the
 owner yet can be lifted on a member household by the owner's sync, then
 comes back with the admin's gossip or the owner's next list.
-A follower household (no writer seat) gets `bans` without each ban's
-free-text `reason` — who is banned (its authorship checks) and by whom
-(a person ban needs it), never why. And a receiver never saves a
+A household holding no owner / admin seat (owner 2026-11-27, every role
+alike) gets `bans` without each ban's free-text `reason` — who is banned
+(its authorship checks) and by whom (a person ban needs it), never why
+(`SpaceSyncService.attach_admin_gate`). And a receiver never saves a
 `members` record of a person the space bans, or of a person whose seat
 names a banned household (P9): a stale provider cannot put them back on
 the roster, as the live JOINED gossip cannot. Nor does any household but the owner stream the owner

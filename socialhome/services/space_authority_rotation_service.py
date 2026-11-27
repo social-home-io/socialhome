@@ -949,6 +949,9 @@ class SpaceAuthorityRotationService:
         if not seats:
             return  # no seat: nothing it holds can be owed (a follower's
             # seat counts — P10, it heals like a member's)
+        # Only a writer seat's proof may start a ROTATION (review M3); a
+        # follower's echo gets its bundle re-sent, never more.
+        writer = any(r.role != SpaceRole.SUBSCRIBER for r in seats)
         ceiling = int(time.time()) + MAX_ECHO_EPOCH_SKEW_S
         if max(parsed) > ceiling:
             log.warning(
@@ -966,10 +969,15 @@ class SpaceAuthorityRotationService:
         own = space.authority_key_epoch
         record = await self._spaces.get_authority_echo(space_id)
         proven: list[int] = []
-        if held > own and self._cert_proves(space, echo.get("key_cert"), held):
+        if (
+            writer
+            and held > own
+            and self._cert_proves(space, echo.get("key_cert"), held)
+        ):
             proven.append(held)
         if (
-            forgotten
+            writer
+            and forgotten
             and self._in_restore_window(record, forgotten)
             and self._cert_proves(space, echo.get("forgotten_cert"), forgotten)
         ):

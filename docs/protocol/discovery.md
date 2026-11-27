@@ -1578,11 +1578,20 @@ a space-keyed item from a member below v_96) until P6/P7 remove that path.
 A third: the host's OWN items also reach a GFS-reached follower over
 federation (it holds the follower's space-session row) — one multi upload
 per GFS per host item; the same deferred lever. Since P10 (owner
-2026-11-27) every household tries a GFS-reached follower exactly like a
-GFS-reached member in the same position — the v_96
-`channel_reached_followers` skip is gone (live fan-out, pictures, the
-mesh-announce sweep): the cost is the cost those people would have as
-members. A delegated admin's rotation reaches such a follower through the owner, which
+2026-11-27) there is no follower-specific rule — the v_96
+`channel_reached_followers` skip is gone. Instead, one rule for everyone:
+A household we hold no `remote_instances` row for (no pairing, no
+directory seat from its card) that never claimed a version over the mesh is
+**not tried** in a space another household hosts or that runs a channel
+(`DELIVERY_ERROR_HOST_HOP`, not a loss): the host holds its seat and serves
+its catch-up, the channel carries posts. Role-neutral — a member and a
+follower in that position alike (P10, owner 2026-11-27). Households with a
+row go first; at most `MAX_MESH_DISCOVERIES_PER_BROADCAST` = 32 row-less
+households are tried over the mesh per broadcast, the rest wait in their
+deferred queue. **Known gap:** what no catch-up carries — a live location
+pin — reaches such a household only from the host's own people. The
+follow-up is one general path: every space item type rides the channel like
+posts. A delegated admin's rotation reaches such a follower through the owner, which
 re-sends the admin's signed rekey to the follower-only households it holds
 a space-session row for (`SpaceService.relay_admin_rekey_to_followers`,
 see [spaces.md](./spaces.md#keys-and-rotation)). The `channel_sent` mark is set when the author's publisher plans the send,
