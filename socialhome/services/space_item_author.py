@@ -209,6 +209,7 @@ _EVENT_SIGNED_FIELDS: tuple[str, ...] = (
     "item_type",
     "item_id",
     "space_id",
+    "epoch",
     "origin_instance_id",
     "author_pk",
     "ts",
@@ -231,6 +232,7 @@ def build_signed_event_item(
     item_type: str,
     item_id: str,
     space_id: str,
+    epoch: int,
     origin_instance_id: str,
     identity_seed: bytes,
     identity_pk: bytes,
@@ -240,11 +242,14 @@ def build_signed_event_item(
     """Build and sign one v_97 event-shaped inner: ``body`` is the payload
     of the federation event ``item_type`` names, signed by the ORIGIN
     household's identity key (``origin_instance_id`` must derive from it).
-    The writer cert is added by the sealer, outside the signature."""
+    ``epoch`` is the content epoch it is sealed at — signed, so nobody
+    holding a later key can re-seal an old item as new. The writer cert is
+    added by the sealer, outside the signature (it is epoch-bound itself)."""
     inner: dict[str, object] = {
         "item_type": item_type,
         "item_id": item_id,
         "space_id": space_id,
+        "epoch": epoch,
         "origin_instance_id": origin_instance_id,
         "author_pk": identity_pk.hex(),
         "ts": ts,
@@ -282,6 +287,9 @@ def verify_signed_event_item(inner: object) -> bool:
         if not isinstance(value, str) or not value:
             return False
     if not is_event_item_id(inner.get("item_id")):
+        return False
+    epoch = inner.get("epoch")
+    if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
         return False
     if not isinstance(inner.get("body"), dict):
         return False

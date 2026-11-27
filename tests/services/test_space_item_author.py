@@ -178,6 +178,7 @@ def _event(**over) -> dict:
         "item_type": "space_task_created",
         "item_id": "ab" * 16,
         "space_id": "sp-1",
+        "epoch": 4,
         "origin_instance_id": ORIGIN,
         "identity_seed": KP.private_key,
         "identity_pk": KP.public_key,
@@ -198,6 +199,7 @@ def test_an_event_item_verifies():
         ("item_type", "space_task_deleted"),
         ("item_id", "cd" * 16),
         ("space_id", "sp-2"),
+        ("epoch", 5),
         ("ts", "2026-11-27T12:00:01+00:00"),
         ("body", {"space_id": "sp-1", "task_id": "t-2", "title": "Milk"}),
     ],
@@ -220,6 +222,8 @@ def test_an_event_item_needs_a_v2_item_id_and_a_dict_body():
     assert not verify_signed_event_item(_event(item_id="short"))
     assert not verify_signed_event_item(_event(item_id="AB" * 16))
     assert not verify_signed_event_item(dict(_event(), body="x"))
+    assert not verify_signed_event_item(dict(_event(), epoch="4"))
+    assert not verify_signed_event_item(dict(_event(), epoch=True))
     assert not verify_signed_event_item("x")
 
 

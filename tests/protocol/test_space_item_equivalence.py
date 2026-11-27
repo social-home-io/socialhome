@@ -28,6 +28,8 @@ from datetime import UTC, datetime
 import pytest
 
 from socialhome.crypto import (
+    REPLAY_CACHE_WINDOW,
+    ReplayCache,
     derive_instance_id,
     generate_identity_keypair,
 )
@@ -86,9 +88,13 @@ class _Fed:
     post_decrypt_gate_steps = FederationService.post_decrypt_gate_steps
     space_write_gates = FederationService.space_write_gates
     dispatch_space_item = FederationService.dispatch_space_item
+    note_replay_id = FederationService.note_replay_id
+    warm_replay_cache = FederationService.warm_replay_cache
 
     def __init__(self, federation_repo, space_repo, members) -> None:
         self._federation_repo = federation_repo
+        self._replay_cache = ReplayCache(window=REPLAY_CACHE_WINDOW)
+        self._inbound_limiter = None
         self._space_repo = space_repo
         self._space_remote_member_repo = members
         self._user_repo = None
@@ -162,18 +168,23 @@ def _cert(who: _Household, scope: str, *, reader: bool = False) -> dict:
 def _body(event_type: E, who: _Household) -> dict:
     if event_type is E.SPACE_COMMENT_CREATED:
         return {"space_id": SPACE_ID, "author": who.user, "comment_id": "c-1"}
+    if event_type is E.SPACE_POST_REACTION:
+        return {"space_id": SPACE_ID, "user_id": who.user, "post_id": "p-1"}
     return {"space_id": SPACE_ID, "task_id": "t-1", "created_by": who.user}
 
 
 _N = iter(range(1, 10**6))
 
 
-def _item(event_type: E, who: _Household, cert: dict, *, signer=None) -> dict:
+def _item(
+    event_type: E, who: _Household, cert: dict, *, signer=None, epoch=EPOCH
+) -> dict:
     signer = signer or who
     inner = build_signed_event_item(
         item_type=event_type.value,
         item_id=f"{next(_N):032x}",
         space_id=SPACE_ID,
+        epoch=epoch,
         origin_instance_id=who.id,
         identity_seed=signer.kp.private_key,
         identity_pk=signer.kp.public_key,
@@ -348,4 +359,58 @@ async def test_an_item_under_another_space_key_is_refused(world):
     ).to_wire()
     assert not await _via_item(
         fed, dispatch, spaces, E.SPACE_TASK_CREATED, member, cert
+    )
+
+
+# ── Replays: a copy is refused, across a restart, under a newer key ──────
+
+
+async def test_a_replayed_item_is_refused_even_after_a_restart(world):
+    """The claim is in the durable replay table: a new dispatcher (a
+    restart, the in-memory cache rebuilt from disk) refuses the copy."""
+    fed, dispatch, spaces, members = world
+    member = _Household("u-member")
+    await _seat(members, member, SpaceRole.MEMBER.value)
+    space = await spaces.get(SPACE_ID)
+    inner = _item(E.SPACE_RSVP_UPDATED, member, _cert(member, WRITER_SCOPE_WRITE))
+    assert await dispatch.apply(
+        space, epoch=EPOCH, item_type=E.SPACE_RSVP_UPDATED.value, inner=inner
+    )
+    # Restart: a fresh in-memory cache warmed from the table, a new
+    # dispatcher.
+    fed._replay_cache = ReplayCache(window=REPLAY_CACHE_WINDOW)
+    await fed.warm_replay_cache()
+    again = SpaceItemDispatch(
+        federation=fed,
+        writer_certs=_Certs(),  # type: ignore[arg-type]
+        own_instance_id=US,
+    )
+    assert not await again.apply(
+        space, epoch=EPOCH, item_type=E.SPACE_RSVP_UPDATED.value, inner=inner
+    )
+    assert len(fed.dispatched) == 1
+
+
+async def test_an_old_item_cannot_be_resealed_under_a_newer_epoch(world):
+    fed, dispatch, spaces, members = world
+    member = _Household("u-member")
+    await _seat(members, member, SpaceRole.MEMBER.value)
+    space = await spaces.get(SPACE_ID)
+    inner = _item(
+        E.SPACE_RSVP_UPDATED, member, _cert(member, WRITER_SCOPE_WRITE), epoch=EPOCH
+    )
+    assert not await dispatch.apply(
+        space, epoch=EPOCH + 1, item_type=E.SPACE_RSVP_UPDATED.value, inner=inner
+    )
+    assert fed.dispatched == []
+
+
+async def test_a_follower_reaction_passes_both_ways_only_while_allowed(world):
+    follower = _Household("u-follower")
+    await _seat(world[3], follower, SpaceRole.SUBSCRIBER.value)
+    cert = _cert(follower, WRITER_SCOPE_COMMENT, reader=True)
+    # allow_subscriber_react is off in this space: refused both ways.
+    assert await _both(world, E.SPACE_POST_REACTION, follower, cert) == (
+        False,
+        False,
     )

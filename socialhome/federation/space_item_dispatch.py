@@ -18,20 +18,26 @@ roster authorizes the user a body names (owner Q1 A); the cert binds the
 household and the epoch.
 
 An item reaches us more than once (several GFSs, a live push and a ring
-fetch, a mention note): the ``item_id`` is remembered, bounded, so a copy
-costs a signature check and no handler run.
+fetch, a mention note) and may be replayed on purpose (anyone who saw its
+ciphertext — the GFS too). Three things make a copy harmless: the signed
+``epoch`` must be the epoch it was sealed at (nobody re-seals an old item
+under a newer key); its stamp may be at most :data:`MAX_ITEM_AGE_S` old;
+and ``(origin, item_id)`` is claimed in the DURABLE replay cache the §24.11
+pipeline uses (``FederationService.note_replay_id``), whose window
+(``REPLAY_CACHE_WINDOW``, 25 h) outlives every item still accepted — so a
+copy is refused across restarts and never evicted by another household.
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 import orjson
 
 from ..domain.federation import FederationEvent, FederationEventType
+from ..domain.gfs_channel import RING_DURABLE_TTL_S
 from ..domain.space_item import item_spec, item_stamp
 from ..domain.writer_cert import WriterCert
 from ..services.space_item_author import (
@@ -46,11 +52,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: How many item ids are remembered, and for how long (seconds). An item
-#: is re-offered at most for the ring's life (24 h) — a copy older than the
-#: window re-runs its handler, which is idempotent per ``ITEM_SPECS``.
-SEEN_ITEMS_MAX: int = 8192
-SEEN_ITEMS_TTL_S: float = 24 * 3600.0
+#: The oldest stamp an item may carry (seconds): the ring's life. The
+#: durable replay cache keeps a claimed id longer (asserted in the tests),
+#: so every item still accepted is one whose copies are refused.
+MAX_ITEM_AGE_S: int = RING_DURABLE_TTL_S
+
+#: The replay-cache namespace of a claimed item.
+ITEM_REPLAY_PREFIX: str = "space-item:"
 
 #: The ``msg_id`` prefix of an event built from an item (never on a wire).
 ITEM_MSG_ID_PREFIX: str = "item:"
@@ -58,6 +66,8 @@ ITEM_MSG_ID_PREFIX: str = "item:"
 
 class _ItemSink(Protocol):
     async def dispatch_space_item(self, event: FederationEvent) -> bool: ...
+
+    async def note_replay_id(self, msg_id: str) -> bool: ...
 
 
 def parse_event_item(plaintext: bytes) -> tuple[str, dict] | None:
@@ -80,7 +90,7 @@ def parse_event_item(plaintext: bytes) -> tuple[str, dict] | None:
 class SpaceItemDispatch:
     """Verify an event-shaped space item and apply it as its event."""
 
-    __slots__ = ("_federation", "_own_instance_id", "_seen", "_writer_certs")
+    __slots__ = ("_federation", "_own_instance_id", "_writer_certs")
 
     def __init__(
         self,
@@ -92,19 +102,6 @@ class SpaceItemDispatch:
         self._federation = federation
         self._writer_certs = writer_certs
         self._own_instance_id = own_instance_id
-        self._seen: OrderedDict[str, float] = OrderedDict()
-
-    # ── Seen ids ─────────────────────────────────────────────────────────
-
-    def _was_seen(self, item_id: str, now: float) -> bool:
-        at = self._seen.get(item_id)
-        return at is not None and now - at < SEEN_ITEMS_TTL_S
-
-    def _remember(self, item_id: str, now: float) -> None:
-        self._seen[item_id] = now
-        self._seen.move_to_end(item_id)
-        while len(self._seen) > SEEN_ITEMS_MAX:
-            self._seen.popitem(last=False)
 
     # ── Apply ────────────────────────────────────────────────────────────
 
@@ -137,8 +134,10 @@ class SpaceItemDispatch:
             )
             return False
         item_id = str(inner["item_id"])
-        now = time.monotonic()
-        if self._was_seen(item_id, now):
+        if inner.get("epoch") != epoch:
+            log.warning(
+                "space_item: %s was signed for another epoch — dropped", item_id
+            )
             return False
         if inner.get("space_id") != space.id:
             log.warning("space_item: %s names another space — dropped", item_id)
@@ -149,8 +148,13 @@ class SpaceItemDispatch:
             log.warning("space_item: %s body names another space — dropped", item_id)
             return False
         ts = str(inner["ts"])
-        if item_stamp(ts) is None:
-            log.warning("space_item: %s has a bad or future stamp — dropped", item_id)
+        stamp = item_stamp(ts)
+        if stamp is None or stamp < datetime.now(UTC) - timedelta(
+            seconds=MAX_ITEM_AGE_S
+        ):
+            log.warning(
+                "space_item: %s has a bad, future or too old stamp — dropped", item_id
+            )
             return False
         raw_cert = inner.get(WRITER_CERT_FIELD)
         try:
@@ -174,6 +178,15 @@ class SpaceItemDispatch:
                 space.id,
             )
             return False
+        # Claimed only now — after the signature and the cert — so nobody
+        # but the origin can spend an id, and atomically against the copy
+        # arriving on another socket (the check-and-insert has no await
+        # before the in-memory mark).
+        if await self._federation.note_replay_id(
+            f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
+        ):
+            log.debug("space_item: %s from %s seen before — dropped", item_id, origin)
+            return False
         event = FederationEvent(
             msg_id=ITEM_MSG_ID_PREFIX + item_id,
             event_type=FederationEventType(item_type),
@@ -184,8 +197,6 @@ class SpaceItemDispatch:
             space_id=space.id,
             epoch=epoch,
         )
-        dispatched = await self._federation.dispatch_space_item(event)
-        # Remembered whatever the gates said: the same item again gets the
-        # same verdict (a held one is replayed by the seat buffer itself).
-        self._remember(item_id, now)
-        return dispatched
+        # Claimed whatever the gates say: the same item again gets the same
+        # verdict (a held one is replayed by the seat buffer itself).
+        return await self._federation.dispatch_space_item(event)

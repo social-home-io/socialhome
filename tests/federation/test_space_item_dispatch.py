@@ -12,7 +12,11 @@ from datetime import UTC, datetime, timedelta
 import orjson
 import pytest
 
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.crypto import (
+    REPLAY_CACHE_WINDOW,
+    derive_instance_id,
+    generate_identity_keypair,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.federation import space_item_dispatch as mod
@@ -52,6 +56,13 @@ class _Sink:
     def __init__(self, verdict: bool = True) -> None:
         self.events: list = []
         self.verdict = verdict
+        self.claimed: set[str] = set()
+
+    async def note_replay_id(self, msg_id: str) -> bool:
+        if msg_id in self.claimed:
+            return True
+        self.claimed.add(msg_id)
+        return False
 
     async def dispatch_space_item(self, event) -> bool:
         self.events.append(event)
@@ -73,6 +84,7 @@ def _inner(item_type="space_task_created", item_id="ab" * 16, **over) -> dict:
         "item_type": item_type,
         "item_id": item_id,
         "space_id": "sp-1",
+        "epoch": 1,
         "origin_instance_id": ORIGIN,
         "identity_seed": KP.private_key,
         "identity_pk": KP.public_key,
@@ -109,6 +121,7 @@ async def test_a_valid_item_becomes_its_event_from_the_origin():
     assert event.epoch == 1
     assert event.payload == {"space_id": "sp-1", "task_id": "t-1"}
     assert event.msg_id == ITEM_MSG_ID_PREFIX + "ab" * 16
+    assert sink.claimed == {f"space-item:{ORIGIN}:{'ab' * 16}"}
     assert certs.calls[0]["required_scope"] == "write"
     assert certs.calls[0]["author_pk"] == KP.public_key
 
@@ -131,13 +144,60 @@ async def test_a_refused_item_is_still_remembered():
     assert len(sink.events) == 1
 
 
-async def test_the_seen_set_is_bounded(monkeypatch):
-    monkeypatch.setattr(mod, "SEEN_ITEMS_MAX", 2)
+async def test_a_copy_is_refused_after_a_restart():
+    """The claim lives in the durable replay cache, not in the dispatcher:
+    a new dispatcher (a restart) over the same cache refuses the copy."""
+    sink = _Sink()
+    inner = _inner()
+    assert await _apply(_dispatch(sink), inner)
+    assert not await _apply(_dispatch(sink), inner)
+    assert len(sink.events) == 1
+    assert sink.claimed == {f"space-item:{ORIGIN}:{'ab' * 16}"}
+
+
+async def test_the_claim_is_per_origin():
+    """Another household reusing an id never squats the origin's item."""
+    other = generate_identity_keypair()
     sink = _Sink()
     d = _dispatch(sink)
-    for n in range(3):
-        await _apply(d, _inner(item_id=f"{n:032x}"))
-    assert await _apply(d, _inner(item_id=f"{0:032x}"))  # evicted → runs again
+    squat = _inner(
+        origin_instance_id=derive_instance_id(other.public_key),
+        identity_seed=other.private_key,
+        identity_pk=other.public_key,
+    )
+    assert await _apply(d, squat)
+    assert await _apply(d, _inner())
+    assert len(sink.events) == 2
+
+
+async def test_an_unsigned_copy_never_spends_the_id():
+    sink = _Sink()
+    d = _dispatch(sink)
+    forged = dict(_inner(), body={"space_id": "sp-1", "task_id": "x"})
+    assert not await _apply(d, forged)
+    assert sink.claimed == set()
+    assert await _apply(d, _inner())
+
+
+async def test_an_item_signed_for_another_epoch_is_refused():
+    """A key holder cannot re-seal an old item under a newer epoch."""
+    sink = _Sink()
+    inner = _inner(epoch=0)
+    assert not await _apply(_dispatch(sink), inner)
+    assert sink.events == []
+
+
+async def test_an_item_older_than_the_ring_is_refused():
+    old = (datetime.now(UTC) - timedelta(seconds=mod.MAX_ITEM_AGE_S + 60)).isoformat()
+    assert not await _apply(_dispatch(), _inner(ts=old))
+    fresh = (datetime.now(UTC) - timedelta(seconds=mod.MAX_ITEM_AGE_S - 60)).isoformat()
+    assert await _apply(_dispatch(), _inner(ts=fresh))
+
+
+def test_the_replay_window_outlives_every_accepted_item():
+    """A claimed id must outlive the oldest stamp still accepted (plus the
+    300 s future skew of its first arrival)."""
+    assert REPLAY_CACHE_WINDOW.total_seconds() > mod.MAX_ITEM_AGE_S + 2 * 300
 
 
 async def test_our_own_echo_is_dropped():

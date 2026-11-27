@@ -138,10 +138,13 @@ from .gfs_relay_transport import (
 from .host_equivalence import acting_hosts, serves_as_host
 from .inbound_retry import InboundRetry
 from .inbound_validator import (
+    INSTANCE_INBOUND_LIMIT,
+    INSTANCE_INBOUND_WINDOW_S,
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
     _InboxInstance,
+    instance_bucket,
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
@@ -1223,6 +1226,20 @@ class FederationService:
         federation envelope of that type reaches, so an item can do no more
         than the legacy event from the same household. Returns whether it
         was dispatched (``False``: a gate refused or held it)."""
+        # The origin's per-household budget (§24.11 step 5a) — the same
+        # bucket its envelopes spend: an item is no cheaper a way in. An
+        # item over it is dropped (the ring keeps it; catch-up heals).
+        if self._inbound_limiter is not None and not self._inbound_limiter.is_allowed(
+            instance_bucket(event.from_instance, media=False),
+            limit=INSTANCE_INBOUND_LIMIT,
+            window_s=INSTANCE_INBOUND_WINDOW_S,
+        ):
+            log.warning(
+                "space item %s from %s dropped — over its inbound budget",
+                event.event_type.value,
+                event.from_instance,
+            )
+            return False
         payload = event.payload if isinstance(event.payload, dict) else {}
         ctx = InboundContext(
             envelope={
