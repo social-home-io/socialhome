@@ -2684,34 +2684,37 @@ async def test_a_bazaar_record_is_described_for_its_wrapper_post(encoder):
     assert "bzr-1" in uploader.items
 
 
-async def test_a_catch_up_stops_describing_past_its_sealed_byte_budget(
-    encoder, monkeypatch
-):
-    """v_97 (owner B-8) — lazy descriptors are bounded by the bytes they
-    seal per resource per stream, not only by the record count."""
-    monkeypatch.setattr(provider_mod, "MAX_CATCHUP_SEALED_BYTES", 10)
+async def test_a_cache_only_requester_gets_a_descriptor_for_every_record(encoder):
+    """v_97 (owner 2026-11-27) — a household that reads a GFS space from
+    the cache only never asks for a file (no ``SPACE_MEDIA_WANTED``) and
+    gets none pushed: EVERY record that shows files carries its lazy
+    descriptor — past the 500-record budget a link-joined reader keeps and
+    past any byte count — and nothing is uploaded for it."""
 
-    class _Sized(_ReaderPlan):
-        sealed_bytes = 9
+    class _Lazy(_ReaderPlan):
+        lazy = True
 
     uploader = _ReaderUploader(readers=())
     uploader.cache_readers = {"peer-b"}
 
     async def plan_for_reader(space_id, urls, iid, *, item_id):
         uploader.items.append(item_id)
-        return _Sized(urls)
+        return _Lazy(urls)
 
     uploader.plan_for_reader = plan_for_reader
     svc = _media_provider(encoder, uploader)
+    count = provider_mod.MAX_CATCHUP_MEDIA_RECORDS + 20
     svc._exporters["posts"] = _FakeExporter(
         "posts",
         [
             {"id": f"p-{i}", "author": "u-1", "image_urls": ["api/media/a.webp"]}
-            for i in range(3)
+            for i in range(count)
         ],
     )
     session = _FakeSession(requester="peer-b")
     session.peer_version = OURS
     await svc.stream_initial(session)
-    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
-    assert ["media_refs" in posts[f"p-{i}"] for i in range(3)] == [True, True, False]
+    posts = _streamed_records(session, "posts")
+    assert len(posts) == count
+    assert all("media_refs" in r for r in posts)
+    assert uploader.stored_asks == []

@@ -215,12 +215,6 @@ _OWN_CONTENT_OWNERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
 #: (newest first): each costs a seal (cached) and, once per GFS, an upload.
 MAX_CATCHUP_MEDIA_RECORDS: int = 500
 
-#: v_97 — the bytes one stream's lazy descriptors may seal per resource (a
-#: GFS space's catch-up: described from our copy, never uploaded). Past it
-#: a record goes without a descriptor; its reader asks for such a file
-#: (``SPACE_MEDIA_WANTED``, answered by a push) when it reaches the host.
-MAX_CATCHUP_SEALED_BYTES: int = 1024 * 1024 * 1024
-
 
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
@@ -253,12 +247,21 @@ class _WithMediaRefs:
     push and ``SPACE_MEDIA_WANTED``):
     only the files its GFS is already known to hold are described, and
     nothing is uploaded. Otherwise (a v_80 requester, which can ask for
-    nothing) every file is described and queued for upload to its GFS."""
+    nothing) every file is described and queued for upload to its GFS.
+
+    ``lazy`` (v_97, owner 2026-11-27 — a household that reads a GFS space
+    from the cache only, which never asks for a file nor gets one pushed):
+    EVERY record is described, from our copy, never uploaded — no record
+    or byte budget, since a record without a descriptor would leave its
+    files unreachable. The cost is CPU only: each file is sealed once per
+    stream in a worker thread (the uploader caps the household's sealing
+    workers and remembers each address, so the next requester of the same
+    epoch costs a lookup); the stream yields between records."""
 
     __slots__ = (
         "_budget",
-        "_bytes",
         "_inner",
+        "_lazy",
         "_media",
         "_requester",
         "_stored_only",
@@ -272,13 +275,14 @@ class _WithMediaRefs:
         requester: str,
         *,
         stored_only: bool = False,
+        lazy: bool = False,
     ) -> None:
         self._inner = inner
         self._media = media
         self._requester = requester
         self._stored_only = stored_only
+        self._lazy = lazy and not stored_only
         self._budget = MAX_CATCHUP_MEDIA_RECORDS
-        self._bytes = MAX_CATCHUP_SEALED_BYTES
         self.resource = inner.resource
 
     async def _add(
@@ -287,7 +291,7 @@ class _WithMediaRefs:
         out: list[dict[str, Any]] = []
         for row in rows:
             urls = record_media_urls(self.resource, row)
-            if urls and self._budget > 0 and self._bytes > 0:
+            if urls and (self._lazy or self._budget > 0):
                 # The item the descriptor is sealed for — the id the reader
                 # keeps it under: a bazaar listing is its wrapper post's.
                 item_id = str(
@@ -317,11 +321,14 @@ class _WithMediaRefs:
                         exc_info=True,
                     )
                     plan = None
-                if not self._stored_only:
+                if self._lazy:
+                    # Sealing ran in a worker thread; let other work in
+                    # between records of a long stream.
+                    await asyncio.sleep(0)
+                elif not self._stored_only:
                     # Every described record costs a seal and an upload.
                     self._budget -= 1
                 if plan is not None:
-                    self._bytes -= int(getattr(plan, "sealed_bytes", 0) or 0)
                     if self._stored_only:
                         # Only a descriptor that goes out spends the budget.
                         self._budget -= 1
@@ -878,6 +885,9 @@ class SpaceSyncService:
                 self._media_gfs,
                 session.requester_instance_id,
                 stored_only=await self._narrow_gfs_catchup(session),
+                lazy=await self._media_gfs.reads_space_from_cache(
+                    session.space_id, session.requester_instance_id
+                ),
             )
         return exporter
 

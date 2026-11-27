@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import os
@@ -1475,7 +1476,7 @@ async def test_a_catch_up_reader_of_a_gfs_space_is_described_for_the_cache(
     plan = await u.plan_for_reader(SPACE, ["api/media/a.webp"], "paired", item_id=ITEM)
     assert plan is not None and plan.lazy and plan.targets == ()
     blob = up_mod.seal_file_sync(MEDIA_KEY, SPACE, 4, ITEM, OWN, "a.webp", a)
-    assert plan.refs[0].size == len(blob) == plan.sealed_bytes
+    assert plan.refs[0].size == len(blob)
     await u.upload(plan)
     assert box.rows == [] and gfs.puts == []
     assert (
@@ -1557,3 +1558,33 @@ async def test_an_unreachable_gfs_is_no_verdict_and_tells_nobody(tmp_path):
         await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False) is None
     )
     assert box.failed == []
+
+
+async def test_lazy_describing_is_capped_per_household(tmp_path, monkeypatch):
+    """v_97 — at most ``MAX_DESCRIBING_STREAMS`` lazy catch-up describes
+    seal at once on a household; the rest wait their turn."""
+    _write(tmp_path, "a.webp", 10)
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS}))
+    running = 0
+    peak = 0
+    real = up_mod.SpaceMediaGfsUploader._describe_names
+
+    async def slow(*args, **kwargs):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(up_mod.SpaceMediaGfsUploader, "_describe_names", slow)
+    plans = await asyncio.gather(
+        *(
+            u.plan_for_reader(SPACE, ["api/media/a.webp"], "paired", item_id=f"i-{i}")
+            for i in range(6)
+        )
+    )
+    assert all(p is not None and p.lazy for p in plans)
+    assert peak == up_mod.MAX_DESCRIBING_STREAMS

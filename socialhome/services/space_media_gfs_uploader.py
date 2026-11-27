@@ -151,8 +151,15 @@ MAX_REMEMBERED: int = 4096
 
 #: Descriptors remembered per (space, epoch, file, size, mtime), so one item
 #: planned by two senders (the member broadcast and the seed holder's
-#: follower relay) or re-streamed in a catch-up is sealed once.
-MAX_DESCRIBED: int = 2048
+#: follower relay) or re-streamed in a catch-up is sealed once. A lazy
+#: catch-up describes every file of a GFS space for its requester (v_97);
+#: the address does not depend on who asks, so the next requester of the
+#: same epoch costs a lookup. ~600 B an entry: ~10 MB at the bound.
+MAX_DESCRIBED: int = 16_384
+
+#: v_97 — lazy catch-up streams describing (sealing) at once on this
+#: household; the rest wait their turn (one worker thread each).
+MAX_DESCRIBING_STREAMS: int = 2
 
 _STATUS_STORED = frozenset({200, 201})
 
@@ -319,11 +326,6 @@ class SpaceMediaPlan:
     #: a reader fetches on view, a miss on demand from a holder, v_83).
     lazy: bool = False
 
-    @property
-    def sealed_bytes(self) -> int:
-        """The bytes describing *refs* sealed (a catch-up's budget)."""
-        return sum(ref.size for ref in self.refs)
-
     def wire(self) -> dict[str, dict]:
         """The ``media_refs`` descriptor."""
         return media_refs_to_wire(self.refs)
@@ -336,6 +338,7 @@ class SpaceMediaGfsUploader:
         "_channels",
         "_crypto",
         "_described",
+        "_describing",
         "_dir",
         "_federation",
         "_federation_repo",
@@ -389,6 +392,9 @@ class SpaceMediaGfsUploader:
         #: drop a push to a reader there.
         self._stored_names: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._described: OrderedDict[tuple, SpaceMediaRef] = OrderedDict()
+        #: v_97 — caps the lazy catch-up sealing at once
+        #: (:data:`MAX_DESCRIBING_STREAMS`).
+        self._describing = asyncio.Semaphore(MAX_DESCRIBING_STREAMS)
 
     def attach_federation(self, federation: FederationService) -> None:
         self._federation = federation
@@ -627,10 +633,13 @@ class SpaceMediaGfsUploader:
     ) -> SpaceMediaPlan | None:
         """A described-only plan (:attr:`SpaceMediaPlan.lazy`): a file in
         pieces up to the 200 MiB cap (a GFS that keeps less refuses its
-        pieces on demand, as it would an upload)."""
-        refs = await self._describe_names(
-            space_id, names, item_id, pieces=MAX_PIECED_FILE_BYTES
-        )
+        pieces on demand, as it would an upload). At most
+        :data:`MAX_DESCRIBING_STREAMS` describe at once (each seals in one
+        worker thread); the rest wait."""
+        async with self._describing:
+            refs = await self._describe_names(
+                space_id, names, item_id, pieces=MAX_PIECED_FILE_BYTES
+            )
         if not refs:
             return None
         return SpaceMediaPlan(
