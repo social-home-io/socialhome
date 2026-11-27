@@ -219,6 +219,8 @@ MAX_CATCHUP_MEDIA_RECORDS: int = 500
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
 
+    async def reads_space_from_cache(self, space_id: str, instance_id: str) -> bool: ...
+
     async def takes_relay_frames(self, instance_id: str) -> bool: ...
 
     async def stored_plan_for_reader(
@@ -849,7 +851,7 @@ class SpaceSyncService:
             exporter is not None
             and resource in MEDIA_REF_RESOURCES
             and self._media_gfs is not None
-            and await self._media_gfs.is_relay_reader(session.requester_instance_id)
+            and await self._reads_from_cache(session)
             and (
                 resource != "pages"
                 or await self._takes_page_media(
@@ -865,6 +867,16 @@ class SpaceSyncService:
             )
         return exporter
 
+    async def _reads_from_cache(self, session: SyncSessionRecord) -> bool:
+        """Whether the requester takes the stream's files from a GFS
+        media cache: a link-joined reader, or (v_97) any v_97 household of
+        a GFS space — its records then carry the descriptor."""
+        assert self._media_gfs is not None
+        requester = session.requester_instance_id
+        return await self._media_gfs.is_relay_reader(
+            requester
+        ) or await self._media_gfs.reads_space_from_cache(session.space_id, requester)
+
     async def _narrow_gfs_catchup(self, session: SyncSessionRecord) -> bool:
         """Whether this requester — a member reading a GFS media cache — is
         at v_92 behind a relay that takes full-size binary frames: the
@@ -877,6 +889,11 @@ class SpaceSyncService:
             >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
             and await self._media_gfs.is_relay_reader(session.requester_instance_id)
             and await self._media_gfs.takes_relay_frames(session.requester_instance_id)
+            # v_97 — a GFS space's v_97 household takes every file from the
+            # cache (no catch-up push): every record is described.
+            and not await self._media_gfs.reads_space_from_cache(
+                session.space_id, session.requester_instance_id
+            )
         )
 
     async def _shaped_exporter(

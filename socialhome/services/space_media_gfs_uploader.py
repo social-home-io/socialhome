@@ -102,6 +102,7 @@ from ..domain.media_constraints import (
 )
 from ..domain.space_item_outbox import (
     MEDIA_UPLOAD_ROW,
+    UNSENT_REFUSED,
     UNSENT_TOO_LARGE,
     QueuedSpaceItem,
 )
@@ -323,7 +324,6 @@ class SpaceMediaGfsUploader:
     """Plan and upload a space item's files to the GFSs its readers use."""
 
     __slots__ = (
-        "_cached_files",
         "_channels",
         "_crypto",
         "_described",
@@ -364,9 +364,6 @@ class SpaceMediaGfsUploader:
         self._channels: GfsChannelService | None = None
         #: v_97 — the durable queue every upload waits in.
         self._outbox: SpaceItemOutbox | None = None
-        #: v_97 — (space, file) an item described and queued for the GFS
-        #: cache (:meth:`push_targets`), bounded.
-        self._cached_files: OrderedDict[tuple[str, str], None] = OrderedDict()
         #: v_97 — whether a space's 14-day legacy window is open.
         self._legacy_window: Callable[[str], Awaitable[bool]] | None = None
         #: Spaces already warned about lacking any upload authorization.
@@ -400,13 +397,13 @@ class SpaceMediaGfsUploader:
     async def push_targets(
         self, space_id: str, filename: str, targets: list[str]
     ) -> list[str]:
-        """Who still needs the household push of a live item's *filename*
-        (v_97, owner 2026-11-27): a file the item described for the GFS
-        cache and that is queued there reaches its v_97 households from the
-        cache — only older ones (and everyone while the space's legacy
-        window is open) keep the push. Any other file — none described, no
-        GFS takes it — goes to everyone."""
-        if (space_id, filename) not in self._cached_files or self._federation is None:
+        """Who still gets the household push of *filename* (v_97, owner
+        2026-11-27): in a GFS space every file reaches a v_97 household
+        only through the GFS cache (the item describes it; a file no GFS
+        takes is shown to its author instead) — only households below
+        v_97, and everyone while the space's 14-day legacy window is open,
+        keep the push. A mesh space's files go to everyone."""
+        if self._federation is None or await self.scope_of(space_id) is None:
             return list(targets)
         if self._legacy_window is not None and await self._legacy_window(space_id):
             return list(targets)
@@ -570,6 +567,17 @@ class SpaceMediaGfsUploader:
             space_id, names, conns, item_id, scoped=scoped, author=author_user_id
         )
 
+    async def reads_space_from_cache(self, space_id: str, instance_id: str) -> bool:
+        """v_97 — whether *instance_id* takes *space_id*'s files from the
+        GFS space media cache: a GFS space (one with a channel here) and a
+        v_97 household — paired, mesh or link-joined alike (owner
+        2026-11-27: a GFS space's files come only through the GFS)."""
+        if self._federation is None or await self.scope_of(space_id) is None:
+            return False
+        return await self._federation.space_member_supports(
+            instance_id, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
+        )
+
     async def plan_for_reader(
         self,
         space_id: str,
@@ -578,13 +586,23 @@ class SpaceMediaGfsUploader:
         *,
         item_id: str,
     ) -> SpaceMediaPlan | None:
-        """The plan for ONE link-joined reader (a catch-up stream): only its
-        GFS. ``None`` when it is no v_80 link-joined member."""
+        """The plan for ONE catch-up reader: a link-joined reader's own
+        GFS, or (v_97) for any household that reads a GFS space from the
+        cache, the GFSs the space's channel lives on. ``None`` otherwise."""
         names = media_names(media_urls)
-        conn = await self._reader_conn(instance_id) if names else None
-        if conn is None:
+        if not names:
             return None
-        return await self._plan(space_id, names, [conn], item_id)
+        conn = await self._reader_conn(instance_id)
+        if conn is not None:
+            return await self._plan(space_id, names, [conn], item_id)
+        if await self.reads_space_from_cache(space_id, instance_id):
+            return await self._plan(
+                space_id,
+                names,
+                await self._media_targets(space_id, followers=False),
+                item_id,
+            )
+        return None
 
     async def _plan(
         self,
@@ -602,12 +620,16 @@ class SpaceMediaGfsUploader:
         if scoped is None:
             return None
         targets = await self._capable(conns, scoped[0])
-        if not targets:
-            return None
-        # Nothing this household could PUT is never sealed or described: a
-        # descriptor naming a blob no GFS will hold only costs its readers a
-        # fetch before the push lands.
-        if not await self.can_upload(space_id, scoped=scoped):
+        # Nothing this household could PUT is never sealed or described. In
+        # a GFS space its files have no other way (v_97): the author is told
+        # they could not be sent.
+        if not targets or not await self.can_upload(space_id, scoped=scoped):
+            log.info(
+                "space media of space %s: no GFS of the space takes its files"
+                " — not sent",
+                space_id,
+            )
+            await self._tell_unsent(space_id, author, UNSENT_REFUSED)
             return None
         pieces = False
         for conn in targets:
@@ -877,6 +899,11 @@ class SpaceMediaGfsUploader:
         )
 
     async def _tell_too_large(self, space_id: str, author: str) -> None:
+        await self._tell_unsent(space_id, author, UNSENT_TOO_LARGE)
+
+    async def _tell_unsent(self, space_id: str, author: str, error: str) -> None:
+        """A file of *author*'s item that can't reach the GFS cache: shown
+        as "Couldn't send" (no push carries it in a GFS space)."""
         if self._outbox is None:
             return
         try:
@@ -884,7 +911,7 @@ class SpaceMediaGfsUploader:
                 space_id=space_id,
                 event_type=MEDIA_UPLOAD_ROW,
                 author_user_id=author,
-                error=UNSENT_TOO_LARGE,
+                error=error,
             )
         except Exception:
             log.warning("space media: an unsent file was not recorded", exc_info=True)
@@ -989,22 +1016,13 @@ class SpaceMediaGfsUploader:
             if gfs_ids:
                 rows.append((_locator(ref, index, manifest), gfs_ids))
         # Every row of one file in one go: a file is never half queued.
-        queued = bool(rows) and await self._outbox.queue_media(
-            space_id=plan.space_id,
-            epoch=ref.epoch,
-            parts=rows,
-            author_user_id=author,
-        )
-        if queued or any(
-            self._stored.get((c.id, address), 0.0) > now
-            for c in conns
-            for _i, address in parts
-        ):
-            key = (plan.space_id, ref.filename)
-            self._cached_files[key] = None
-            self._cached_files.move_to_end(key)
-            while len(self._cached_files) > MAX_REMEMBERED:
-                self._cached_files.popitem(last=False)
+        if rows:
+            await self._outbox.queue_media(
+                space_id=plan.space_id,
+                epoch=ref.epoch,
+                parts=rows,
+                author_user_id=author,
+            )
 
     async def deliver(self, row: QueuedSpaceItem) -> PublishOutcome:
         """One attempt of one queued blob (or piece) on ``row.gfs_id``."""

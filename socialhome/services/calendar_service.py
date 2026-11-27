@@ -2672,7 +2672,6 @@ class SpaceCalendarService(
                 correlation_id=event.id,
                 target_instance_ids=targets,
                 media_urls=fresh,
-                live=True,
             )
         except Exception:
             log.exception(

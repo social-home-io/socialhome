@@ -1240,3 +1240,74 @@ async def test_a_gfs_described_hashed_file_is_filled_by_the_hosts_push(env, db):
         _blob(_hashed("post-gfs", "x.webp", data), body=data)
     )
     assert (media / SC(data)).read_bytes() == data
+
+
+async def test_a_gfs_described_comment_picture_is_kept_for_the_cache(env, db):
+    """v_97 — a GFS space's comment picture comes with a descriptor: the
+    comment shows this household's name for the cached copy, bound to the
+    sender, and a ``space_media_refs`` row is kept for the fetch."""
+    svc, media = env
+    await _seat(db, "peer-a", "u-a")
+    fetcher = SpaceMediaGfsFetcher(
+        refs_repo=SqliteSpaceMediaRefRepo(db),
+        space_crypto=_NoKeys(),  # type: ignore[arg-type]
+        gfs_service=_NoGfs(),  # type: ignore[arg-type]
+        gfs_repo=_NoGfs(),  # type: ignore[arg-type]
+        federation_repo=_NoInstances(),  # type: ignore[arg-type]
+        space_repo=SqliteSpaceRepo(db),
+        federation=_NoInstances(),  # type: ignore[arg-type]
+        media_dir=media,
+    )
+    svc.attach_gfs_media(fetcher)
+
+    def _event(event_type, msg_id, payload):
+        return FederationEvent(
+            msg_id=msg_id,
+            event_type=event_type,
+            from_instance="peer-a",
+            to_instance="self",
+            timestamp=datetime.now(UTC).isoformat(),
+            payload=payload,
+            space_id="sp-a",
+        )
+
+    await svc._on_space_post_created(
+        _event(
+            FET.SPACE_POST_CREATED,
+            "m-p",
+            {"id": "post-c", "author": "u-a", "type": "text", "content": "hi"},
+        )
+    )
+    await svc._on_space_comment_added(
+        _event(
+            FET.SPACE_COMMENT_CREATED,
+            "m-c",
+            {
+                "id": "com-1",
+                "post_id": "post-c",
+                "author": "u-a",
+                "type": "image",
+                "content": "",
+                "media_url": "api/media/c.webp",
+                "media_refs": {
+                    "c.webp": {
+                        "blob_id": "b" * 64,
+                        "suite": "aesgcm-256-pad-det",
+                        "epoch": 0,
+                        "size": 99,
+                        "scope": "channel",
+                        "addr_suite": "sm1",
+                    }
+                },
+            },
+        )
+    )
+    await fetcher.drain()
+    ref = await db.fetchone(
+        "SELECT local_name, blob_id FROM space_media_refs WHERE item_id = 'com-1'"
+    )
+    assert ref is not None and ref["blob_id"] == "b" * 64
+    row = await db.fetchone(
+        "SELECT media_url FROM space_post_comments WHERE id = 'com-1'"
+    )
+    assert row["media_url"] == f"api/media/{ref['local_name']}"

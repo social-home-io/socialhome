@@ -189,7 +189,9 @@ def test_record_media_urls_per_resource() -> None:
     ]
     assert record_media_urls("gallery", {"kind": "album", "cover_url": "x"}) == []
     assert record_media_urls("tasks", {"media_url": "api/media/x.webp"}) == []
-    assert MEDIA_REF_RESOURCES == frozenset({"posts", "calendar", "gallery", "pages"})
+    assert MEDIA_REF_RESOURCES == frozenset(
+        {"posts", "comments", "calendar", "gallery", "bazaar", "pages"}
+    )
 
 
 # ── A page's files: its cover and the pictures its body shows ───────────

@@ -109,7 +109,14 @@ def test_the_registry_is_frozen() -> None:
 
 
 def test_resource_sets_derive_from_the_registry() -> None:
-    assert MEDIA_REF_RESOURCES == {"posts", "calendar", "gallery", "pages"}
+    assert MEDIA_REF_RESOURCES == {
+        "posts",
+        "comments",
+        "calendar",
+        "gallery",
+        "bazaar",
+        "pages",
+    }
     assert FILE_HASH_RESOURCES == {"posts", "calendar", "gallery", "comments", "bazaar"}
     # The descriptor module re-exports the same sets.
     assert space_media_ref.MEDIA_REF_RESOURCES is MEDIA_REF_RESOURCES

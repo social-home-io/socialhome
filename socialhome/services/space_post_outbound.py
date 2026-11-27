@@ -633,7 +633,6 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                         target_instance_ids=targets,
                         media_urls=media_urls,
                         space_id=event.space_id,
-                        live=True,
                     )
                 except Exception:
                     log.exception(
@@ -728,7 +727,10 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             )
 
     async def _ship_comment_media(
-        self, space_id: str, correlation_id: str, media_urls: list[str]
+        self,
+        space_id: str,
+        correlation_id: str,
+        media_urls: list[str],
     ) -> None:
         """Queue a comment's picture for every other member household at
         v_85 (one ``SPACE_MEDIA_BLOB`` outbox row each) — an older one keeps
@@ -783,6 +785,16 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         }
         media_urls = item_media_urls("comments", c)
         payload = await self._with_file_hashes(payload, media_urls)
+        # v_97 — in a GFS space the comment's picture goes to the GFS cache
+        # like a post's: the descriptor rides the comment.
+        media_plan = await self._plan_media_refs(
+            event.space_id,
+            media_urls,
+            item_id=c.id,
+            followers=False,
+            author_user_id=c.author,
+        )
+        payload = self._with_media_refs(payload, media_plan)
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,
@@ -798,6 +810,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # v_85 — a comment's picture ships like a post's (it is stored
         # content-addressed on the receiver, so only bytes that hash to what
         # the comment carries ever back it).
+        await self._upload_media(media_plan, author_user_id=c.author)
         await self._ship_comment_media(event.space_id, c.id, media_urls)
         if await self._member_publishable(event.space_id):
             await self._schedule_item(

@@ -1388,25 +1388,62 @@ async def test_a_piece_whose_file_changed_is_not_sent(tmp_path):
     assert gfs.puts == []
 
 
-async def test_push_targets_keep_the_push_unless_the_cache_has_the_file(tmp_path):
-    """v_97 — a live item's file it described AND queued for the GFS cache
-    is pushed only to households below v_97 (and to everyone while the
-    space's legacy window is open); any other file to everyone."""
-    _write(tmp_path, "a.webp", 10)
+async def test_a_gfs_spaces_files_are_pushed_only_below_v97(tmp_path):
+    """v_97 (owner 2026-11-27) — a GFS space's files reach a v_97
+    household only through the GFS cache: whatever the file, only older
+    households keep the push (everyone while the legacy window is open); a
+    mesh space's files go to everyone."""
     g1 = _Conn("g1", "https://g1.example")
-    gfs = _Gfs([g1])
-    u = _pieced_uploader(tmp_path, gfs)
+    u = _pieced_uploader(tmp_path, _Gfs([g1]))
     u.attach_federation(_Fed({"new": OURS, "old": 90}))
     targets = ["new", "old"]
-    # Nothing described yet: everyone keeps the push.
-    assert await u.push_targets(SPACE, "a.webp", targets) == targets
-    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    await _upload(u, plan)
     assert await u.push_targets(SPACE, "a.webp", targets) == ["old"]
-    assert await u.push_targets(SPACE, "b.webp", targets) == targets
+    assert await u.push_targets(SPACE, "any.webp", targets) == ["old"]
+    mesh = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(b"\1" * 32, channel=None))
+    mesh.attach_federation(_Fed({"new": OURS}))
+    assert await mesh.push_targets(SPACE, "a.webp", targets) == targets
 
     async def window_open(space_id):
         return True
 
     u.attach_legacy_window(window_open)
     assert await u.push_targets(SPACE, "a.webp", targets) == targets
+
+
+async def test_a_catch_up_reader_of_a_gfs_space_is_described_for_the_cache(
+    tmp_path,
+):
+    """v_97 — a paired (or mesh) v_97 household catching a GFS space up
+    gets the descriptor too, planned on the channel's GFSs: it reads the
+    space's files from the cache, never a push."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _pieced_uploader(tmp_path, _Gfs([g1]))
+    u.attach_federation(_Fed({"paired": OURS, "old": 90}))
+    assert await u.reads_space_from_cache(SPACE, "paired") is True
+    assert await u.reads_space_from_cache(SPACE, "old") is False
+    plan = await u.plan_for_reader(SPACE, ["api/media/a.webp"], "paired", item_id=ITEM)
+    assert plan is not None and [t.id for t in plan.targets] == ["g1"]
+    assert (
+        await u.plan_for_reader(SPACE, ["api/media/a.webp"], "old", item_id=ITEM)
+        is None
+    )
+
+
+async def test_a_file_no_gfs_of_the_space_takes_is_told_to_its_author(tmp_path):
+    """v_97 — with no GFS of the space keeping its media, a GFS space's
+    file has no way to its households: the author is told (no push)."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _pieced_uploader(tmp_path, _Gfs([g1], scopes=()))
+    box = _Outbox()
+    u.attach_outbox(box)
+    plan = await u.plan(
+        SPACE,
+        ["api/media/a.webp"],
+        item_id=ITEM,
+        followers=False,
+        author_user_id="anna",
+    )
+    assert plan is None
+    assert box.failed == [(SPACE, "anna", "refused")]

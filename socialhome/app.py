@@ -2450,7 +2450,7 @@ def _wire_federation_stack(
     # service ships the full BazaarListing payload + image bytes so
     # remote members see price / mode / photos / status, not just the
     # caption. See ``socialhome/services/bazaar_outbound.py``.
-    BazaarOutbound(
+    bazaar_outbound = BazaarOutbound(
         bus=bus,
         federation_service=federation_service,
         bazaar_repo=bazaar_repo,
@@ -2688,6 +2688,7 @@ def _wire_federation_stack(
         moment_reaction_counts=moment_reaction_counts,
         content_inbound=content_inbound,
         gallery_federation_outbound=gallery_federation_outbound,
+        bazaar_outbound=bazaar_outbound,
         page_federation_outbound=page_federation_outbound,
     )
 
@@ -5914,6 +5915,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_post_outbound.attach_media_gfs(space_media_uploader)
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
+        fed.bazaar_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
         # …and the outbox skips a SPACE_MEDIA_BLOB push to one of them only
         # while its GFS is known to hold the file (every member is pushed

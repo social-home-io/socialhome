@@ -2052,6 +2052,10 @@ class _ReaderUploader:
     async def is_relay_reader(self, iid):
         return iid in self.readers
 
+    async def reads_space_from_cache(self, space_id, iid):
+        # v_97 — a v_97 household of a GFS space (any path).
+        return iid in getattr(self, "cache_readers", set())
+
     async def takes_relay_frames(self, iid):
         return self.frames and iid in self.readers
 
@@ -2643,3 +2647,20 @@ async def test_the_ban_reason_reaches_admin_households_only(encoder, admin):
     (got,) = _records(session)["bans"]
     assert got["banned_by"] == "u-a" and got["user_id"] == "u-x"
     assert got.get("reason") == ("spam" if admin else None)
+
+
+async def test_a_paired_v97_requester_of_a_gfs_space_gets_every_descriptor(encoder):
+    """v_97 — a paired household catching a GFS space up is no link-joined
+    reader, yet it reads the space's files from the GFS cache: its records
+    carry the descriptor (full plan, uploaded), never only the stored
+    blobs."""
+    uploader = _ReaderUploader(stored={"c.webp"})
+    uploader.cache_readers = {"peer-b"}
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert "media_refs" in posts["p-1"]
+    assert uploader.stored_asks == []
+    assert len(uploader.uploaded) >= 1
