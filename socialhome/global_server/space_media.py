@@ -100,7 +100,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..domain.gfs_space_media import MEDIA_SCOPES, space_media_address
+from ..domain.gfs_space_media import (
+    MEDIA_SCOPES,
+    PieceProof,
+    check_piece,
+    space_media_address,
+)
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
 from .blob_store import (
     TEMP_GRACE_S,
@@ -221,6 +226,9 @@ class SpaceMediaLimits:
             "space_max_bytes": self.space_max_bytes,
             "space_uploads_per_hour": self.space_uploads_per_hour,
             "scopes": sorted(MEDIA_SCOPES),
+            # v_97 — it keeps 8 MiB pieces of a larger file (sm1p): only
+            # when a whole piece fits its blob cap.
+            **({"pieces": True} if self.max_blob_bytes >= MAX_BLOB_BYTES else {}),
         }
 
 
@@ -470,6 +478,7 @@ class GfsSpaceMediaStore:
         reserved: UploadSlot | None = None,
         client: str | None = None,
         owner: tuple[str, str] | None = None,
+        proof: PieceProof | None = None,
     ) -> bool:
         """Keep one blob for the scope. ``True`` when its bytes were stored
         now, ``False`` when they already were (the scope's retry, another
@@ -479,7 +488,9 @@ class GfsSpaceMediaStore:
         stores nothing new); without it this call admits the upload itself
         (for *client*'s address). *owner* is the fairness owner the blob
         counts against — ``("client", the uploader's keyed network
-        prefix)``; without it the scope stands alone. Raises :class:`MediaRefused`."""
+        prefix)``; without it the scope stands alone. *proof*: the blob is
+        a piece (sm1p) — its bytes are checked against the proof, never as a
+        content address. Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
         if reserved is None:
             admitted = await self.admit_upload(
@@ -500,7 +511,7 @@ class GfsSpaceMediaStore:
             if expires_at <= now:
                 raise MediaRefused(422, "bad_expiry")
             expires_at = min(expires_at, now + self._limits.ttl_s)
-            await check_scoped_address(scope_kind, scope_id, blob_id, data)
+            await check_scoped_address(scope_kind, scope_id, blob_id, data, proof)
             async with self._lock:
                 stored = await self._store(
                     scope_kind,
@@ -908,11 +919,23 @@ class GfsSpaceMediaStore:
 
 
 async def check_scoped_address(
-    scope_kind: str, scope_id: str, blob_id: str, data: bytes
+    scope_kind: str,
+    scope_id: str,
+    blob_id: str,
+    data: bytes,
+    proof: PieceProof | None = None,
 ) -> None:
     """``422 blob_id_mismatch`` unless *blob_id* is the scope-bound address
     of *data* (:func:`~socialhome.domain.gfs_space_media.space_media_address`)
-    — hashing up to 8 MiB in a worker thread."""
+    — or, for a piece (*proof*, sm1p), unless *proof* places exactly these
+    bytes at *blob_id* (:func:`~socialhome.domain.gfs_space_media
+    .check_piece`) — hashing up to 8 MiB in a worker thread."""
+    if proof is not None:
+        if not await asyncio.to_thread(
+            check_piece, scope_kind, scope_id, blob_id, data, proof
+        ):
+            raise MediaRefused(422, "blob_id_mismatch")
+        return
     try:
         address = await asyncio.to_thread(
             space_media_address, scope_kind, scope_id, data

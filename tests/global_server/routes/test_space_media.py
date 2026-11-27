@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import os
 import time
 from datetime import UTC, datetime
@@ -22,13 +23,18 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from socialhome.domain.gfs_space_media import (
+    ADDR_SUITE_SM1P,
     AUTH_CHANNEL,
     CHANNEL_MEDIA_DELETE_PREFIX,
+    PIECE_PROOF_HEADER,
     SCOPE_CHANNEL,
     SPACE_MEDIA_AUTH_HEADER,
+    PieceProof,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
     media_delete_payload,
+    piece_address,
+    pieced_file_address,
     space_media_address,
 )
 from socialhome.gfs_channel import (
@@ -483,6 +489,8 @@ async def test_info_advertises_the_cache_in_the_signed_block(gfs):
         "scopes": ["channel"],
         # v_83 — a reader may ask for a blob it missed, waiting this long.
         "on_demand": {"wait_s": 25},
+        # v_97 — it keeps the 8 MiB pieces of a larger file (sm1p).
+        "pieces": True,
     }
     assert verify_capabilities(
         body["public_key"],
@@ -1073,3 +1081,152 @@ async def test_the_byte_budget_is_per_network_prefix(gfs):
     )
     assert r.status == 429
     assert (await r.json())["error"] == "ip_media_quota"
+
+
+# ── v_97 pieces (sm1p): a derived address, proved by the manifest ─────────
+
+
+def _pieces(n: int = 3) -> list[bytes]:
+    return [os.urandom(SMALL) for _ in range(n)]
+
+
+def _proof(pieces: list[bytes], index: int) -> PieceProof:
+    return PieceProof(
+        manifest=tuple(hashlib.sha256(p).hexdigest() for p in pieces), index=index
+    )
+
+
+def _piece_addr(proof: PieceProof, channel: str = CHANNEL) -> str:
+    return piece_address(
+        pieced_file_address(SCOPE_CHANNEL, channel, proof.manifest), proof.index
+    )
+
+
+def _piece_headers(blob_id: str, size: int, proof: PieceProof | None) -> dict:
+    now = int(time.time())
+    claim = SpaceMediaClaim(
+        scope=SCOPE_CHANNEL,
+        scope_id=CHANNEL,
+        blob_id=blob_id,
+        size=size,
+        expires_at=now + 86_400,
+        ts=now,
+        addr_suite=ADDR_SUITE_SM1P,
+    )
+    headers = _channel_header(claim)
+    if proof is not None:
+        headers[PIECE_PROOF_HEADER] = proof.to_header()
+    return headers
+
+
+async def test_a_piece_with_its_proof_is_stored_at_its_derived_address(gfs):
+    pieces = _pieces()
+    proof = _proof(pieces, 1)
+    addr = _piece_addr(proof)
+    r = await gfs.put(
+        f"/gfs/media/{addr}",
+        data=pieces[1],
+        headers=_piece_headers(addr, len(pieces[1]), proof),
+    )
+    assert r.status == 201
+    g = await gfs.get(f"/gfs/media/{addr}")
+    assert g.status == 200
+    assert await g.read() == pieces[1]
+
+
+async def test_a_wrong_piece_at_a_real_piece_address_is_refused(gfs):
+    """A member holding the key seals other bytes and tries to put them
+    where the author's piece belongs: the manifest names the real piece."""
+    pieces = _pieces()
+    proof = _proof(pieces, 1)
+    addr = _piece_addr(proof)
+    evil = os.urandom(SMALL)
+    r = await gfs.put(
+        f"/gfs/media/{addr}", data=evil, headers=_piece_headers(addr, SMALL, proof)
+    )
+    assert r.status == 422
+    # A manifest forged to name the evil bytes derives another address.
+    forged = _proof([pieces[0], evil, pieces[2]], 1)
+    r = await gfs.put(
+        f"/gfs/media/{addr}", data=evil, headers=_piece_headers(addr, SMALL, forged)
+    )
+    assert r.status == 422
+    assert (await gfs.get(f"/gfs/media/{addr}")).status == 404
+    # The real piece still lands afterwards: nobody squatted the address.
+    r = await gfs.put(
+        f"/gfs/media/{addr}",
+        data=pieces[1],
+        headers=_piece_headers(addr, SMALL, proof),
+    )
+    assert r.status == 201
+
+
+async def test_a_piece_under_another_index_is_refused(gfs):
+    pieces = _pieces()
+    proof = _proof(pieces, 1)
+    addr = _piece_addr(proof)
+    r = await gfs.put(
+        f"/gfs/media/{addr}",
+        data=pieces[0],
+        headers=_piece_headers(addr, SMALL, _proof(pieces, 0)),
+    )
+    assert r.status == 422
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "garbage",
+        # index out of range
+        base64.urlsafe_b64encode(
+            orjson.dumps({"manifest": ["a" * 64, "b" * 64], "index": 5})
+        )
+        .decode()
+        .rstrip("="),
+        # past the 200 MiB / 8 MiB bound
+        base64.urlsafe_b64encode(
+            orjson.dumps({"manifest": ["a" * 64] * 26, "index": 0})
+        )
+        .decode()
+        .rstrip("="),
+    ],
+)
+async def test_an_sm1p_upload_needs_a_well_formed_proof(gfs, body_reads, raw):
+    pieces = _pieces(2)
+    proof = _proof(pieces, 0)
+    addr = _piece_addr(proof)
+    headers = _piece_headers(addr, SMALL, None)
+    if raw is not None:
+        headers[PIECE_PROOF_HEADER] = raw
+    r = await gfs.put(f"/gfs/media/{addr}", data=pieces[0], headers=headers)
+    assert r.status == 400
+    assert body_reads["n"] == 0
+
+
+async def test_a_content_addressed_upload_never_takes_a_piece_proof_path(gfs):
+    """An sm1 claim is checked as a content address even when a proof rides
+    along: a proof can't turn a piece address into an sm1 upload."""
+    pieces = _pieces(2)
+    proof = _proof(pieces, 0)
+    addr = _piece_addr(proof)
+    now = int(time.time())
+    claim = SpaceMediaClaim(
+        scope=SCOPE_CHANNEL,
+        scope_id=CHANNEL,
+        blob_id=addr,
+        size=SMALL,
+        expires_at=now + 86_400,
+        ts=now,
+    )
+    headers = {**_channel_header(claim), PIECE_PROOF_HEADER: proof.to_header()}
+    r = await gfs.put(f"/gfs/media/{addr}", data=pieces[0], headers=headers)
+    assert r.status == 422
+
+
+@pytest.mark.parametrize(
+    "gfs", [{"space_media_max_bytes": 4 * 1024 * 1024}], indirect=True
+)
+async def test_a_cache_too_small_for_a_piece_does_not_advertise_pieces(gfs):
+    body = await (await gfs.get("/gfs/info")).json()
+    assert "pieces" not in body["capabilities"]["space_media"]

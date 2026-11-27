@@ -5,6 +5,7 @@ household does (a signed ``PUT /gfs/media/serve/{ticket}`` or a decline)."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import time
 
@@ -17,10 +18,14 @@ from socialhome.canonical_json import canonical_bytes
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from socialhome.domain.gfs_space_media import (
     AUTH_CHANNEL,
+    PIECE_PROOF_HEADER,
     SCOPE_CHANNEL,
     SPACE_MEDIA_AUTH_HEADER,
+    PieceProof,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
+    piece_address,
+    pieced_file_address,
     space_media_address,
 )
 from socialhome.domain.gfs_space_media_on_demand import serve_signing_body
@@ -748,3 +753,75 @@ async def test_readers_on_a_node_without_the_claim_poll_once_and_stop_with_it(
     assert time.monotonic() - started < 4.5
     # One poller (≈ every 0.5 s) plus each reader's first look.
     assert reads["n"] <= 10
+
+
+# ── v_97 pieces: a holder serves a piece with its proof ──────────────────
+
+
+def _piece() -> tuple[list[bytes], PieceProof, str]:
+    pieces = [os.urandom(SMALL) for _ in range(3)]
+    proof = PieceProof(
+        manifest=tuple(hashlib.sha256(p).hexdigest() for p in pieces), index=2
+    )
+    addr = piece_address(
+        pieced_file_address(SCOPE_SPACE, SPACE, proof.manifest), proof.index
+    )
+    return pieces, proof, addr
+
+
+async def _answer_piece(tc, ws, blob: bytes, proof: PieceProof | str):
+    frame = await asyncio.wait_for(ws.frames.get(), 5)
+    headers = _serve_headers(HOST, HOST_SEED, frame["ticket"])
+    headers[PIECE_PROOF_HEADER] = proof if isinstance(proof, str) else proof.to_header()
+    if frame["mode"] == "cache":
+        headers[SPACE_MEDIA_AUTH_HEADER] = _auth(blob, frame["blob_id"])
+    resp = await tc.put(
+        f"/gfs/media/serve/{frame['ticket']}", data=blob, headers=headers
+    )
+    return frame, resp.status, await resp.json()
+
+
+async def test_a_piece_is_streamed_when_its_proof_places_it(gfs):
+    pieces, proof, addr = _piece()
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, addr))
+    _frame, status, body = await _answer_piece(gfs, ws, pieces[2], proof)
+    resp = await reader
+    assert (status, body) == (200, {"stored": False})
+    assert resp.status == 200 and await resp.read() == pieces[2]
+
+
+async def test_a_re_uploaded_piece_is_stored_under_its_proof(gfs):
+    pieces, proof, addr = _piece()
+    await _mark_stored(gfs, addr, ago=60)
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, addr))
+    frame, status, body = await _answer_piece(gfs, ws, pieces[2], proof)
+    resp = await reader
+    assert frame["mode"] == "cache"
+    assert (status, body) == (200, {"stored": True})
+    assert await resp.read() == pieces[2]
+    assert await gfs.app_[gfs_space_media_store_key].read(addr) == pieces[2]
+
+
+async def test_a_wrong_piece_with_a_proof_never_reaches_a_reader_whole(gfs):
+    pieces, proof, addr = _piece()
+    await _mark_stored(gfs, addr, ago=60)
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, addr))
+    # The right proof with other bytes, and a proof of another index.
+    _, status, _ = await _answer_piece(gfs, ws, pieces[1], proof)
+    assert status == 422
+    resp = await reader
+    with pytest.raises(aiohttp.ClientPayloadError):
+        await resp.read()
+    assert await gfs.app_[gfs_space_media_store_key].read(addr) is None
+
+
+async def test_a_malformed_piece_proof_is_refused_before_any_byte(gfs):
+    pieces, _proof, addr = _piece()
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, addr))
+    _, status, body = await _answer_piece(gfs, ws, pieces[2], "garbage")
+    assert (status, body) == (422, {"error": "bad_piece_proof"})
+    reader.cancel()

@@ -44,8 +44,12 @@ import logging
 from aiohttp import web
 
 from ...domain.gfs_space_media import (
+    ADDR_SUITE_SM1P,
+    PIECE_PROOF_HEADER,
     SPACE_MEDIA_AUTH_HEADER,
+    InvalidPieceProof,
     InvalidSpaceMediaAuth,
+    PieceProof,
     SpaceMediaUploadAuth,
 )
 from .. import app_keys as K
@@ -133,6 +137,7 @@ class GfsMediaView(GfsBaseView):
                 reason=f"Invalid {SPACE_MEDIA_AUTH_HEADER}"
             ) from exc
         claim = auth.claim
+        proof = piece_proof(self.request, claim.addr_suite)
         try:
             await self.svc(K.gfs_space_media_auth_key).authorize_upload(
                 auth, scope_kind=claim.scope, scope_id=claim.scope_id, blob_id=blob_id
@@ -195,6 +200,7 @@ class GfsMediaView(GfsBaseView):
                     expires_at=claim.expires_at,
                     reserved=reserved,
                     owner=owner,
+                    proof=proof,
                 )
             except MediaRefused as exc:
                 return _media_refused(exc)
@@ -203,6 +209,18 @@ class GfsMediaView(GfsBaseView):
         if stored:
             return web.json_response({"stored": True}, status=201)
         return web.json_response({"stored": False, "status": "already_stored"})
+
+
+def piece_proof(request: web.Request, addr_suite: str) -> PieceProof | None:
+    """The piece proof an sm1p blob must carry (v_97; ``400`` when it is
+    missing or malformed — before any body is read); ``None`` for a content
+    addressed (sm1) blob, whose bytes are their own proof."""
+    if addr_suite != ADDR_SUITE_SM1P:
+        return None
+    try:
+        return PieceProof.from_header(request.headers.get(PIECE_PROOF_HEADER, ""))
+    except InvalidPieceProof as exc:
+        raise web.HTTPBadRequest(reason=f"Invalid {PIECE_PROOF_HEADER}") from exc
 
 
 async def _read_with_progress(request: web.Request, size: int) -> bytes:
