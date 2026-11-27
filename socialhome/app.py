@@ -2533,6 +2533,7 @@ def _wire_federation_stack(
 
     # A household the host's roster snapshot adds gets our recent rows.
     private_invite_handler.attach_space_resume(space_sync_resume_provider)
+    app[K.space_sync_resume_key] = space_sync_resume_provider
 
     # v_86 — which files of a row we ship: on a catch-up, as a non-host
     # household, our own people's files only; on a SPACE_MEDIA_WANTED,
@@ -5953,6 +5954,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # §25.6: a stream to a link-joined member carries the records'
         # ``media_refs`` (sync line 80); the receiving side keeps them.
         app[K.space_sync_service_key].attach_media_gfs(space_media_uploader)
+        # v_97 — a replay to a cache-only household describes its files.
+        app[K.space_sync_resume_key].attach_media_gfs(space_media_uploader)
         app[K.space_sync_receiver_key].attach_gfs_media(space_media_fetcher)
         if (item_outbox := app.get(K.space_item_outbox_key)) is not None:
             # v_97 — every space file upload waits in the durable item queue

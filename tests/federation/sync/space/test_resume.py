@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import hashlib
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -1967,3 +1968,55 @@ async def test_a_push_that_fails_never_raises(provider_factory):
         space_id="sp-1", instance_id="peer-a", since=since
     )
     assert unwired == 0
+
+
+class _CacheMedia:
+    """``peer-a`` reads the GFS space from the cache only; ``slow.webp``
+    is still on its way here."""
+
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    async def cache_only(self, space_id, instance_id):
+        return instance_id == "peer-a"
+
+    async def plan_for_reader(self, space_id, urls, instance_id, *, item_id):
+        self.items.append(item_id)
+        names = [u.rsplit("/", 1)[-1] for u in urls]
+        return SimpleNamespace(
+            refs=tuple(n for n in names if n != "slow.webp"),
+            pending=tuple(n for n in names if n == "slow.webp"),
+            wire=lambda: {n: {"blob_id": "b"} for n in names if n != "slow.webp"},
+        )
+
+
+async def test_a_cache_only_household_gets_replayed_files_described(provider_factory):
+    """v_97 (owner rule B) — a replay to a household that reads the GFS
+    space from the cache only describes each row's files (it gets no push
+    and asks for none): posts, and a page with its open sides. A row whose
+    file is still on its way here is not replayed without its descriptor
+    (the §25.6 catch-up brings it); a paired household of a mesh space
+    keeps the push."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    posts = [
+        dataclasses.replace(
+            _post(0, base + timedelta(minutes=1)), image_urls=("api/media/a.webp",)
+        ),
+        dataclasses.replace(
+            _post(1, base + timedelta(minutes=2)), image_urls=("api/media/slow.webp",)
+        ),
+    ]
+    page = dataclasses.replace(
+        _page(0, (base + timedelta(minutes=3)).isoformat()),
+        content="![p](api/media/pg.webp)",
+    )
+    provider, fed, _ = provider_factory(posts=posts, pages=[page], members=["peer-a"])
+    media = _CacheMedia()
+    provider.attach_media_gfs(media)
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    by_id = {s["payload"]["id"]: s["payload"] for s in fed.sent}
+    assert by_id["p-0"]["media_refs"] == {"a.webp": {"blob_id": "b"}}
+    assert "p-1" not in by_id
+    assert by_id[page.id]["media_refs"] == {"pg.webp": {"blob_id": "b"}}
