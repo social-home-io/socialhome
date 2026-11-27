@@ -103,6 +103,12 @@ _SPACE_PAGE_HERE = f"({_HOSTED_SPACE} OR pending_base_seq IS NOT NULL)"
 _HISTORY_HERE = f"(space_id IS NULL OR {_HOSTED_SPACE})"
 _SNAPSHOT_HERE = _HOSTED_SPACE
 
+#: A page history / snapshot row ``t`` of a page that is not deleted.
+_ON_LIVE_PAGE = (
+    " AND EXISTS (SELECT 1 FROM space_pages lp WHERE lp.id = t.page_id"
+    " AND lp.space_id = t.space_id AND lp.deleted_at IS NULL)"
+)
+
 # ─── The reference set (orphan sweep, ``is_referenced``) ─────────────────
 #
 # Household rows are listed by hand; every SPACE item's file fields come
@@ -900,11 +906,13 @@ class SqliteMediaReferenceRepo:
         """Whether a LIVE row of space *space_id* shows *basename* right now
         — a post or comment not deleted, a listing, a calendar event, page
         or space-album item not deleted — never only a moderation queue
-        entry or a page's edit history. On demand (v_83) a household sends
+        entry or a closed page snapshot. On demand (v_83) a household sends
         a file only when this holds as well as :meth:`confined_to_space`,
-        so a deleted item's picture is never sent again. A member's
-        page-scoped ``sp-`` copy is live iff the space's live page shows the
-        file (v_82)."""
+        so a deleted item's picture is never sent again. A live page counts
+        with its version history and open conflict sides (v_97: its members
+        see them); a deleted page's files never come back. A member's
+        page-scoped ``sp-`` copy is live iff such a row of the space shows
+        the file (v_82)."""
         if not basename or not space_id:
             return False
         if basename.startswith(SPACE_PAGE_MEDIA_PREFIX):
@@ -932,7 +940,17 @@ class SqliteMediaReferenceRepo:
             for r in rows_to_dicts(rows):
                 if _hit(shape, r.get("v"), basename):
                     return True
-        return False
+        # v_97 (coordinator 1A) — a live page's history and open sides show
+        # to its members too; their raw names are our own files only on the
+        # space's host.
+        hosted = await self._db.fetchone(
+            "SELECT 1 FROM spaces hs, instance_identity ii"
+            " WHERE hs.id = ? AND hs.owner_instance_id = ii.instance_id",
+            (space_id,),
+        )
+        return hosted is not None and basename in await self._page_raw_names(
+            space_id, live=True
+        )
 
     async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]:
         """``(space_id, item_id, created_at)`` of every LIVE space item that
@@ -1035,10 +1053,21 @@ class SqliteMediaReferenceRepo:
 
     async def _page_names_of(self, space_id: str, *, live: bool) -> set[str]:
         """The page-scoped ``sp-`` names of the files *space_id*'s pages
-        show — the live pages only (*live*), else every page row of it (its
-        pages, their history, open sides)."""
+        show — its LIVE pages with their version history and open conflict
+        sides (*live*: what its members see, v_97), else every page row of
+        it (deleted pages too, any snapshot)."""
+        return {
+            space_page_media_name(space_id, n)
+            for n in await self._page_raw_names(space_id, live=live)
+        }
+
+    async def _page_raw_names(self, space_id: str, *, live: bool) -> set[str]:
+        """The names (as the page rows spell them) of the files *space_id*'s
+        pages show — see :meth:`_page_names_of`."""
         sources: tuple[tuple[str, tuple[str, ...], str], ...] = (
             ("space_pages", ("cover_image_url", "content"), " AND deleted_at IS NULL"),
+            ("page_edit_history", ("cover_image_url", "content"), _ON_LIVE_PAGE),
+            ("space_page_snapshots", ("body",), " AND conflict = 1" + _ON_LIVE_PAGE),
         )
         if not live:
             sources = (
@@ -1049,7 +1078,7 @@ class SqliteMediaReferenceRepo:
         names: set[str] = set()
         for table, cols, extra in sources:
             rows = await self._db.fetchall(
-                f"SELECT {', '.join(cols)} FROM {table} WHERE space_id = ?{extra}",
+                f"SELECT {', '.join(cols)} FROM {table} t WHERE t.space_id = ?{extra}",
                 (space_id,),
             )
             for r in rows_to_dicts(rows):
@@ -1063,7 +1092,7 @@ class SqliteMediaReferenceRepo:
                         names |= _names_in_side(raw)
                     else:
                         names |= _names_in_markdown(raw)
-        return {space_page_media_name(space_id, n) for n in names}
+        return names
 
     async def space_files(self, space_id: str) -> list[str]:
         """Every file a row of space *space_id* names in a registry column

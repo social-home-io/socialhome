@@ -107,7 +107,11 @@ from ..domain.space_item_outbox import (
     UNSENT_TOO_LARGE,
     QueuedSpaceItem,
 )
-from ..domain.space_media_ref import SpaceMediaRef, media_refs_to_wire
+from ..domain.space_media_ref import (
+    MAX_PAGE_DESCRIPTOR_ENTRIES,
+    SpaceMediaRef,
+    media_refs_to_wire,
+)
 from ..gfs_channel import channel_pk_of, derive_channel_seed
 from ..moment_public_media import is_blob_id
 from ..space_media_seal import (
@@ -134,8 +138,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: Files described per item (a post carries ≤ 10 pictures + a file + a card).
-MAX_FILES_PER_ITEM: int = 16
+#: Files described per item: the largest descriptor any item carries (a
+#: page version with its open sides; a post shows ≤ 10 pictures + a file +
+#: a card).
+MAX_FILES_PER_ITEM: int = MAX_PAGE_DESCRIPTOR_ENTRIES
 
 #: Piece manifests remembered per file address (a row carries its own; a
 #: holder asked for a piece on demand reads it from here first).

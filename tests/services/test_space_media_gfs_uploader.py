@@ -1588,3 +1588,18 @@ async def test_lazy_describing_is_capped_per_household(tmp_path, monkeypatch):
     )
     assert all(p is not None and p.lazy for p in plans)
     assert peak == up_mod.MAX_DESCRIBING_STREAMS
+
+
+async def test_a_page_version_with_open_sides_is_described_whole(tmp_path):
+    """v_97 — one item describes up to the largest descriptor any item
+    carries (a page version and its open sides), not only 16 files."""
+    names = [f"f{i}.webp" for i in range(40)]
+    for name in names:
+        _write(tmp_path, name, 10)
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS}))
+    plan = await u.plan_for_reader(
+        SPACE, [f"api/media/{n}" for n in names], "paired", item_id=ITEM
+    )
+    assert plan is not None and len(plan.refs) == 40

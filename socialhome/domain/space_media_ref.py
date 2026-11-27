@@ -263,6 +263,21 @@ def record_media_urls(resource: str, record: dict[str, Any]) -> list[str]:
     return urls if cap is None else distinct_media_files(urls, cap)
 
 
+def described_record_urls(resource: str, record: dict[str, Any]) -> list[str]:
+    """The files a §25.6 record's ``media_refs`` describes: its own
+    (:func:`record_media_urls`) and, for a page, its open conflict sides'
+    (the record's ``conflict`` list — members see them, v_97), at most
+    :data:`MAX_PAGE_DESCRIPTOR_ENTRIES` distinct ones — what a page
+    receiver allows (``localize_as_shown``)."""
+    urls = record_media_urls(resource, record)
+    if resource != "pages":
+        return urls
+    for side in record.get("conflict") or ():
+        if isinstance(side, dict):
+            urls.extend(page_media_urls(side.get("cover"), side.get("content")))
+    return distinct_media_files(urls, MAX_PAGE_DESCRIPTOR_ENTRIES)
+
+
 def record_file_urls(resource: str, record: dict[str, Any]) -> list[str]:
     """Every local file an item of *resource* shows — what its ``files``
     hash map (v_85) describes: the item's files for a

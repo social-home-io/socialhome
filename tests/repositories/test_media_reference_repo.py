@@ -922,11 +922,13 @@ async def test_a_deleted_listings_photo_is_not_live(db):
     assert await repo.live_in_space("sold.webp", "sp1")
 
 
-async def test_a_live_pages_files_are_live_and_its_history_is_not(db):
-    """v_83 × v_82 — on demand a household sends a page's files as the page
-    is NOW (its cover and every picture its body shows), under the host's
-    own name or a member's page-scoped ``sp-`` copy; never a file only an
-    edit history or an open conflict side names, never another space's."""
+async def test_a_live_pages_files_history_and_open_sides_are_live(db):
+    """v_83 × v_82 — on demand a household sends a LIVE page's files: its
+    cover and every picture its body shows, and (v_97, coordinator 1A) the
+    files of its version history and of its open conflict sides, which its
+    members see — under the host's own name or a member's page-scoped
+    ``sp-`` copy; never another space's, never a closed snapshot's, and
+    nothing of a deleted page."""
     await _page_rows(db)
     await db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
@@ -954,8 +956,20 @@ async def test_a_live_pages_files_are_live_and_its_history_is_not(db):
         assert not await repo.confined_to_space(page_copy, "sp2"), name
         assert not await repo.live_in_space(page_copy, "sp2"), name
     for name in ("older.webp", "side.webp"):
-        assert not await repo.live_in_space(name, "sp1"), name
-        assert not await repo.live_in_space(space_page_media_name("sp1", name), "sp1")
+        assert await repo.live_in_space(name, "sp1"), name
+        assert await repo.live_in_space(space_page_media_name("sp1", name), "sp1")
+        assert not await repo.live_in_space(space_page_media_name("sp2", name), "sp2")
+    # A plain snapshot (no open side) is no live content.
+    await db.enqueue(
+        "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
+        " snapshot_by, side, conflict) VALUES('pg', 'sp1', '2026-01-02', ?,"
+        " 'u1', 'mine', 0)",
+        ('{"content": "![c](api/media/closed.webp)"}',),
+    )
+    assert not await repo.live_in_space("closed.webp", "sp1")
+    assert not await repo.live_in_space(
+        space_page_media_name("sp1", "closed.webp"), "sp1"
+    )
     # An sp- name no page of the space shows is nobody's.
     stray = space_page_media_name("sp1", "nothing.webp")
     assert not await repo.confined_to_space(stray, "sp1")
@@ -966,6 +980,11 @@ async def test_a_live_pages_files_are_live_and_its_history_is_not(db):
     assert not await repo.live_in_space(
         space_page_media_name("sp1", "body.webp"), "sp1"
     )
+    for name in ("older.webp", "side.webp"):
+        assert not await repo.live_in_space(name, "sp1"), name
+        assert not await repo.live_in_space(
+            space_page_media_name("sp1", name), "sp1"
+        ), name
 
 
 _SIDE = (

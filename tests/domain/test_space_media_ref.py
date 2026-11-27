@@ -18,6 +18,7 @@ from socialhome.domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
     SpaceMediaRef,
+    described_record_urls,
     media_refs_to_wire,
     page_body_media_refs,
     page_file_count,
@@ -468,3 +469,29 @@ def test_a_whole_blob_entry_never_carries_a_checksum() -> None:
     wire = media_refs_to_wire([_ref()])
     wire["x.webp"]["sha256"] = "c" * 64
     assert parse_media_refs(wire, space_id="sp", allowed={"x.webp"}) == []
+
+
+def test_described_record_urls_adds_a_pages_open_sides_bounded():
+    """v_97 — a page record's descriptor covers its open sides' files too,
+    each once, at most MAX_PAGE_DESCRIPTOR_ENTRIES; other records keep
+    record_media_urls."""
+    side = {
+        "content": "![s](api/media/s.webp) ![a](api/media/a.webp)",
+        "cover": "api/media/c.webp",
+    }
+    page = {"content": "![a](api/media/a.webp)", "conflict": [side, "junk"]}
+    assert described_record_urls("pages", page) == [
+        "api/media/a.webp",
+        "api/media/c.webp",
+        "api/media/s.webp",
+    ]
+    many = {
+        "content": "",
+        "conflict": [
+            {"content": " ".join(f"![x](api/media/{i}-{j}.webp)" for j in range(40))}
+            for i in range(3)
+        ],
+    }
+    assert len(described_record_urls("pages", many)) == MAX_PAGE_DESCRIPTOR_ENTRIES
+    post = {"image_urls": ["api/media/p.webp"], "conflict": [side]}
+    assert described_record_urls("posts", post) == record_media_urls("posts", post)

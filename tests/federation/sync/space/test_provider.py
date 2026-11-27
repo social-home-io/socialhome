@@ -2363,6 +2363,44 @@ async def test_a_link_joined_v81_requesters_page_records_carry_media_refs(encode
     assert all("media_refs" not in r for r in _streamed_records(old, "pages"))
 
 
+async def test_a_page_records_open_sides_are_described_too(encoder):
+    """v_97 (coordinator 1A) — a page record carries its open conflict
+    sides, which its members see: their files are described with the
+    version's, so a cache-only reader fetches them from the GFS cache
+    (never pushed, never asked for)."""
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+    exporters = {
+        "pages": _FakeExporter(
+            "pages",
+            [
+                {
+                    "id": "pg-1",
+                    "title": "T",
+                    "content": "![a](api/media/a.webp)",
+                    "conflict": [
+                        {
+                            "side_id": "h",
+                            "title": "T",
+                            "content": "![s](api/media/side.webp)",
+                            "cover": "api/media/sidecover.webp",
+                        }
+                    ],
+                }
+            ],
+        )
+    }
+    svc, _media = _page_provider(
+        encoder, versions={"peer-b": OURS}, exporters=exporters
+    )
+    svc.attach_media_gfs(uploader)
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    (page,) = _streamed_records(session, "pages")
+    assert set(page["media_refs"]) == {"a.webp", "side.webp", "sidecover.webp"}
+
+
 async def test_a_page_file_named_outside_the_space_is_not_in_the_catchup(
     encoder, monkeypatch
 ):

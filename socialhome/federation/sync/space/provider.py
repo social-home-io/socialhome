@@ -40,10 +40,10 @@ from ....domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     PAGE_HISTORY_FILES,
     STREAM_HISTORY_FILES,
+    described_record_urls,
     page_media_urls,
     recent_history_files,
     record_file_urls,
-    record_media_urls,
 )
 from ....services.space_media_names import space_own_files
 from .exporter import (
@@ -290,7 +290,7 @@ class _WithMediaRefs:
     ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for row in rows:
-            urls = record_media_urls(self.resource, row)
+            urls = described_record_urls(self.resource, row)
             if urls and (self._lazy or self._budget > 0):
                 # The item the descriptor is sealed for — the id the reader
                 # keeps it under: a bazaar listing is its wrapper post's.
