@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pathlib
+
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
+
 from .conftest import _auth
 
 _TEST_SPACE_ID = "space-bazaar-route"
@@ -694,3 +698,40 @@ async def test_listing_detail_carries_the_cards_bids_offers_and_saved_flag(clien
     # Offers stay per viewer: only the caller's own, never someone else's.
     assert [o["offerer_user_id"] for o in body["offers"]] == [client._uid]
     assert body["viewer_saved"] is True
+
+
+async def test_a_photo_listed_in_another_space_gets_a_copy_of_its_own(client):
+    """v_97 (coordinator 2A) — a photo a listing in one space already shows,
+    listed again in another space, is given a copy local to the second
+    space (new name, same bytes): each space's GFS cache may seal its own
+    copy under its own key, and nothing about it is another space's."""
+    media = pathlib.Path(client._cfg.media_path)
+    media.mkdir(parents=True, exist_ok=True)
+    (media / "bike.webp").write_bytes(b"bike-pixels")
+    first = await _seed_space(client, "space-one")
+    second = await _seed_space(client, "space-two")
+
+    async def _list(space_id):
+        r = await client.post(
+            "/api/bazaar",
+            json={
+                "space_id": space_id,
+                "title": "Bike",
+                "mode": "fixed",
+                "price": 100,
+                "currency": "USD",
+                "image_urls": ["api/media/bike.webp"],
+            },
+            headers=_auth(client._tok),
+        )
+        assert r.status == 201, await r.text()
+        return (await r.json())["image_urls"]
+
+    assert [u.split("?")[0] for u in await _list(first)] == ["api/media/bike.webp"]
+    (copy_url,) = await _list(second)
+    copy = copy_url.split("?")[0].rsplit("/", 1)[-1]
+    assert copy != "bike.webp" and copy.endswith(".webp")
+    assert (media / copy).read_bytes() == b"bike-pixels"
+    refs = SqliteMediaReferenceRepo(client._db)
+    assert await refs.confined_to_space(copy, second)
+    assert await refs.confined_to_space("bike.webp", first)

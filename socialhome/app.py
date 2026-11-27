@@ -4827,7 +4827,9 @@ def create_app(config: Config | None = None) -> web.Application:
     # Who may name a stored file in a write (private albums D7, other
     # people's chat attachments, a space's photos): one guard for every
     # local write sink (``services/media_ref_guard.py``).
-    media_ref_guard = MediaRefGuard(repos.media_reference)
+    media_ref_guard = MediaRefGuard(
+        repos.media_reference, media_dir=pathlib.Path(config.media_path)
+    )
     app[K.media_ref_guard_key] = media_ref_guard
     for guarded in (
         feed_service,

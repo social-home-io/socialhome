@@ -1543,6 +1543,10 @@ class SpaceCalendarService(
         clean_cover = await self._openable_cover(
             _clean_cover_url(cover_url), user_id=created_by
         )
+        # v_97 (2A) — a cover named elsewhere too: a copy of its own here.
+        clean_cover = (
+            await self._space_media_copies((clean_cover,), space_id=space_id)
+        )(clean_cover)
         where = clean_location(location)
         event = CalendarEvent(
             # Owner-bound (v_36): no other household can announce this id
