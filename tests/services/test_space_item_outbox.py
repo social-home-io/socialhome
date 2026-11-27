@@ -15,6 +15,7 @@ from socialhome.domain.space_item_outbox import (
     UNSENT_REFUSED,
     UNSENT_TOO_LARGE,
 )
+from socialhome.repositories import space_item_outbox_repo as repo_mod
 from socialhome.repositories.space_item_outbox_repo import SqliteSpaceItemOutboxRepo
 from socialhome.services import space_item_outbox as mod
 from socialhome.services.gfs_publish_retry import PublishOutcome
@@ -417,3 +418,69 @@ async def test_an_item_naming_nobody_is_told_to_the_admins(db, caplog):
     assert await box.unsent("sp", "ben") == []
     [item] = await box.unsent("sp", "admin", admin=True)
     assert item.error == "refused"
+
+
+# ── v_97 file uploads: their own lane (media review 5–7, 11) ─────────────
+
+
+async def _queue_file(box, n=3, gfs_ids=("g1",), space_id="sp"):
+    return await box.queue_media(
+        space_id=space_id,
+        epoch=3,
+        parts=[(f"piece-{i}", list(gfs_ids)) for i in range(n)],
+        author_user_id="anna",
+    )
+
+
+def _media_outbox(db, clock, gfs, told=None):
+    box = _outbox(db, clock, gfs, told)
+    box.attach_media(gfs.send)
+    return box
+
+
+async def test_file_uploads_run_in_their_own_lane(db):
+    """An 8 MiB upload never holds an item back: the items' pass sends no
+    file row, the file lane sends no item."""
+    clock, gfs = _Clock(), _Gfs()
+    box = _media_outbox(db, clock, gfs)
+    await _queue_file(box, n=2)
+    await _queue(box, "chat")
+    await box.run_once()
+    assert gfs.accepted == [("g1", "chat")]
+    await box.run_once(media=True)
+    assert gfs.accepted[1:] == [("g1", "piece-0"), ("g1", "piece-1")]
+
+
+async def test_file_rows_never_fill_the_items_bound(db, monkeypatch):
+    clock, gfs = _Clock(), _Gfs()
+    box = _media_outbox(db, clock, gfs)
+    monkeypatch.setattr(repo_mod, "SPACE_MEDIA_QUEUE_MAX_ITEMS", 3)
+    assert await _queue_file(box, n=3)
+    # The file lane is full: a whole file is refused (never half queued)…
+    assert not await _queue_file(box, n=2)
+    # …and the space's items still queue.
+    assert await _queue(box, "chat")
+
+
+async def test_a_busy_upload_holds_that_gfss_other_pieces_not_the_items(db):
+    clock, gfs = _Clock(), _Gfs()
+    gfs.answers["g1"] = [PublishOutcome.transient(retry_after_s=600)]
+    box = _media_outbox(db, clock, gfs)
+    await _queue_file(box, n=3)
+    await _queue(box, "chat")
+    await box.run_once(media=True)
+    assert gfs.tries == ["g1"]  # one attempt, the other pieces deferred
+    await box.run_once()
+    assert ("g1", "chat") in gfs.accepted
+
+
+async def test_a_file_waiting_too_long_keeps_its_locator_for_retry(db):
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.transient()]
+    box = _media_outbox(db, clock, gfs, told)
+    await _queue_file(box, n=1)
+    await box.run_once(media=True)
+    clock.advance(13 * 3600)
+    await box.run_once(media=True)
+    [unsent] = await box.unsent("sp", "anna")
+    assert (unsent.error, unsent.retryable) == ("too_old", True)

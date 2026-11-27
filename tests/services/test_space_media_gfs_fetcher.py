@@ -1544,12 +1544,17 @@ async def test_a_wrong_whole_file_checksum_writes_nothing(tmp_path):
     wire, blobs, _addrs = _pieced("v.webm", data)
     other = os.urandom(BIG_SIZE)
     wire["v.webm"]["sha256"] = sha256_hex(other)
-    f = _fetcher(tmp_path, _Gfs(blobs), conns=[_Conn("g", "https://g")])
+    gfs = _Gfs(blobs)
+    f = _fetcher(tmp_path, gfs, conns=[_Conn("g", "https://g")])
     await _recv_pieced(f, wire)
     name = _sc("v.webm", other)
     assert await f.ensure_local(name, timeout_s=30) is False
     assert not (tmp_path / name).exists()
     assert not (tmp_path / ".partial" / f"pieces-{name}").exists()
+    # The next view does not download the 200 MiB again at once.
+    gfs.fetches.clear()
+    assert await f.ensure_local(name, timeout_s=30) is False
+    assert gfs.fetches == []
 
 
 async def test_a_file_in_pieces_is_never_prefetched(tmp_path):

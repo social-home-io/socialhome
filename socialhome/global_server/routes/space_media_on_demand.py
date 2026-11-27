@@ -34,6 +34,7 @@ import time
 from aiohttp import web
 
 from ...domain.gfs_space_media import (
+    ADDR_SUITE_SM1P,
     PIECE_PROOF_HEADER,
     SPACE_MEDIA_AUTH_HEADER,
     InvalidPieceProof,
@@ -300,6 +301,12 @@ class GfsMediaServeView(GfsBaseView):
             return False
         try:
             auth = SpaceMediaUploadAuth.from_header(raw)
+            if (auth.claim.addr_suite == ADDR_SUITE_SM1P) != (
+                session.proof is not None
+            ):
+                # As on an upload: a piece's claim says sm1p and carries
+                # its proof; a whole blob's says sm1 and carries none.
+                return False
             await self.svc(K.gfs_space_media_auth_key).authorize_upload(
                 auth,
                 scope_kind=session.scope_kind,

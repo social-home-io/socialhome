@@ -13,8 +13,10 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.space_item_outbox import (
+    MEDIA_UPLOAD_ROW,
     SPACE_FAILED_MAX_BYTES,
     SPACE_FAILED_MAX_ITEMS,
+    SPACE_MEDIA_QUEUE_MAX_ITEMS,
     SPACE_QUEUE_MAX_BYTES,
     SPACE_QUEUE_MAX_ITEMS,
     UNPLANNED_GFS,
@@ -119,10 +121,10 @@ class AbstractSpaceItemOutboxRepo(Protocol):
     async def usage(self, space_id: str) -> tuple[int, int]: ...
 
     async def list_due(
-        self, now: str, *, limit: int = 100
+        self, now: str, *, limit: int = 100, media: bool = False
     ) -> list[QueuedSpaceItem]: ...
 
-    async def next_due_at(self) -> str | None: ...
+    async def next_due_at(self, *, media: bool = False) -> str | None: ...
 
     async def delete(self, item_id: str, gfs_id: str) -> None: ...
 
@@ -130,7 +132,9 @@ class AbstractSpaceItemOutboxRepo(Protocol):
         self, item_id: str, gfs_id: str, *, attempts: int, next_attempt_at: str
     ) -> None: ...
 
-    async def defer_gfs(self, gfs_id: str, space_id: str, *, until: str) -> None: ...
+    async def defer_gfs(
+        self, gfs_id: str, space_id: str, *, until: str, media: bool = False
+    ) -> None: ...
 
     async def expedite(self, gfs_id: str, *, now: str) -> None: ...
 
@@ -212,13 +216,17 @@ class SqliteSpaceItemOutboxRepo:
                     " AND supersede_key=? AND status='pending'",
                     (space_id, key),
                 )
+            # Items and file uploads are bounded apart (v_97).
+            media = rows[0].event_type == MEDIA_UPLOAD_ROW
             count, size = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM space_item_outbox"
-                " WHERE space_id=? AND status='pending'",
-                (space_id,),
+                " WHERE space_id=? AND status='pending'"
+                " AND (event_type=?)=?",
+                (space_id, MEDIA_UPLOAD_ROW, int(media)),
             ).fetchone()
             if (
-                count + len(rows) > max_items
+                count + len(rows)
+                > (SPACE_MEDIA_QUEUE_MAX_ITEMS if media else max_items)
                 or size + sum(r.bytes for r in rows) > max_bytes
             ):
                 raise _Full
@@ -239,18 +247,26 @@ class SqliteSpaceItemOutboxRepo:
         )
         return (int(row[0]), int(row[1])) if row else (0, 0)
 
-    async def list_due(self, now: str, *, limit: int = 100) -> list[QueuedSpaceItem]:
+    async def list_due(
+        self, now: str, *, limit: int = 100, media: bool = False
+    ) -> list[QueuedSpaceItem]:
+        """Due rows of one lane: the items, or (*media*) the file
+        uploads — each lane has its own loop, so neither waits on the
+        other."""
         rows = await self._db.fetchall(
             f"SELECT {_COLS} FROM space_item_outbox"
             " WHERE status='pending' AND next_attempt_at<=?"
+            f" AND (event_type='{MEDIA_UPLOAD_ROW}')={int(media)}"
             " ORDER BY next_attempt_at, rowid LIMIT ?",
             (now, int(limit)),
         )
         return [_from_row(r) for r in rows_to_dicts(rows)]
 
-    async def next_due_at(self) -> str | None:
+    async def next_due_at(self, *, media: bool = False) -> str | None:
         return await self._db.fetchval(
             "SELECT MIN(next_attempt_at) FROM space_item_outbox WHERE status='pending'"
+            " AND (event_type=?)=?",
+            (MEDIA_UPLOAD_ROW, int(media)),
         )
 
     async def delete(self, item_id: str, gfs_id: str) -> None:
@@ -285,7 +301,9 @@ class SqliteSpaceItemOutboxRepo:
             (int(attempts), next_attempt_at, item_id, gfs_id),
         )
 
-    async def defer_gfs(self, gfs_id: str, space_id: str, *, until: str) -> None:
+    async def defer_gfs(
+        self, gfs_id: str, space_id: str, *, until: str, media: bool = False
+    ) -> None:
         """Every waiting row of *space_id* for *gfs_id* due before *until*
         waits till then (that GFS answers them the same) and counts as
         tried, so a reconnect releases it; another space's rows on the same
@@ -294,8 +312,8 @@ class SqliteSpaceItemOutboxRepo:
             "UPDATE space_item_outbox SET next_attempt_at=?,"
             " attempts=MAX(attempts, 1)"
             " WHERE gfs_id=? AND space_id=? AND status='pending'"
-            " AND next_attempt_at<?",
-            (until, gfs_id, space_id, until),
+            " AND next_attempt_at<? AND (event_type=?)=?",
+            (until, gfs_id, space_id, until, MEDIA_UPLOAD_ROW, int(media)),
         )
 
     async def expedite(self, gfs_id: str, *, now: str) -> None:

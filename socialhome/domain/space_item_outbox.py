@@ -52,6 +52,11 @@ SPACE_QUEUE_MAX_ITEMS: int = 2_000
 #: Bytes of ciphertext one space may hold (2 000 chat items ≈ 5.6 MB; the
 #: rest is room for a few large posts).
 SPACE_QUEUE_MAX_BYTES: int = 32 * 1024 * 1024
+#: v_97 — file-upload rows one space may hold waiting (their own bound:
+#: an album of videos never crowds the space's chat out of its queue). A
+#: 200 MiB file is 25 rows per GFS; rows are small locators.
+SPACE_MEDIA_QUEUE_MAX_ITEMS: int = 1_000
+
 #: Failed items one space keeps WITH their bytes (for Retry); past either
 #: bound a newly failed item keeps no bytes and only counts on its author's
 #: one counter row — a GFS refusing everything can't fill the disk.

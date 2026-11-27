@@ -180,6 +180,9 @@ MAX_MISSES_REMEMBERED: int = 4096
 VIEW_TIMEOUT_S: float = 20.0
 REQUEST_TIMEOUT_S: float = 30.0
 
+#: One 8 MiB piece's GET (v_97): a full piece over a ~1 Mbit/s link.
+PIECE_TIMEOUT_S: float = 120.0
+
 #: GFSs tried per fetch.
 MAX_SOURCES: int = 4
 
@@ -567,7 +570,10 @@ class SpaceMediaGfsFetcher:
         except TimeoutError:
             log.warning("space media %s: fetch from the GFS timed out", filename)
             return False
-        if outcome == _MISS:
+        if outcome in (_MISS, _REFUSED):
+            # A refused file (a wrong checksum, a piece that does not open)
+            # is not fetched again on every view either (v_97: up to 200
+            # MiB each time).
             self._misses[filename] = _monotonic() + MISS_TTL_S
             self._misses.move_to_end(filename)
             while len(self._misses) > MAX_MISSES_REMEMBERED:
@@ -879,7 +885,7 @@ class SpaceMediaGfsFetcher:
         outcome = _MISS
         for conn in sources:
             blob = await self._gfs.fetch_space_media(
-                conn, address, max_bytes=MAX_BLOB_BYTES, timeout_s=REQUEST_TIMEOUT_S
+                conn, address, max_bytes=MAX_BLOB_BYTES, timeout_s=PIECE_TIMEOUT_S
             )
             if blob is None:
                 continue

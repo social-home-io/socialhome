@@ -62,8 +62,9 @@ from .gfs_publish_retry import PublishOutcome
 
 log = logging.getLogger(__name__)
 
-#: Rows tried per pass.
+#: Rows tried per pass (items; file uploads — up to 8 MiB each).
 BATCH: int = 100
+MEDIA_BATCH: int = 8
 #: Longest sleep between passes when nothing is due sooner.
 IDLE_WAKE_S: float = 60.0
 #: How often an item whose last GFS stopped serving the space is planned
@@ -115,6 +116,8 @@ class SpaceItemOutbox:
         "_changed",
         "_clock",
         "_media_sender",
+        "_media_task",
+        "_media_wake",
         "_notify",
         "_planner",
         "_repo",
@@ -142,6 +145,10 @@ class SpaceItemOutbox:
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        #: v_97 — the file-upload lane (its own loop: an 8 MiB upload never
+        #: holds an item back, nor a backlog of uploads hides one).
+        self._media_wake = asyncio.Event()
+        self._media_task: asyncio.Task | None = None
         self._swept_at: datetime | None = None
 
     def attach(self, *, sender: Sender, planner: Planner) -> None:
@@ -228,8 +235,59 @@ class SpaceItemOutbox:
             )
             return False
         self._space_changed(space_id)
-        self._wake.set()
+        self._wake_lane(event_type == MEDIA_UPLOAD_ROW)
         return True
+
+    async def queue_media(
+        self,
+        *,
+        space_id: str,
+        epoch: int,
+        parts: list[tuple[str, list[str]]],
+        author_user_id: str,
+    ) -> bool:
+        """v_97 — one space file's upload rows (*parts*: each blob or
+        piece's locator and the GFSs it goes to), stored all or none in one
+        transaction (a file is never half queued). ``False`` — and its
+        author told — when the space's file lane is full."""
+        now = self._clock()
+        rows = [
+            QueuedSpaceItem(
+                item_id=uuid.uuid4().hex,
+                gfs_id=gfs_id,
+                space_id=space_id,
+                epoch=int(epoch),
+                ring_class="durable",
+                event_type=MEDIA_UPLOAD_ROW,
+                author_user_id=author_user_id,
+                payload=payload,
+                next_attempt_at=_iso(now),
+                created_at=_iso(now),
+            )
+            for payload, gfs_ids in parts
+            for gfs_id in dict.fromkeys(gfs_ids)
+        ]
+        if not rows:
+            return True
+        if not await self._repo.add(rows):
+            log.warning(
+                "space items: the file lane of space %s is full — a file was"
+                " not uploaded",
+                space_id,
+            )
+            await self.fail(
+                space_id=space_id,
+                event_type=MEDIA_UPLOAD_ROW,
+                author_user_id=author_user_id,
+                error=UNSENT_QUEUE_FULL,
+            )
+            return False
+        self._space_changed(space_id)
+        self._wake_lane(True)
+        return True
+
+    def _wake_lane(self, media: bool) -> None:
+        (self._media_wake if media else self._wake).set()
 
     async def fail(
         self, *, space_id: str, event_type: str, author_user_id: str, error: str
@@ -270,6 +328,7 @@ class SpaceItemOutbox:
         if n:
             self._space_changed(space_id)
             self._wake.set()
+            self._media_wake.set()
         await self._tell(space_id, user_id)
         return n
 
@@ -290,22 +349,23 @@ class SpaceItemOutbox:
         """*gfs_id* (re)connected: what waits for it goes now."""
         await self._repo.expedite(gfs_id, now=self._now())
         self._wake.set()
+        self._media_wake.set()
 
-    async def run_once(self) -> int:
-        """One pass over the due rows; returns how many were due. Rows of
-        one (GFS, space) go in order; the pairs in parallel, so one space's
-        failing head never holds another space back on the same GFS."""
+    async def run_once(self, *, media: bool = False) -> int:
+        """One pass over one lane's due rows (the items, or *media*: the
+        file uploads); returns how many were due. Rows of one (GFS, space)
+        go in order; the pairs in parallel, so one space's failing head
+        never holds another space back on the same GFS."""
         if self._sender is None or self._planner is None:
             return 0
-        await self._expire_failed()
-        rows = await self._repo.list_due(self._now(), limit=BATCH)
-        # A file upload (up to 8 MiB a row) never holds the space's items
-        # back on the same GFS: uploads and items go in separate lines.
-        groups: dict[tuple[str, str, bool], list[QueuedSpaceItem]] = {}
+        if not media:
+            await self._expire_failed()
+        rows = await self._repo.list_due(
+            self._now(), limit=MEDIA_BATCH if media else BATCH, media=media
+        )
+        groups: dict[tuple[str, str], list[QueuedSpaceItem]] = {}
         for row in rows:
-            groups.setdefault((row.gfs_id, row.space_id, _is_media(row)), []).append(
-                row
-            )
+            groups.setdefault((row.gfs_id, row.space_id), []).append(row)
         await asyncio.gather(*(self._run_group(batch) for batch in groups.values()))
         return len(rows)
 
@@ -348,7 +408,7 @@ class SpaceItemOutbox:
                 await self._fail(row, UNSENT_REFUSED)
             elif planned:
                 await self._repo.expand(row, planned, now=self._now())
-                self._wake.set()
+                self._wake_lane(_is_media(row))
             else:
                 await self._backoff(row, None, whole_gfs=False)
             return True
@@ -370,7 +430,9 @@ class SpaceItemOutbox:
                 row.event_type,
                 row.space_id,
             )
-            await self._fail(row, UNSENT_TOO_OLD, drop_payload=True)
+            # A file's locator stays (Retry seals it again); an item's
+            # stamp is past what receivers take.
+            await self._fail(row, UNSENT_TOO_OLD, drop_payload=not _is_media(row))
             return True
         sender = self._media_sender if _is_media(row) else self._sender
         if sender is None:
@@ -394,10 +456,9 @@ class SpaceItemOutbox:
             await self._fail(row, UNSENT_SEAL_FAILED, drop_payload=True)
             return True
         if outcome.kind == "transient":
-            # An upload's busy answer never parks the space's items.
-            await self._backoff(
-                row, outcome.retry_after_s, whole_gfs=not _is_media(row)
-            )
+            # Holds that GFS's other rows of the same lane (an upload's
+            # busy answer never parks the items, nor the reverse).
+            await self._backoff(row, outcome.retry_after_s)
             return False
         log.warning(
             "space items: GFS %s refused a %s of space %s for good — the author"
@@ -479,7 +540,9 @@ class SpaceItemOutbox:
             row.item_id, row.gfs_id, attempts=attempts, next_attempt_at=until
         )
         if whole_gfs:
-            await self._repo.defer_gfs(row.gfs_id, row.space_id, until=until)
+            await self._repo.defer_gfs(
+                row.gfs_id, row.space_id, until=until, media=_is_media(row)
+            )
 
     # ── Notifications ────────────────────────────────────────────────────
 
@@ -514,23 +577,31 @@ class SpaceItemOutbox:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="space-item-outbox")
+        self._media_task = asyncio.create_task(
+            self._loop(media=True), name="space-item-outbox-files"
+        )
 
     async def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-        if self._task is not None:
+        self._media_wake.set()
+        for task in (self._task, self._media_task):
+            if task is None:
+                continue
             try:
-                await asyncio.wait_for(self._task, timeout=10.0)
+                await asyncio.wait_for(task, timeout=10.0)
             except TimeoutError, asyncio.CancelledError:
-                self._task.cancel()
-            self._task = None
+                task.cancel()
+        self._task = None
+        self._media_task = None
 
-    async def _loop(self) -> None:
+    async def _loop(self, *, media: bool = False) -> None:
+        wake = self._media_wake if media else self._wake
         while not self._stop.is_set():
-            self._wake.clear()
+            wake.clear()
             due = 0
             try:
-                due = await self.run_once()
+                due = await self.run_once(media=media)
             except Exception:
                 log.warning("space items: a queue pass failed", exc_info=True)
                 try:
@@ -538,14 +609,15 @@ class SpaceItemOutbox:
                 except TimeoutError:
                     pass
                 continue
-            if due >= BATCH or self._stop.is_set():
+            if due >= (MEDIA_BATCH if media else BATCH) or self._stop.is_set():
                 continue
-            await self._sleep()
+            await self._sleep(media=media)
 
-    async def _sleep(self) -> None:
+    async def _sleep(self, *, media: bool = False) -> None:
         wait = IDLE_WAKE_S
+        wake = self._media_wake if media else self._wake
         try:
-            nxt = await self._repo.next_due_at()
+            nxt = await self._repo.next_due_at(media=media)
         except Exception:
             log.debug("space items: next due time unreadable", exc_info=True)
             nxt = None
@@ -558,6 +630,6 @@ class SpaceItemOutbox:
         if wait <= 0.0:
             return
         try:
-            await asyncio.wait_for(self._wake.wait(), timeout=wait)
+            await asyncio.wait_for(wake.wait(), timeout=wait)
         except TimeoutError:
             pass

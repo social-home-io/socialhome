@@ -517,6 +517,19 @@ class _Outbox:
     async def fail(self, *, space_id, event_type, author_user_id, error):
         self.failed.append((space_id, author_user_id, error))
 
+    async def queue_media(self, *, space_id, epoch, parts, author_user_id):
+        for payload, gfs_ids in parts:
+            await self.queue(
+                space_id=space_id,
+                epoch=epoch,
+                payload=payload,
+                event_type=MEDIA_UPLOAD_ROW,
+                ring_class="durable",
+                author_user_id=author_user_id,
+                gfs_ids=gfs_ids,
+            )
+        return True
+
 
 async def _upload(u, plan, *, tries=6, author=""):
     """Queue *plan* and run its rows the way the durable queue does (a

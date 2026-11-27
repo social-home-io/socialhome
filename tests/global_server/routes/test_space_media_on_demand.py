@@ -181,7 +181,7 @@ def _serve_headers(iid: str, seed: bytes, ticket: str, op: str = "serve") -> dic
     }
 
 
-def _auth(blob: bytes, blob_id: str) -> str:
+def _auth(blob: bytes, blob_id: str, addr_suite: str = "sm1") -> str:
     now = int(time.time())
     claim = SpaceMediaClaim(
         scope=SCOPE_SPACE,
@@ -190,6 +190,7 @@ def _auth(blob: bytes, blob_id: str) -> str:
         size=len(blob),
         expires_at=now + 86_400,
         ts=now,
+        addr_suite=addr_suite,
     )
     sig = sign_ed25519(CHANNEL_SEED, claim.channel_signing_bytes())
     return SpaceMediaUploadAuth(
@@ -769,12 +770,16 @@ def _piece() -> tuple[list[bytes], PieceProof, str]:
     return pieces, proof, addr
 
 
-async def _answer_piece(tc, ws, blob: bytes, proof: PieceProof | str):
+async def _answer_piece(
+    tc, ws, blob: bytes, proof: PieceProof | str, *, claim_suite: str = "sm1p"
+):
     frame = await asyncio.wait_for(ws.frames.get(), 5)
     headers = _serve_headers(HOST, HOST_SEED, frame["ticket"])
     headers[PIECE_PROOF_HEADER] = proof if isinstance(proof, str) else proof.to_header()
     if frame["mode"] == "cache":
-        headers[SPACE_MEDIA_AUTH_HEADER] = _auth(blob, frame["blob_id"])
+        headers[SPACE_MEDIA_AUTH_HEADER] = _auth(
+            blob, frame["blob_id"], addr_suite=claim_suite
+        )
     resp = await tc.put(
         f"/gfs/media/serve/{frame['ticket']}", data=blob, headers=headers
     )
@@ -825,3 +830,20 @@ async def test_a_malformed_piece_proof_is_refused_before_any_byte(gfs):
     _, status, body = await _answer_piece(gfs, ws, pieces[2], "garbage")
     assert (status, body) == (422, {"error": "bad_piece_proof"})
     reader.cancel()
+
+
+async def test_a_piece_under_an_sm1_claim_is_streamed_never_stored(gfs):
+    """The serve's claim must say what the body is: a proof with an sm1
+    claim (or the reverse) is never stored."""
+    pieces, proof, addr = _piece()
+    await _mark_stored(gfs, addr, ago=60)
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, addr))
+    frame, status, body = await _answer_piece(
+        gfs, ws, pieces[2], proof, claim_suite="sm1"
+    )
+    resp = await reader
+    assert frame["mode"] == "cache"
+    assert (status, body) == (200, {"stored": False})
+    assert await resp.read() == pieces[2]
+    assert await gfs.app_[gfs_space_media_store_key].read(addr) is None

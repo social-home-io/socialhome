@@ -981,23 +981,20 @@ class SpaceMediaGfsUploader:
         else:
             manifest = ()
             parts = [(-1, ref.blob_id)]
-        queued = False
+        rows: list[tuple[str, list[str]]] = []
         for index, address in parts:
             gfs_ids = [
                 c.id for c in conns if self._stored.get((c.id, address), 0.0) <= now
             ]
-            if not gfs_ids:
-                continue
-            await self._outbox.queue(
-                space_id=plan.space_id,
-                epoch=ref.epoch,
-                payload=_locator(ref, index, manifest),
-                event_type=MEDIA_UPLOAD_ROW,
-                ring_class="durable",
-                author_user_id=author,
-                gfs_ids=gfs_ids,
-            )
-            queued = True
+            if gfs_ids:
+                rows.append((_locator(ref, index, manifest), gfs_ids))
+        # Every row of one file in one go: a file is never half queued.
+        queued = bool(rows) and await self._outbox.queue_media(
+            space_id=plan.space_id,
+            epoch=ref.epoch,
+            parts=rows,
+            author_user_id=author,
+        )
         if queued or any(
             self._stored.get((c.id, address), 0.0) > now
             for c in conns
