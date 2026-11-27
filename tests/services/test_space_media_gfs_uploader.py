@@ -103,6 +103,9 @@ class _Gfs:
     def space_media_cache_off(self, conn) -> bool:
         return False
 
+    def capability_unknown(self, conn) -> bool:
+        return getattr(self, "unknown", False)
+
     async def space_media_max_blob(self, conn, *, scope="channel"):
         if scope not in self.scopes:
             return None
@@ -1476,3 +1479,31 @@ async def test_a_file_over_half_a_channels_share_is_never_split(tmp_path):
     )
     assert plan is None
     assert box.failed == [(SPACE, "anna", "too_large")]
+
+
+async def test_an_unreachable_gfs_is_no_verdict_and_tells_nobody(tmp_path):
+    """Review F (findings 4/8): a GFS whose capability is merely unknown
+    right now, or a catch-up plan (no author), never shows "Couldn't
+    send"."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], scopes=())
+    gfs.unknown = True
+    u = _pieced_uploader(tmp_path, gfs)
+    box = _Outbox()
+    u.attach_outbox(box)
+    assert (
+        await u.plan(
+            SPACE,
+            ["api/media/a.webp"],
+            item_id=ITEM,
+            followers=False,
+            author_user_id="anna",
+        )
+        is None
+    )
+    gfs.unknown = False
+    assert (
+        await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False) is None
+    )
+    assert box.failed == []

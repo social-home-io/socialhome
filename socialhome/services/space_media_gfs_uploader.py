@@ -624,12 +624,20 @@ class SpaceMediaGfsUploader:
         # a GFS space its files have no other way (v_97): the author is told
         # they could not be sent.
         if not targets or not await self.can_upload(space_id, scoped=scoped):
-            log.info(
-                "space media of space %s: no GFS of the space takes its files"
-                " — not sent",
-                space_id,
+            # Told only for a live item with its author (never a catch-up),
+            # and only on a verdict: every GFS of the space answered and none
+            # keeps space media. A GFS that is merely unreachable, or a
+            # grant still on its way, is no verdict (review F, findings 4/8).
+            verdict = bool(conns) and not any(
+                self._gfs.capability_unknown(c) for c in conns
             )
-            await self._tell_unsent(space_id, author, UNSENT_REFUSED)
+            if author and verdict and await self.can_upload(space_id, scoped=scoped):
+                log.info(
+                    "space media of space %s: no GFS of the space takes its"
+                    " files — not sent",
+                    space_id,
+                )
+                await self._tell_unsent(space_id, author, UNSENT_REFUSED)
             return None
         # The largest file in pieces a GFS of the plan keeps (half its
         # signed channel share; 0: none keeps pieces).
