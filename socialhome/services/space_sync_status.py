@@ -134,6 +134,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
         "_clock",
         "_gfs_took",
         "_hosts",
+        "_items_waiting",
         "_last_sent",
         "_outbox",
         "_outcomes",
@@ -195,6 +196,9 @@ class SpaceSyncStatusService(BusPublisherMixin):
         #: member household has yet
         #: (``FederationService.undelivered_space_items``). ``None``: none.
         self._undelivered: Callable[[str], Awaitable[list[str]]] | None = None
+        #: v_97 — ``space_id ->`` our items of a GFS space still waiting in
+        #: the durable item queue (``SpaceItemOutbox.waiting``). ``None``: 0.
+        self._items_waiting: Callable[[str], Awaitable[int]] | None = None
         #: ``(space, post)`` a GFS took from us (member publish): sent,
         #: whatever the outbox says. Memory only, bounded — lost on a
         #: restart (the post then reads "Not sent yet" until a household
@@ -210,6 +214,11 @@ class SpaceSyncStatusService(BusPublisherMixin):
         """Wire "Not sent yet": *undelivered* names a space's posts no
         member household has yet (the status's ``unsent_posts``)."""
         self._undelivered = undelivered
+
+    def attach_items_waiting(self, waiting: Callable[[str], Awaitable[int]]) -> None:
+        """v_97 — a GFS space's items waiting for a GFS count in
+        ``waiting_to_send`` too (the durable item queue)."""
+        self._items_waiting = waiting
 
     def post_reached_gfs(self, space_id: str, post_id: str) -> None:
         """A GFS took our post *post_id* (the member publish): it went
@@ -346,6 +355,8 @@ class SpaceSyncStatusService(BusPublisherMixin):
         self, space: Space, *, ignore_sync_id: str = ""
     ) -> SpaceSyncStatus:
         waiting = await self._outbox.count_pending_for_space(space.id)
+        if self._items_waiting is not None:
+            waiting += await self._items_waiting(space.id)
         # Read even with nothing in the outbox: a post whose every member
         # household is reached only over the mesh waits in a deferred mesh
         # send, not in the outbox.

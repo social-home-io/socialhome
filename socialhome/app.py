@@ -285,6 +285,7 @@ from .repositories.space_author_profile_repo import SqliteSpaceAuthorProfileRepo
 from .repositories.space_bot_repo import SqliteSpaceBotRepo
 from .repositories.space_cover_repo import SqliteSpaceCoverRepo
 from .repositories.space_icon_repo import SqliteSpaceIconRepo
+from .repositories.space_item_outbox_repo import SqliteSpaceItemOutboxRepo
 from .repositories.space_key_repo import SqliteSpaceKeyRepo
 from .repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
 from .repositories.space_media_ref_repo import SqliteSpaceMediaRefRepo
@@ -459,6 +460,7 @@ from .services.space_crypto_service import (
     SpaceContentEncryption,
 )
 from .services.space_gfs_needed_service import SpaceGfsNeededService
+from .services.space_item_outbox import SpaceItemOutbox
 from .services.space_listing_counts_service import SpaceListingCountsService
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
@@ -1533,6 +1535,7 @@ def _build_repos(db: AsyncDatabase):
         cp=SqliteCpRepo(db),
         dm_routing=SqliteDmRoutingRepo(db),
         dm_media_outbox=SqliteDmMediaOutboxRepo(db),
+        space_item_outbox=SqliteSpaceItemOutboxRepo(db),
         space_media_outbox=SqliteSpaceMediaOutboxRepo(db),
         app=SqliteAppRepo(db),
         app_group=SqliteAppGroupRepo(db),
@@ -5192,6 +5195,24 @@ def create_app(config: Config | None = None) -> web.Application:
             key_manager=key_manager,
         )
         gfs_member_publish.attach_channels(gfs_channels)
+        # v_97 — a GFS space's content waits in a durable queue until every
+        # planned GFS took it (owner 2026-11-27: retry, never a fallback).
+        space_item_outbox = SpaceItemOutbox(repos.space_item_outbox)
+        space_item_outbox.attach(
+            sender=gfs_channels.deliver_item, planner=gfs_channels.planned_gfs_ids
+        )
+
+        async def _tell_unsent(space_id: str, author_user_id: str) -> None:
+            await ws_manager.broadcast_to_user(
+                author_user_id, {"type": "space.unsent", "space_id": space_id}
+            )
+
+        space_item_outbox.attach_notify(_tell_unsent)
+        if (item_status := app.get(K.space_sync_status_key)) is not None:
+            space_item_outbox.attach_changed(item_status.outbox_changed)
+            item_status.attach_items_waiting(space_item_outbox.waiting)
+        gfs_member_publish.attach_outbox(space_item_outbox)
+        app[K.space_item_outbox_key] = space_item_outbox
         writer_certs.attach_channels(gfs_channels)
         gfs_channels.attach_space_service(real_space_service)
         gfs_channels.wire(bus)
@@ -6168,6 +6189,12 @@ def create_app(config: Config | None = None) -> web.Application:
             # v_84 — a connection came up: retry approvals of "Ask to join"
             # that have not seated their person yet (own task, non-blocking).
             gfs_join_requests.resume_soon()
+            # v_97 — content items waiting for this GFS go now.
+            if (item_outbox := app.get(K.space_item_outbox_key)) is not None:
+                try:
+                    await item_outbox.expedite(gfs_id)
+                except Exception:
+                    log.exception("gfs: item queue expedite failed for %s", gfs_id)
             # v_89 — mailbox tickets: a household with none gets a batch now
             # rather than at its first daily slot. Fail-soft.
             try:
@@ -6396,6 +6423,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_member_publish.start()
         if gfs_channels is not None:
             await gfs_channels.start()
+        if (item_outbox := app.get(K.space_item_outbox_key)) is not None:
+            await item_outbox.start()
 
         # v_48: page drafts waiting for their host — flushed now, then on a
         # tick and whenever a host answers again.
@@ -6781,6 +6810,10 @@ def create_app(config: Config | None = None) -> web.Application:
         await gfs_connection_service.stop()
         if gfs_member_publish is not None:
             await gfs_member_publish.stop()
+        # The durable item queue keeps what waits on disk: its loop ends
+        # before the publish session closes.
+        if (item_outbox := app.get(K.space_item_outbox_key)) is not None:
+            await item_outbox.stop()
         if gfs_channels is not None:
             await gfs_channels.stop()
         gfs_publish_session = gfs_connection_service.publish_client()

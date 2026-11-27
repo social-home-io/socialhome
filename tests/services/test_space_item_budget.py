@@ -1,94 +1,63 @@
-"""Sender budgets for a GFS space's channel items (v_97)."""
+"""Sender budgets for a GFS space's channel items (v_97): per person, sized
+for an active 10 000-seat space; the item waits in the durable queue."""
 
 from __future__ import annotations
 
-import asyncio
-
-from socialhome.domain.space_item import (
-    BUDGET_CHAT,
-    BUDGET_CONTENT,
-    BUDGET_LOCATION,
-)
+from socialhome.domain.space_item import BUDGET_CHAT, BUDGET_CONTENT, BUDGET_LOCATION
 from socialhome.services import space_item_budget as mod
 from socialhome.services.space_item_budget import SenderBudget
 
 
 class _Clock:
     def __init__(self) -> None:
-        self.t = 100.0
+        self.t = 1000.0
 
     def __call__(self) -> float:
         return self.t
 
 
-def _publisher(log: list, name: str):
-    async def publish() -> None:
-        log.append(name)
-
-    return publish
+def test_content_never_waits():
+    budget = SenderBudget(clock=_Clock())
+    assert [budget.delay("sp", BUDGET_CONTENT, "u") for _ in range(50)] == [0.0] * 50
 
 
-async def test_content_goes_at_once():
-    budget, sent = SenderBudget(), []
+def test_chat_bursts_ten_then_one_a_second_per_person():
+    clock = _Clock()
+    budget = SenderBudget(clock=clock)
+    delays = [budget.delay("sp", BUDGET_CHAT, "anna") for _ in range(12)]
+    assert delays[:10] == [0.0] * 10
+    assert delays[10:] == [1.0, 2.0]
+    # Another person — and the same person in another space — is never
+    # held behind her.
+    assert budget.delay("sp", BUDGET_CHAT, "ben") == 0.0
+    assert budget.delay("other", BUDGET_CHAT, "anna") == 0.0
+    # The bucket refills at one a second.
+    clock.t += 13
+    assert budget.delay("sp", BUDGET_CHAT, "anna") == 0.0
+
+
+def test_one_pin_per_ten_seconds_a_newer_one_takes_the_waiting_slot():
+    clock = _Clock()
+    budget = SenderBudget(clock=clock)
+    assert budget.delay("sp", BUDGET_LOCATION, "ann") == 0.0
+    clock.t += 2
+    assert budget.delay("sp", BUDGET_LOCATION, "ann") == 8.0
+    clock.t += 2
+    # Replaces the waiting pin in its slot — never pushed further out.
+    assert budget.delay("sp", BUDGET_LOCATION, "ann") == 6.0
+    assert budget.delay("sp", BUDGET_LOCATION, "bob") == 0.0
+    clock.t += 20
+    assert budget.delay("sp", BUDGET_LOCATION, "ann") == 0.0
+
+
+def test_idle_people_are_forgotten_past_the_cap(monkeypatch):
+    monkeypatch.setattr(mod, "MAX_TRACKED", 3)
+    clock = _Clock()
+    budget = SenderBudget(clock=clock)
     for n in range(3):
-        assert await budget.submit("sp", BUDGET_CONTENT, "u", _publisher(sent, n))
-    assert sent == [0, 1, 2]
-
-
-async def test_chat_waits_past_twenty_a_minute_and_keeps_its_order(monkeypatch):
-    monkeypatch.setattr(mod, "CHAT_PER_MINUTE", 2)
-    clock = _Clock()
-    budget, sent = SenderBudget(clock=clock), []
-    for n in range(4):
-        await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, f"m{n}"))
-    assert sent == ["m0", "m1"]
-    clock.t += 61
-    await budget.wait_idle()
-    assert sent == ["m0", "m1", "m2", "m3"]
-
-
-async def test_another_space_has_its_own_chat_budget(monkeypatch):
-    monkeypatch.setattr(mod, "CHAT_PER_MINUTE", 1)
-    budget, sent = SenderBudget(), []
-    assert await budget.submit("a", BUDGET_CHAT, "u", _publisher(sent, "a"))
-    assert await budget.submit("b", BUDGET_CHAT, "u", _publisher(sent, "b"))
-
-
-async def test_one_pin_a_minute_per_person_latest_only(monkeypatch):
-    monkeypatch.setattr(mod, "LOCATION_INTERVAL_S", 0.05)
-    budget, sent = SenderBudget(), []
-    assert await budget.submit("sp", BUDGET_LOCATION, "ann", _publisher(sent, "p1"))
-    assert not await budget.submit("sp", BUDGET_LOCATION, "ann", _publisher(sent, "p2"))
-    assert not await budget.submit("sp", BUDGET_LOCATION, "ann", _publisher(sent, "p3"))
-    # Another person is not held behind her.
-    assert await budget.submit("sp", BUDGET_LOCATION, "bob", _publisher(sent, "b1"))
-    await asyncio.sleep(0.1)
-    await budget.wait_idle()
-    assert sent == ["p1", "b1", "p3"]
-
-
-async def test_a_full_queue_never_drops_a_message(monkeypatch):
-    monkeypatch.setattr(mod, "CHAT_PER_MINUTE", 1)
-    monkeypatch.setattr(mod, "MAX_WAITING", 1)
-    clock = _Clock()
-    budget, sent = SenderBudget(clock=clock), []
-    await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, "m0"))
-    await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, "m1"))
-    assert await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, "m2"))
-    assert "m2" in sent
-    clock.t += 61
-    await budget.wait_idle()
-    assert sorted(sent) == ["m0", "m1", "m2"]
-
-
-async def test_close_sends_every_held_item_at_once(monkeypatch):
-    """Shutting down never waits out a pacing window: what is held goes."""
-    monkeypatch.setattr(mod, "CHAT_PER_MINUTE", 1)
-    monkeypatch.setattr(mod, "LOCATION_INTERVAL_S", 3600.0)
-    budget, sent = SenderBudget(clock=_Clock()), []
-    await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, "m0"))
-    await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, "m1"))
-    await budget.submit("sp", BUDGET_LOCATION, "ann", _publisher(sent, "p1"))
-    await budget.submit("sp", BUDGET_LOCATION, "ann", _publisher(sent, "p2"))
-    await asyncio.wait_for(budget.close(), timeout=2)
-    assert sorted(sent) == ["m0", "m1", "p1", "p2"]
+        budget.delay("sp", BUDGET_CHAT, f"p{n}")
+        budget.delay("sp", BUDGET_LOCATION, f"p{n}")
+    clock.t += 3600
+    budget.delay("sp", BUDGET_CHAT, "new")
+    budget.delay("sp", BUDGET_LOCATION, "new")
+    assert len(budget._tokens) == 1 and len(budget._pins) == 1

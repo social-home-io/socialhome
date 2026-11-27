@@ -7613,14 +7613,18 @@ async def test_v97_members_get_one_item_and_older_ones_the_event():
     assert (result.attempted, result.succeeded) == (3, 3)
 
 
-async def test_a_sealer_that_raises_falls_back_to_the_event():
+@pytest.mark.security
+async def test_a_sealer_that_raises_never_falls_back_to_the_legacy_fan_out():
+    """Owner 2026-11-27: no legacy fan-out for GFS-space content — the
+    sealer handles its own failures (the author is told); a raise is a bug
+    that surfaces, never a send of the event to every household."""
     fed = _ItemFed(["a97"], {"a97"}, None)
 
     async def boom(*a, **kw):
         raise ValueError("unserialisable payload")
 
     fed._item_sealer = boom
-    assert (
+    with pytest.raises(ValueError):
         await fed._broadcast_as_item(
             "sp",
             FederationEventType.SPACE_TASK_CREATED,
@@ -7629,9 +7633,18 @@ async def test_a_sealer_that_raises_falls_back_to_the_event():
             legacy_payload=None,
             legacy_below=None,
         )
-        is None
-    )
     assert fed.calls == []
+
+
+@pytest.mark.security
+async def test_a_gfs_space_item_that_failed_goes_to_no_v97_household():
+    """The sealer could not seal or store it (its author was told): only the
+    members below v_97 get the event, as always — no v_97 household does."""
+    sealed = SealedItem(space_id="sp", epoch=0, item="", via_channel=True)
+    fed = await _gfs_broadcast(sealed)
+    ((event_type, _payload, kw),) = fed.calls
+    assert event_type is FederationEventType.SPACE_TASK_CREATED
+    assert kw["only_instances"] == ["b96"]
 
 
 async def test_without_a_seal_the_caller_sends_the_event_to_everyone():

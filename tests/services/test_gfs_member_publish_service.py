@@ -749,8 +749,26 @@ class _Seats:
         ]
 
 
+class _Outbox:
+    """Records what the sealer stores in the durable item queue."""
+
+    def __init__(self) -> None:
+        self.queued: list[dict] = []
+        self.failed: list[dict] = []
+        self.accept = True
+
+    async def queue(self, **kw):
+        self.queued.append(kw)
+        return self.accept
+
+    async def fail(self, **kw):
+        self.failed.append(kw)
+
+
 async def _gfs_space(world):
     svc = await _sealing(world, channel=True)
+    world["outbox"] = _Outbox()
+    svc.attach_outbox(world["outbox"])  # type: ignore[arg-type]
     svc.attach_items(
         config=_Config(),  # type: ignore[arg-type]
         mentions=_Mentions(),  # type: ignore[arg-type]
@@ -767,9 +785,15 @@ async def test_a_gfs_space_change_goes_on_its_channel_with_its_ring_class(world)
         {"space_id": SPACE_ID, "user_id": "anna", "lat": 1.0, "lon": 2.0},
     )
     assert sealed.via_channel
-    (published,) = world["channels"].sealed
-    assert published[2] == sealed.item
-    assert world["channels"].ring_classes == ["ephemeral"]
+    # Stored in the durable queue for every planned GFS — not sent here.
+    assert world["channels"].sealed == []
+    (queued,) = world["outbox"].queued
+    assert queued["payload"] == sealed.item
+    assert queued["gfs_ids"] == ["conn-1"]
+    assert queued["ring_class"] == "ephemeral"
+    assert queued["author_user_id"] == "anna"
+    assert queued["supersede_key"] == "location:anna"
+    assert queued["delay_s"] == 0.0
     # The first change on this household opens the 14-day legacy window.
     assert sealed.legacy_window
 
@@ -790,13 +814,138 @@ async def test_a_location_off_is_durable_and_never_held(world):
             "lon": 2.0,
         },
     )
-    # Right after a pin: still goes at once (no pin pacing for an "off").
+    # Right after a pin: still goes at once (no pin pacing for an "off"),
+    # and it replaces a pin still waiting.
     await svc.seal_event_item(
         SPACE_ID,
         FederationEventType.SPACE_LOCATION_UPDATED,
         {"space_id": SPACE_ID, "user_id": "anna", "mode": "off"},
     )
-    assert world["channels"].ring_classes == ["ephemeral", "durable"]
+    queued = world["outbox"].queued
+    assert [q["ring_class"] for q in queued] == ["ephemeral", "durable"]
+    assert [q["delay_s"] for q in queued] == [0.0, 0.0]
+    assert {q["supersede_key"] for q in queued} == {"location:anna"}
+
+
+async def test_a_pin_right_after_a_pin_waits_for_its_slot_in_the_queue(world):
+    svc = await _gfs_space(world)
+    for _ in range(2):
+        await svc.seal_event_item(
+            SPACE_ID,
+            FederationEventType.SPACE_LOCATION_UPDATED,
+            {"space_id": SPACE_ID, "user_id": "anna", "mode": "gps"},
+        )
+    first, second = world["outbox"].queued
+    assert first["delay_s"] == 0.0 and second["delay_s"] > 0.0
+
+
+@pytest.mark.security
+async def test_no_gfs_to_take_it_yet_still_queues_never_the_legacy_path(world):
+    """Owner 2026-11-27: GFS-space content waits — no plan yet (no grant)
+    is an item planned when due, never ``None`` (the legacy fan-out)."""
+    svc = await _gfs_space(world)
+
+    async def nothing(space_id):
+        return []
+
+    world["channels"].plan = nothing
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed is not None and sealed.via_channel
+    assert world["outbox"].queued[0]["gfs_ids"] == []
+
+
+@pytest.mark.security
+async def test_a_gfs_space_seal_failure_is_the_authors_never_the_legacy_path(
+    world, caplog
+):
+    svc = await _gfs_space(world)
+    world["svc"]._writer_certs.scope = None
+
+    async def none(*_a, **_k):
+        return None
+
+    world["svc"]._writer_certs.issue_for_instance = none
+    sealed = await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        {"space_id": SPACE_ID, "author": "anna", "content": "hi"},
+    )
+    assert sealed is not None and sealed.via_channel and sealed.item == ""
+    assert world["outbox"].queued == []
+    (failed,) = world["outbox"].failed
+    assert (failed["author_user_id"], failed["error"]) == ("anna", "seal_failed")
+    assert "no writer cert or content key" in caplog.text
+
+
+@pytest.mark.security
+async def test_an_exception_while_sealing_a_gfs_space_item_is_surfaced(
+    world, caplog, monkeypatch
+):
+    svc = await _gfs_space(world)
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(GfsMemberPublishService, "_seal_event", boom)
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed is not None and sealed.via_channel and sealed.item == ""
+    assert world["outbox"].failed[0]["error"] == "seal_failed"
+    assert "failed — not sent" in caplog.text
+
+
+@pytest.mark.security
+async def test_not_knowing_the_space_kind_is_surfaced_not_sent_as_legacy(
+    world, monkeypatch
+):
+    svc = await _gfs_space(world)
+
+    async def boom(*_a):
+        raise RuntimeError("db")
+
+    monkeypatch.setattr(GfsMemberPublishService, "channel_space", boom)
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed is not None and sealed.via_channel
+    assert world["outbox"].failed
+
+
+async def test_a_refused_store_sends_nothing_and_the_author_was_told(world):
+    svc = await _gfs_space(world)
+    world["outbox"].accept = False
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed.via_channel and sealed.item == "" and sealed.notes == ()
+
+
+async def test_without_a_queue_a_gfs_space_item_is_surfaced(world, caplog):
+    svc = await _sealing(world, channel=True)
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed is not None and sealed.via_channel and sealed.item == ""
+    assert "no durable item queue" in caplog.text
+
+
+async def test_a_mesh_space_seal_error_keeps_the_legacy_path(world, monkeypatch):
+    """A mesh space's legacy event IS its durable per-household path."""
+    svc = await _sealing(world)
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(GfsMemberPublishService, "_seal_event", boom)
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+        )
+        is None
+    )
 
 
 async def test_the_legacy_window_closes_after_fourteen_days(world):

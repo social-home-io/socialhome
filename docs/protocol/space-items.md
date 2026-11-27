@@ -299,18 +299,49 @@ per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
   mailbox), so it notifies at once. `@here` / `@everyone` notify watchers
   live and everyone else by badge (owner F7) — no notes.
 
+## The durable item queue (GFS spaces)
+
+Owner 2026-11-27: a GFS space's content is never handed to the legacy
+per-household fan-out (that path is only for households below v_97 and the
+14-day window); it waits in a **durable retry queue** until every GFS it is
+planned for accepted it (`space_item_outbox`, household migration 0158;
+`services/space_item_outbox.py`).
+
+- **At seal time** the item is sealed, checked against the largest payload
+  a GFS takes (200 KiB of ciphertext — larger is refused there and then, the
+  author told), and stored as one row per planned GFS (the owner's signed
+  list ∩ the grant; none yet, e.g. no grant: one row planned when due). It
+  survives a restart.
+- **Per GFS, until accepted.** A transient answer (down, timeout, 5xx, 429)
+  backs off 5 s, 15 s, 1 min, 5 min, then every 10 min — never giving up —
+  honouring a 429's `Retry-After` (≤ 15 min), and holds that GFS's other
+  rows until then (they would get the same answer). A reconnect to that GFS
+  makes everything due at once. GFSs never wait on each other; one GFS's
+  rows go in order.
+- **Permanent errors reach the author.** A GFS refusing for good (a 4xx:
+  not seated, unknown channel), a too-large item, a full queue, or a
+  sealing failure (a bug, logged at WARNING — no legacy fallback either) is
+  kept as a `failed` row; the author's space screen shows "Couldn't send to
+  {space}" with **Try again** / **Discard** (`/api/spaces/{id}/unsent`, the
+  `space.unsent` frame). A GFS that no longer serves the space (dropped
+  from the owner's list) just loses its copy.
+- **Bounded per space**: 2 000 rows / 32 MiB. Past it a new item is refused
+  and the author sees "too much is already waiting to go out". Items still
+  waiting count in the space's `waiting_to_send`.
+
 ## Sender budgets and location
 
-Per household and space: content > chat > location.
-Chat ≤ 20 items/min (the rest wait for the next minute); location ≤ 1 per
-person per 60 s, latest only (a newer pin replaces a waiting one). In a GFS
+Per person and space (sized for an active 10 000-seat space, see the
+limits table): chat a burst of 10, then 1 a second; location ≤ 1 pin per
+10 s, latest only (a newer pin replaces one still waiting in the queue);
+content never waits. The budget only sets when an item is first due — the
+item waits for its slot in the durable queue, never in memory. In a GFS
 space a person sharing location has the pin republished every 15 min as a
 keepalive (owner F3), since the ring keeps a location item only 15 min
 (`ephemeral`). Each keepalive is rebuilt from what is true then — still a
 member, still sharing, location on, a live position, still inside a zone
 for `zone_only` — and otherwise the pin is forgotten and never repeated. A
-mesh space's households keep the last pin, so nothing repeats there. On
-shutdown every held item goes at once.
+mesh space's households keep the last pin, so nothing repeats there.
 
 ## GFS spaces: joining and switching
 
@@ -345,8 +376,9 @@ shutdown every held item goes at once.
   `SPACE_ITEM`, `SPACE_MENTION_NOTE` and the v2 inner. Below
   v_97 a member gets the legacy event (`broadcast_to_space_members` splits
   the audience by `space_member_supports(MIN_FOR_SPACE_ITEMS)`; an unknown
-  version counts as older). When no listed GFS can take an item right now,
-  or it can't be sealed, the legacy event goes to everyone.
+  version counts as older). A GFS space's item that no listed GFS can take
+  right now waits in the durable queue; one that can't be sealed is shown
+  to its author — never the legacy event to everyone.
 - GFS capability **`channel_ring`**: households use the ring and the new
   publish fields only on a GFS that proves it; on another GFS the v_96
   channel behaviour holds.

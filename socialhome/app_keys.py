@@ -179,6 +179,8 @@ gfs_server_selection_service_key: AppKey = AppKey("gfs_server_selection_service"
 gfs_ws_supervisor_key: AppKey = AppKey("gfs_ws_supervisor")
 #: v_97 — the household side of the GFS channel ring (watch, cursors, fetch).
 channel_ring_client_key: AppKey = AppKey("channel_ring_client")
+#: v_97 — the durable queue of a GFS space's content items (migration 0158).
+space_item_outbox_key: AppKey = AppKey("space_item_outbox")
 #: v_97 — the space pin fan-out (its 15-minute keepalive).
 space_location_outbound_key: AppKey = AppKey("space_location_outbound")
 #: v_89 — this household's GFS mailboxes (one per GFS) and member directory.

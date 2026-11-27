@@ -1,0 +1,399 @@
+"""The durable retry queue of a GFS space's content items (v_97).
+
+Owner 2026-11-27: content in a GFS space (a global space, or a private one
+with ``private_gfs`` on) waits in a PERSISTED queue (``space_item_outbox``,
+migration 0158) until every planned GFS accepted it — it is never handed to
+the legacy per-household fan-out instead (that path is only for households
+below v_97 and the 14-day window).
+
+* **Per planned GFS.** One row per (item, GFS). A row goes when that GFS
+  accepted the item. A transient answer — the GFS down, a timeout, a 5xx,
+  a 429 — moves the row on by :func:`~socialhome.domain.space_item_outbox
+  .backoff_s` (a ``Retry-After`` honoured) and holds every other row of
+  that GFS until then (they would get the same answer); a reconnect to the
+  GFS makes them due at once (:meth:`SpaceItemOutbox.expedite`).
+* **Permanent errors reach the author.** A permanent refusal (a 4xx — not
+  seated, unknown channel), an item too large for any GFS, a full queue and
+  a sealing failure are kept as ``failed`` rows; the author's SPA shows
+  "Couldn't send to {space}" with Retry / Discard (``GET / POST / DELETE
+  /api/spaces/{id}/unsent``) and is told by a ``space.unsent`` frame.
+* **Bounded.** :data:`~socialhome.domain.space_item_outbox
+  .SPACE_QUEUE_MAX_ITEMS` rows / :data:`~socialhome.domain.space_item_outbox
+  .SPACE_QUEUE_MAX_BYTES` per space; past it a new item is refused (the
+  author sees "too many waiting").
+* **Budgets.** The sender budget only sets when an item is first due; it
+  waits for its slot here, so a restart loses nothing.
+
+The loop follows the scheduler pattern (``_stop: asyncio.Event``).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+
+from ..domain.gfs_channel import MEMBER_PUBLISH_MAX_PAYLOAD_CHARS
+from ..domain.space_item_outbox import (
+    UNPLANNED_GFS,
+    UNSENT_QUEUE_FULL,
+    UNSENT_REFUSED,
+    UNSENT_TOO_LARGE,
+    QueuedSpaceItem,
+    UnsentItem,
+    backoff_s,
+)
+from ..repositories.space_item_outbox_repo import AbstractSpaceItemOutboxRepo
+from .gfs_publish_retry import PublishOutcome
+
+log = logging.getLogger(__name__)
+
+#: Rows tried per pass.
+BATCH: int = 100
+#: Longest sleep between passes when nothing is due sooner.
+IDLE_WAKE_S: float = 60.0
+
+#: One attempt to put ``row`` on ``row.gfs_id``.
+Sender = Callable[[QueuedSpaceItem], Awaitable[PublishOutcome]]
+#: The GFS ids a space's item goes to now; ``None`` when the space no longer
+#: has a channel here.
+Planner = Callable[[str], Awaitable[list[str] | None]]
+#: ``(space_id, author_user_id)`` — the author's unsent items changed.
+Notify = Callable[[str, str], Awaitable[None]]
+
+
+def _iso(at: datetime) -> str:
+    return at.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+class SpaceItemOutbox:
+    """Queue, retry and surface a GFS space's content items (see the module
+    docstring)."""
+
+    __slots__ = (
+        "_changed",
+        "_clock",
+        "_notify",
+        "_planner",
+        "_repo",
+        "_sender",
+        "_stop",
+        "_task",
+        "_wake",
+    )
+
+    def __init__(
+        self,
+        repo: AbstractSpaceItemOutboxRepo,
+        *,
+        clock: Callable[[], datetime] = _utcnow,
+    ) -> None:
+        self._repo = repo
+        self._clock = clock
+        self._sender: Sender | None = None
+        self._planner: Planner | None = None
+        self._notify: Notify | None = None
+        self._changed: Callable[[str], None] | None = None
+        self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    def attach(self, *, sender: Sender, planner: Planner) -> None:
+        """The channel service's one-attempt send and its planner."""
+        self._sender = sender
+        self._planner = planner
+
+    def attach_notify(self, notify: Notify) -> None:
+        """Tell the author their unsent items changed (a WS frame)."""
+        self._notify = notify
+
+    def attach_changed(self, changed: Callable[[str], None]) -> None:
+        """A space's queue changed (the sync status re-counts
+        ``waiting_to_send``)."""
+        self._changed = changed
+
+    def _now(self) -> str:
+        return _iso(self._clock())
+
+    # ── Queueing ─────────────────────────────────────────────────────────
+
+    async def queue(
+        self,
+        *,
+        space_id: str,
+        epoch: int,
+        payload: str,
+        event_type: str,
+        ring_class: str,
+        author_user_id: str,
+        gfs_ids: list[str],
+        delay_s: float = 0.0,
+        supersede_key: str | None = None,
+    ) -> bool:
+        """Store the sealed item for each of *gfs_ids* (none planned yet:
+        one row planned when due), first due in *delay_s* (its budget
+        slot). ``False`` — and the author is told — when it is too large
+        for any GFS or the space's queue is full."""
+        if len(payload) > MEMBER_PUBLISH_MAX_PAYLOAD_CHARS:
+            await self.fail(
+                space_id=space_id,
+                event_type=event_type,
+                author_user_id=author_user_id,
+                error=UNSENT_TOO_LARGE,
+            )
+            return False
+        now = self._clock()
+        due = _iso(now + timedelta(seconds=max(0.0, delay_s)))
+        item_id = uuid.uuid4().hex
+        rows = [
+            QueuedSpaceItem(
+                item_id=item_id,
+                gfs_id=gfs_id,
+                space_id=space_id,
+                epoch=int(epoch),
+                ring_class=ring_class,
+                event_type=event_type,
+                author_user_id=author_user_id,
+                supersede_key=supersede_key,
+                payload=payload,
+                next_attempt_at=due,
+                created_at=_iso(now),
+            )
+            for gfs_id in (list(dict.fromkeys(gfs_ids)) or [UNPLANNED_GFS])
+        ]
+        if not await self._repo.add(rows):
+            log.warning(
+                "space items: the queue of space %s is full — a %s was not sent",
+                space_id,
+                event_type,
+            )
+            await self.fail(
+                space_id=space_id,
+                event_type=event_type,
+                author_user_id=author_user_id,
+                error=UNSENT_QUEUE_FULL,
+            )
+            return False
+        self._space_changed(space_id)
+        self._wake.set()
+        return True
+
+    async def fail(
+        self, *, space_id: str, event_type: str, author_user_id: str, error: str
+    ) -> None:
+        """Record an item that could not be stored at all and tell its
+        author."""
+        await self._repo.record_failure(
+            space_id=space_id,
+            event_type=event_type,
+            author_user_id=author_user_id,
+            error=error,
+            now=self._now(),
+        )
+        await self._tell(space_id, author_user_id)
+
+    # ── The author's view ────────────────────────────────────────────────
+
+    async def unsent(self, space_id: str, author_user_id: str) -> list[UnsentItem]:
+        return await self._repo.list_failed(space_id, author_user_id)
+
+    async def retry(self, space_id: str, author_user_id: str) -> int:
+        """Retry the author's failed items that kept their bytes, now."""
+        n = await self._repo.retry_failed(space_id, author_user_id, now=self._now())
+        if n:
+            self._space_changed(space_id)
+            self._wake.set()
+        await self._tell(space_id, author_user_id)
+        return n
+
+    async def discard(self, space_id: str, author_user_id: str) -> int:
+        n = await self._repo.discard_failed(space_id, author_user_id)
+        await self._tell(space_id, author_user_id)
+        return n
+
+    async def waiting(self, space_id: str) -> int:
+        """Items of the space still waiting for a GFS."""
+        return await self._repo.count_pending(space_id)
+
+    # ── Sending ──────────────────────────────────────────────────────────
+
+    async def expedite(self, gfs_id: str) -> None:
+        """*gfs_id* (re)connected: what waits for it goes now."""
+        await self._repo.expedite(gfs_id, now=self._now())
+        self._wake.set()
+
+    async def run_once(self) -> int:
+        """One pass over the due rows; returns how many were due. Rows of
+        one GFS go in order, GFSs in parallel."""
+        if self._sender is None or self._planner is None:
+            return 0
+        rows = await self._repo.list_due(self._now(), limit=BATCH)
+        by_gfs: dict[str, list[QueuedSpaceItem]] = {}
+        for row in rows:
+            by_gfs.setdefault(row.gfs_id, []).append(row)
+        await asyncio.gather(
+            *(self._run_gfs(gfs_id, batch) for gfs_id, batch in by_gfs.items())
+        )
+        return len(rows)
+
+    async def _run_gfs(self, gfs_id: str, rows: list[QueuedSpaceItem]) -> None:
+        for row in rows:
+            try:
+                if not await self._attempt(row):
+                    return  # the GFS answers the rest the same: they wait
+            except Exception:
+                log.warning(
+                    "space items: an attempt for space %s failed",
+                    row.space_id,
+                    exc_info=True,
+                )
+                await self._backoff(row, None)
+                return
+
+    async def _attempt(self, row: QueuedSpaceItem) -> bool:
+        """Try *row*; ``False`` when its GFS should not be tried again in
+        this pass."""
+        assert self._sender is not None and self._planner is not None
+        if row.gfs_id == UNPLANNED_GFS:
+            planned = await self._planner(row.space_id)
+            if planned is None:
+                log.warning(
+                    "space items: space %s no longer has a channel here — a"
+                    " waiting %s is dropped",
+                    row.space_id,
+                    row.event_type,
+                )
+                await self._repo.delete(row.item_id, row.gfs_id)
+                self._space_changed(row.space_id)
+            elif planned:
+                await self._repo.expand(row, planned, now=self._now())
+                self._wake.set()
+            else:
+                await self._backoff(row, None, whole_gfs=False)
+            return True
+        outcome = await self._sender(row)
+        if outcome.kind == "delivered":
+            await self._repo.delete(row.item_id, row.gfs_id)
+            self._space_changed(row.space_id)
+            return True
+        if outcome.kind == "gone":
+            log.info(
+                "space items: GFS %s no longer serves space %s — its copy of a"
+                " %s is dropped",
+                row.gfs_id,
+                row.space_id,
+                row.event_type,
+            )
+            await self._repo.delete(row.item_id, row.gfs_id)
+            self._space_changed(row.space_id)
+            return True
+        if outcome.kind == "transient":
+            await self._backoff(row, outcome.retry_after_s)
+            return False
+        log.warning(
+            "space items: GFS %s refused a %s of space %s for good — the author"
+            " is told",
+            row.gfs_id,
+            row.event_type,
+            row.space_id,
+        )
+        await self._repo.mark_failed(row.item_id, row.gfs_id, UNSENT_REFUSED)
+        self._space_changed(row.space_id)
+        await self._tell(row.space_id, row.author_user_id)
+        return True
+
+    async def _backoff(
+        self,
+        row: QueuedSpaceItem,
+        retry_after_s: float | None,
+        *,
+        whole_gfs: bool = True,
+    ) -> None:
+        attempts = row.attempts + 1
+        until = _iso(
+            self._clock() + timedelta(seconds=backoff_s(attempts, retry_after_s))
+        )
+        await self._repo.reschedule(
+            row.item_id, row.gfs_id, attempts=attempts, next_attempt_at=until
+        )
+        if whole_gfs:
+            await self._repo.defer_gfs(row.gfs_id, until=until)
+
+    # ── Notifications ────────────────────────────────────────────────────
+
+    def _space_changed(self, space_id: str) -> None:
+        if self._changed is None:
+            return
+        try:
+            self._changed(space_id)
+        except Exception:
+            log.debug("space items: status refresh failed", exc_info=True)
+
+    async def _tell(self, space_id: str, author_user_id: str) -> None:
+        if self._notify is None or not author_user_id:
+            return
+        try:
+            await self._notify(space_id, author_user_id)
+        except Exception:
+            log.debug("space items: unsent notice failed", exc_info=True)
+
+    # ── Lifecycle ────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._stop.clear()
+        self._task = asyncio.create_task(self._loop(), name="space-item-outbox")
+
+    async def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._task is not None:
+            try:
+                await asyncio.wait_for(self._task, timeout=10.0)
+            except TimeoutError, asyncio.CancelledError:
+                self._task.cancel()
+            self._task = None
+
+    async def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._wake.clear()
+            due = 0
+            try:
+                due = await self.run_once()
+            except Exception:
+                log.warning("space items: a queue pass failed", exc_info=True)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=5.0)
+                except TimeoutError:
+                    pass
+                continue
+            if due >= BATCH or self._stop.is_set():
+                continue
+            await self._sleep()
+
+    async def _sleep(self) -> None:
+        wait = IDLE_WAKE_S
+        try:
+            nxt = await self._repo.next_due_at()
+        except Exception:
+            log.debug("space items: next due time unreadable", exc_info=True)
+            nxt = None
+        if nxt is not None:
+            try:
+                ahead = (datetime.fromisoformat(nxt) - self._clock()).total_seconds()
+                wait = min(wait, max(0.0, ahead))
+            except ValueError:
+                pass
+        if wait <= 0.0:
+            return
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=wait)
+        except TimeoutError:
+            pass

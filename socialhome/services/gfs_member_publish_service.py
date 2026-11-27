@@ -34,7 +34,6 @@ Publishing runs in the background (:meth:`GfsMemberPublishService
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -49,6 +48,7 @@ from ..domain.gfs_channel import RING_CLASS_DURABLE
 from ..domain.space import SpaceFeatures, SpaceType
 from ..domain.space_item import (
     BUDGET_CONTENT,
+    BUDGET_LOCATION,
     EVENT_ITEM_SIZE_BUCKETS,
     ITEM_SIZE_BUCKETS,
     ITEM_SPECS,
@@ -61,6 +61,7 @@ from ..domain.space_item import (
     reader_cert_permits,
     required_scope,
 )
+from ..domain.space_item_outbox import UNSENT_SEAL_FAILED
 from ..domain.writer_cert import WriterCert, scope_permits
 from ..task_drain import wait_tasks_done
 from .gfs_channel_service import CHANNEL_TIERS
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_channel_service import GfsChannelService
     from .space_crypto_service import SpaceContentEncryption
+    from .space_item_outbox import SpaceItemOutbox
     from .space_mentions import SpaceMentionResolver
     from .space_writer_cert_service import SpaceWriterCertService
 
@@ -111,6 +113,17 @@ def _cert_lets(
         and isinstance(users, list)
         and author_user_id in users
         and reader_cert_permits(parsed, item_type, features)
+    )
+
+
+def _author_of(payload: dict) -> str:
+    """The local person a change's payload names (the budget and the
+    "Couldn't send" notice are theirs); ``""`` when none."""
+    return str(
+        payload.get("user_id")
+        or payload.get("author_user_id")
+        or payload.get("author")
+        or ""
     )
 
 
@@ -159,6 +172,7 @@ class GfsMemberPublishService:
         "_crypto",
         "_identity",
         "_mentions",
+        "_outbox",
         "_remote_members",
         "_spaces",
         "_stopping",
@@ -187,13 +201,19 @@ class GfsMemberPublishService:
         #: v_97 — ``(instance_id, identity_seed, identity_pk)``: the origin
         #: that signs this household's event-shaped space items.
         self._identity: tuple[str, bytes, bytes] | None = None
-        #: v_97 — chat / location pacing for channel items.
+        #: v_97 — when a person's chat / location item may first go.
         self._budget = SenderBudget()
         #: v_97 — the legacy-window start per space, the mention resolver
         #: and the roster for mention notes (``attach_items``).
         self._config: AbstractInstanceConfigRepo | None = None
         self._mentions: SpaceMentionResolver | None = None
         self._remote_members: AbstractSpaceRemoteMemberRepo | None = None
+        #: v_97 — the durable queue a GFS space's items wait in.
+        self._outbox: SpaceItemOutbox | None = None
+
+    def attach_outbox(self, outbox: SpaceItemOutbox) -> None:
+        """v_97 — the durable item queue (owner: retry, never a fallback)."""
+        self._outbox = outbox
 
     def attach_items(
         self,
@@ -281,7 +301,6 @@ class GfsMemberPublishService:
         """Let in-flight background publishes (and held items) finish."""
         self._stopping = True
         await self.wait_idle()
-        await self._budget.close()
 
     # ── Publishing an item ────────────────────────────────────────────────
 
@@ -461,59 +480,125 @@ class GfsMemberPublishService:
 
         * a **mesh space**: returned for ``SPACE_ITEM``;
         * a **GFS space** (a channel here), for the whole space and a type
-          no v1 item carries: published on the channel (through the sender
-          budget, with the spec's ring class), returned ``via_channel`` with
-          the mention notes for mentioned households.
+          no v1 item carries: stored in the DURABLE item queue
+          (:mod:`.space_item_outbox` — retried per planned GFS until
+          accepted, its first try at the sender budget's slot) and
+          returned ``via_channel`` with the mention notes. Never ``None``
+          (owner 2026-11-27: GFS-space content is never handed to the
+          legacy per-household fan-out): an item that can't be sealed or
+          stored is a failure its author sees ("Couldn't send"), logged at
+          WARNING, and the result still says ``via_channel``.
 
-        ``None`` (the legacy event goes to everyone) when it can't be: no
-        identity, no person item, a narrowed audience or a v1-carried type
-        in a GFS space, or no cert / key for the epoch."""
+        ``None`` (the legacy event goes to everyone) only where the legacy
+        event IS the path: no identity, no person item, a narrowed
+        audience or a v1-carried type in a GFS space, latest-only state or
+        no cert / key for the epoch in a mesh space."""
         if self._identity is None or event_type.value not in ITEM_SPECS:
             return None
-        on_channel = await self.channel_space(space_id)
-        if on_channel and (
-            not whole_space or event_type.value in V1_CHANNEL_EVENT_TYPES
-        ):
-            return None
-        if not on_channel and (
-            supersede_key(event_type, space_id=space_id, payload=payload) is not None
-        ):
+        author = _author_of(payload)
+        try:
+            on_channel = await self.channel_space(space_id)
+        except Exception:
+            # Which kind of space this is can't be told: never a legacy
+            # fan-out of what may be GFS-space content — a bug, surfaced.
+            log.warning(
+                "space items: could not tell whether space %s is a GFS space"
+                " — a %s was not sent; its author is told",
+                space_id,
+                event_type.value,
+                exc_info=True,
+            )
+            return await self._unsent(space_id, event_type, author)
+        if on_channel:
+            if not whole_space or event_type.value in V1_CHANNEL_EVENT_TYPES:
+                return None
+            try:
+                return await self._channel_item(space_id, event_type, payload, author)
+            except Exception:
+                log.warning(
+                    "space items: sealing a %s for GFS space %s failed — not"
+                    " sent; its author is told",
+                    event_type.value,
+                    space_id,
+                    exc_info=True,
+                )
+                return await self._unsent(space_id, event_type, author)
+        if supersede_key(event_type, space_id=space_id, payload=payload) is not None:
             # Latest-only state (a pin, a poll selection) keeps its event on
             # the mesh: the outbox holds one row per (peer, key) for it, and
             # a queued SPACE_ITEM would not (no movement trail for an
             # offline household, an opt-out still replaces a queued pin).
             return None
-        if on_channel and (
-            self._channels is None or not await self._channels.plan(space_id)
-        ):
-            # No channel server to take it right now: the legacy event goes
-            # to everyone (never a change that reaches nobody).
+        try:
+            sealed = await self._seal_event(space_id, event_type, payload)
+        except Exception:
+            # A mesh space: the legacy event is the durable per-household
+            # path there — it carries the change.
+            log.warning(
+                "space items: sealing a %s for mesh space %s failed — the event"
+                " goes as before",
+                event_type.value,
+                space_id,
+                exc_info=True,
+            )
             return None
-        sealed = await self._seal_event(space_id, event_type, payload)
         if sealed is None:
             return None
         epoch, ct = sealed
-        if not on_channel:
-            return SealedItem(space_id=space_id, epoch=epoch, item=ct)
+        return SealedItem(space_id=space_id, epoch=epoch, item=ct)
+
+    async def _channel_item(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        author: str,
+    ) -> SealedItem:
+        """A GFS space's item: sealed, size-checked and stored in the
+        durable queue for every planned GFS (none planned yet: planned when
+        due)."""
+        if self._outbox is None:
+            log.warning(
+                "space items: no durable item queue — a %s of GFS space %s"
+                " was not sent",
+                event_type.value,
+                space_id,
+            )
+            return await self._unsent(space_id, event_type, author)
+        sealed = await self._seal_event(space_id, event_type, payload)
+        if sealed is None:
+            log.warning(
+                "space items: no writer cert or content key for the current"
+                " epoch of GFS space %s — a %s was not sent; its author is told",
+                space_id,
+                event_type.value,
+            )
+            return await self._unsent(space_id, event_type, author)
+        epoch, ct = sealed
         spec = ITEM_SPECS[event_type.value]
         # A location "off" must outlive the pin it removes: kept like any
         # durable item (a household that fetches later still sees it) and
-        # never held behind the pin pacing.
+        # never held behind the pin pacing — but it replaces a pin still
+        # waiting (the same latest-only key).
         off = payload.get("mode") == "off"
-        ring_class = RING_CLASS_DURABLE if off else spec.ring_class
-        await self._budget.submit(
-            space_id,
-            BUDGET_CONTENT if off else spec.budget,
-            str(
-                payload.get("user_id")
-                or payload.get("author_user_id")
-                or payload.get("author")
-                or ""
+        location = spec.budget == BUDGET_LOCATION
+        targets = await self._channels.plan(space_id) if self._channels else []
+        queued = await self._outbox.queue(
+            space_id=space_id,
+            epoch=epoch,
+            payload=ct,
+            event_type=event_type.value,
+            ring_class=RING_CLASS_DURABLE if off else spec.ring_class,
+            author_user_id=author,
+            gfs_ids=[t.id for t in targets],
+            delay_s=self._budget.delay(
+                space_id, BUDGET_CONTENT if off else spec.budget, author
             ),
-            functools.partial(
-                self._publish_channel_item, space_id, epoch, ct, ring_class
-            ),
+            supersede_key=f"location:{author}" if location else None,
         )
+        if not queued:
+            # Too large, or the space's queue is full: its author was told.
+            return SealedItem(space_id=space_id, epoch=epoch, item="", via_channel=True)
         wire = {"space_id": space_id, "epoch": epoch, "item": ct}
         return SealedItem(
             space_id=space_id,
@@ -533,16 +618,27 @@ class GfsMemberPublishService:
             ),
         )
 
-    async def _publish_channel_item(
-        self, space_id: str, epoch: int, ct: str, ring_class: str
-    ) -> None:
-        if self._channels is None:
-            return
-        targets = await self._channels.plan(space_id)
-        if targets:
-            await self._channels.publish_sealed(
-                space_id, epoch, ct, targets, ring_class=ring_class
-            )
+    async def _unsent(
+        self, space_id: str, event_type: FederationEventType, author: str
+    ) -> SealedItem:
+        """A GFS-space item that could not be sealed or stored: its author
+        sees it (no bytes kept — Discard only); nothing goes to a v_97
+        household (the result says ``via_channel``)."""
+        if self._outbox is not None:
+            try:
+                await self._outbox.fail(
+                    space_id=space_id,
+                    event_type=event_type.value,
+                    author_user_id=author,
+                    error=UNSENT_SEAL_FAILED,
+                )
+            except Exception:
+                log.warning(
+                    "space items: could not record an unsent %s",
+                    event_type.value,
+                    exc_info=True,
+                )
+        return SealedItem(space_id=space_id, epoch=0, item="", via_channel=True)
 
     async def _seal_event(
         self, space_id: str, event_type: FederationEventType, payload: dict

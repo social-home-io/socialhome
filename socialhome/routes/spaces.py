@@ -34,6 +34,7 @@ from ..app_keys import (
     space_chat_service_key,
     space_cover_repo_key,
     space_icon_repo_key,
+    space_item_outbox_key,
     space_listing_counts_service_key,
     space_moderation_service_key,
     space_remote_location_repo_key,
@@ -613,6 +614,51 @@ class SpaceSummaryView(BaseView):
             self.match("id"), user_id=self.user.user_id
         )
         return web.json_response(out)
+
+
+class SpaceUnsentView(BaseView):
+    """``/api/spaces/{id}/unsent`` (v_97) — the caller's own items of a GFS
+    space that could not be sent ("Couldn't send to {space}"):
+
+    * ``GET`` → ``{"items": [{item_id, event_type, error, created_at,
+      retryable, count}]}``, oldest first (``error``: ``refused`` /
+      ``too_large`` / ``queue_full`` / ``seal_failed``);
+    * ``POST`` (Retry) → ``{"retried": n}`` — the ones that kept their
+      bytes go into the queue again, now;
+    * ``DELETE`` (Discard) → ``{"discarded": n}``.
+
+    Only the caller's own items: nobody sees, retries or discards another
+    person's. Empty when this household has no durable item queue."""
+
+    def _outbox(self):
+        return self.request.app.get(space_item_outbox_key)
+
+    async def get(self) -> web.Response:
+        outbox = self._outbox()
+        items = (
+            await outbox.unsent(self.match("id"), self.user.user_id)
+            if outbox is not None
+            else []
+        )
+        return web.json_response({"items": [i.to_wire() for i in items]})
+
+    async def post(self) -> web.Response:
+        outbox = self._outbox()
+        n = (
+            await outbox.retry(self.match("id"), self.user.user_id)
+            if outbox is not None
+            else 0
+        )
+        return web.json_response({"retried": n})
+
+    async def delete(self) -> web.Response:
+        outbox = self._outbox()
+        n = (
+            await outbox.discard(self.match("id"), self.user.user_id)
+            if outbox is not None
+            else 0
+        )
+        return web.json_response({"discarded": n})
 
 
 class SpaceProposalsView(BaseView):

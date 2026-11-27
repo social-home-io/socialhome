@@ -353,6 +353,17 @@ async def test_waiting_to_send_counts_the_spaces_outbox(env):
     assert (await env.svc.status("sp")).waiting_to_send == 4
 
 
+async def test_waiting_to_send_counts_items_waiting_for_a_gfs(env):
+    """v_97 — a GFS space's items in the durable queue wait to send too."""
+    env.outbox.pending["sp"] = 1
+
+    async def items(space_id):
+        return {"sp": 3}.get(space_id, 0)
+
+    env.svc.attach_items_waiting(items)
+    assert (await env.svc.status("sp")).waiting_to_send == 4
+
+
 # ── The frame: only when the state changes ────────────────────────────────
 
 

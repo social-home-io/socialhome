@@ -30961,3 +30961,33 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   outline-offset: 2px;
   border-radius: var(--sh-radius-sm);
 }
+
+/* v_97 — "Couldn't send to {space}": the author's own GFS-space items a GFS
+ * would not take (SpaceUnsentBanner). Warning tint, wraps on a phone. */
+.sh-unsent-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs) var(--sh-space-md);
+  margin: var(--sh-space-xs) 0;
+  padding: 10px var(--sh-space-md);
+  border: 1px solid color-mix(in srgb, var(--sh-warning) 35%, var(--sh-border));
+  border-radius: var(--sh-radius-sm);
+  background: color-mix(in srgb, var(--sh-warning) 12%, transparent);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-unsent-banner__icon { color: var(--sh-warning); }
+.sh-unsent-banner__text {
+  display: flex;
+  flex: 1 1 14rem;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sh-unsent-banner__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+}
+.sh-unsent-banner__actions .sh-btn { min-height: 36px; }

@@ -87,7 +87,10 @@ class GfsPublish:
 class PublishOutcome:
     """How one anonymous publish attempt ended."""
 
-    kind: Literal["delivered", "transient", "permanent"]
+    #: ``gone`` (v_97 space items only): the target no longer serves the
+    #: item (not a channel server of the space any more) — nothing to retry
+    #: and nothing to tell the author.
+    kind: Literal["delivered", "transient", "permanent", "gone"]
     #: Seconds the server asked us to wait (a 429's ``Retry-After``).
     retry_after_s: float | None = None
 
@@ -102,6 +105,10 @@ class PublishOutcome:
     @classmethod
     def permanent(cls) -> PublishOutcome:
         return cls("permanent")
+
+    @classmethod
+    def gone(cls) -> PublishOutcome:
+        return cls("gone")
 
 
 def parse_retry_after_s(value: str | None) -> float | None:

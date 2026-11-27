@@ -4194,13 +4194,15 @@ class FederationService:
         * a **mesh space**: to its v_97 member households in the audience as
           ``SPACE_ITEM`` (one multi upload per GFS), the legacy event to
           the older ones;
-        * a **GFS space** (the sealer put it on the channel — only for the
-          whole space: a narrowed audience never goes where every seat
-          reads): the legacy event to the members below v_97 only (and,
-          in the 14-day window after the space became a GFS space here, to
+        * a **GFS space** (the sealer stored it in the durable channel
+          queue, or told its author it could not — only for the whole
+          space: a narrowed audience never goes where every seat reads):
+          the legacy event to the members below v_97 only (and, in the
+          14-day window after the space became a GFS space here, to
           everyone).
 
-        ``None`` when it can't be sealed: the caller sends the legacy event
+        ``None`` when the legacy event is the path (a mesh space's
+        latest-only state, a type that is no item, …): the caller sends it
         to the whole audience."""
         assert self._item_sealer is not None
         members = [
@@ -4213,20 +4215,13 @@ class FederationService:
             if only_instances is None
             else [iid for iid in members if iid in only_instances]
         )
-        try:
-            sealed = await self._item_sealer(
-                space_id, event_type, payload, whole_space=whole_space
-            )
-        except Exception:
-            # Never a change that reaches nobody: whatever the sealer hit,
-            # the legacy event goes to the whole audience.
-            log.warning(
-                "space item: sealing %s for space %s failed — the event goes as before",
-                event_type.value,
-                space_id,
-                exc_info=True,
-            )
-            return None
+        # No fallback here (owner 2026-11-27): a GFS space's content waits
+        # in the sealer's durable queue, and a failure there is shown to its
+        # author — never sent as the legacy event to every household. The
+        # sealer handles its own errors (it never raises).
+        sealed = await self._item_sealer(
+            space_id, event_type, payload, whole_space=whole_space
+        )
         if sealed is None:
             return None
         items_to: list[str] = []

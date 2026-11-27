@@ -34,6 +34,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space_item_outbox import QueuedSpaceItem
 from socialhome.domain.writer_cert import WriterEntitlement
 from socialhome.gfs_channel import (
     channel_pk_of,
@@ -2671,3 +2672,66 @@ async def test_a_notice_of_a_replaced_channel_sends_nothing(env):
     env.owner.gfs.sent = []
     assert (await svc._retry_send(conn.id, stale)).kind == "delivered"
     assert env.owner.gfs.sent == []
+
+
+# ── v_97: one attempt for the durable item queue ─────────────────────────
+
+
+def _queued_row(gfs_id: str, *, epoch: int = 3, payload: str = "cXVldWVk"):
+    return QueuedSpaceItem(
+        item_id="i1",
+        gfs_id=gfs_id,
+        space_id=SPACE_ID,
+        epoch=epoch,
+        ring_class="durable",
+        event_type="space_chat_message_created",
+        author_user_id="anna",
+        payload=payload,
+        next_attempt_at="",
+        created_at="",
+    )
+
+
+async def test_the_durable_queue_delivers_one_attempt_through_the_channel(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.member, env.other)
+    assert await env.other.svc.planned_gfs_ids(SPACE_ID) == ["conn-1"]
+    outcome = await env.other.svc.deliver_item(_queued_row("conn-1"))
+    assert outcome.kind == "delivered"
+    [frame] = [q.sealed for q in await _queued(env, env.member)]
+    assert frame["payload"] == "cXVldWVk"
+
+
+async def test_the_durable_queue_hears_gone_for_a_server_that_no_longer_serves(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    assert (
+        await env.other.svc.deliver_item(_queued_row("no-such-conn"))
+    ).kind == "gone"
+    # A space with no channel here any more: gone too (and no plan).
+    env.other.spaces.spaces.pop(SPACE_ID)
+    assert (await env.other.svc.deliver_item(_queued_row("conn-1"))).kind == "gone"
+    assert await env.other.svc.planned_gfs_ids(SPACE_ID) is None
+
+
+async def test_the_durable_queue_hears_gone_for_an_unnamed_listing_target(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    stranger = _unconnected(env, env.other, gfs_instance_id="gfs-not-named")
+    env.other.gfs.targets = [env.other.svc._conn_repo.conn, stranger]
+    assert (await env.other.svc.deliver_item(_queued_row(stranger.id))).kind == "gone"
+
+
+async def test_the_durable_queue_hears_permanent_without_a_grant_for_the_epoch(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    outcome = await env.other.svc.deliver_item(_queued_row("conn-1", epoch=99))
+    assert outcome.kind == "permanent"
+
+
+async def test_the_durable_queue_waits_for_a_connection_not_active(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    conn = env.other.svc._conn_repo.conn
+    env.other.svc._conn_repo.conn = replace(conn, status="pending")
+    assert (await env.other.svc.deliver_item(_queued_row("conn-1"))).kind == "transient"

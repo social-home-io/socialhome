@@ -459,6 +459,7 @@ from .spaces import (
     SpaceSummaryView,
     SpaceSyncTriggerView,
     SpaceUnbanView,
+    SpaceUnsentView,
 )
 from .stickies import (
     SpaceStickyCollectionView,
@@ -681,6 +682,8 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/spaces/{id}/archive", SpaceArchiveView)
     app.router.add_view("/api/spaces/{id}/compat", SpaceCompatView)
     app.router.add_view("/api/spaces/{id}/summary", SpaceSummaryView)
+    # v_97 — the caller's GFS-space items that could not be sent.
+    app.router.add_view("/api/spaces/{id}/unsent", SpaceUnsentView)
     app.router.add_view("/api/spaces/{id}/members", SpaceMembersView)
     app.router.add_view(
         "/api/spaces/{id}/members/me",

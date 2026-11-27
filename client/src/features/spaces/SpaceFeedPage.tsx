@@ -67,6 +67,7 @@ import { SpaceInviteFirst } from './SpaceInviteFirst'
 import { SpaceGfsNotice } from '@/components/SpaceGfsNotice'
 import { SpaceSyncChip } from './SpaceSyncChip'
 import { NotSentMark } from './NotSentMark'
+import { SpaceUnsentBanner } from './SpaceUnsentBanner'
 import { syncHostName, useSpaceSync } from './spaceSync'
 import { isSetupPending } from './spaceSetup'
 import { useSpaceNotifLevel } from './SpaceNotifLevels'
@@ -755,6 +756,9 @@ export default function SpaceFeedPage() {
       {/* Only when this household is not up to date with the space (or
        *  our own items still wait to go out) — on every section. */}
       {s && !s.archived && <SpaceSyncChip spaceId={spaceId} sync={s.sync} hostedHere={hostedHere} />}
+      {/* v_97 — the viewer's own changes a GFS would not take: Try again /
+       *  Discard. Nothing when there is nothing to say. */}
+      {s && <SpaceUnsentBanner spaceId={spaceId} spaceName={s.name} />}
       {/* The hero and "Needs you" open the Feed only: the other sections
        *  are tools, and the top bar already names the space. */}
       {s && feedList && (

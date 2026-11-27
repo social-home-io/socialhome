@@ -131,6 +131,7 @@ from ..domain.gfs_channel import (
     canonical,
 )
 from ..domain.space import SpaceType
+from ..domain.space_item_outbox import QueuedSpaceItem
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..gfs_channel import (
     bind_grant,
@@ -2241,6 +2242,62 @@ class GfsChannelService:
             if await self._first_attempt(conn, item):
                 accepted.append(conn)
         return accepted
+
+    async def planned_gfs_ids(self, space_id: str) -> list[str] | None:
+        """v_97 — the durable item queue's planner: the ids of the servers
+        a content item of *space_id* goes to now (:meth:`plan`; ``[]`` —
+        none yet, e.g. no grant), or ``None`` when the space no longer has
+        a channel here."""
+        space = await self._spaces.get(space_id)
+        if space is None or not channel_on(space):
+            return None
+        return [t.id for t in await self.plan(space_id)]
+
+    async def deliver_item(self, row: QueuedSpaceItem) -> PublishOutcome:
+        """v_97 — ONE attempt to put a queued content item on ``row.gfs_id``
+        (the durable queue, :mod:`.space_item_outbox`, owns every retry —
+        never the in-memory one). ``gone`` when that server no longer
+        serves the space's channel (not on the owner's list, not named by
+        the grant, no ``private_channels``, the connection removed) or the
+        space has no channel here any more; ``permanent`` when we can't
+        publish at the item's epoch any more (our grant for it is gone) or
+        the server refused it for good; ``transient`` while the server is
+        down, busy (429, honoured) or of unknown capability."""
+        space = await self._spaces.get(row.space_id)
+        if space is None or not channel_on(space) or row.payload is None:
+            return PublishOutcome.gone()
+        grant = await self._publisher_grant(row.space_id, row.epoch)
+        if grant is None or grant.writer_key is None:
+            return PublishOutcome.permanent()
+        item = GfsPublish(
+            space_id=row.space_id,
+            event_type=_KIND_ANON,
+            payload={
+                "epoch": row.epoch,
+                "payload": row.payload,
+                "ring_class": row.ring_class,
+            },
+        )
+        if is_listing_target_id(row.gfs_id):
+            candidates = await self._anon_candidates(row.space_id, grant) or []
+            conn = next((t for t in candidates if t.id == row.gfs_id), None)
+            if conn is None:
+                return PublishOutcome.gone()
+            if not await self._gfs.private_channels_supported(conn):
+                if self._gfs.capability_unknown(conn):
+                    return PublishOutcome.transient()
+                return PublishOutcome.gone()
+            return await self._send(conn, item)
+        stored = await self._conn_repo.get(row.gfs_id)
+        if stored is None:
+            return PublishOutcome.gone()
+        if stored.status != "active":
+            return PublishOutcome.transient()
+        if stored.id not in {
+            t.id for t in await self._anon_targets(row.space_id, grant)
+        }:
+            return PublishOutcome.gone()
+        return await self._send(stored, item)
 
     async def _post_item(
         self, conn: GfsConnection, space_id: str, data: dict
