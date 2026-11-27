@@ -1,6 +1,8 @@
 """``/api/spaces/{id}/unsent`` (v_97) — the caller's own GFS-space items
 that could not be sent: list, Retry, Discard. Only the caller's own."""
 
+from datetime import UTC, datetime
+
 import pytest
 
 from socialhome.app_keys import space_item_outbox_key
@@ -9,7 +11,8 @@ from socialhome.repositories.space_item_outbox_repo import SqliteSpaceItemOutbox
 
 from .test_space_read_gate import _add_user, _seat
 
-T0 = "2026-11-27T10:00:00.000000+00:00"
+#: Now: a retried item older than what receivers take is never sent (too_old).
+T0 = datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 @pytest.fixture
