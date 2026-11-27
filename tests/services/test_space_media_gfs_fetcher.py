@@ -1579,3 +1579,19 @@ async def test_a_gfs_space_member_asks_its_gfs_never_its_host(tmp_path):
     await _recv_hashed(f, _wire("a.webp", blob), data)
     assert await f.ensure_local(_sc("a.webp", data)) is True
     assert len(gfs.wanted) == 1
+
+
+async def test_part_directories_stay_under_their_cap(tmp_path, monkeypatch):
+    """v_97 — the pieces of fetches that never completed can't fill the
+    disk: past the cap the least recently written part directory goes
+    (never the file being fetched)."""
+    monkeypatch.setattr(fetch_mod, "MAX_PARTIAL_PIECE_BYTES", PIECE_BYTES + 1024)
+    old = tmp_path / ".partial" / "pieces-sc-old.webm"
+    old.mkdir(parents=True)
+    (old / "000000").write_bytes(b"x" * 4096)
+    data = os.urandom(PIECE_BYTES + 99)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    f = _fetcher(tmp_path, _Gfs(blobs), conns=[_Conn("g", "https://g")])
+    await _recv_pieced(f, wire)
+    assert await f.ensure_local(_sc("v.webm", data), timeout_s=30) is True
+    assert not old.exists()

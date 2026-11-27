@@ -146,6 +146,17 @@ class GfsMediaView(GfsBaseView):
             log.debug("space media upload refused: %s", exc)
             return _refused()
         size = claim.size
+        if proof is not None:
+            try:
+                # v_97 — one file at most half the scope's share.
+                await store.check_file_share(
+                    scope_id=claim.scope_id,
+                    scope_kind=claim.scope,
+                    proof=proof,
+                    size=size,
+                )
+            except MediaRefused as exc:
+                return _media_refused(exc)
         # The fairness owner: a channel's blob counts against its UPLOADER's
         # network prefix (an IPv6 /48, an IPv4 /24, as a keyed hash —
         # identity-free), never a seated member (fourth review G1) and never

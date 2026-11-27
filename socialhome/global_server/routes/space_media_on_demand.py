@@ -317,6 +317,18 @@ class GfsMediaServeView(GfsBaseView):
             log.debug("space media on demand: not stored: %s", exc)
             return False
         store = self.svc(K.gfs_space_media_store_key)
+        if session.proof is not None:
+            try:
+                # v_97 — one file at most half the scope's share.
+                await store.check_file_share(
+                    scope_id=session.scope_id,
+                    scope_kind=session.scope_kind,
+                    proof=session.proof,
+                    size=len(session.buf),
+                )
+            except MediaRefused as exc:
+                log.info("space media on demand: not stored: %s", exc.reason)
+                return False
         # A channel blob counts against its uploader's network prefix, as an
         # ordinary upload does (``routes/space_media.py``).
         owner = ("client", store.prefix_key(self.client_ip()))

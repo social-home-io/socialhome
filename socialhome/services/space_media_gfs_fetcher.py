@@ -183,6 +183,11 @@ REQUEST_TIMEOUT_S: float = 30.0
 #: One 8 MiB piece's GET (v_97): a full piece over a ~1 Mbit/s link.
 PIECE_TIMEOUT_S: float = 120.0
 
+#: Bytes the part directories of files in pieces may hold together (v_97):
+#: past it the least recently written ones go first (a fetch that never
+#: completed), never the file being fetched.
+MAX_PARTIAL_PIECE_BYTES: int = 512 * 1024 * 1024
+
 #: GFSs tried per fetch.
 MAX_SOURCES: int = 4
 
@@ -943,6 +948,11 @@ class SpaceMediaGfsFetcher:
             )
             return False
         await aiofiles.os.makedirs(part_dir, exist_ok=True)
+        stale = await asyncio.to_thread(
+            _over_cap_part_dirs, self._dir / _PARTIAL_DIR, part_dir, len(data)
+        )
+        for old in stale:
+            await drop_parts(old)
         tmp = part_dir / f".{part_name(index)}.{uuid.uuid4().hex}"
         try:
             async with aiofiles.open(tmp, "wb") as fh:
@@ -1085,6 +1095,43 @@ class SpaceMediaGfsFetcher:
             space_id=space_id,
             sha256=sha256,
         )
+
+
+def _over_cap_part_dirs(
+    root: pathlib.Path, keep: pathlib.Path, adding: int
+) -> list[pathlib.Path]:
+    """The ``pieces-*`` part directories under *root* to drop, least
+    recently written first, so that all of them plus *adding* bytes stay
+    within :data:`MAX_PARTIAL_PIECE_BYTES` — never *keep*. The worker-thread
+    body (a directory walk)."""
+    dirs: list[tuple[float, int, pathlib.Path]] = []
+    total = 0
+    try:
+        entries = list(os.scandir(root))
+    except FileNotFoundError:
+        return []
+    for entry in entries:
+        if not entry.name.startswith("pieces-") or not entry.is_dir(
+            follow_symlinks=False
+        ):
+            continue
+        size = 0
+        newest = 0.0
+        for part in os.scandir(entry.path):
+            if part.is_file(follow_symlinks=False):
+                st = part.stat(follow_symlinks=False)
+                size += st.st_size
+                newest = max(newest, st.st_mtime)
+        total += size
+        if pathlib.Path(entry.path) != keep:
+            dirs.append((newest, size, pathlib.Path(entry.path)))
+    out: list[pathlib.Path] = []
+    for _newest, size, path in sorted(dirs):
+        if total + adding <= MAX_PARTIAL_PIECE_BYTES:
+            break
+        out.append(path)
+        total -= size
+    return out
 
 
 def _join_parts_sync(part_dir: pathlib.Path, count: int, tmp: pathlib.Path) -> str:

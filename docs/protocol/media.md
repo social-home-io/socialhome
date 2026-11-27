@@ -1076,25 +1076,30 @@ Owner 2026-11-27: in a **GFS space** (a global space, or a private one with
 paired, mesh, link-joined, member or follower — takes the space's pictures
 and files from the GFS space media cache. One path:
 
-- **Descriptor on the shared copy.** A post, calendar cover, gallery item
-  or page version carries `media_refs` on the one payload every household
-  reads (so it still goes as ONE space item), not in a per-household copy.
+- **Descriptor on the shared copy.** A post, a comment's picture, a
+  calendar cover, a gallery item, a bazaar listing's photos or a page
+  version carries `media_refs` on the one payload every household reads (so
+  it still goes as ONE space item), not in a per-household copy. A §25.6
+  catch-up describes its records' files for every v_97 requester of a GFS
+  space too (planned on the channel's GFSs, bounded by the catch-up media
+  budget).
 - **Uploads** go to every GFS the space's channel lives on (plus each
   link-joined member's), through the durable item queue (above).
-- **No push for what the cache holds.** A live item's file that the item
-  described AND that is queued for the cache
-  (`SpaceMediaGfsUploader.push_targets`) is not pushed to a v_97
-  household; a household below v_97 keeps the push, and so does everyone
-  while the space's 14-day window is open (the households the legacy
-  events are for). Everything else keeps the push: a file no descriptor
-  covers (a comment's picture, a bazaar photo, a file no GFS of the space
-  takes, one not only the space's), a §25.6 catch-up (its records carry a
-  descriptor only for link-joined readers), a file someone asked for.
-- **No `SPACE_MEDIA_WANTED` for a described file.** A file a household
-  reads from the GFS cache (it holds a `space_media_refs` row) is never
-  asked of a host or a helper; a miss in the cache goes through v_83 on
-  demand (below), for members as for followers. A file without a
-  descriptor keeps the `SPACE_MEDIA_WANTED` heal.
+- **No push.** No `SPACE_MEDIA_BLOB` row is queued for a v_97 household
+  of a GFS space — live, catch-up or asked for
+  (`SpaceMediaGfsUploader.push_targets`). Households below v_97 keep the
+  push, and so does everyone while the space's 14-day window is open (the
+  households the legacy events are for).
+- **No `SPACE_MEDIA_WANTED`.** A household never asks a host or a helper
+  for a GFS space's file; a miss in the cache goes through v_83 on demand
+  (below), for members as for followers.
+- **A file the cache can't take is shown, never pushed.** No GFS of the
+  space keeps media (or this household holds no upload authorization):
+  its author sees "Couldn't send" (`refused`); a file over 8 MiB with no
+  GFS keeping pieces, or over 200 MiB: "too large to send". (A file that
+  is not only this space's content — the same picture in another space —
+  is never sealed under the space's key; it is the one residual a GFS-space
+  reader can't get, as before.)
 
 Mesh spaces keep the push and `SPACE_MEDIA_WANTED` unchanged.
 
@@ -1142,12 +1147,16 @@ another length, or onto another file (`space_media_seal.piece_aad_name`).
 - **Refused once, not again at once.** A refused file (a piece that does
   not open, a wrong checksum) enters the view's 5-minute miss memory like
   a miss. A piece's GET gets 120 s.
-- **Residuals** (follow-ups): the part directory of a file whose last piece
-  never comes stays until the space goes (no total cap); a content-named
-  row is first-describer-wins, so a member who describes a file's checksum
-  first with a junk address makes the file unfetchable until that row goes;
-  one big file can take most of a channel's 256 MiB cache share (the
-  least recently fetched files go first).
+- **Bounds.** The part directories of unfinished fetches hold at most
+  512 MiB together (the least recently written go first, never the file
+  being fetched). On the GFS one file in pieces takes at most half of a
+  scope's share (`space_max_bytes`, 256 MiB): the file is known from the
+  piece proof's manifest, its stored pieces are added up, and a piece past
+  it is `413 file_over_share` (on an upload and an on-demand re-upload
+  alike) — no new GFS state.
+- **Residual** (follow-up): a content-named row is first-describer-wins,
+  so a member who describes a file's checksum first with a junk address
+  makes the file unfetchable until that row goes.
 - **Not yet** (follow-up): progressive playback while pieces arrive;
   a reader with the file in another space still fetches it.
 

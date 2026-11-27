@@ -2388,7 +2388,10 @@ is always checked as a content address, whatever header rides along. An
 unknown address suite is refused (`UnsupportedSpaceMediaAddrSuite`); `sm1p`
 is never a content address (`space_media_address` refuses it). A GFS
 advertises `"pieces": true` in its signed `space_media` block only when a
-whole piece fits its blob cap; a household sends pieces only there. The GFS recomputes it on upload from
+whole piece fits its blob cap; a household sends pieces only there. One
+file takes at most half of a scope's `space_max_bytes`: the GFS adds up
+the stored pieces its manifest names and refuses a piece past it
+(`413 file_over_share`). The GFS recomputes it on upload from
 the claim's scope and refuses a mismatch (`422 blob_id_mismatch`); a reader
 checks it with the scope id it knows. **Why:** with a bare content hash, a
 follower who saw a blob's address (it rides in the item, before the
