@@ -8935,6 +8935,11 @@ def cmd_gfs_big_file() -> None:
             )
         ],
     )
+    # Both readers have the space open: their households watch its channel
+    # ring and take the item live (a non-watcher gets a heads ping and
+    # fetches on open).
+    _view_space("a", space_id)
+    _view_space("e", space_id)
     offs = {x: _log_size(x) for x in ("a", "b", "e")}
     s, up = _upload_file(
         f"{b_url}/api/media/upload",
