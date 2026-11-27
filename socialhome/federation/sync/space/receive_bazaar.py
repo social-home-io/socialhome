@@ -11,7 +11,6 @@ from ....domain.bazaar_faq import (
     entry_from_wire,
 )
 from ....domain.federation import FederationEvent
-from ....domain.file_hashes import parse_file_hashes
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     BazaarBid,
@@ -21,7 +20,7 @@ from ....domain.post import (
 )
 from ....domain.space_media_fields import item_media_urls
 from ....services.inbound_media_store import space_media_refs
-from .receiver_base import VERIFIED_ROW, ReceiverBase
+from .receiver_base import ReceiverBase
 from .stream_health import HeldBack
 
 if TYPE_CHECKING:
@@ -54,20 +53,24 @@ class BazaarMixin(ReceiverBase):
         for r in records:
             listing = _bazaar_listing_from_record(r, space_id)
             if listing is not None:
-                # The provider ships the photos (catch-up): its names.
+                # The provider ships the photos (catch-up): its names; in a
+                # GFS space (v_97) the record's descriptor names them for
+                # the GFS cache — only for a listing new here, or from the
+                # host. v_85 — the host's hashes only.
                 held_listing = await self._bazaar_repo.get_listing(listing.post_id)
-                names = self._media_names.localize(
+                names = await self._localize_record(
                     space_id,
-                    provider,
+                    r,
+                    listing.post_id,
                     item_media_urls("bazaar", listing),
+                    provider=provider,
+                    takes_descriptor=held_listing is None or bazaar_from_host,
                     held=(
                         item_media_urls("bazaar", held_listing)
                         if held_listing is not None
-                        else ()
+                        else None
                     ),
-                    # v_85 — the host's hashes only.
-                    hashes=parse_file_hashes(r) if bazaar_from_host else None,
-                    verified=VERIFIED_ROW.get() == (space_id, provider),
+                    from_host=bazaar_from_host,
                 )
                 listing = names.item("bazaar", listing)
                 try:
@@ -81,6 +84,7 @@ class BazaarMixin(ReceiverBase):
                             space_id,
                         )
                     else:
+                        await self._keep_media(names)
                         await _apply_bazaar_faq(
                             self._bazaar_repo, listing.post_id, r.get("faq")
                         )

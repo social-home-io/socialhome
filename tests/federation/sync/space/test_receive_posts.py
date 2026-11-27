@@ -22,7 +22,12 @@ from socialhome.federation.sync.space.receive_posts import (
     _post_from_record,
 )
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
-from tests.federation.sync.space.receiver_fakes import _here, _send
+from tests.federation.sync.space.receiver_fakes import (
+    _SYNC_REFS,
+    _GfsMediaSink,
+    _here,
+    _send,
+)
 
 
 async def test_dispatch_keeps_a_hidden_anchor_post_out_of_the_joiners_feed(receiver):
@@ -485,3 +490,32 @@ def test_a_synced_comments_reserved_picture_is_dropped():
     assert comment is not None and comment.media_url is None
     record["media_url"] = "api/media/pic.webp"
     assert _comment_from_record(record).media_url == "api/media/pic.webp"
+
+
+async def test_a_streamed_comments_descriptor_names_its_picture_from_the_gfs(setup):
+    """v_97 (owner B-3): a GFS space's comment picture reaches a v_97
+    household only through the GFS cache — the §25.6 record's descriptor
+    names it here (bound to the provider and the comment) and is kept."""
+    r, c, kp = setup
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "comments",
+        [
+            {
+                "id": "c-m",
+                "post_id": "p-1",
+                "author": "u-1",
+                "type": "image",
+                "content": "pic",
+                "media_url": "api/media/a.webp",
+                "created_at": "2026-04-18T00:00:00+00:00",
+                "media_refs": _SYNC_REFS,
+            },
+        ],
+    )
+    assert [(x[3], x[4]) for x in sink.received] == [("c-m", "peer-a")]
+    assert c.comments[0].media_url == "api/media/sg-a.webp"
+    assert sink.kept == [{"a.webp": "sg-a.webp"}]

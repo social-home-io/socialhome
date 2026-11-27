@@ -215,6 +215,12 @@ _OWN_CONTENT_OWNERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
 #: (newest first): each costs a seal (cached) and, once per GFS, an upload.
 MAX_CATCHUP_MEDIA_RECORDS: int = 500
 
+#: v_97 — the bytes one stream's lazy descriptors may seal per resource (a
+#: GFS space's catch-up: described from our copy, never uploaded). Past it
+#: a record goes without a descriptor; its reader asks for such a file
+#: (``SPACE_MEDIA_WANTED``, answered by a push) when it reaches the host.
+MAX_CATCHUP_SEALED_BYTES: int = 1024 * 1024 * 1024
+
 
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
@@ -251,6 +257,7 @@ class _WithMediaRefs:
 
     __slots__ = (
         "_budget",
+        "_bytes",
         "_inner",
         "_media",
         "_requester",
@@ -271,6 +278,7 @@ class _WithMediaRefs:
         self._requester = requester
         self._stored_only = stored_only
         self._budget = MAX_CATCHUP_MEDIA_RECORDS
+        self._bytes = MAX_CATCHUP_SEALED_BYTES
         self.resource = inner.resource
 
     async def _add(
@@ -279,8 +287,13 @@ class _WithMediaRefs:
         out: list[dict[str, Any]] = []
         for row in rows:
             urls = record_media_urls(self.resource, row)
-            if urls and self._budget > 0:
-                item_id = str(row.get("id") or "")
+            if urls and self._budget > 0 and self._bytes > 0:
+                # The item the descriptor is sealed for — the id the reader
+                # keeps it under: a bazaar listing is its wrapper post's.
+                item_id = str(
+                    (row.get("post_id") if self.resource == "bazaar" else row.get("id"))
+                    or ""
+                )
                 try:
                     if self._stored_only:
                         # Only blobs its GFS is known to hold, address for
@@ -308,6 +321,7 @@ class _WithMediaRefs:
                     # Every described record costs a seal and an upload.
                     self._budget -= 1
                 if plan is not None:
+                    self._bytes -= int(getattr(plan, "sealed_bytes", 0) or 0)
                     if self._stored_only:
                         # Only a descriptor that goes out spends the budget.
                         self._budget -= 1

@@ -2652,8 +2652,8 @@ async def test_the_ban_reason_reaches_admin_households_only(encoder, admin):
 async def test_a_paired_v97_requester_of_a_gfs_space_gets_every_descriptor(encoder):
     """v_97 — a paired household catching a GFS space up is no link-joined
     reader, yet it reads the space's files from the GFS cache: its records
-    carry the descriptor (full plan, uploaded), never only the stored
-    blobs."""
+    carry the descriptor (the uploader's plan — lazy for a cache-only
+    household, owner B-8), never only the stored blobs."""
     uploader = _ReaderUploader(stored={"c.webp"})
     uploader.cache_readers = {"peer-b"}
     svc = _media_provider(encoder, uploader)
@@ -2664,3 +2664,54 @@ async def test_a_paired_v97_requester_of_a_gfs_space_gets_every_descriptor(encod
     assert "media_refs" in posts["p-1"]
     assert uploader.stored_asks == []
     assert len(uploader.uploaded) >= 1
+
+
+async def test_a_bazaar_record_is_described_for_its_wrapper_post(encoder):
+    """v_97 (owner B-3) — a bazaar record carries no ``id``: its files are
+    described for the wrapper post's id, the one the listing's reader keeps
+    them under."""
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+    svc = _media_provider(encoder, uploader)
+    svc._exporters["bazaar"] = _FakeExporter(
+        "bazaar", [{"post_id": "bzr-1", "image_urls": ["api/media/a.webp"]}]
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    (listing,) = _streamed_records(session, "bazaar")
+    assert "media_refs" in listing
+    assert "bzr-1" in uploader.items
+
+
+async def test_a_catch_up_stops_describing_past_its_sealed_byte_budget(
+    encoder, monkeypatch
+):
+    """v_97 (owner B-8) — lazy descriptors are bounded by the bytes they
+    seal per resource per stream, not only by the record count."""
+    monkeypatch.setattr(provider_mod, "MAX_CATCHUP_SEALED_BYTES", 10)
+
+    class _Sized(_ReaderPlan):
+        sealed_bytes = 9
+
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        uploader.items.append(item_id)
+        return _Sized(urls)
+
+    uploader.plan_for_reader = plan_for_reader
+    svc = _media_provider(encoder, uploader)
+    svc._exporters["posts"] = _FakeExporter(
+        "posts",
+        [
+            {"id": f"p-{i}", "author": "u-1", "image_urls": ["api/media/a.webp"]}
+            for i in range(3)
+        ],
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert ["media_refs" in posts[f"p-{i}"] for i in range(3)] == [True, True, False]

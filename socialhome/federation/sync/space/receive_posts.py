@@ -31,6 +31,7 @@ from ....domain.post import (
 )
 from ....domain.space import ContentAction
 from ....domain.space_item import reaction_emoji_ok, stamp_to_db, stored_stamp
+from ....domain.space_media_fields import item_media_urls
 from ....domain.space_media_ref import post_media_urls
 from ....services.inbound_media_store import space_media_refs
 from ....services.link_preview_service import space_wire_link_preview
@@ -324,7 +325,21 @@ class PostsMixin(ReceiverBase):
                     parse_file_hashes(r) if comments_from_host else None,
                 ),
             )
+            # v_97 — a GFS space's v_97 household takes the picture from
+            # the GFS cache: the record's descriptor names it here (only
+            # for a comment new here, or from the host).
+            held_comment = await self._space_post_repo.get_comment(comment.id)
+            media = await self._localize_gfs(
+                space_id,
+                r,
+                comment.id,
+                item_media_urls("comments", comment),
+                provider=provider,
+                takes_descriptor=held_comment is None or comments_from_host,
+            )
+            comment = media.item("comments", comment)
             if await self._space_post_repo.add_comment(comment, space_id=space_id):
+                await self._keep_media(media)
                 # History, not news: only replies held for this comment
                 # (the parent-wait buffer) follow it.
                 await self._bus.publish(

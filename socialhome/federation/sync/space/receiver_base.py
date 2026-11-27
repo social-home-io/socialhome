@@ -195,6 +195,30 @@ class ReceiverBase:
             ),
         )
 
+    async def _localize_gfs(
+        self,
+        space_id: str,
+        record: dict[str, Any],
+        item_id: str,
+        urls: list[str],
+        *,
+        provider: str,
+        takes_descriptor: bool,
+    ) -> SpaceMediaLocalization:
+        """v_97 — only the GFS cache's names for a streamed item's files
+        (a comment keeps its direct names as it has them): what a record's
+        ``media_refs`` describe, bound to *provider*, for a record that may
+        attach a descriptor (:meth:`_localize_record`'s *takes_descriptor*)."""
+        if self._gfs_media is None or not takes_descriptor or not urls:
+            return SpaceMediaLocalization()
+        return await self._gfs_media.localize(
+            space_id,
+            record.get(MEDIA_REFS_FIELD),
+            urls,
+            item_id=item_id,
+            origin=provider,
+        )
+
     async def _keep_media(self, media: SpaceMediaLocalization) -> None:
         if self._gfs_media is not None:
             await self._gfs_media.keep(media)

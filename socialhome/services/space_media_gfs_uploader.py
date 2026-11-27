@@ -102,6 +102,7 @@ from ..domain.media_constraints import (
 )
 from ..domain.space_item_outbox import (
     MEDIA_UPLOAD_ROW,
+    UNPLANNED_GFS,
     UNSENT_REFUSED,
     UNSENT_TOO_LARGE,
     QueuedSpaceItem,
@@ -314,6 +315,14 @@ class SpaceMediaPlan:
     space_id: str
     refs: tuple[SpaceMediaRef, ...]
     targets: tuple[GfsConnection, ...]
+    #: v_97 — described only, never uploaded (a catch-up's older files:
+    #: a reader fetches on view, a miss on demand from a holder, v_83).
+    lazy: bool = False
+
+    @property
+    def sealed_bytes(self) -> int:
+        """The bytes describing *refs* sealed (a catch-up's budget)."""
+        return sum(ref.size for ref in self.refs)
 
     def wire(self) -> dict[str, dict]:
         """The ``media_refs`` descriptor."""
@@ -596,23 +605,37 @@ class SpaceMediaGfsUploader:
         *,
         item_id: str,
     ) -> SpaceMediaPlan | None:
-        """The plan for ONE catch-up reader: a link-joined reader's own
-        GFS, or (v_97) for any household that reads a GFS space from the
-        cache, the GFSs the space's channel lives on. ``None`` otherwise."""
+        """The plan for ONE catch-up reader. v_97 (owner B-8): a household
+        that reads a GFS space from the cache only gets a LAZY plan — each
+        file described by its deterministic address from our copy, never
+        uploaded (no bulk re-upload on a join): it fetches on view, and a
+        blob the cache lacks comes on demand from a holder (v_83). A
+        link-joined reader of any other space: its own GFS, uploaded.
+        ``None`` otherwise."""
         names = media_names(media_urls)
         if not names:
             return None
+        if await self.cache_only(space_id, instance_id):
+            return await self._describe_lazily(space_id, names, item_id)
         conn = await self._reader_conn(instance_id)
         if conn is not None:
             return await self._plan(space_id, names, [conn], item_id)
-        if await self.reads_space_from_cache(space_id, instance_id):
-            return await self._plan(
-                space_id,
-                names,
-                await self._media_targets(space_id, followers=False),
-                item_id,
-            )
         return None
+
+    async def _describe_lazily(
+        self, space_id: str, names: list[str], item_id: str
+    ) -> SpaceMediaPlan | None:
+        """A described-only plan (:attr:`SpaceMediaPlan.lazy`): a file in
+        pieces up to the 200 MiB cap (a GFS that keeps less refuses its
+        pieces on demand, as it would an upload)."""
+        refs = await self._describe_names(
+            space_id, names, item_id, pieces=MAX_PIECED_FILE_BYTES
+        )
+        if not refs:
+            return None
+        return SpaceMediaPlan(
+            space_id=space_id, refs=tuple(refs), targets=(), lazy=True
+        )
 
     async def _plan(
         self,
@@ -630,18 +653,20 @@ class SpaceMediaGfsUploader:
         if scoped is None:
             return None
         targets = await self._capable(conns, scoped[0])
-        # Nothing this household could PUT is never sealed or described. In
-        # a GFS space its files have no other way (v_97): the author is told
-        # they could not be sent.
-        if not targets or not await self.can_upload(space_id, scoped=scoped):
-            # Told only for a live item with its author (never a catch-up),
-            # and only on a verdict: every GFS of the space answered and none
-            # keeps space media. A GFS that is merely unreachable, or a
-            # grant still on its way, is no verdict (review F, findings 4/8).
-            verdict = bool(conns) and not any(
-                self._gfs.capability_unknown(c) for c in conns
-            )
-            if author and verdict and await self.can_upload(space_id, scoped=scoped):
+        # A GFS whose capabilities are merely unknown right now (unreachable)
+        # is no verdict: its rows wait in the durable queue (review F,
+        # finding 4 — never filtered and lost).
+        waiting = [
+            c
+            for c in conns
+            if self._gfs.capability_unknown(c) and c.id not in {t.id for t in targets}
+        ]
+        if not targets and not waiting and conns:
+            # A verdict: every GFS of the space answered and none keeps
+            # space media — the file has no way to a cache-only household
+            # (v_97); told for a live item with its author, never a
+            # catch-up.
+            if author and await self.can_upload(space_id, scoped=scoped):
                 log.info(
                     "space media of space %s: no GFS of the space takes its"
                     " files — not sent",
@@ -649,9 +674,15 @@ class SpaceMediaGfsUploader:
                 )
                 await self._tell_unsent(space_id, author, UNSENT_REFUSED)
             return None
+        # No GFS planned yet (no connection), an unreachable one, or a grant
+        # still on its way: the file is described all the same and its rows
+        # wait in the durable queue (planned when due, sent once the GFS
+        # answers or the grant lands — :meth:`deliver`).
         # The largest file in pieces a GFS of the plan keeps (half its
-        # signed channel share; 0: none keeps pieces).
-        pieces = 0
+        # signed channel share; 0: none keeps pieces). Unknown: assume the
+        # most — a GFS that turns out not to keep pieces drops its rows and
+        # the author is told (``gone`` → replans → told).
+        pieces = MAX_PIECED_FILE_BYTES if waiting or not conns else 0
         for conn in targets:
             pieces = max(pieces, await self._gfs.space_media_file_max(conn))
         refs = await self._describe_names(
@@ -660,7 +691,7 @@ class SpaceMediaGfsUploader:
         if not refs:
             return None
         return SpaceMediaPlan(
-            space_id=space_id, refs=tuple(refs), targets=tuple(targets)
+            space_id=space_id, refs=tuple(refs), targets=(*targets, *waiting)
         )
 
     async def _describe_names(
@@ -980,7 +1011,7 @@ class SpaceMediaGfsUploader:
         in the durable queue; a file another upload already stored on a GFS
         is skipped there. Never raises (a row that can't be stored is shown
         to *author_user_id* by the queue)."""
-        if plan is None or self._outbox is None:
+        if plan is None or plan.lazy or self._outbox is None:
             return
         for ref in plan.refs:
             try:
@@ -1001,7 +1032,10 @@ class SpaceMediaGfsUploader:
         conns = list(plan.targets)
         if ref.pieced:
             conns = [
-                c for c in conns if await self._gfs.space_media_file_max(c) >= ref.size
+                c
+                for c in conns
+                if self._gfs.capability_unknown(c)
+                or await self._gfs.space_media_file_max(c) >= ref.size
             ]
             manifest = self._manifests.get(ref.blob_id)
             if manifest is None:
@@ -1037,6 +1071,9 @@ class SpaceMediaGfsUploader:
             ]
             if gfs_ids:
                 rows.append((_locator(ref, index, manifest), gfs_ids))
+            elif not plan.targets:
+                # No GFS planned yet: one row planned when due.
+                rows.append((_locator(ref, index, manifest), [UNPLANNED_GFS]))
         # Every row of one file in one go: a file is never half queued.
         if rows:
             await self._outbox.queue_media(
@@ -1061,6 +1098,9 @@ class SpaceMediaGfsUploader:
         if conn is None:
             return PublishOutcome.gone()
         limit = await self._gfs.space_media_max_blob(conn, scope=scope)
+        if limit is None and self._gfs.capability_unknown(conn):
+            # Unreachable right now: no verdict — the row waits.
+            return PublishOutcome.transient()
         if limit is None or (
             ref.pieced and not await self._gfs.space_media_pieces(conn)
         ):
