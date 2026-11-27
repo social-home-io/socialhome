@@ -7326,7 +7326,6 @@ async def test_a_delegated_admin_serving_as_host_tries_everyone(monkeypatch):
     ],
 )
 async def test_reaches_host_directly_is_decided_by_path(host, row_source, claim, want):
-    """(In a space that runs a GFS channel here.)"""
     """P10 (coordinator 2026-11-27): the media fetch path is decided by the
     path to the host — paired or mesh → ask the host; only a GFS seat →
     the GFS on-demand fetch — never by role."""
@@ -7341,21 +7340,6 @@ async def test_reaches_host_directly_is_decided_by_path(host, row_source, claim,
     svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
     svc.attach_space_write_gate(_ChannelSpaces(True, host=host), _Seats(set()))
     assert await svc.reaches_host_directly("sp") is want
-
-
-async def test_without_a_channel_a_relay_seat_asks_the_host():
-    """No channel: a relay (invite-link) seat carries SPACE_MEDIA_WANTED to
-    the host like any path (v_92) — the GFS on-demand fetch is for a
-    channel seat alone."""
-    km = _make_kek_manager()
-    fed_repo = InMemoryFederationRepo()
-    row, _ = _make_remote_instance(km)
-    await fed_repo.save_instance(
-        dataclasses.replace(row, id="host-x", source=InstanceSource.SPACE_SESSION)
-    )
-    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
-    svc.attach_space_write_gate(_ChannelSpaces(False, host="host-x"), _Seats(set()))
-    assert await svc.reaches_host_directly("sp") is True
 
 
 async def test_households_with_a_row_go_before_mesh_discoveries(monkeypatch):

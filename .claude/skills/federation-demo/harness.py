@@ -7894,7 +7894,10 @@ def _forget_gfs_copies(local_name: str) -> int:
 @_offline_step
 def cmd_gfs_space_healing() -> None:
     """v_92 — a GFS-only member heals from the host, then from a helper
-    while the host is offline.
+    while the host is offline. P10 (by path, never by role): e reaches the
+    space only through the GFS, so its missed PICTURES come back through the
+    GFS on-demand fetch (steps 2 and 4 assert no SPACE_MEDIA_WANTED);
+    missed EVENTS still come from the helper's resume (step 3).
 
     Prereqs: the gfs chain through ``gfs-member-mesh`` (e holds a
     link-joined seat in a's space reached only through the GFS; d, paired
@@ -7980,13 +7983,15 @@ def cmd_gfs_space_healing() -> None:
         return ""
 
     def _view_until(post_id: str, original: bytes, timeout: float) -> tuple[str, int]:
-        """e views the picture; its first view must miss. Polls the view
-        until e serves the original bytes; returns (name, first status)."""
+        """e views the picture its copy of which went. P10 (by path): e
+        reaches the space only through the GFS, so the view asks the GFS on
+        demand — it may serve at once. Polls until e serves the original
+        bytes; returns (name, first status)."""
         name = _space_post_file("e", post_id)
         url = f"{e_base}/api/media/{name}"
-        first, _ = _http_get_bytes(url, token=e["token"], timeout=60.0)
-        if first == 200:
-            raise SystemExit(f"{step}: e still served {name[:15]}… after its copy went")
+        first, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
+        if first == 200 and body == original:
+            return name, first
         deadline = time.time() + timeout
         while time.time() < deadline:
             s, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
@@ -8039,27 +8044,23 @@ def cmd_gfs_space_healing() -> None:
         )
         dropped = _forget_gfs_copies(name1)
         (_instance_dir("e") / "media" / name1).unlink()
-        a_off, e_off = _log_size("a"), _log_size("e")
+        a_off = _log_size("a")
         _, first = _view_until(post1, pic1, 90.0)
-        asked = _log_lines_matching("e", f"to {a['instance_id']}: sent", offset=e_off)
-        helper_asked = _log_lines_matching("e", f"to {d['instance_id']}:", offset=e_off)
+        # P10, by path: e reaches the space only through the GFS — its view
+        # asked the GFS on demand, never the host with SPACE_MEDIA_WANTED.
         served = _log_lines_matching(
             "a", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=a_off
         )
-        if not asked or not [x for x in served if "1 file(s) queued" in x]:
+        if served:
             raise SystemExit(
-                f"{step}: no SPACE_MEDIA_WANTED round-trip with the host "
-                f"(e: {asked!r}, a: {served!r})"
-            )
-        if helper_asked:
-            raise SystemExit(
-                f"{step}: e asked the helper d while the host answered: "
-                f"{helper_asked!r}"
+                f"{step}: GFS-reached e asked the host with SPACE_MEDIA_WANTED "
+                f"instead of its GFS: {served!r}"
             )
         print(
             f"  old picture {name1[:15]}… (GFS copies dropped: {dropped}, e's copy "
-            f"gone): e's view → HTTP {first}, SPACE_MEDIA_WANTED to the host a "
-            "only, a served it, e holds it byte-identical ✓"
+            f"gone): e's view → HTTP {first}, through its GFS on demand (P10: by "
+            "path — e reaches the space only through the GFS); e holds it "
+            "byte-identical ✓"
         )
 
         # 3. A second picture both hold, gone from the GFS and from e; then
@@ -8163,28 +8164,25 @@ def cmd_gfs_space_healing() -> None:
         )
 
         # 4. Old picture, host silent → the helper d serves it.
-        d_off, e_off = _log_size("d"), _log_size("e")
+        d_off = _log_size("d")
         t0 = time.time()
         _, first = _view_until(post2, pic2, 180.0)
         took = time.time() - t0
-        to_d = _log_lines_matching("e", f"to {d['instance_id']}: sent", offset=e_off)
-        served = [
-            x
-            for x in _log_lines_matching(
-                "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
-            )
-            if "1 file(s) queued" in x
-        ]
-        if not to_d or not served:
+        # P10, by path: through the GFS on demand (a holder — d — serves the
+        # GFS over its socket), never SPACE_MEDIA_WANTED to the helper.
+        served = _log_lines_matching(
+            "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
+        )
+        if served:
             raise SystemExit(
-                f"{step}: the helper d did not serve e's request with the host "
-                f"silent (e asked d: {to_d!r}; d served: {served!r})"
+                f"{step}: GFS-reached e asked the helper d with SPACE_MEDIA_WANTED "
+                f"instead of its GFS: {served!r}"
             )
         print(
             f"  host a silent; old picture {name2[:15]}… (GFS copies dropped: "
             f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
-            f"a being silent, it asked the helper d instead, which served it; "
-            f"byte-identical after {took:.0f} s ✓"
+            f"a being silent: through its GFS on demand (P10: by path), never "
+            f"SPACE_MEDIA_WANTED to the helper; byte-identical after {took:.0f} s ✓"
         )
 
         # 5. What the GFS saw over the whole step.

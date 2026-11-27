@@ -371,9 +371,12 @@ below; the rest are the WebRTC/HTTPS content-streaming dance.
 
 **Older files on view (v_92)**
 
-`SPACE_MEDIA_WANTED` `{space_id, files: [{item, name}]}` (≤ 50) — a member
-household asks the host, then one trusted helper at a time, for files of
-live items it holds but never received; the answer is `SPACE_MEDIA_BLOB`.
+`SPACE_MEDIA_WANTED` `{space_id, files: [{item, name}]}` (≤ 50) — a
+household with a paired or mesh path to the host (member or follower
+alike, P10: by path, never by role) asks the host, then one trusted helper
+at a time, for files of live items it holds but never received; the answer
+is `SPACE_MEDIA_BLOB`. A household reaching the space only through a GFS
+uses the GFS v_83 on-demand fetch instead.
 See [media.md](./media.md#older-files-on-view--space_media_wanted-v_92).
 
 **GFS public-content relay (Phase 5)** — removed in v_96: a global space's
@@ -1923,9 +1926,9 @@ and live location shares, proposals, game-table cards, the roster with the
 same fields (presence included), sync pages (pushed like a member's, one
 checksum), the sync status, "Sync now", and media (pushed like a member's;
 a missed picture is fetched by PATH, never by role: a household with a
-paired, mesh or relay path to the host asks it with `SPACE_MEDIA_WANTED`
-(v_92); one that reaches the space only through its GFS channel seat uses
-the v_83 on-demand fetch — `FederationService.reaches_host_directly`). Every read audience is
+paired or mesh path to the host asks it with `SPACE_MEDIA_WANTED`, one that
+reaches the space only through a GFS uses the v_83 on-demand fetch —
+`FederationService.reaches_host_directly`). Every read audience is
 `SpaceWriterHouseholds(roles=SEAT_ROLES)` and the receiving half
 `holds_seat` (any seat); there is no follower-specific delivery rule.
 The only differences are writes: no chat send, no proposal create / vote,

@@ -4420,12 +4420,11 @@ class FederationService:
 
     async def reaches_host_directly(self, space_id: str) -> bool:
         """Does THIS household reach ``space_id``'s host other than through
-        the space's GFS channel — a paired row, a version it claimed over
-        the mesh, a relay seat in a space without a channel — or host it
-        itself? The media fetch path is decided by this (P10: by path,
-        never by role): ``False`` (a channel seat and nothing else) → the
-        v_83 GFS on-demand fetch; ``True`` → ``SPACE_MEDIA_WANTED`` to the
-        host (v_92). Fail soft to ``False`` (the GFS path needs nothing of
+        a GFS — a paired row, or a version it claimed over the mesh — or
+        host it itself? The media fetch path is decided by this (P10:
+        by path, never by role): ``False`` (only a channel or relay seat)
+        → the v_83 GFS on-demand fetch; ``True`` → ``SPACE_MEDIA_WANTED``
+        to the host. Fail soft to ``False`` (the GFS path needs nothing of
         the host)."""
         try:
             hosts = await self._hosts_elsewhere(space_id)
@@ -4436,11 +4435,6 @@ class FederationService:
                     else None
                 )
                 return space is not None  # we host it (or serve as host)
-            assert self._space_repo is not None
-            if await self._space_repo.get_gfs_channel(space_id) is None:
-                # No channel: whatever seat reached us here (paired, mesh
-                # or a relay seat) carries a request to the host too.
-                return True
             for host in hosts:
                 row = await self._federation_repo.get_instance(host)
                 if row is not None and row.source is not InstanceSource.SPACE_SESSION:

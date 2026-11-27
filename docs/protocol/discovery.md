@@ -2619,10 +2619,12 @@ reader that misses a blob **when a person views it** asks the GFS, and the
 GFS asks one household that holds the file to send the same deterministic
 ciphertext again — **streamed** straight to the waiting reader(s) with
 nothing stored, or **re-uploaded** into the cache. A prefetch never asks.
-Paired and mesh members never use this (they get the bytes from the
-household). Since v_92 it is for **followers** only: a household holding a
-member seat (link-joined included) asks its host or a helper with
-`SPACE_MEDIA_WANTED` instead
+Paired and mesh households never use this (they get the bytes from the
+household, or ask the host or a helper with `SPACE_MEDIA_WANTED`). Since
+P10 (owner 2026-11-27: by path, never by role) it is the path of **every
+household that reaches the space only through a GFS** — a relay seat
+and/or a channel seat, no paired row, no mesh claim — member or follower
+alike; v_92 media healing covers paired / mesh households only
 ([`media.md`](./media.md#older-files-on-view--space_media_wanted-v_92)). The
 household side, both flow diagrams and the cost are in
 [`media.md`](./media.md#space-media-on-demand-v_83).
