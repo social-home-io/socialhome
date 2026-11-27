@@ -593,13 +593,14 @@ describe('SpaceLocationCard', () => {
       }
       return Promise.resolve({ zones: [] })
     })
-    const { findByText, findAllByRole } = render(
+    const { findByText, findAllByText } = render(
       <SpaceLocationCard spaceId="sp_test" currentUserId="u_pascal" takesFollowers followerCount={12} />,
     )
     await findByText(/Your location is private here/i)
-    const [share] = await findAllByRole('button', { name: 'Share my location' })
-    fireEvent.click(share)
-    await findByText('Everyone in this space means its members and its 12 followers.')
+    // On the switch itself and in the first-visit ask alike.
+    const lines = await findAllByText('Everyone in this space means its members and its 12 followers.')
+    expect(lines.length).toBeGreaterThanOrEqual(1)
+    expect(lines.some((el) => el.closest('.sh-sharing-chip'))).toBe(true)
   })
 
   it('subscribes to space_zone_changed WS events', async () => {

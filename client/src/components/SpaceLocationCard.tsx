@@ -394,6 +394,9 @@ export function SpaceLocationCard({
                   : t('location.card.gps_hint')}
               </span>
             )}
+            {/* Who sees it — on the switch itself too, not only in the
+             *  first-visit ask (P10: followers see a shared location). */}
+            {audience && <span class="sh-muted">{audience}</span>}
           </div>
           <Button
             variant={sharingMe ? 'danger' : 'primary'}

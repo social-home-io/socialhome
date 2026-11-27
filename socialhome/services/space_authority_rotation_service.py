@@ -146,6 +146,14 @@ _MAX_BUNDLE_ROSTER_ENTRIES = 5000
 #: a lagging member gets its bundle again about hourly until it applies it.
 ECHO_REACTION_INTERVAL_S: float = 3600.0
 
+#: At most this many echo-triggered bundle RE-SENDS per space per
+#: :data:`ECHO_REACTION_INTERVAL_S`, whichever households asked (P10: every
+#: seat heals, a follower's too — so 10 000 auto-approved follower
+#: households echoing "behind" can't make the owner send 10 000 bundles,
+#: each with the full roster, every hour). A household over the budget is
+#: answered on a later echo (its next periodic sync).
+ECHO_RESENDS_PER_SPACE: int = 60
+
 #: At most one echo-triggered ROTATION per space this often, whichever
 #: household asked — so N member households (or one malicious one) cannot
 #: drive a rotation storm.
@@ -175,6 +183,7 @@ class SpaceAuthorityRotationService:
         "_closed",
         "_echo_pending",
         "_echo_reacted",
+        "_echo_resends",
         "_echo_rotated",
         "_federation",
         "_federation_repo",
@@ -227,6 +236,9 @@ class SpaceAuthorityRotationService:
         #: by the hosted rosters. In memory: a restart is not something a
         #: member can trigger.
         self._echo_reacted: dict[tuple[str, str], float] = {}
+        #: Per space: (window start, re-sends in it) — the per-space budget
+        #: :data:`ECHO_RESENDS_PER_SPACE`.
+        self._echo_resends: dict[str, tuple[float, int]] = {}
         self._echo_rotated: dict[str, float] = {}
         #: Owner side: last seed re-share per ``(space_id, household)`` an
         #: admin's ``seed_held: false`` echo triggered, monotonic seconds.
@@ -981,6 +993,18 @@ class SpaceAuthorityRotationService:
             last = self._echo_reacted.get((space_id, sender))
             if last is not None and now - last < ECHO_REACTION_INTERVAL_S:
                 return
+            start, sent = self._echo_resends.get(space_id, (now, 0))
+            if now - start >= ECHO_REACTION_INTERVAL_S:
+                start, sent = now, 0
+            if sent >= ECHO_RESENDS_PER_SPACE:
+                log.info(
+                    "space %s: echo re-send budget spent this hour — %s "
+                    "is answered on a later echo",
+                    space_id,
+                    sender,
+                )
+                return
+            self._echo_resends[space_id] = (start, sent + 1)
             self._echo_reacted[(space_id, sender)] = now
             log.info(
                 "space %s: %s is behind on the authority key (holds %d, "

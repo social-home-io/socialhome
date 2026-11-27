@@ -1051,7 +1051,9 @@ export default function SpaceFeedPage() {
         <SpaceLocationCard
           spaceId={spaceId}
           currentUserId={follower ? undefined : currentUser.value?.user_id}
-          takesFollowers={features?.allow_subscribers === true}
+          // Followers already seated still see the pins after the switch
+          // goes off: say so whenever there are any.
+          takesFollowers={features?.allow_subscribers === true || (followerCount ?? 0) > 0}
           followerCount={followersOnHero}
         />
       )}
