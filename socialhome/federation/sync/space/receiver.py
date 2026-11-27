@@ -55,7 +55,7 @@ from ....domain.space import ContentAction, parse_have_seq
 from ....infrastructure.event_bus import EventBus
 from ....services.space_media_names import SpaceMediaNamer
 from ....services.space_service import apply_inviter_reproof
-from ....services.space_writer_households import holds_member_seat
+from ....services.space_writer_households import holds_seat
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -996,13 +996,13 @@ class SpaceSyncReceiver(
         elif resource in (
             "space_zones",
             "space_zones_deleted",
-        ) and not await holds_member_seat(self._space_repo, space_id):
-            # We only follow this space: its members' places are not ours
-            # to keep (owner decision 13), whichever household streams them
-            # — the live SPACE_ZONE_* events are dropped the same way.
+        ) and not await holds_seat(self._space_repo, space_id):
+            # Nobody here holds a seat (a follower's counts, P10): the
+            # space's places are not ours to keep, whichever household
+            # streams them — the live SPACE_ZONE_* events the same way.
             log.info(
                 "sync: %d %s records from %s for %s dropped: this household "
-                "holds no member seat there",
+                "holds no seat there",
                 len(records),
                 resource,
                 provider,

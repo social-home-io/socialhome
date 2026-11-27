@@ -400,8 +400,8 @@ class SpaceSyncResumeProvider(FileHashesMixin):
         §319.6 resync paths (:meth:`replay_space_to` /
         :meth:`replay_calendar_to`) run this check before any
         ``_replay_*`` call so a resync request can't bypass it. A household
-        that is not the roster authority (a v_92 helper) serves only writer
-        seats — the §25.6 provider's gate for member-only data.
+        that is not the roster authority (a v_92 helper) serves the seated
+        households the gate names — every seat, a follower's included (P10).
         """
         if (
             self._member_gate is not None

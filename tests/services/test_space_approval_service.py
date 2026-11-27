@@ -1219,9 +1219,9 @@ async def test_list_for_space_refuses_a_caller_without_a_seat(stack):
             await stack.approvals.list_for_space(sid, viewer_user_id="uid-outsider")
 
 
-async def test_list_for_space_refuses_a_follower(stack):
-    """A follower is an outsider to the space's governance (owner
-    decision 13): the same 403 as no seat at all."""
+async def test_a_follower_reads_the_proposals_but_never_votes(stack):
+    """P10 (owner 2026-11-26): a follower reads the proposals like a member
+    and never votes on one; no seat at all is still the outsider's 403."""
     await _user(stack, "alice")
     space = await stack.setup.create_space(owner_username="alice", name="S")
     await stack.space_repo.save_member(
@@ -1232,14 +1232,16 @@ async def test_list_for_space_refuses_a_follower(stack):
             joined_at="2026-10-18T00:00:00+00:00",
         )
     )
+    assert (
+        await stack.approvals.list_for_space(space.id, viewer_user_id="uid-fol") == []
+    )
     with pytest.raises(SpacePermissionError, match="Not a space member"):
-        await stack.approvals.list_for_space(space.id, viewer_user_id="uid-fol")
+        await stack.approvals.list_for_space(space.id, viewer_user_id="uid-none")
 
 
-async def test_the_proposal_mirror_skips_follower_only_households(stack):
-    """Governance is the members' business (owner decision 13): the host
-    mirrors a proposal onto member households only, never onto one whose
-    people only follow the space."""
+async def test_the_proposal_mirror_reaches_follower_only_households(stack):
+    """P10: every seated household reads the proposals — the host mirrors
+    a proposal onto a household whose people only follow the space too."""
     space = await _space(stack)
     await _add_admin(stack, space.id, "bob")
     for house, role in (("house-member", "member"), ("house-follower", "subscriber")):
@@ -1255,7 +1257,9 @@ async def test_the_proposal_mirror_skips_follower_only_households(stack):
         space.id, actor_username="alice", action=ProposalAction.DISSOLVE
     )
     call = stack.fed.broadcast_to_space_members.await_args
-    assert call.kwargs["only_instances"] == frozenset({"house-member"})
+    assert call.kwargs["only_instances"] == frozenset(
+        {"house-member", "house-follower"}
+    )
 
 
 # ── voted_by_me: the list never asks a voter to vote twice (bug 9) ──

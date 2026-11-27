@@ -249,7 +249,7 @@ class AbstractConversationRepo(Protocol):
         limit: int = 500,
     ) -> list[str]: ...
     async def list_space_chat_unread(
-        self, username: str, *, writer_roles: frozenset[str]
+        self, username: str, *, roles: frozenset[str]
     ) -> list[SpaceChatSeatUnread]: ...
 
     # Reactions -----------------------------------------------------------
@@ -1687,20 +1687,20 @@ class SqliteConversationRepo:
         return [str(r["content"] or "") for r in rows]
 
     async def list_space_chat_unread(
-        self, username: str, *, writer_roles: frozenset[str]
+        self, username: str, *, roles: frozenset[str]
     ) -> list[SpaceChatSeatUnread]:
         """``username``'s live seats in space chats, each with its raw unread
         count (the :meth:`count_unread` rules), in ONE query.
 
         Only seats the chat's access would still honour come back: the
         space known and not dissolved, its ``feature_chat`` on, the user
-        holding a ``space_members`` seat whose role is in ``writer_roles``
-        (never a follower) and not banned. A chat not created yet (or a
+        holding a ``space_members`` seat whose role is in ``roles``
+        (every role since P10: a follower reads the chat) and not banned. A chat not created yet (or a
         seat not reconciled yet) simply has no row.
         """
-        if not writer_roles:
+        if not roles:
             return []
-        marks = ",".join("?" for _ in writer_roles)
+        marks = ",".join("?" for _ in roles)
         rows = await self._db.fetchall(
             f"""
             SELECT c.space_id, c.id AS conversation_id, cm.notif_level,
@@ -1731,7 +1731,7 @@ class SqliteConversationRepo:
                )
              ORDER BY c.space_id
             """,
-            (SystemChatScope.SPACE.value, *sorted(writer_roles), username),
+            (SystemChatScope.SPACE.value, *sorted(roles), username),
         )
         return [
             SpaceChatSeatUnread(

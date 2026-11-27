@@ -75,7 +75,7 @@ from ....domain.space_sync_page import (
 from ....services.inbound_media_store import media_basename
 from ....services.pending_decrypts_cache import KEY_WAIT_MAX_AHEAD
 from ....services.space_crypto_service import MissingEpochKey
-from ....services.space_writer_households import holds_member_seat
+from ....services.space_writer_households import holds_seat
 from ....sync_page import (
     COMMIT_SPECS,
     COMMITTED_RESOURCES,
@@ -891,6 +891,7 @@ class SyncPageService:
         "_request_round",
         "_round_left",
         "_rounds",
+        "_seated",
         "_seats",
         "_sender",
         "_seqs",
@@ -902,7 +903,6 @@ class SyncPageService:
         "_tasks",
         "_versions",
         "_wanted",
-        "_writers",
     )
 
     def __init__(
@@ -979,12 +979,12 @@ class SyncPageService:
         self._fetching: dict[str, float] = {}
         #: space → the buckets a member fetch cannot complete (R3).
         self._stuck: OrderedDict[str, _Stuck] = OrderedDict()
-        #: Push (:meth:`attach_push`): the fan-out, the writer households of
-        #: a space (never a follower-only one), and per space when the last
+        #: Push (:meth:`attach_push`): the fan-out, the seated households of
+        #: a space (a follower's included, P10), and per space when the last
         #: push went (monotonic) with that page's order key; the spaces
         #: whose newer page waits for the hour mark.
         self._sender: _PageSender | None = None
-        self._writers: Callable[[str], Awaitable[set[str]]] | None = None
+        self._seated: Callable[[str], Awaitable[set[str]]] | None = None
         self._pushed: OrderedDict[str, tuple[float, tuple[int, int, int]]] = (
             OrderedDict()
         )
@@ -1319,16 +1319,16 @@ class SyncPageService:
         self,
         *,
         sender: _PageSender,
-        writers: Callable[[str], Awaitable[set[str]]],
+        seated: Callable[[str], Awaitable[set[str]]],
     ) -> None:
         """Wire page delivery: ``sender`` — the federation service's space
         fan-out (``broadcast_to_space_members``: paired and mesh members
         directly, GFS-reached ones in ONE multi upload per GFS) and its
-        one-household send; ``writers(space_id)`` — the member households
-        holding a writer seat (a follower-only household never gets a
-        page: its vector covers member-only resources)."""
+        one-household send; ``seated(space_id)`` — the households holding
+        a seat, a follower's included (P10, owner 2026-11-26: a follower
+        syncs like a member and holds the same rows, so ONE checksum)."""
         self._sender = sender
-        self._writers = writers
+        self._seated = seated
 
     async def _page_event(self, space_id: str, held: _Held) -> dict:
         """The ``SPACE_SYNC_PAGE`` payload: the page and its full vector,
@@ -1349,7 +1349,7 @@ class SyncPageService:
     async def _push_or_schedule(self, space_id: str) -> None:
         """A page was sealed here: push it now, or — within the hour after
         the last push — once at the hour mark (:meth:`push_due`)."""
-        if self._sender is None or self._writers is None:
+        if self._sender is None or self._seated is None:
             return
         last = self._pushed.get(space_id)
         if last is not None and self._monotonic() - last[0] < PAGE_PUSH_INTERVAL_S:
@@ -1369,7 +1369,7 @@ class SyncPageService:
     async def _push(self, space_id: str) -> None:
         """Push the page sealed here to every writer household. Fail-soft."""
         self._push_pending.discard(space_id)
-        if self._sender is None or self._writers is None:
+        if self._sender is None or self._seated is None:
             return
         try:
             space = await self._spaces.get(space_id)
@@ -1385,19 +1385,19 @@ class SyncPageService:
             self._pushed_payload.move_to_end(space_id)
             while len(self._pushed_payload) > MAX_PUSHED_PAYLOADS:
                 self._pushed_payload.popitem(last=False)
-            writers = await self._writers(space_id)
+            seated = await self._seated(space_id)
             await self._sender.broadcast_to_space_members(
                 space_id,
                 FederationEventType.SPACE_SYNC_PAGE,
                 payload,
                 min_proto_version=FederationCapability.MIN_FOR_SYNC_PAGES,
-                only_instances=writers,
+                only_instances=seated,
             )
             log.info(
-                "sync page: pushed page %d of space %s to %d member household(s)",
+                "sync page: pushed page %d of space %s to %d seated household(s)",
                 held.page.seq,
                 space_id,
-                len(writers),
+                len(seated),
             )
         except Exception:
             log.exception("sync page: pushing the page of %s failed", space_id)
@@ -1472,8 +1472,9 @@ class SyncPageService:
     ) -> None:
         """A BEGIN from *requester* (a stream ends): when its ``page`` ref
         shows it missed a push (:meth:`page_for`), the same
-        ``SPACE_SYNC_PAGE`` event goes to that one household — never a
-        follower-only one. The sentinel carries no page. Fail-soft.
+        ``SPACE_SYNC_PAGE`` event goes to that one household — any seated
+        one, a follower's included (P10). The sentinel carries no page.
+        Fail-soft.
 
         Security check 2: only a SIGNER answers (the page it last pushed) —
         a tick sends one BEGIN to every peer, and every member holding the
@@ -1482,7 +1483,7 @@ class SyncPageService:
         signer answers it). Each signer judges the requester's entry for
         ITSELF (``signers``), so a signer's own entry for its own page never
         makes another signer resend."""
-        if self._sender is None or self._writers is None:
+        if self._sender is None or self._seated is None:
             self.seal_soon(space_id)
             return
         try:
@@ -1496,7 +1497,7 @@ class SyncPageService:
                 requester_version=requester_version,
                 requester_ref=requester_ref,
             )
-            if payload is None or requester not in await self._writers(space_id):
+            if payload is None or requester not in await self._seated(space_id):
                 return
             await self._sender.send_with_mesh_fallback(
                 to_instance_id=requester,
@@ -1533,11 +1534,12 @@ class SyncPageService:
         sealed = payload.get("page_sealed") if isinstance(payload, dict) else None
         if sealed is None:
             return False
-        if not await holds_member_seat(self._spaces, space_id):  # type: ignore[arg-type]
-            # The receiving half of "no page to a follower" (L5): a
-            # follower-only household drops a page sent to it by mistake.
+        if not await holds_seat(self._spaces, space_id):  # type: ignore[arg-type]
+            # A household with nobody seated in the space keeps nothing of
+            # it (a follower's seat counts, P10).
             log.info(
-                "sync page: a page of %s for a follower household dropped", space_id
+                "sync page: a page of %s for a household with no seat dropped",
+                space_id,
             )
             return False
         return await self.receive(
@@ -1596,7 +1598,7 @@ class SyncPageService:
         :data:`KEY_WAIT_MAX_AHEAD` past it (the epoch is plaintext and is
         read before anything is verified), once per (space, provider,
         epoch); else it waits for the next sync. The replay re-checks our
-        own seat ("no page to a follower")."""
+        own seat (any seat, a follower's included)."""
         held = await self._crypto.get_current_epoch(space_id)
         key = (space_id, provider, epoch)
         if (
@@ -1624,7 +1626,7 @@ class SyncPageService:
 
         async def _again() -> None:
             self._parked_keys.discard(key)
-            if not await holds_member_seat(self._spaces, space_id):  # type: ignore[arg-type]
+            if not await holds_seat(self._spaces, space_id):  # type: ignore[arg-type]
                 return
             await self.receive(
                 space_id=space_id, sync_id=sync_id, provider=provider, sealed=sealed

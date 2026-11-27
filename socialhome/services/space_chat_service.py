@@ -50,7 +50,7 @@ from ..domain.events import (
     SpaceMemberJoined,
     SpaceMemberLeft,
 )
-from ..domain.space import WRITER_ROLES, SpaceRole
+from ..domain.space import SpaceRole
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -166,7 +166,7 @@ class SpaceChatService:
         if member is None or await self._spaces.is_banned(space_id, user.user_id):
             raise NotFoundError(f"space {space_id!r} not found")
         if not space.features.chat:
-            return SystemChatSummary(enabled=False)
+            return SystemChatSummary(enabled=False, can_post=False)
         chat = await self.reconcile(space_id)
         seat = next(
             (
@@ -178,7 +178,7 @@ class SpaceChatService:
         )
         if seat is None:
             # The policy refused this reader (e.g. an inactive account).
-            return SystemChatSummary(enabled=False)
+            return SystemChatSummary(enabled=False, can_post=False)
         muted_until = (
             seat.muted_until
             if mute_active(seat.muted_until, now=datetime.now(UTC))
@@ -219,7 +219,7 @@ class SpaceChatService:
         if user is None or not user.is_active():
             return {}
         rows = await self._convos.list_space_chat_unread(
-            username, writer_roles=frozenset(r.value for r in WRITER_ROLES)
+            username, roles=frozenset(r.value for r in SpaceRole)
         )
         now = datetime.now(UTC)
         resolver = DmMentionResolver(self._convos, self._users, self._policy)

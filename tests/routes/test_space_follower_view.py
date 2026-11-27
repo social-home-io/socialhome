@@ -1,18 +1,11 @@
-"""A follower's (``subscriber``) view of a space is reduced (owner
-decision 13, 2026-10-18).
+"""A follower's (``subscriber``) view of a space is a member's view, read
+only (P10, owner 2026-11-26: "a follower is a limited member but still a
+member"; it replaces owner decision 13).
 
-A follower reads the posts and is on the roster like any seat (roster
-gossip and snapshots reach follower households too, D3), but takes no part
-in the people's whereabouts or governance: the space chat refuses them. So:
-
-* ``GET /api/spaces/{id}/members`` shows a follower the same roster as a
-  member (v_96, D3: followers are visible to everyone in the space — every
-  seat, themselves included) by name, picture and role, without session
-  presence (online / idle / last seen), join time or the location-share
-  opt-in.
+* ``GET /api/spaces/{id}/members`` shows a follower the same roster, with
+  the same fields, as a member (v_96, D3: every seat, themselves included).
 * ``GET /api/spaces/{id}/proposals``, ``/presence`` (the map pins) and
-  ``/zones`` are for members only: a follower gets the same 403 as an
-  outsider.
+  ``/zones`` answer a follower like a member; an outsider gets 403.
 * ``GET /api/spaces/{id}`` carries ``my_role`` so the SPA learns the
   viewer's own role without finding itself in the roster.
 """
@@ -26,8 +19,8 @@ _MEMBER = ("mia", "uid-mia")
 _FOLLOWER = ("fern", "uid-fern")
 _OTHER_FOLLOWER = ("fred", "uid-fred")
 
-#: Presence / bookkeeping fields a follower never sees on a roster row.
-_WITHHELD = (
+#: Presence / bookkeeping fields every seat sees on a roster row.
+_FIELDS = (
     "is_online",
     "is_idle",
     "last_seen_at",
@@ -75,9 +68,9 @@ async def _roster(client, headers) -> list[dict]:
     return await r.json()
 
 
-async def test_follower_roster_lists_every_seat_without_presence(seeded):
-    """D3 (v_96): a follower sees the same roster as a member — every seat,
-    other followers and themselves included — but never presence."""
+async def test_follower_roster_is_the_members_roster(seeded):
+    """D3 (v_96) + P10: a follower sees the same roster as a member — every
+    seat, other followers and themselves included — with the same fields."""
     client, hdr = seeded
     rows = await _roster(client, hdr["follower"])
     assert {r["user_id"] for r in rows} == {
@@ -88,9 +81,10 @@ async def test_follower_roster_lists_every_seat_without_presence(seeded):
         "uid-r-member",
         "uid-r-follower",
     }
-    for row in rows:
-        for key in _WITHHELD:
-            assert key not in row, (row["user_id"], key)
+    assert rows == await _roster(client, hdr["member"])
+    local = {r["user_id"]: r for r in rows if r["user_id"] == _OWNER[1]}
+    for key in _FIELDS:
+        assert key in local[_OWNER[1]], key
     by_id = {r["user_id"]: r for r in rows}
     assert by_id[_OWNER[1]]["role"] == "owner"
     assert by_id[_OWNER[1]]["is_owner"] is True
@@ -132,17 +126,21 @@ async def test_members_name_a_follower_from_the_roster(seeded):
 
 
 @pytest.mark.parametrize("path", ["/proposals", "/presence", "/zones"])
-async def test_member_only_reads_refuse_a_follower(seeded, path):
+async def test_a_follower_reads_like_a_member(seeded, path):
+    """P10: proposals, the map pins and the zones answer a follower like a
+    member; the same answer, the owner's shared pin included."""
     client, hdr = seeded
     url = f"/api/spaces/{_SID}{path}"
-    await _forbidden(await client.get(url, headers=hdr["follower"]))
-    for who in ("owner", "member"):
+    answers = []
+    for who in ("owner", "member", "follower"):
         r = await client.get(url, headers=hdr[who])
         assert r.status == 200, (who, await r.text())
+        answers.append(await r.json())
+    assert answers[1] == answers[2]
 
 
-@pytest.mark.parametrize("path", ["/presence", "/zones"])
-async def test_member_only_reads_hide_unknown_ids(seeded, path):
+@pytest.mark.parametrize("path", ["/proposals", "/presence", "/zones"])
+async def test_reads_hide_unknown_ids(seeded, path):
     """An unknown id answers the outsider's 403 — no existence oracle."""
     client, hdr = seeded
     await _forbidden(

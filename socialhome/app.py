@@ -2810,10 +2810,10 @@ def _build_sync_pages(
         seat_repo, own_instance_id=own_instance_id, roles=SEAT_ROLES
     )
 
-    async def _writers(space_id: str) -> set[str]:
+    async def _seated(space_id: str) -> set[str]:
         return set(await writers.households(space_id))
 
-    pages.attach_push(sender=federation_service, writers=_writers)
+    pages.attach_push(sender=federation_service, seated=_seated)
     federation_service._event_registry.register(
         FederationEventType.SPACE_SYNC_PAGE, pages.on_page_event
     )

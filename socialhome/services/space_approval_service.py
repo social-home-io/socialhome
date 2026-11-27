@@ -59,8 +59,8 @@ from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRep
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .protection_gate import ProtectionGateMixin
-from .space_member_guard import require_member_seat
-from .space_writer_households import SpaceWriterHouseholds
+from .space_member_guard import require_seat
+from .space_writer_households import SEAT_ROLES, SpaceWriterHouseholds
 
 log = logging.getLogger(__name__)
 
@@ -261,11 +261,10 @@ class SpaceApprovalService(ProtectionGateMixin):
     async def list_for_space(self, space_id: str, *, viewer_user_id: str) -> list[dict]:
         """Open proposals for a space (SPA views), lazily expiring stale
         ones. Reads the local table — authoritative on the host, mirror on
-        a member household. The caller needs a member's seat — a follower
-        is an outsider to the space's governance (owner decision 13) —
-        checked before the lazy expiry, so an outsider can't trigger its
-        writes either."""
-        await require_member_seat(self._spaces, space_id, viewer_user_id)
+        a member household. The caller needs a seat — a follower reads the
+        proposals too (P10), never creates or votes on one — checked before
+        the lazy expiry, so an outsider can't trigger its writes either."""
+        await require_seat(self._spaces, space_id, viewer_user_id)
         out: list[dict] = []
         for p in await self._proposals.list_open(space_id):
             if p.expires_at <= _now():
@@ -916,10 +915,12 @@ class SpaceApprovalService(ProtectionGateMixin):
         # remote admin's SPA shows the same proposal + tally and can vote.
         if self._federation is not None and await self._host_owns(proposal.space_id):
             try:
-                # Governance is the members' business: never mirrored
-                # onto a household that only follows (owner decision 13).
+                # Every seated household reads the proposals — a
+                # follower's too (P10); only admins create and vote.
                 members = SpaceWriterHouseholds(
-                    self._remote_members, own_instance_id=self._own_instance_id
+                    self._remote_members,
+                    own_instance_id=self._own_instance_id,
+                    roles=SEAT_ROLES,
                 )
                 await self._federation.broadcast_to_space_members(
                     proposal.space_id,

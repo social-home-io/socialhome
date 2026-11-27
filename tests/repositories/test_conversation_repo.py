@@ -1034,15 +1034,15 @@ async def test_list_space_chat_unread_one_row_per_live_seat(env):
     await env.repo.save_message(_message("s1-own", one, sender="uid-bob"))
     await env.repo.save_message(_message("s2-0", two))
     await env.repo.set_last_read(two, "bob", at=datetime.now(UTC).isoformat())
-    rows = await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS)
+    rows = await env.repo.list_space_chat_unread("bob", roles=_WRITERS)
     assert [(r.space_id, r.conversation_id, r.unread) for r in rows] == [
         ("sp1", one, 3),
         ("sp2", two, 0),
     ]
     assert rows[0].notif_level == "mentions" and rows[0].muted_until is None
     # Nobody else has a seat; no roles → nothing.
-    assert await env.repo.list_space_chat_unread("alice", writer_roles=_WRITERS) == []
-    assert await env.repo.list_space_chat_unread("bob", writer_roles=frozenset()) == []
+    assert await env.repo.list_space_chat_unread("alice", roles=_WRITERS) == []
+    assert await env.repo.list_space_chat_unread("bob", roles=frozenset()) == []
 
 
 @pytest.mark.parametrize(
@@ -1062,9 +1062,9 @@ async def test_list_space_chat_unread_one_row_per_live_seat(env):
 async def test_list_space_chat_unread_skips_seats_access_refuses(env, spoil):
     chat = await _space_with_chat(env, "sp1")
     await env.repo.save_message(_message("m1", chat))
-    assert len(await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS))
+    assert len(await env.repo.list_space_chat_unread("bob", roles=_WRITERS))
     await env.db.enqueue(spoil)
-    assert await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS) == []
+    assert await env.repo.list_space_chat_unread("bob", roles=_WRITERS) == []
 
 
 async def test_list_messages_sync_page_since_a_stamp(env):

@@ -9,10 +9,10 @@ reconciler has not caught up on yet never grants (or withholds) anything:
 
 * **household** — an active local user, while ``feat_household_chat`` is
   on (:class:`HouseholdChatAccess`).
-* **space** — a local ``space_members`` seat with a WRITER role (owner,
-  admin, moderator, member — never a follower), ``features.chat`` on, not
-  banned, the space not dissolved; posting also needs the space not
-  archived (reading an archived space's chat stays allowed)
+* **space** — a local ``space_members`` seat (a follower's included: it
+  reads, P10), ``features.chat`` on, not banned, the space not dissolved;
+  posting needs a WRITER role (owner, admin, moderator, member) and the
+  space not archived (reading an archived space's chat stays allowed)
   (:class:`SpaceChatAccess`).
 
 A scope with no registered access is refused (fail closed), so a

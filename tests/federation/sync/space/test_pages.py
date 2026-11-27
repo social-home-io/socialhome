@@ -1609,7 +1609,7 @@ def _pushing(env: _Env) -> _PushSender:
     async def writers(space_id):
         return set(WRITERS)
 
-    env.svc.attach_push(sender=sender, writers=writers)
+    env.svc.attach_push(sender=sender, seated=writers)
     return sender
 
 

@@ -112,7 +112,7 @@ from ..services.space_member_guard import (
     banned_from_space,
     user_id_of_another_household,
 )
-from ..services.space_writer_households import holds_member_seat
+from ..services.space_writer_households import holds_seat
 from .host_equivalence import acts_as_host
 from .moderation_approval import (
     FEATURE_OF_EVENT,
@@ -416,11 +416,12 @@ class SpaceAuthorship:
         space = await self._spaces.get(space_id)
         return await self.acts_as_host(space, sender)
 
-    async def holds_member_seat(self, space_id: str) -> bool:
-        """THIS household holds a member's seat in ``space_id`` (a local
-        writer) — a follower-only household keeps no member-only data
-        (owner decision 13)."""
-        return await holds_member_seat(self._spaces, space_id)
+    async def holds_seat(self, space_id: str) -> bool:
+        """THIS household holds a seat in ``space_id`` — a follower's
+        included (P10, owner 2026-11-26: a follower reads everything a
+        member does). A household with nobody seated keeps none of its
+        data."""
+        return await holds_seat(self._spaces, space_id)
 
     @property
     def seat_repo(self) -> AbstractSpaceRemoteMemberRepo:

@@ -84,7 +84,7 @@ from ..services.space_service import (
     seal_join_snapshot,
     signed_roster_event,
 )
-from ..services.space_writer_households import holds_member_seat
+from ..services.space_writer_households import holds_seat
 from .host_equivalence import acts_as_host, holds_local_admin_seat
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 from .mesh_member_claim import sender_identity_pk
@@ -1167,12 +1167,12 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
-        if not await holds_member_seat(self._space_repo, space_id):
-            # We only follow this space: the members' whereabouts are not
-            # ours to keep (owner decision 13), whoever sent them.
+        if not await holds_seat(self._space_repo, space_id):
+            # Nobody here holds a seat (a follower's counts, P10): the
+            # space's whereabouts are not ours to keep, whoever sent them.
             log.info(
                 "SPACE_LOCATION_UPDATED from %s for %s dropped: this "
-                "household holds no member seat there",
+                "household holds no seat there",
                 event.from_instance,
                 space_id,
             )
@@ -1406,8 +1406,8 @@ class PrivateSpaceInviteHandler:
             self._space_repo, self._remote_members, space, event.from_instance
         ):
             return  # only the host (or our trusted inviter) mirrors proposals
-        if not await holds_member_seat(self._space_repo, space_id):
-            return  # governance is the members' — a follower household keeps none
+        if not await holds_seat(self._space_repo, space_id):
+            return  # nobody seated here (a follower counts, P10): keep none
         await self._approval_service.apply_mirror_update(space_id, view)
 
     async def _on_key_exchange_rekey(self, event: FederationEvent) -> None:

@@ -285,6 +285,7 @@ async def test_household_chat_off_hides_it_and_refuses_writes(client):
         "enabled": False,
         "conversation_id": None,
         "unread": 0,
+        "can_post": False,
         "notif_level": None,
         "muted_until": None,
         "last_read_at": None,

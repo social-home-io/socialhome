@@ -88,7 +88,7 @@ from .gfs_mailbox_service import GfsMailboxService
 from .space_writer_households import (
     SEAT_ROLES,
     SpaceWriterHouseholds,
-    holds_member_seat,
+    holds_seat,
 )
 
 if TYPE_CHECKING:
@@ -921,9 +921,7 @@ class SpaceMemberDirectory:
     async def _publish_to_hosts(self, space_id: str) -> int:
         hosts = await self._hosts(space_id)
         # Any seat of ours, a follower's included (same path as a member).
-        if not hosts or not await holds_member_seat(
-            self._spaces, space_id, roles=SEAT_ROLES
-        ):
+        if not hosts or not await holds_seat(self._spaces, space_id, roles=SEAT_ROLES):
             return 0
         sent = 0
         for host in hosts:
@@ -1693,11 +1691,7 @@ class SpaceMemberDirectory:
         # (the host answers only where it keeps a directory). A paired
         # joiner holds no card of the space at all — it gets no host card —
         # so this echo is what repairs a first snapshot it never got.
-        return (
-            0
-            if await holds_member_seat(self._spaces, space_id, roles=SEAT_ROLES)
-            else None
-        )
+        return 0 if await holds_seat(self._spaces, space_id, roles=SEAT_ROLES) else None
 
     async def ask_host(self, space_id: str) -> None:
         """Our directory of *space_id* misses something a host has (a host
@@ -1721,7 +1715,7 @@ class SpaceMemberDirectory:
             last = self._asked_at.get((space_id, host), float("-inf"))
             if now - last < HELLO_RESNAPSHOT_S:
                 return
-            if not await holds_member_seat(self._spaces, space_id, roles=SEAT_ROLES):
+            if not await holds_seat(self._spaces, space_id, roles=SEAT_ROLES):
                 return
             self._asked_at[(space_id, host)] = now
             await self._publish_to_host(space_id, host, again=True)

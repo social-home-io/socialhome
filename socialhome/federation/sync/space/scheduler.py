@@ -1751,7 +1751,7 @@ class SpaceSyncScheduler:
         """Spaces hosted elsewhere in which one of our people holds a seat —
         a follower (``subscriber``) seat included (v_96: a follower is a
         member with the read-only role on every path, so it BEGINs its host
-        like a member; the provider serves the follower subset). A bare
+        like a member, and gets what a member gets — P10). A bare
         mirror with no seat of ours never contacts the host."""
         out: list[Space] = []
         for space in await self._list_local_spaces():

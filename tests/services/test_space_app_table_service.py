@@ -550,8 +550,11 @@ async def test_group_messages_ride_the_space_and_reach_unpaired_players(net):
     assert [f["data"] for f in frames] == [{"go": 1}]
     kinds = [p.get("kind") for _s, t, p in net.space_events() if t == SPACE_SESSION]
     assert "message" in kinds
-    # Never anything to the follower or the outsider.
-    assert not net.space_events(to=h["f"].instance)
+    # The follower sees the card (P10) but never a session message; the
+    # outsider gets nothing at all.
+    assert not [
+        t for _s, t, _p in net.space_events(to=h["f"].instance) if t == SPACE_SESSION
+    ]
     assert not net.space_events(to=h["x"].instance)
     assert b'"go"' not in orjson.dumps(
         [p for s, t, p in net.sent if t in (h["f"].instance, h["x"].instance)]

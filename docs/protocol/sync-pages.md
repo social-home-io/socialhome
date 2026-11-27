@@ -411,7 +411,7 @@ sequenceDiagram
   writer households (a page's vector covers member-only resources, e.g.
   zones), and a provider sends the targeted event only to a writer
   household. The receiving half: a household holding no member seat drops
-  a page sent to it by mistake (`holds_member_seat`; security check 2,
+  a page sent to it by mistake (`holds_seat`; security check 2,
   L5). A non-member on a mesh path sees `SPACE_ROUTED` ciphertext;
   a GFS sees the sealed multi body.
 - **Lazy seal.** When the provider is a signer and a stream to a member

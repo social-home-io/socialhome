@@ -129,7 +129,8 @@ class SystemChatSummary:
     conversation_id: str | None = None
     unread: int = 0
     #: Whether the viewer may write to it: ``False`` for a space's follower,
-    #: who reads its chat but never posts (owner 2026-11-26).
+    #: who reads its chat but never posts (owner 2026-11-26), and for a chat
+    #: that is turned off.
     can_post: bool = True
     notif_level: str | None = None
     #: The viewer's own mute while it is still on (UTC ISO 8601), else

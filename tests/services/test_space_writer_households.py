@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from socialhome.domain.space import SpaceRole
+from socialhome.domain.space import WRITER_ROLES, SpaceRole
 from socialhome.services.space_writer_households import (
     SEAT_ROLES,
     SpaceWriterHouseholds,
-    holds_member_seat,
+    holds_seat,
 )
 
 
@@ -64,10 +64,12 @@ class _Space:
         return [SimpleNamespace(user_id="u1", role=self._role)]
 
 
-async def test_our_own_seat_is_a_writer_seat_unless_any_seat_is_asked_for():
-    assert await holds_member_seat(_Space("member"), "sp")
-    assert not await holds_member_seat(_Space("subscriber"), "sp")
-    assert await holds_member_seat(_Space("subscriber"), "sp", roles=SEAT_ROLES)
-    assert not await holds_member_seat(
+async def test_our_own_seat_is_any_seat_unless_writers_are_asked_for():
+    """P10: the default is any seat, a follower's included."""
+    assert await holds_seat(_Space("member"), "sp")
+    assert await holds_seat(_Space("subscriber"), "sp")
+    assert not await holds_seat(_Space("subscriber"), "sp", roles=WRITER_ROLES)
+    assert await holds_seat(_Space("subscriber"), "sp", roles=SEAT_ROLES)
+    assert not await holds_seat(
         _Space("subscriber", local=False), "sp", roles=SEAT_ROLES
     )

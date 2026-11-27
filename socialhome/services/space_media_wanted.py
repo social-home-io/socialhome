@@ -57,9 +57,9 @@ while every file is here; per lost file one request entry and its bytes
 once.
 
 **Provider** (:class:`SpaceMediaWantedProvider`). The requester must hold a
-writer (member) seat in the space — the predicate the §25.6 provider uses
-for member-only data (:meth:`SpaceWriterHouseholds.may_receive`), so a
-follower-only household gets nothing (it asks its GFS); each entry must
+seat in the space, a follower's included (P10) — the predicate the §25.6
+provider uses for the chat (:meth:`SpaceWriterHouseholds.may_receive`
+with ``SEAT_ROLES``), so a household with nobody seated gets nothing; each entry must
 name a LIVE item of THAT space showing a file whose content name is the
 requested one (a stored ``sc-`` name directly; an unhashed local file by
 ``space_content_media_name(space, sha256(file), basename)``); the file gate
@@ -104,6 +104,7 @@ from ..domain.file_hashes import (
     space_content_media_name,
 )
 from ..domain.media_constraints import is_safe_media_name
+from ..domain.space import WRITER_ROLES
 from ..federation.host_equivalence import acting_hosts
 from ..federation.sync.space.file_gate import (
     CatchUpFileGates,
@@ -116,7 +117,7 @@ from .inbound_media_store import (
     media_file_path,
     space_direct_media_name,
 )
-from .space_writer_households import holds_member_seat
+from .space_writer_households import holds_seat
 
 if TYPE_CHECKING:
     from ..domain.federation import DeliveryResult, FederationEvent
@@ -451,7 +452,10 @@ class SpaceMediaWanted:
         that are not here (see the module docstring, "Without a view");
         the names added."""
         added: set[str] = set()
-        if self._dir is None or not await holds_member_seat(self._spaces, space_id):
+        # A follower household fetches through its GFS (#1317, v_83).
+        if self._dir is None or not await holds_seat(
+            self._spaces, space_id, roles=WRITER_ROLES
+        ):
             return added
         wall = self._utcnow()
         cutoff = (wall - timedelta(seconds=SWEEP_MAX_AGE_S)).strftime(_SQL_TIME)
@@ -509,8 +513,8 @@ class SpaceMediaWanted:
             for space_id, item_id, _created in rows:
                 if name in per_space.get(space_id, {}):
                     continue
-                if not await holds_member_seat(self._spaces, space_id):
-                    continue  # a follower reads through its GFS (v_83)
+                if not await holds_seat(self._spaces, space_id, roles=WRITER_ROLES):
+                    continue  # a follower fetches through its GFS (v_83)
                 per_space.setdefault(space_id, {})[name] = item_id
                 added = True
             if not added:
@@ -710,8 +714,8 @@ class SpaceMediaWantedProvider:
         #: This household — a sender-bound ``sd-`` name is ours to deliver
         #: only when it is bound to us.
         self._own = own_instance_id
-        #: ``(space, household) → holds a writer seat`` — the §25.6 gate for
-        #: member-only data (:meth:`SpaceWriterHouseholds.may_receive`).
+        #: ``(space, household) → holds a seat`` (a follower's included,
+        #: P10) — the §25.6 seat gate (:meth:`SpaceWriterHouseholds.may_receive`).
         self._member_gate = member_gate
         self._refs = media_refs
         self._gates = file_gates
@@ -743,10 +747,9 @@ class SpaceMediaWantedProvider:
             )
             return 0
         if not await self._member_gate(space_id, requester):
-            # A follower-only household reads through its GFS (v_83).
+            # Nobody of that household is seated in the space.
             log.info(
-                "SPACE_MEDIA_WANTED from %s: holds no member seat in space %s "
-                "— dropped",
+                "SPACE_MEDIA_WANTED from %s: holds no seat in space %s — dropped",
                 requester,
                 space_id,
             )

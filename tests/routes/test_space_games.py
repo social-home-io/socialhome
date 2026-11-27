@@ -151,8 +151,13 @@ async def test_open_join_and_close_a_table(client):
     assert listing["can_edit_games"] is True and listing["allowed_apps"] == [APP]
     assert [t["session_id"] for t in listing["tables"]] == [session]
     assert listing["tables"][0]["app"] == {"installed": True, "enabled": True}
-    # Followers see no games at all.
+    # A follower sees the tables (P10: read parity) but never joins one.
     r = await client.get(base, headers=_auth(tok["fred"]))
+    assert r.status == 200
+    seen = await r.json()
+    assert [t["session_id"] for t in seen["tables"]] == [session]
+    assert seen["can_edit_games"] is False
+    r = await client.post(f"{base}/{session}/join", headers=_auth(tok["fred"]))
     assert r.status == 403
 
     r = await client.post(f"{base}/{session}/join", headers=_auth(tok["mod"]))

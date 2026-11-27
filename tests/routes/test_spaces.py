@@ -3852,35 +3852,31 @@ async def test_space_chat_is_refused_to_non_members_and_unknown_spaces(client):
     assert r.status == 403
 
 
-async def test_space_chat_is_disabled_for_a_follower(client):
+async def test_a_follower_reads_the_space_chat_but_never_posts(client):
+    """P10 (owner 2026-11-26): a follower reads the chat like a member;
+    ``can_post`` is False and a send is refused."""
     sid = await _create_subscribable_space(client, "Broadcast")
     r = await client.post(
         f"/api/spaces/{sid}/subscribe", headers=_auth(client._bob_token)
     )
     assert r.status in (200, 201), await r.text()
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    await _say(client, cid, client._admin_token, "hello followers")
     status, follower = await _space_chat(client, sid, client._bob_token)
     assert status == 200
-    assert follower == {
-        "enabled": False,
-        "conversation_id": None,
-        "unread": 0,
-        "notif_level": None,
-        "muted_until": None,
-        "last_read_at": None,
-    }
-    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
-    for call in (
-        client.post(
-            f"/api/conversations/{cid}/messages",
-            json={"content": "hi"},
-            headers=_auth(client._bob_token),
-        ),
-        client.get(
-            f"/api/conversations/{cid}/messages", headers=_auth(client._bob_token)
-        ),
-    ):
-        r = await call
-        assert r.status == 403
+    assert follower["enabled"] is True and follower["can_post"] is False
+    assert follower["conversation_id"] == cid
+    r = await client.get(
+        f"/api/conversations/{cid}/messages", headers=_auth(client._bob_token)
+    )
+    assert r.status == 200, await r.text()
+    assert "hello followers" in await r.text()
+    r = await client.post(
+        f"/api/conversations/{cid}/messages",
+        json={"content": "hi"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403
 
 
 async def test_a_space_admin_turns_the_chat_off_and_on(client):
@@ -4010,10 +4006,9 @@ async def test_space_writes_keep_their_tight_limits(client):
     assert bans[5] == 429
 
 
-async def test_space_chat_roster_is_refused_to_followers_and_non_members(client):
-    """The roster names people on other households: only the chat's
-    members (a space's writers) read it — a non-member and a local
-    follower get 403."""
+async def test_space_chat_roster_is_refused_to_non_members(client):
+    """The roster names people on other households: only the space's
+    seats read it — a non-member gets 403, a follower reads it (P10)."""
     sid = await _create_subscribable_space(client, "Broadcast roster")
     cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
     path = f"/api/conversations/{cid}/members"
@@ -4024,7 +4019,7 @@ async def test_space_chat_roster_is_refused_to_followers_and_non_members(client)
     )
     assert r.status in (200, 201), await r.text()
     r = await client.get(path, headers=_auth(client._bob_token))
-    assert r.status == 403
+    assert r.status == 200
     r = await client.get(path, headers=_auth(client._admin_token))
     assert r.status == 200
 

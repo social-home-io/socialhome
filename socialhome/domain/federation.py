@@ -300,8 +300,8 @@ class FederationEventType(str, enum.Enum):
     # ── Space chat (v_55) — the space's own group chat (a system
     # conversation on group-DM storage, one per space). Each household
     # keeps its own chat for the space; the wire names the space, never a
-    # conversation id. Fanned out only to households holding at least one
-    # WRITER seat (never a follower-only household). Message ids are
+    # conversation id. Fanned out to every household holding a seat, a
+    # follower-only one included (P10: it reads the chat). Message ids are
     # owner-bound (``space-chat-message``) to the author. Read receipts,
     # delivery state and typing are never federated. See
     # ``docs/protocol/space-chat.md``.
@@ -390,9 +390,9 @@ class FederationEventType(str, enum.Enum):
     #: wins, a removal is final. See ``docs/protocol/bazaar.md``.
     BAZAAR_LISTING_FAQ_UPDATED = "bazaar_listing_faq_updated"
     #: v_77 — a game table opened in a space: its *card* (upsert by
-    #: ``rev``). From the table's host household to the member households
-    #: holding a writer seat (``broadcast_to_space_members`` narrowed with
-    #: ``only_instances``) — never a follower-only household, never a GFS.
+    #: ``rev``). From the table's host household to every seated household
+    #: (``broadcast_to_space_members`` narrowed with ``only_instances``) —
+    #: a follower-only one included (P10: it sees, never joins), never a GFS.
     #: ``space_id`` is the only routing field; the card (table id, app,
     #: host, note, players, seats taken, state, expiry) is encrypted. See
     #: ``docs/protocol/app-groups.md``.
@@ -441,8 +441,8 @@ class FederationEventType(str, enum.Enum):
     #: v_95 sync pages: the space authority's newest signed page and its
     #: bucket vector (``docs/protocol/sync-pages.md``), ``{page_sealed:
     #: {epoch, payload}}`` — sealed under the space content key inside the
-    #: encrypted payload. Pushed by the signer to every member household
-    #: (never a follower) at most hourly, and sent to ONE household whose
+    #: encrypted payload. Pushed by the signer to every seated household
+    #: (a follower's included, P10) at most hourly, and sent to ONE household whose
     #: BEGIN names an older page than the one last pushed.
     SPACE_SYNC_PAGE = "space_sync_page"
     SPACE_SYNC_DIRECT_FAILED = "space_sync_direct_failed"

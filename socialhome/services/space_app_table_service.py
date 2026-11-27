@@ -127,7 +127,7 @@ from .space_service import SpaceService
 from .space_writer_households import (
     SEAT_ROLES,
     SpaceWriterHouseholds,
-    holds_member_seat,
+    holds_seat,
 )
 
 if TYPE_CHECKING:
@@ -841,7 +841,7 @@ class SpaceTableService(BusPublisherMixin):
             space is None
             or space.dissolved
             or space.space_type is SpaceType.GLOBAL
-            or not await holds_member_seat(self._spaces, space_id)
+            or not await holds_seat(self._spaces, space_id)
         ):
             return None
         return space
@@ -1191,7 +1191,7 @@ class SpaceTableService(BusPublisherMixin):
                 )
             except (AppGroupClosedError, AppGroupNotFoundError) as exc:
                 log.info("space_tables: leave on space exit: %s", exc.code)
-        if not await holds_member_seat(self._spaces, event.space_id):
+        if not await holds_seat(self._spaces, event.space_id):
             for table in await self._repo.list_for_space(event.space_id):
                 if self._card_only(table):
                     await self._repo.delete(table.session_id)

@@ -54,7 +54,7 @@ class SpaceWriterHouseholds:
         return instance_id in await self.households(space_id)
 
 
-async def holds_member_seat(
+async def holds_seat(
     space_repo: AbstractSpaceRepo,
     space_id: str,
     *,

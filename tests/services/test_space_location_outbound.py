@@ -274,9 +274,9 @@ async def test_publishes_gps_only_local_frame(env):
     assert "state" not in data
 
 
-async def test_local_frame_skips_followers(env):
-    """A follower may not read the map (owner decision 13), so its live
-    pins never reach them either."""
+async def test_local_frame_reaches_followers(env):
+    """P10 (owner 2026-11-26): a follower reads the map, so the live pins
+    reach them too."""
     sp = await env.make_space("sp_follow")
     for uid, role, share in (
         (env.alice_uid, "member", True),
@@ -302,7 +302,7 @@ async def test_local_frame_skips_followers(env):
         ),
     )
     [(user_ids, _frame)] = env.ws.calls
-    assert list(user_ids) == [env.alice_uid]
+    assert sorted(user_ids) == sorted([env.alice_uid, env.bob_uid])
 
 
 async def test_no_zone_name_in_federation_payload(env):

@@ -678,11 +678,11 @@ class SpaceSyncService:
         #: for HTTPS-mode chunk delivery (``session.transport_mode ==
         #: "https"``); ``_send`` falls back to RTC when ``None``.
         self._federation = None
-        #: Who may receive the member-only resources (the chat, v_55, and
-        #: the zones): ``(space_id, requester_instance_id) -> bool`` — a
-        #: household holding a writer seat
-        #: (:meth:`SpaceWriterHouseholds.may_receive`). ``None`` streams
-        #: none of them (fail closed).
+        #: Who may receive the chat (v_55) by catch-up:
+        #: ``(space_id, requester_instance_id) -> bool`` — a household
+        #: holding a seat, a follower's included (P10;
+        #: :meth:`SpaceWriterHouseholds.may_receive` with ``SEAT_ROLES``).
+        #: ``None`` streams none of it (fail closed).
         self._member_gate: Callable[[str, str], Awaitable[bool]] | None = None
         #: Whether this household may speak for a space's roster:
         #: ``space_id -> bool`` (the host, or a seed-holding delegated admin
@@ -769,8 +769,8 @@ class SpaceSyncService:
         self._own_members = own_members
 
     def attach_member_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
-        """Wire who may receive a space's member-only resources by
-        catch-up — never a follower-only household (owner decision 13)."""
+        """Wire who may receive a space's chat by catch-up — any seated
+        household, a follower's included (P10, owner 2026-11-26)."""
         self._member_gate = gate
 
     async def _exporter_for(

@@ -72,7 +72,7 @@ from ..dm_mentions import DmMentionResolver
 from ..dm_service import MAX_DM_LENGTH
 from ..protection_gate import ProtectionGateMixin
 from ..space_chat_service import SpaceChatService
-from ..space_writer_households import SEAT_ROLES, holds_member_seat
+from ..space_writer_households import SEAT_ROLES, holds_seat
 from ..system_chat_policy import SystemChatPolicy
 
 if TYPE_CHECKING:
@@ -229,7 +229,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
 
     async def _has_local_seat(self, space_id: str) -> bool:
         # One of OUR people — ``space_members`` also mirrors the host's.
-        return await holds_member_seat(self._spaces, space_id, roles=SEAT_ROLES)
+        return await holds_seat(self._spaces, space_id, roles=SEAT_ROLES)
 
     async def _message_in(
         self,

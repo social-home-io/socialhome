@@ -273,9 +273,11 @@ async def test_unread_by_space_follows_level_and_mute(stack):
     await stack.dm.mute(chat_id, username="bob", duration="forever")
     muted = (await stack.chat.unread_by_space("bob"))[SP]
     assert muted.unread == 0 and muted.muted_until == MUTED_FOREVER
-    # The sender's own messages never count; a follower has no seat.
+    # The sender's own messages never count; a follower's seat counts like
+    # a member's (P10: it reads the chat).
     assert (await stack.chat.unread_by_space("anna"))[SP].unread == 0
-    assert await stack.chat.unread_by_space("finn") == {}
+    await stack.chat.summary(SP, "finn")
+    assert SP in await stack.chat.unread_by_space("finn")
 
 
 async def test_unread_by_space_skips_the_mention_parse_without_unread(stack):
