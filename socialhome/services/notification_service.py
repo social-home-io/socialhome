@@ -681,6 +681,8 @@ _PUSH_GENERIC: tuple[str, str] = ("notification.push.generic", "New notification
 #: (a test walks the module), so a new type must decide.
 _PUSH_AS_IS: frozenset[str] = frozenset(
     {
+        # v_97 — "New activity in {space}": contentless already.
+        "space_activity",
         "post_created",
         "comment_added",
         "post_replied",
@@ -4854,6 +4856,10 @@ class NotificationService(ProtectionGateMixin):
                     link_url=space_feed_link(event.space_id),
                 ),
                 about=about,
+                # Nobody did it that we know of: the ring says only that
+                # something waits.
+                actor_user_id=None,
+                push=False,
             )
 
     async def _space_prefs(

@@ -58,11 +58,15 @@ from socialhome.domain.media_chunking import (
     media_chunk_bytes,
 )
 from socialhome.domain.outbox import OutboxEntry
+from socialhome.domain.space_item import SealedItem
 from socialhome.federation import FederationService, routed_crypto
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation import media_framing as _mf
 from socialhome.federation.encoder import FederationEncoder
-from socialhome.federation.federation_service import UNPAIR_SEND_RACE_S
+from socialhome.federation.federation_service import (
+    UNPAIR_SEND_RACE_S,
+    sends_as_item,
+)
 from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from socialhome.federation.media_envelope import (
     build_media_envelope as _build_media_envelope,
@@ -7461,3 +7465,154 @@ async def test_peer_moment_look_high_keeps_the_farthest_look_since_our_start():
     svc.note_unpaired("peer-a")
     assert svc.peer_moment_look_high("peer-a") is None
     assert svc.peer_moment_look_hops("peer-a") is None
+
+
+# ── v_97: a mesh space's change as one space item ────────────────────────
+
+
+def test_only_a_person_change_the_same_for_everyone_goes_as_an_item():
+    E = FederationEventType
+    assert sends_as_item(E.SPACE_TASK_CREATED)
+    assert sends_as_item(E.SPACE_CHAT_MESSAGE_CREATED)
+    # A per-peer payload stays the event.
+    assert not sends_as_item(E.SPACE_TASK_CREATED, per_peer=lambda *a: None)
+    # Host statements and secrets are never person items.
+    assert not sends_as_item(E.SPACE_MEMBER_BANNED)
+    assert not sends_as_item(E.SPACE_KEY_EXCHANGE_REKEY)
+    assert not sends_as_item(E.SPACE_MEDIA_BLOB)
+
+
+class _ItemFed:
+    """Just enough of FederationService for ``_broadcast_as_item``."""
+
+    _broadcast_as_item = FederationService._broadcast_as_item
+
+    def __init__(self, members, v97, sealed) -> None:
+        self._own_instance_id = "me"
+        self._members = members
+        self._v97 = v97
+        self.calls: list[tuple] = []
+
+        self.whole: list[bool] = []
+
+        async def seal(space_id, event_type, payload, *, whole_space):
+            self.whole.append(whole_space)
+            return sealed
+
+        self._item_sealer = seal
+
+        class _Repo:
+            async def list_member_instance_ids(_self, space_id):
+                return list(members)
+
+        self._federation_repo = _Repo()
+
+    async def space_member_supports(self, iid, *, min_version):
+        assert min_version == 97
+        return iid in self._v97
+
+    async def broadcast_to_space_members(self, space_id, event_type, payload, **kw):
+        self.calls.append((event_type, payload, kw))
+        ok = [DeliveryResult(instance_id=i, ok=True) for i in kw["only_instances"]]
+        return BroadcastResult(
+            attempted=len(ok), succeeded=len(ok), failed=0, results=tuple(ok)
+        )
+
+
+async def test_v97_members_get_one_item_and_older_ones_the_event():
+    sealed = SealedItem(space_id="sp", epoch=3, item="ct")
+    fed = _ItemFed(["me", "a97", "b96", "c97"], {"a97", "c97"}, sealed)
+    payload = {"space_id": "sp", "task_id": "t"}
+    result = await fed._broadcast_as_item(
+        "sp",
+        FederationEventType.SPACE_TASK_CREATED,
+        payload,
+        min_proto_version=None,
+        legacy_payload={"old": 1},
+        legacy_below=50,
+    )
+    (item_call, legacy_call) = fed.calls
+    assert item_call == (
+        FederationEventType.SPACE_ITEM,
+        sealed.wire(),
+        {"only_instances": ["a97", "c97"]},
+    )
+    assert fed.whole == [True]
+    assert legacy_call[0] is FederationEventType.SPACE_TASK_CREATED
+    assert legacy_call[1] == payload
+    assert legacy_call[2]["only_instances"] == ["b96"]
+    assert legacy_call[2]["legacy_payload"] == {"old": 1}
+    assert (result.attempted, result.succeeded) == (3, 3)
+
+
+async def test_without_a_seal_the_caller_sends_the_event_to_everyone():
+    fed = _ItemFed(["a97"], {"a97"}, None)
+    assert (
+        await fed._broadcast_as_item(
+            "sp",
+            FederationEventType.SPACE_TASK_CREATED,
+            {},
+            min_proto_version=None,
+            legacy_payload=None,
+            legacy_below=None,
+        )
+        is None
+    )
+    assert fed.calls == []
+
+
+async def _gfs_broadcast(sealed, *, only=None):
+    fed = _ItemFed(["me", "a97", "b96", "c97"], {"a97", "c97"}, sealed)
+    await fed._broadcast_as_item(
+        "sp",
+        FederationEventType.SPACE_TASK_CREATED,
+        {"space_id": "sp"},
+        min_proto_version=None,
+        legacy_payload=None,
+        legacy_below=None,
+        only_instances=only,
+    )
+    return fed
+
+
+async def test_a_gfs_space_item_rides_its_channel_and_only_old_members_get_the_event():
+    sealed = SealedItem(space_id="sp", epoch=3, item="ct", via_channel=True)
+    fed = await _gfs_broadcast(sealed)
+    ((event_type, _payload, kw),) = fed.calls
+    assert event_type is FederationEventType.SPACE_TASK_CREATED
+    assert kw["only_instances"] == ["b96"]
+
+
+async def test_in_the_legacy_window_every_member_also_gets_the_event():
+    sealed = SealedItem(
+        space_id="sp", epoch=3, item="ct", via_channel=True, legacy_window=True
+    )
+    fed = await _gfs_broadcast(sealed)
+    ((_t, _p, kw),) = fed.calls
+    assert kw["only_instances"] == ["a97", "b96", "c97"]
+
+
+async def test_mention_notes_go_to_v97_mentioned_households_only():
+    note = {"space_id": "sp", "epoch": 3, "item": "ct"}
+    sealed = SealedItem(
+        space_id="sp",
+        epoch=3,
+        item="ct",
+        via_channel=True,
+        notes=(("a97", note), ("b96", note)),
+    )
+    fed = await _gfs_broadcast(sealed)
+    notes = [c for c in fed.calls if c[0] is FederationEventType.SPACE_MENTION_NOTE]
+    assert notes == [
+        (FederationEventType.SPACE_MENTION_NOTE, note, {"only_instances": ["a97"]})
+    ]
+
+
+async def test_a_narrowed_audience_is_never_the_whole_space():
+    fed = await _gfs_broadcast(
+        SealedItem(space_id="sp", epoch=3, item="ct"), only=["a97"]
+    )
+    assert fed.whole == [False]
+    ((event_type, _p, kw),) = fed.calls
+    assert event_type is FederationEventType.SPACE_ITEM
+    assert kw["only_instances"] == ["a97"]

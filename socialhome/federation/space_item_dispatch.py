@@ -31,6 +31,7 @@ copy is refused across restarts and never evicted by another household.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -38,7 +39,12 @@ import orjson
 
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.gfs_channel import RING_DURABLE_TTL_S
-from ..domain.space_item import item_spec, item_stamp
+from ..domain.space_item import (
+    AUTHORITY_KIND_FIELD,
+    AUTHORITY_KIND_SPACE_EVENT,
+    item_spec,
+    item_stamp,
+)
 from ..services.space_item_author import (
     UnsupportedItemAuthorSigSuite,
     verify_signed_event_item,
@@ -88,10 +94,15 @@ def parse_event_item(plaintext: bytes) -> tuple[str, dict] | None:
     return str(item_type), inner
 
 
+#: ``(space, origin) -> bool``: whether ``origin`` acts as the space's host
+#: here (``federation.host_equivalence.acts_as_host``).
+HostCheck = Callable[["Space", str], Awaitable[bool]]
+
+
 class SpaceItemDispatch:
     """Verify an event-shaped space item and apply it as its event."""
 
-    __slots__ = ("_federation", "_own_instance_id", "_writer_certs")
+    __slots__ = ("_acts_as_host", "_federation", "_own_instance_id", "_writer_certs")
 
     def __init__(
         self,
@@ -99,10 +110,12 @@ class SpaceItemDispatch:
         federation: _ItemSink,
         writer_certs: SpaceWriterCertService,
         own_instance_id: str,
+        acts_as_host: HostCheck | None = None,
     ) -> None:
         self._federation = federation
         self._writer_certs = writer_certs
         self._own_instance_id = own_instance_id
+        self._acts_as_host = acts_as_host
 
     # ── Apply ────────────────────────────────────────────────────────────
 
@@ -206,4 +219,73 @@ class SpaceItemDispatch:
         # Claimed whatever the gates say: their verdict is stable, so the
         # same item again gets the same one (a held item is replayed by the
         # seat buffer itself).
+        return await self._federation.dispatch_space_item(event)
+
+    async def apply_authority(self, space: Space, *, epoch: int, inner: dict) -> bool:
+        """A host statement from the channel (``authority_kind:
+        space_event``) whose SPACE AUTHORITY signature the caller verified
+        (``open_channel_authority``, for this space and ``epoch``). Here: the
+        statement's own type is a host statement of ``ITEM_SPECS``; the
+        ORIGIN household's v2 signature over it verifies (so the household
+        that spoke is proven — a delegated admin never passes as the owner
+        for an owner-only rule, which the handler judges on
+        ``from_instance``); the origin acts as the space's host here; the
+        signed epoch, space and stamp hold; the id is claimed once. Then
+        the same gates and the event's own handler, from that origin."""
+        if inner.get(AUTHORITY_KIND_FIELD) != AUTHORITY_KIND_SPACE_EVENT:
+            return False
+        item_type = inner.get("item_type")
+        spec = item_spec(item_type)
+        if spec is None or not spec.authority:
+            log.warning("space_item: %r is no host statement — dropped", item_type)
+            return False
+        origin = str(inner.get("origin_instance_id") or "")
+        if origin and origin == self._own_instance_id:
+            return False
+        try:
+            signed = verify_signed_event_item(inner)
+        except UnsupportedItemAuthorSigSuite as exc:
+            log.warning("space_item: unknown author_sig_suite %s — dropped", exc)
+            return False
+        if not signed:
+            log.warning("space_item: host statement not signed by its origin")
+            return False
+        item_id = str(inner["item_id"])
+        body = inner["body"]
+        body_space = body.get("space_id")
+        stamp = item_stamp(str(inner["ts"]))
+        if (
+            inner.get("epoch") != epoch
+            or inner.get("space_id") != space.id
+            or (body_space is not None and body_space != space.id)
+            or stamp is None
+            or stamp < datetime.now(UTC) - timedelta(seconds=MAX_ITEM_AGE_S)
+        ):
+            log.warning("space_item: host statement %s out of bounds", item_id)
+            return False
+        if self._acts_as_host is None or not await self._acts_as_host(space, origin):
+            log.warning(
+                "space_item: host statement %s from %s, which does not act "
+                "as the host of space %s here — dropped",
+                item_id,
+                origin,
+                space.id,
+            )
+            return False
+        if not self._federation.item_budget_allows(origin):
+            return False
+        if await self._federation.note_replay_id(
+            f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
+        ):
+            return False
+        event = FederationEvent(
+            msg_id=ITEM_MSG_ID_PREFIX + item_id,
+            event_type=FederationEventType(str(item_type)),
+            from_instance=origin,
+            to_instance=self._own_instance_id,
+            timestamp=str(inner["ts"]),
+            payload=body,
+            space_id=space.id,
+            epoch=epoch,
+        )
         return await self._federation.dispatch_space_item(event)

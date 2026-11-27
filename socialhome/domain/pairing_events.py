@@ -150,6 +150,8 @@ CONFIRMS_PAIRING_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_TIMETABLE_UPSERTED,
         FederationEventType.SPACE_TIMETABLE_DELETED,
         FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        FederationEventType.SPACE_ITEM,
+        FederationEventType.SPACE_MENTION_NOTE,
         FederationEventType.SPACE_CHAT_MESSAGE_UPDATED,
         FederationEventType.SPACE_CHAT_MESSAGE_DELETED,
         FederationEventType.SPACE_CHAT_REACTION,

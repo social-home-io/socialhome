@@ -540,6 +540,9 @@ def frames(monkeypatch) -> _Frames:
         return True
 
     monkeypatch.setattr(GfsWebSocketRegistry, "send", _send)
+    # v_97 — the hello drain delivers queued copies directly (never
+    # watch-filtered): the same recorder.
+    monkeypatch.setattr(GfsWebSocketRegistry, "send_direct", _send)
     return out
 
 

@@ -30,6 +30,7 @@ two different consumers, one PresenceUpdated event.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -78,6 +79,10 @@ def _before(stamp: object, other: str) -> bool:
     return a < b
 
 
+#: v_97 (owner F3) — a shared pin is republished this often.
+KEEPALIVE_S: float = 15 * 60.0
+
+
 class SpaceLocationOutbound:
     """Fan a household :class:`PresenceUpdated` out to every opted-in
     space, both locally (WS) and to remote member instances
@@ -87,11 +92,14 @@ class SpaceLocationOutbound:
     __slots__ = (
         "_bus",
         "_federation",
+        "_last_payload",
         "_last_sent",
         "_members",
         "_presence",
         "_shared_from",
         "_spaces",
+        "_stop",
+        "_task",
         "_users",
         "_ws",
         "_zones",
@@ -130,6 +138,12 @@ class SpaceLocationOutbound:
         #: first sent their pin. A pin never says "here since" earlier than
         #: that: where they were before they chose to share is not shared.
         self._shared_from: dict[tuple[str, str], str] = {}
+        #: v_97 — (space, user) → the last pin sent, republished every
+        #: :data:`KEEPALIVE_S` while they share (owner F3: a pin older than
+        #: 45 minutes reads as stale). In memory, bounded like the above.
+        self._last_payload: dict[tuple[str, str], dict] = {}
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
 
     def wire(self) -> None:
         self._bus.subscribe(PresenceUpdated, self._on_presence_updated)
@@ -301,6 +315,7 @@ class SpaceLocationOutbound:
         key = (event.space_id, event.user_id)
         self._last_sent.pop(key, None)
         self._shared_from.pop(key, None)
+        self._last_payload.pop(key, None)
         # This household's own open Map tabs drop the pin at once.
         await self._broadcast_removed(
             event.space_id, {"space_id": event.space_id, "user_id": event.user_id}
@@ -480,10 +495,46 @@ class SpaceLocationOutbound:
         if _before(payload.get("updated_at"), start):
             payload = {**payload, "updated_at": start}
         self._last_sent[key] = (said, payload.get("updated_at"))
+        self._last_payload[key] = payload
         await self._broadcast_local(space_id, payload)
         if unchanged and not force:
             return
         await self._fan_out_federation(space_id, payload)
+
+    async def keepalive(self) -> int:
+        """v_97 (owner F3) — republish every pin still shared, so a member
+        who opens the map (or a GFS space's ring, which keeps a pin 15
+        minutes) sees it; receivers show a pin older than 45 minutes as
+        stale. Returns how many went."""
+        sent = 0
+        for (space_id, _user), payload in list(self._last_payload.items()):
+            await self._fan_out_federation(space_id, payload)
+            sent += 1
+        return sent
+
+    async def start(self) -> None:
+        self._stop.clear()
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop(), name="space-pin-keepalive")
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            await self._task
+            self._task = None
+
+    async def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=KEEPALIVE_S)
+            except TimeoutError:
+                pass
+            if self._stop.is_set():
+                return
+            try:
+                await self.keepalive()
+            except Exception:
+                log.warning("space pin keepalive failed", exc_info=True)
 
     async def _fan_out_federation(
         self,

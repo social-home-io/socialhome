@@ -111,6 +111,7 @@ from ..domain.outbox import (
 )
 from ..domain.relay_media_frame import relay_event_payload_limit
 from ..domain.space import WRITER_ROLES, parse_have_seq
+from ..domain.space_item import ITEM_SPECS, SealedItem
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
@@ -440,6 +441,20 @@ def _outbox_payload_ad(
     ).encode()
 
 
+#: Seals a person's change as one item:
+#: ``(space_id, event_type, payload, *, whole_space) -> SealedItem | None``.
+ItemSealer = Callable[..., Awaitable["SealedItem | None"]]
+
+
+def sends_as_item(event_type: FederationEventType, *, per_peer: object = None) -> bool:
+    """v_97 — whether a space broadcast goes as ONE space item: a change of
+    :data:`~socialhome.domain.space_item.ITEM_SPECS` (a person's, or a host
+    statement — the sealer decides what it can seal) that is the same for
+    every recipient. A per-peer payload is targeted (one
+    household's own cert, …) and stays the event it is."""
+    return per_peer is None and event_type.value in ITEM_SPECS
+
+
 class FederationService:
     """Core federation handler — outbound delivery and inbound dispatch.
 
@@ -492,6 +507,7 @@ class FederationService:
         "_inbound_limiter",
         "_inbound_pipeline",
         "_inbound_retry",
+        "_item_sealer",
         "_key_manager",
         "_last_mesh_begin_at",
         "_mailbox_sender_check",
@@ -682,6 +698,8 @@ class FederationService:
         self._mesh_claim_answer_tasks: set[asyncio.Task[None]] = set()
         #: See :meth:`attach_space_applied`.
         self._space_applied: Callable[[str], None] | None = None
+        #: v_97 — seals a person's space change as one space item.
+        self._item_sealer: ItemSealer | None = None
         #: See :meth:`attach_sync_begin_admitted`.
         self._sync_begin_admitted: (
             Callable[[FederationEvent], Awaitable[None]] | None
@@ -4162,6 +4180,111 @@ class FederationService:
             results=tuple(results),
         )
 
+    def attach_item_sealer(self, sealer: ItemSealer) -> None:
+        """v_97 — seals a person's space change as ONE space item
+        (``GfsMemberPublishService.seal_event_item``)."""
+        self._item_sealer = sealer
+
+    async def _broadcast_as_item(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        *,
+        min_proto_version: int | None,
+        legacy_payload: dict | None,
+        legacy_below: int | None,
+        only_instances: Collection[str] | None = None,
+    ) -> BroadcastResult | None:
+        """v_97 (``docs/protocol/space-items.md``) — a person's change as
+        ONE sealed space item (the same bytes for every recipient):
+
+        * a **mesh space**: to its v_97 member households in the audience as
+          ``SPACE_ITEM`` (one multi upload per GFS), the legacy event to
+          the older ones;
+        * a **GFS space** (the sealer put it on the channel — only for the
+          whole space: a narrowed audience never goes where every seat
+          reads): the legacy event to the members below v_97 only (and,
+          in the 14-day window after the space became a GFS space here, to
+          everyone).
+
+        ``None`` when it can't be sealed: the caller sends the legacy event
+        to the whole audience."""
+        assert self._item_sealer is not None
+        members = [
+            iid
+            for iid in await self._federation_repo.list_member_instance_ids(space_id)
+            if iid != self._own_instance_id
+        ]
+        audience = (
+            members
+            if only_instances is None
+            else [iid for iid in members if iid in only_instances]
+        )
+        sealed = await self._item_sealer(
+            space_id, event_type, payload, whole_space=set(audience) == set(members)
+        )
+        if sealed is None:
+            return None
+        items_to: list[str] = []
+        legacy_to: list[str] = []
+        for iid in audience:
+            if not sealed.via_channel and await self.space_member_supports(
+                iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
+            ):
+                items_to.append(iid)
+            elif (
+                not sealed.via_channel
+                or sealed.legacy_window
+                or not await self.space_member_supports(
+                    iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
+                )
+            ):
+                legacy_to.append(iid)
+        parts: list[BroadcastResult] = []
+        if items_to:
+            parts.append(
+                await self.broadcast_to_space_members(
+                    space_id,
+                    FederationEventType.SPACE_ITEM,
+                    sealed.wire(),
+                    only_instances=items_to,
+                )
+            )
+        for iid, note in sealed.notes:
+            # v_97 — a mentioned household hears at once (≤ 20 per item).
+            if await self.space_member_supports(
+                iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
+            ):
+                parts.append(
+                    await self.broadcast_to_space_members(
+                        space_id,
+                        FederationEventType.SPACE_MENTION_NOTE,
+                        note,
+                        only_instances=[iid],
+                    )
+                )
+        if legacy_to:
+            parts.append(
+                await self.broadcast_to_space_members(
+                    space_id,
+                    event_type,
+                    payload,
+                    min_proto_version=min_proto_version,
+                    legacy_payload=legacy_payload,
+                    legacy_below=legacy_below,
+                    only_instances=legacy_to,
+                )
+            )
+        results = tuple(r for part in parts for r in part.results)
+        succeeded = sum(1 for r in results if r.ok)
+        return BroadcastResult(
+            attempted=len(results),
+            succeeded=succeeded,
+            failed=len(results) - succeeded,
+            results=results,
+        )
+
     async def broadcast_to_space_members(
         self,
         space_id: str,
@@ -4225,6 +4348,20 @@ class FederationService:
         events that MUST always ship and degrade noisily on older
         peers).
         """
+        if self._item_sealer is not None and sends_as_item(
+            event_type, per_peer=per_peer
+        ):
+            split = await self._broadcast_as_item(
+                space_id,
+                event_type,
+                payload,
+                min_proto_version=min_proto_version,
+                legacy_payload=legacy_payload,
+                legacy_below=legacy_below,
+                only_instances=only_instances,
+            )
+            if split is not None:
+                return split
         instance_ids = await self._federation_repo.list_member_instance_ids(
             space_id,
         )

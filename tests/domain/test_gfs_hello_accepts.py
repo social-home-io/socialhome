@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.gfs_hello_accepts import (
+    ACCEPTS_CHANNEL_RING,
     ACCEPTS_ENVELOPE_MEDIA,
     ACCEPTS_SPACE_MEDIA_SERVE,
     ACCEPTS_WS_BINARY1,
@@ -17,11 +18,13 @@ from socialhome.domain.gfs_hello_accepts import (
 
 def test_the_hello_lists_only_the_per_connection_labels():
     """v_96 — no space-keyed seat, so none of its labels: the hello asks
-    for binary frames, answers media requests and opens relay media."""
+    for binary frames, answers media requests and opens relay media; v_97
+    — it reads its channels from the ring."""
     assert OUR_HELLO_ACCEPTS == (
         ACCEPTS_WS_BINARY1,
         ACCEPTS_SPACE_MEDIA_SERVE,
         ACCEPTS_ENVELOPE_MEDIA,
+        ACCEPTS_CHANNEL_RING,
     )
     for retired in (
         "space_key_pull",

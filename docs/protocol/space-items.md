@@ -88,24 +88,29 @@ to v2.
 
 A statement only the space authority makes — join / leave / ban / unban /
 role change / config / age gate / dissolve / moderation decided / proposal
-updated — rides as the existing channel authority item
-(`item_type: "authority"`), with a new `authority_kind: "space_event"`:
+updated — rides a GFS space's channel as the existing channel authority
+item (`item_type: "authority"`), with a new `authority_kind: "space_event"`.
+Its inner is **signed twice**:
 
-```
-{ "authority_kind": "space_event", "event_type", "item_id", "space_id",
-  "origin_instance_id", "ts", "body",
-  "authority_sig_suite", "authority_sig" }
-```
+1. it is the event-shaped v2 inner above (`item_type` = the statement's
+   event type, `body` = its payload), signed by the household that made
+   the statement — so its **origin is proven**: a delegated admin holding
+   the seed can never pose as the owner, and an owner-only rule (owner-only
+   config pins, …) is judged on that origin by the event's own handler;
+2. the whole inner (with `authority_kind`) and the sealing epoch are signed
+   by the space authority (`authority_sig` / `authority_sig_suite`, event
+   `space_channel_authority`, as every channel authority item) — so only a
+   seed holder speaks.
 
-signed by the space authority key (event type `space_channel_authority`,
-as every channel authority item). `origin_instance_id` is the seed holder
-that made the statement (the owner or a delegated admin); receivers apply
-the event as from that household, so a rule that only the OWNER household
-may change something (owner-only config pins) is judged on it — a delegated
-admin's signature never passes as the owner's.
+The receiver also requires the origin to act as the space's host here
+(`host_equivalence.acts_as_host`: the owner, or the delegated admin that
+invited it while delegation is on). In a mesh space the host keeps sending
+its statements as events to its members directly.
 
-Authority items are **pushed to every seat** (watching or not) and also go
-into the ring (owner F4).
+Authority items are **pushed to every seat** (watching or not, `push_all`)
+and also go into the ring (owner F4). Any writer could set `push_all`, so
+the GFS allows 6 a minute per channel and downgrades the rest (kept, not
+pushed to all) — never refused, so no writer can crowd the host out.
 
 ## Registry: `ITEM_SPECS`
 

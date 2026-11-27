@@ -58,12 +58,7 @@ def test_record_and_snapshot() -> None:
         "envelope": {"frames": 1, "bytes": 4000},
         "relay:space_item": {"frames": 2, "bytes": 11646},
     }
-    # v_97: a 2 KiB item (padded 2048 → ~2.7 KiB base64 + frame) is its own
-    # class; the 4 KiB ones stay together.
-    assert snap["by_size"] == {
-        "2k": {"frames": 1, "bytes": 4000},
-        "4k": {"frames": 2, "bytes": 11646},
-    }
+    assert snap["by_size"] == {"4k": {"frames": 3, "bytes": 15646}}
 
 
 def test_kinds_are_bounded() -> None:

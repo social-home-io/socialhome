@@ -3014,6 +3014,7 @@
   "capability.sync_pages": "Space sync status, even without the host",
   "capability.subscriber_seats": "Follow spaces with one seat on every path",
   "capability.moment_reach": "Choose how far your moments go",
+  "capability.space_items": "Every space change travels as one space item",
   "settings.tab.security": "Security",
   "settings.security.signing_in": "Signing in",
   "settings.security.signing_in_hint": "Only you use this. Nobody else sees your sign-in username.",

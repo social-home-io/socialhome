@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -23,21 +25,27 @@ from socialhome.crypto import (
     derive_instance_id,
     ed25519_public_key,
 )
-from socialhome.domain.federation import GfsConnection
+from socialhome.domain.federation import FederationEventType, GfsConnection
+from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
     SpaceType,
 )
-from socialhome.domain.space_item import ITEM_SIZE_BUCKETS
+from socialhome.domain.space_item import EVENT_ITEM_SIZE_BUCKETS, ITEM_SIZE_BUCKETS
 from socialhome.domain.writer_cert import WriterCert
+from socialhome.federation.space_item_dispatch import parse_event_item
 from socialhome.services.gfs_member_publish_service import (
+    LEGACY_WINDOW,
+    LEGACY_WINDOW_KEY_PREFIX,
     GfsMemberPublishService,
     _cert_lets,
     build_item_plaintext,
     parse_item_plaintext,
 )
+from socialhome.services.space_item_author import verify_signed_event_item
+from socialhome.services.space_public_authority import open_channel_authority
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 SPACE_ID = "sp-pub"
@@ -123,12 +131,18 @@ class _Channels:
         self.announced: list[tuple[str, str | None]] = []
         self.healed: list[str] = []
         self.channel = True
+        self.ring_classes: list = []
+        self.pushes: list = []
 
     async def plan(self, space_id):
         return [self.conn]
 
-    async def publish_sealed(self, space_id, epoch, ciphertext, targets):
+    async def publish_sealed(
+        self, space_id, epoch, ciphertext, targets, *, ring_class=None, push_all=False
+    ):
         self.sealed.append((space_id, epoch, ciphertext, targets))
+        self.ring_classes.append(ring_class)
+        self.pushes.append(push_all)
         return targets
 
     async def on_rotation(self, space_id):
@@ -599,3 +613,259 @@ def test_a_reader_cert_publishes_only_what_the_follower_switches_allow(
     )
     assert _cert_lets(cert, AUTHOR, item_type, features) is ok
     assert not _cert_lets({"scope": "comment"}, AUTHOR, "comment", features)
+
+
+# ── v_97: sealing a space change as one event-shaped item ────────────────
+
+
+async def _sealing(world, *, channel: bool = False):
+    world["channels"].channel = channel
+    world["spaces"].spaces[SPACE_ID] = _space(
+        owner=world["owner"].instance_id, public=False
+    )
+    me = world["me"]
+    world["svc"].attach_identity(
+        instance_id=me.instance_id, identity_seed=me.seed, identity_pk=me.pk
+    )
+    return world["svc"]
+
+
+async def test_a_mesh_space_change_is_sealed_as_one_verifiable_item(world):
+    svc = await _sealing(world)
+    body = {"space_id": SPACE_ID, "task_id": "t-1", "title": "Milk"}
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, body
+    )
+    assert set(sealed.wire()) == {"space_id", "epoch", "item"}
+    assert (sealed.space_id, sealed.epoch, sealed.via_channel) == (SPACE_ID, 3, False)
+    opened = parse_event_item(world["crypto"].decrypt(sealed.item))
+    item_type, inner = opened
+    assert item_type == "space_task_created"
+    assert verify_signed_event_item(inner)
+    assert inner["origin_instance_id"] == world["me"].instance_id
+    assert (inner["body"], inner["epoch"], inner["space_id"]) == (body, 3, SPACE_ID)
+    assert WriterCert.from_wire(inner["writer_cert"]).scope == "write"
+    # Padded to a bucket: the size tells the bucket, not the content.
+    assert len(world["crypto"].decrypt(sealed.item)) in EVENT_ITEM_SIZE_BUCKETS
+
+
+async def test_nothing_is_sealed_that_cannot_be_an_item(world):
+    svc = await _sealing(world)
+    # A targeted / host type is no person item.
+    for kind in (
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_MEMBER_BANNED,
+    ):
+        assert await svc.seal_event_item(SPACE_ID, kind, {}) is None
+    # No identity attached.
+    bare = GfsMemberPublishService(
+        conn_repo=_Conns([]),  # type: ignore[arg-type]
+        space_repo=world["spaces"],  # type: ignore[arg-type]
+        space_crypto=world["crypto"],  # type: ignore[arg-type]
+        writer_certs=_Certs(world["me"]),  # type: ignore[arg-type]
+    )
+    assert (
+        await bare.seal_event_item(SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {})
+        is None
+    )
+
+
+async def test_no_cert_or_too_weak_a_cert_seals_nothing(world):
+    svc = await _sealing(world)
+    certs = svc._writer_certs
+    certs.scope = "comment"
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+        )
+        is None
+    )
+
+    async def none(*_a, **_k):
+        return None
+
+    certs.scope = None
+    certs.issue_for_instance = none
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID, FederationEventType.SPACE_COMMENT_CREATED, {"space_id": SPACE_ID}
+        )
+        is None
+    )
+
+
+async def test_the_seed_holder_signs_its_own_cert(world):
+    svc = await _sealing(world)
+    certs = svc._writer_certs
+    certs.scope = None
+    issued: list[str] = []
+
+    async def issue(space_id, instance_id, *, epoch, instance_pk_hint):
+        issued.append(instance_id)
+        return sign_writer_cert(
+            space_seed=SPACE_SEED,
+            space_id=space_id,
+            epoch=epoch,
+            instance_pk=instance_pk_hint,
+            scope="write",
+        )
+
+    certs.issue_for_instance = issue
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed is not None and issued == [world["me"].instance_id]
+
+
+# ── v_97: a GFS space's items ride only its channel ──────────────────────
+
+
+class _Config:
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    async def get(self, key):
+        return self.data.get(key)
+
+    async def set(self, key, value):
+        self.data[key] = value
+
+
+class _Mentions:
+    async def resolve(self, space_id, content, *, author_id):
+        return tuple(
+            Mention(type=MentionType.USER, raw=f"@{w[1:]}", user_id=w[1:])
+            for w in content.split()
+            if w.startswith("@")
+        )
+
+
+class _Seats:
+    async def list_for_space(self, space_id):
+        return [
+            SimpleNamespace(user_id="anna", instance_id="hh-anna"),
+            SimpleNamespace(user_id="ben", instance_id="hh-ben"),
+        ]
+
+
+async def _gfs_space(world):
+    svc = await _sealing(world, channel=True)
+    svc.attach_items(
+        config=_Config(),  # type: ignore[arg-type]
+        mentions=_Mentions(),  # type: ignore[arg-type]
+        remote_members=_Seats(),  # type: ignore[arg-type]
+    )
+    return svc
+
+
+async def test_a_gfs_space_change_goes_on_its_channel_with_its_ring_class(world):
+    svc = await _gfs_space(world)
+    sealed = await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        {"space_id": SPACE_ID, "user_id": "anna", "lat": 1.0, "lon": 2.0},
+    )
+    assert sealed.via_channel
+    (published,) = world["channels"].sealed
+    assert published[2] == sealed.item
+    assert world["channels"].ring_classes == ["ephemeral"]
+    # The first change on this household opens the 14-day legacy window.
+    assert sealed.legacy_window
+
+
+async def test_the_legacy_window_closes_after_fourteen_days(world):
+    svc = await _gfs_space(world)
+    old = (datetime.now(UTC) - LEGACY_WINDOW - timedelta(seconds=1)).isoformat()
+    svc._config.data[LEGACY_WINDOW_KEY_PREFIX + SPACE_ID] = old
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed.via_channel and not sealed.legacy_window
+
+
+async def test_a_mention_notifies_the_mentioned_household_at_once(world):
+    svc = await _gfs_space(world)
+    sealed = await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        {"space_id": SPACE_ID, "author": "x", "content": "@ben lunch"},
+    )
+    assert [iid for iid, _ in sealed.notes] == ["hh-ben"]
+    assert sealed.notes[0][1] == sealed.wire()
+
+
+async def test_a_v1_carried_type_or_a_narrowed_audience_keeps_its_old_path(world):
+    svc = await _gfs_space(world)
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID, FederationEventType.SPACE_POST_CREATED, {"space_id": SPACE_ID}
+        )
+        is None
+    )
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID,
+            FederationEventType.SPACE_TASK_CREATED,
+            {"space_id": SPACE_ID},
+            whole_space=False,
+        )
+        is None
+    )
+    assert world["channels"].sealed == []
+
+
+async def test_a_host_statement_is_double_signed_and_pushed_to_every_seat(world):
+    """v_97 (owner F4): a seed holder's statement rides the channel as an
+    authority item — the origin's own signature inside, the space
+    authority's over it — pushed to every seat and kept in the ring."""
+    svc = await _gfs_space(world)
+
+    async def seed(space_id):
+        return SPACE_SEED
+
+    world["spaces"].get_space_seed = seed
+    sealed = await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_MEMBER_BANNED,
+        {"space_id": SPACE_ID, "user_id": "u-x"},
+    )
+    assert sealed.via_channel
+    assert world["channels"].pushes == [True]
+    inner = open_channel_authority(
+        world["crypto"].decrypt(sealed.item),
+        space_id=SPACE_ID,
+        epoch=3,
+        space_pubkey_hex=SPACE_PK.hex(),
+    )
+    assert inner["authority_kind"] == "space_event"
+    assert verify_signed_event_item(inner)
+    assert inner["origin_instance_id"] == world["me"].instance_id
+
+
+async def test_no_seed_no_host_statement(world):
+    svc = await _gfs_space(world)
+
+    async def no_seed(space_id):
+        return None
+
+    world["spaces"].get_space_seed = no_seed
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID,
+            FederationEventType.SPACE_MEMBER_BANNED,
+            {"space_id": SPACE_ID},
+        )
+        is None
+    )
+
+
+async def test_a_mesh_space_host_statement_stays_the_event(world):
+    svc = await _sealing(world)
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID,
+            FederationEventType.SPACE_CONFIG_CHANGED,
+            {"space_id": SPACE_ID},
+        )
+        is None
+    )

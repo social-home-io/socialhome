@@ -2711,6 +2711,7 @@
   "capability.sync_pages": "Sync-Stand von Spaces, auch ohne den Gastgeber",
   "capability.subscriber_seats": "Spaces folgen, mit einem Platz auf jedem Weg",
   "capability.moment_reach": "Wähle, wie weit deine Momente gehen",
+  "capability.space_items": "Jede Änderung in einem Space reist als ein Space-Eintrag",
   "settings.tab.security": "Sicherheit",
   "settings.security.signing_in": "Anmelden",
   "settings.security.signing_in_hint": "Das nutzt nur du. Niemand sonst sieht deinen Anmeldenamen.",

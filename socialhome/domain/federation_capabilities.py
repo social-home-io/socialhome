@@ -1669,7 +1669,22 @@ from __future__ import annotations
 #:   household gets no hop-4–5 copy and ignores ``moment_look_hops`` (its
 #:   upgrade resync asks for it once it reaches v_96). Not space-scoped. Labelled "Choose how far
 #:   your moments go".
-OURS: int = 96
+#: * **v_97** (2026-11-27) — **space items** (``docs/protocol/
+#:   space-items.md``, owner-approved design 2026-11-27): every space change
+#:   travels as one sealed, author-signed item (v2 inner,
+#:   ``space-item-author:v2:``, or the authority ``space_event`` inner),
+#:   received through one door (``SpaceItemDispatch``) that runs the same
+#:   gates and handler as the event it replaces. New event types
+#:   ``SPACE_ITEM`` (a mesh space's item to a member household) and
+#:   ``SPACE_MENTION_NOTE`` (the same item to a mentioned household). A GFS
+#:   space carries its items only on its channel (GFS capability
+#:   ``channel_ring``). No record change, no ``SYNC_RECORD_LINES`` entry, no
+#:   page suite bump: an item stores the very rows its event stores.
+#:   **Fallback**: a member household below v_97 gets the legacy event
+#:   (``broadcast_to_space_members`` splits the audience) for one release
+#:   window; v_98 removes the legacy fan-out. Space-scoped. Labelled
+#:   "Every space change travels as one space item".
+OURS: int = 97
 
 
 class FederationCapability:
@@ -2417,6 +2432,11 @@ class FederationCapability:
     #: one per space per 10 min); an older one refuses the event at its
     #: peer-class step, so it gets nothing, as before.
     MIN_FOR_SESSION_SYNC_REFUSAL = 96
+    #: v_97 — space items: ``SPACE_ITEM`` / ``SPACE_MENTION_NOTE`` and the
+    #: v2 / ``space_event`` inners (``docs/protocol/space-items.md``). A
+    #: member household at or above it gets a space change as one item; one
+    #: below it the legacy event.
+    MIN_FOR_SPACE_ITEMS = 97
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2787,6 +2807,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MOMENT_REACH,
         "Choose how far your moments go",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_ITEMS,
+        "Every space change travels as one space item",
+    ),
 ]
 
 
@@ -2988,6 +3012,8 @@ CAPABILITY_FEATURE_KEYS: dict[str, str] = {
     "Follow spaces with one seat on every path": "subscriber_seats",
     # MIN_FOR_MOMENT_REACH
     "Choose how far your moments go": "moment_reach",
+    # MIN_FOR_SPACE_ITEMS
+    "Every space change travels as one space item": "space_items",
 }
 
 
@@ -3124,6 +3150,10 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # so it refuses followers' relayed comments and reactions; its people
         # cannot follow.
         FederationCapability.MIN_FOR_SUBSCRIBER_SEATS,
+        # A behind member household gets every change of the space as the
+        # legacy event, one release window long; it cannot read a GFS
+        # space's items on its channel.
+        FederationCapability.MIN_FOR_SPACE_ITEMS,
     }
 )
 

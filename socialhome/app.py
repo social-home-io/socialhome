@@ -19,6 +19,7 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 
 from __future__ import annotations
 
+import functools
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
@@ -75,7 +76,7 @@ from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import MULTI_MAX_TRANSIENT, FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
-from .federation.host_equivalence import acting_hosts
+from .federation.host_equivalence import acting_hosts, acts_as_host
 from .federation.host_hop import HostHop
 from .federation.inbox_reply import inbox_holds_envelope
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
@@ -1422,8 +1423,10 @@ async def dispatch_gfs_relay_frame(
     *,
     gfs_channels: GfsChannelService | None = None,
     inbound_limiter: RateLimiter | None = None,
-) -> None:
-    """Route one inbound GFS fan-out frame to its consumer.
+) -> bool:
+    """Route one inbound GFS fan-out frame to its consumer. ``True`` when it
+    was handed on (applied, or held for its key / parent); ``False`` when it
+    was dropped here — the v_97 ring client then keeps its cursor before it.
 
     The only space content a GFS relays to a household is an opaque channel
     frame (v_51 private, v_96 global): it names a channel, never a space or
@@ -1439,19 +1442,20 @@ async def dispatch_gfs_relay_frame(
     """
     if "channel_id" not in frame:
         log.debug("gfs.relay: dropping a non-channel relay frame (legacy GFS)")
-        return
+        return False
     log.info(
         "gfs.relay.received: channel=%s event=%s",
         frame.get("channel_id"),
         frame.get("event_type"),
     )
     if gfs_channels is None:
-        return
+        return False
     if inbound_limiter is not None and not _gfs_channel_budget(
         inbound_limiter, frame.get("channel_id")
     ):
-        return
+        return False
     await gfs_channels.handle_frame(frame)
+    return True
 
 
 def _default_ice_servers(
@@ -2262,6 +2266,7 @@ def _wire_federation_stack(
         member_households=member_households,
     )
     space_location_outbound.wire()
+    app[K.space_location_outbound_key] = space_location_outbound
 
     # §23.8.7 — federate per-space zone CRUD to remote member instances.
     space_zone_outbound = SpaceZoneOutbound(
@@ -5152,6 +5157,19 @@ def create_app(config: Config | None = None) -> web.Application:
             writer_certs=writer_certs,
         )
         real_space_service.attach_member_gfs(gfs_member_publish)
+        gfs_member_publish.attach_items(
+            config=repos.instance_config,
+            mentions=SpaceMentionResolver(
+                space_repo, user_repo, repos.space_remote_member
+            ),
+            remote_members=repos.space_remote_member,
+        )
+        # v_97 — this household signs its space items as itself.
+        gfs_member_publish.attach_identity(
+            instance_id=real_instance_id,
+            identity_seed=identity.identity_seed,
+            identity_pk=identity.identity_public_key,
+        )
         _member = gfs_member_publish
 
         async def _announce_after_repin(space_id: str, gfs_id: str) -> object:
@@ -5444,8 +5462,19 @@ def create_app(config: Config | None = None) -> web.Application:
                     federation=federation_service,
                     writer_certs=writer_certs,
                     own_instance_id=real_instance_id,
+                    acts_as_host=functools.partial(
+                        acts_as_host, space_repo, repos.space_remote_member
+                    ),
                 )
             )
+            # v_97 — SPACE_ITEM / SPACE_MENTION_NOTE take the same door.
+            space_public_inbound.attach_to(federation_service)
+        # v_97 (owner F3) — shared pins are republished every 15 minutes.
+        await app[K.space_location_outbound_key].start()
+        if gfs_member_publish is not None:
+            # v_97 — a mesh space's change goes to v_97 member households as
+            # one sealed SPACE_ITEM (the legacy event to older ones).
+            federation_service.attach_item_sealer(gfs_member_publish.seal_event_item)
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()
@@ -6112,8 +6141,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # arrive without an HTTPS callback. SH→GFS REST stays unchanged.
         # Inbound relay frames are logged here today; integration into the
         # federation inbound pipeline is a follow-up.
-        async def _on_gfs_relay(frame: dict) -> None:
-            await dispatch_gfs_relay_frame(
+        async def _on_gfs_relay(frame: dict) -> bool:
+            return await dispatch_gfs_relay_frame(
                 frame,
                 gfs_channels=gfs_channels,
                 inbound_limiter=federation_service.inbound_limiter,
@@ -6725,10 +6754,13 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_info_refresh.stop()
         if gfs_reconcile_retry is not None:
             await gfs_reconcile_retry.stop()
-        if (ring_client := app.get(K.channel_ring_client_key)) is not None:
-            await ring_client.stop()
+        if (pins := app.get(K.space_location_outbound_key)) is not None:
+            await pins.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
+        # After the sockets: no frame moves a cursor after its last flush.
+        if (ring_client := app.get(K.channel_ring_client_key)) is not None:
+            await ring_client.stop()
         # v_89 — the anonymous mailbox claim sockets and ticket loops.
         if (space_mailboxes := app.get(K.space_mailbox_service_key)) is not None:
             await space_mailboxes.stop()

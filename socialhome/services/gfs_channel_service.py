@@ -1195,7 +1195,13 @@ class GfsChannelService:
             # after its own (anonymous) notice it would be the first
             # identified subscribe on the new epoch. It renews when the
             # members do — on the rekey (:meth:`on_rekey_sent`).
-            return await self.announce_epoch(space_id)
+            announced = await self.announce_epoch(space_id)
+            space = await self._spaces.get(space_id)
+            if space is not None and space.owner_instance_id == self._own_instance_id:
+                # v_97 — the owner's seat moves to the new epoch (a "not
+                # yet" is retried from the queue until the notice landed).
+                self._spawn(self.subscribe(space_id), "owner-seat")
+            return announced
         except Exception:
             log.exception("gfs.channel: rotation hook failed")
             return 0
@@ -1329,6 +1335,10 @@ class GfsChannelService:
                         done += 1
                     if result == "created":
                         await self.distribute(space.id)
+                    if result in ("created", "kept"):
+                        # v_97 — the owner reads its GFS space's channel
+                        # like every member: its own seat.
+                        await self.subscribe(space.id, only=gfs_id)
                 else:
                     # A delegated admin that rotated and stopped before
                     # its rekey went out: its own seat is renewed with
@@ -1924,15 +1934,45 @@ class GfsChannelService:
 
     # ── Seats (identified, like a follower) ──────────────────────────────
 
+    async def _seat_grant(self, space_id: str) -> GfsChannelGrant | None:
+        """The grant we take our seat with: our stored one, or — the OWNER,
+        which holds none (v_97, owner sign-off 3: the owner takes a seat in
+        its own GFS space like every member) — the publisher grant it
+        derives from its seed, with a pass for its own key."""
+        grant = await self.current_grant(space_id)
+        if grant is not None:
+            return grant
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id != self._own_instance_id:
+            return None
+        epoch = await self._crypto.get_current_epoch(space_id)
+        found = await self._channel_seed(space)
+        if epoch is None or found is None:
+            return None
+        published = await self._publisher_grant(space_id, epoch)
+        if published is None:
+            return None
+        channel_id, channel_seed = found
+        return replace(
+            published,
+            channel_pass=issue_channel_pass(
+                channel_seed=channel_seed,
+                channel_id=channel_id,
+                epoch=published.channel_epoch,
+                instance_pk=self._own_pk,
+            ),
+        )
+
     async def subscribe(self, space_id: str, *, only: str | None = None) -> int:
         """Take our fan-out seat on the channel's servers with the current
-        grant's pass. Fail-soft per server. Returns how many accepted."""
+        grant's pass (the owner's: :meth:`_seat_grant`). Fail-soft per
+        server. Returns how many accepted."""
         space = await self._spaces.get(space_id)
         if space is None or not channel_on(space):
             # Defence in depth: never a seat for a space whose stored option
             # is OFF (or that is no longer global), whatever grant we hold.
             return 0
-        grant = await self.current_grant(space_id)
+        grant = await self._seat_grant(space_id)
         if grant is None or grant.channel_pass is None:
             # A publish-only member never takes a seat.
             return 0
@@ -1961,7 +2001,7 @@ class GfsChannelService:
         it is still the current one (a replay for an older grant is dropped:
         the newer grant subscribes itself)."""
         space = await self._spaces.get(space_id)
-        grant = await self.current_grant(space_id)
+        grant = await self._seat_grant(space_id)
         if (
             space is None
             or not channel_on(space)
@@ -2160,6 +2200,9 @@ class GfsChannelService:
         epoch: int,
         ciphertext: str,
         targets: list[GfsConnection],
+        *,
+        ring_class: str | None = None,
+        push_all: bool = False,
     ) -> list[GfsConnection]:
         """Publish an item already sealed at ``epoch`` (the member publisher
         sealed it with our space writer cert inside) to ``targets``,
@@ -2174,10 +2217,15 @@ class GfsChannelService:
             or not channel_on(space)
         ):
             return []
+        ring: dict = {}
+        if ring_class is not None:
+            ring["ring_class"] = ring_class
+        if push_all:
+            ring["push_all"] = True
         item = GfsPublish(
             space_id=space_id,
             event_type=_KIND_ANON,
-            payload={"epoch": epoch, "payload": ciphertext},
+            payload={"epoch": epoch, "payload": ciphertext, **ring},
         )
         accepted: list[GfsConnection] = []
         allowed = {t.id for t in await self._anon_targets(space_id, grant)}
@@ -2203,6 +2251,9 @@ class GfsChannelService:
             or not channel_on(space)
         ):
             return PublishOutcome.permanent()
+        ring = await self._gfs.channel_ring_supported(conn)
+        raw_class = data.get("ring_class")
+        ring_class = raw_class if isinstance(raw_class, str) else None
         req = sign_publish_anon(
             ChannelPublishAnonRequest(
                 gfs_instance_id=conn.gfs_instance_id,
@@ -2214,6 +2265,10 @@ class GfsChannelService:
                 payload=str(data["payload"]),
                 writer_sig="",
                 writer_sig_suite=WRITER_KEY_SUITE_ED25519,
+                # v_97 — the ring fields, only to a server that proved
+                # ``channel_ring`` (an older one refuses unknown keys).
+                ring_class=ring_class if ring else None,
+                push_all=bool(data.get("push_all")) and ring,
             ),
             writer_seed=b64url_decode(grant.writer_key.writer_seed),
         )

@@ -18,6 +18,7 @@ import logging
 import zlib
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +37,7 @@ from socialhome.domain.events import (
     SpaceContentKeyImported,
     SpacePostCreated,
 )
+from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
@@ -2626,3 +2628,97 @@ async def test_an_event_shaped_item_into_an_archived_space_reaches_the_gates(
     frame = await _item_frame(item_env, inner=inner, item_type="space_post_deleted")
     await _relay(item_env["inbound"], frame)
     assert [c[2] for c in dispatch.calls] == ["space_post_deleted"]
+
+
+class _Registry:
+    def __init__(self) -> None:
+        self.handlers: dict = {}
+
+    def register(self, event_type, handler) -> None:
+        self.handlers[event_type] = handler
+
+
+def _item_event(event_type, payload, *, space_id="sp-1"):
+    return FederationEvent(
+        msg_id="m",
+        event_type=event_type,
+        from_instance="peer",
+        to_instance="us.home",
+        timestamp=datetime.now(UTC).isoformat(),
+        payload=payload,
+        space_id=space_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [FederationEventType.SPACE_ITEM, FederationEventType.SPACE_MENTION_NOTE],
+)
+async def test_space_item_and_mention_note_take_the_channel_door(item_env, event_type):
+    """v_97 — a mesh space's SPACE_ITEM (and a mention note) is opened by the
+    very code a channel item is: decrypt, then the one receiver."""
+    dispatch = _RecordingDispatch()
+    inbound = item_env["inbound"]
+    inbound.attach_item_dispatch(dispatch)
+    fed = SimpleNamespace(_event_registry=_Registry())
+    inbound.attach_to(fed)
+    handler = fed._event_registry.handlers[event_type]
+    inner = {"item_type": "space_task_created", "body": {"task_id": "t"}}
+    frame = await _item_frame(item_env, inner=inner, item_type="space_task_created")
+    payload = {"space_id": "sp-1", "epoch": frame["epoch"], "item": frame["payload"]}
+    await handler(_item_event(event_type, payload))
+    assert [c[2] for c in dispatch.calls] == ["space_task_created"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"space_id": "sp-other", "epoch": 1, "item": "x"},
+        {"space_id": "sp-1", "epoch": "1", "item": "x"},
+        {"space_id": "sp-1", "epoch": True, "item": "x"},
+        {"space_id": "sp-1", "epoch": -1, "item": "x"},
+        {"space_id": "sp-1", "epoch": 1, "item": ""},
+        {"space_id": 3, "epoch": 1, "item": "x"},
+    ],
+)
+async def test_a_malformed_space_item_is_dropped(item_env, payload):
+    dispatch = _RecordingDispatch()
+    inbound = item_env["inbound"]
+    inbound.attach_item_dispatch(dispatch)
+    fed = SimpleNamespace(_event_registry=_Registry())
+    inbound.attach_to(fed)
+    handler = fed._event_registry.handlers[FederationEventType.SPACE_ITEM]
+    await handler(_item_event(FederationEventType.SPACE_ITEM, payload))
+    assert dispatch.calls == []
+
+
+async def test_a_host_statement_on_the_channel_reaches_the_item_dispatch(item_env):
+    """v_97 — an authority item of kind ``space_event`` (signature checked
+    against the pinned key) goes to the one receiver; a forged authority
+    signature never does."""
+    seen: list[dict] = []
+
+    class _Dispatch(_RecordingDispatch):
+        async def apply_authority(self, space, *, epoch, inner) -> bool:
+            seen.append(inner)
+            return True
+
+    item_env["inbound"].attach_item_dispatch(_Dispatch())
+    inner = {
+        "authority_kind": "space_event",
+        "item_type": "space_member_banned",
+        "body": {"space_id": "sp-1"},
+    }
+    epoch = await item_env["crypto"].get_current_epoch("sp-1")
+    for seed in (
+        item_env["space_kp"].private_key,
+        generate_space_keypair().private_key,
+    ):
+        plaintext = channel_authority_plaintext(
+            inner, space_id="sp-1", epoch=epoch, space_seed=seed
+        )
+        sealed_epoch, ct = await item_env["crypto"].encrypt("sp-1", plaintext)
+        await item_env["inbound"].handle_channel_item(
+            "sp-1", epoch=sealed_epoch, payload=ct
+        )
+    assert [i["item_type"] for i in seen] == ["space_member_banned"]

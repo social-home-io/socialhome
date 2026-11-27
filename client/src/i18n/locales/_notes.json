@@ -518,6 +518,7 @@
   "capability.sync_pages": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A member household can tell whether its copy of a space is up to date (or behind) from a page the space's host signed, even while the host is offline.",
   "capability.subscriber_seats": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. Following a space gives a person one read-only follower seat that works the same however their household reaches the space (paired, mesh, invite link or GFS); only the space's host and admins see who follows.",
   "capability.moment_reach": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A person can choose how many households away (hops) their moments are passed on, from 1 to 5.",
+  "capability.space_items": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. Every change in a space (a post, a task, a chat message, a location pin) is sent as one sealed item, checked the same way on every path.",
   "error.reaction_limit": "Shown when someone adds a sixth emoji reaction to one post in a space. \"Reaction\" is the emoji reaction, not a comment.",
   "error.space_name_too_long": "Shown when a space name is longer than allowed. {max} is a number of characters.",
   "error.space_emoji_too_long": "Shown when a space's icon is more than one emoji.",

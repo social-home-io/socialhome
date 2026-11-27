@@ -58,6 +58,7 @@ from cryptography.exceptions import InvalidTag
 
 from ..crypto import derive_instance_id
 from ..domain.events import PostEdited, SpacePostCreated
+from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.gfs_channel import SPACE_ITEM_EVENT_TYPE
 from ..domain.link_preview import card_survives_edit
 from ..domain.media_constraints import space_media_ref
@@ -67,6 +68,7 @@ from ..domain.space import SpaceRole
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
+    AUTHORITY_KIND_SPACE_EVENT,
     ITEM_TYPE_POST,
     ITEM_TYPE_POST_EDIT,
     POST_SHAPED_ITEM_TYPES,
@@ -119,6 +121,7 @@ from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
     from ..domain.space import Space
+    from ..federation.federation_service import FederationService
     from ..federation.space_authorship import SpaceAuthorship
     from ..repositories.space_author_profile_repo import (
         AbstractSpaceAuthorProfileRepo,
@@ -198,6 +201,39 @@ class SpacePublicInbound:
         self._gfs_media: SpaceMediaGfsFetcher | None = None
         #: v_97 — the one receiver of event-shaped items. ``None``: dropped.
         self._item_dispatch: SpaceItemDispatch | None = None
+
+    def attach_to(self, federation: FederationService) -> None:
+        """v_97 — take ``SPACE_ITEM`` (a mesh space's item) and
+        ``SPACE_MENTION_NOTE`` (an item that mentions our people) through
+        the very door a channel item takes."""
+        federation._event_registry.register(
+            FederationEventType.SPACE_ITEM, self._on_space_item_event
+        )
+        federation._event_registry.register(
+            FederationEventType.SPACE_MENTION_NOTE, self._on_space_item_event
+        )
+
+    async def _on_space_item_event(self, event: FederationEvent) -> None:
+        """``{space_id, epoch, item}``: the routing space must be the one
+        the payload names; the item proves its own origin inside."""
+        p = event.payload if isinstance(event.payload, dict) else {}
+        space_id, epoch, item = p.get("space_id"), p.get("epoch"), p.get("item")
+        if (
+            not isinstance(space_id, str)
+            or (event.space_id and event.space_id != space_id)
+            or not isinstance(epoch, int)
+            or isinstance(epoch, bool)
+            or epoch < 0
+            or not isinstance(item, str)
+            or not item
+        ):
+            log.warning(
+                "space_public.inbound: malformed %s from %s — dropped",
+                event.event_type.value,
+                event.from_instance,
+            )
+            return
+        await self.handle_channel_item(space_id, epoch=epoch, payload=item)
 
     def attach_item_dispatch(self, dispatch: SpaceItemDispatch) -> None:
         """Wire the v_97 event-shaped item receiver."""
@@ -659,6 +695,14 @@ class SpacePublicInbound:
                 "failed its authority signature or epoch — dropped",
                 space.id,
             )
+            return
+        if inner.get(AUTHORITY_KIND_FIELD) == AUTHORITY_KIND_SPACE_EVENT:
+            # v_97 — a host statement: the one receiver, from its proven
+            # origin, through the same gates and handler as the event.
+            if self._item_dispatch is not None:
+                await self._item_dispatch.apply_authority(
+                    space, epoch=epoch, inner=inner
+                )
             return
         await self._apply_authority_relayed(
             space,

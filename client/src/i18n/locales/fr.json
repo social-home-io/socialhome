@@ -2706,6 +2706,7 @@
   "capability.sync_pages": "État de synchronisation des espaces, même sans l'hôte",
   "capability.subscriber_seats": "Suivre un espace, une place sur chaque chemin",
   "capability.moment_reach": "Choisissez jusqu'où vont vos moments",
+  "capability.space_items": "Chaque changement d’un espace voyage comme un seul élément",
   "settings.tab.security": "Sécurité",
   "settings.security.signing_in": "Connexion",
   "settings.security.signing_in_hint": "Vous seul l'utilisez. Personne d'autre ne voit votre identifiant de connexion.",

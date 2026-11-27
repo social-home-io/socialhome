@@ -220,6 +220,10 @@ class _Gfs:
         # v_96 — the second capability a GLOBAL space's channel needs.
         return getattr(self, "seats", True)
 
+    async def channel_ring_supported(self, conn):
+        # v_97 — the server keeps a ring per channel (real GFS: it does).
+        return getattr(self, "ring", True)
+
     def known_instance_ids(self, conn):
         return frozenset({conn.gfs_instance_id, *self.previous.get(conn.id, ())})
 
@@ -777,7 +781,8 @@ async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
     queued = await _queued(env, env.member)
     assert len(queued) == 1
     frame = queued[0].sealed
-    assert frame == {
+    # v_97 — the GFS adds the item's place in the channel's ring.
+    assert {k: v for k, v in frame.items() if k not in ("seq", "ring_id")} == {
         "channel_id": channel_id,
         "event_type": "space_item",
         "epoch": _wire(env, channel_id),
@@ -877,6 +882,28 @@ async def test_heal_reannounces_and_resubscribes(env):
     assert await env.member.svc.heal("conn-1") == 1
     assert await repo.has_subscription(channel_id, env.member.h.instance_id)
     assert await env.owner.svc.heal("conn-1") == 1
+
+
+async def test_the_owner_takes_its_own_seat(env):
+    """v_97 (owner sign-off 3): the owner reads its GFS space's channel like
+    every member — a seat with a pass it issues from its seed."""
+    channel_id = await _channel_ready(env)
+    repo = env.app[gfs_channel_repo_key]
+    owner_id = env.owner.h.instance_id
+    assert await env.owner.svc.subscribe(SPACE_ID) == 1
+    assert await repo.has_subscription(channel_id, owner_id)
+    await env.owner.svc._unsubscribe_all(channel_id, (GFS_ID,))
+    assert await env.owner.svc.heal("conn-1") == 1
+    assert await repo.has_subscription(channel_id, owner_id)
+
+
+async def test_ring_connections_name_the_channel_and_its_ring_servers(env):
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    found = await env.member.svc.ring_connections(SPACE_ID)
+    assert found is not None and found[0] == channel_id
+    assert [c.id for c in found[1]] == ["conn-1"]
+    assert await env.member.svc.ring_connections("no-such-space") is None
 
 
 # ── Rebind: the server moved to a new public id ─────────────────────────
@@ -2370,9 +2397,10 @@ async def test_a_global_item_reaches_every_seat_once_and_never_the_owner(env):
 
 @pytest.mark.security
 async def test_the_owner_publishes_into_its_own_global_channel(env):
-    """Q4: the owner takes no seat but publishes its own items and the
-    authority items into its channel, with a publish-only grant it derives
-    from the seed — never stored, never a pass."""
+    """Q4: the owner publishes its own items and the authority items into
+    its channel, with a grant it derives from the seed — never stored.
+    Since v_97 (owner sign-off 3) it also takes a seat with a pass it
+    issues itself."""
     _go_global(env)
     await _channel_ready(env)
     await _hand_grants(env, env.member)
@@ -2380,7 +2408,7 @@ async def test_the_owner_publishes_into_its_own_global_channel(env):
     assert await env.owner.svc.publish_current(SPACE_ID, 3, "b3duZXI") == 1
     queued = await _queued(env, env.member)
     assert [q.sealed["payload"] for q in queued] == ["b3duZXI"]
-    assert await env.owner.svc.subscribe(SPACE_ID) == 0
+    assert await env.owner.svc.subscribe(SPACE_ID) == 1
 
 
 async def test_a_member_drops_its_channel_when_the_space_leaves_global(env):

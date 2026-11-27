@@ -445,6 +445,16 @@ class FederationEventType(str, enum.Enum):
     #: (a follower's included, P10) at most hourly, and sent to ONE household whose
     #: BEGIN names an older page than the one last pushed.
     SPACE_SYNC_PAGE = "space_sync_page"
+    #: v_97 space items (``docs/protocol/space-items.md``): ``{space_id,
+    #: epoch, item}`` — one space change sealed under the space content key
+    #: (an author-signed v2 inner, or an authority ``space_event``), applied
+    #: by the handler of the event it replaces after the same gates. A mesh
+    #: space's items go to its v_97 member households as this event.
+    SPACE_ITEM = "space_item"
+    #: v_97 — the same sealed item, sent to ONE household whose people it
+    #: mentions, so it notifies at once (a GFS space's non-watching
+    #: households otherwise see it at their next fetch).
+    SPACE_MENTION_NOTE = "space_mention_note"
     SPACE_SYNC_DIRECT_FAILED = "space_sync_direct_failed"
     SPACE_SYNC_REQUEST_MORE = "space_sync_request_more"
     SPACE_SYNC_REJECTED = "space_sync_rejected"
@@ -849,6 +859,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: v_95: the signed sync page pushed to every member household —
         #: a GFS-seated one included (members equal on any path).
         FederationEventType.SPACE_SYNC_PAGE,
+        #: v_97: a space item and a mention note — every member path.
+        FederationEventType.SPACE_ITEM,
+        FederationEventType.SPACE_MENTION_NOTE,
         FederationEventType.SPACE_SYNC_BEGIN,
         FederationEventType.SPACE_SYNC_CHUNK,
         FederationEventType.SPACE_SYNC_CHUNK_ACK,
@@ -906,6 +919,8 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 #: stream, or route — a receiver refuses any of them inside a multi frame.
 MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
     {
+        #: v_97 — a mention note is for the mentioned household only.
+        FederationEventType.SPACE_MENTION_NOTE,
         # ── Single recipient by design ──
         #: The host's member directory and a member's card: per-household
         #: (the directory is filtered per recipient, the card goes to the
@@ -1199,6 +1214,11 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #    the sending side, not this gate's. ──
         #: v_95: authority-signed, never content; any member relays it.
         FederationEventType.SPACE_SYNC_PAGE,
+        #: v_97: the envelope only carries a sealed item; the item's own
+        #: type is gated (writer seat included) when it is applied, on its
+        #: proven origin (``SpaceItemDispatch``).
+        FederationEventType.SPACE_ITEM,
+        FederationEventType.SPACE_MENTION_NOTE,
         FederationEventType.SPACE_SYNC_BEGIN,
         FederationEventType.SPACE_SYNC_CHUNK,
         FederationEventType.SPACE_SYNC_CHUNK_ACK,

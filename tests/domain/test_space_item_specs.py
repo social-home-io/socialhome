@@ -21,6 +21,7 @@ from socialhome.domain.space import SpaceFeatures
 from socialhome.domain.space_item import (
     AUTHORITY_ITEM_TYPES,
     BUDGET_CLASSES,
+    EVENT_ITEM_SIZE_BUCKETS,
     IDEMPOTENCY_CLASSES,
     ITEM_SIZE_BUCKETS,
     ITEM_SPECS,
@@ -161,7 +162,9 @@ def test_a_reader_cert_never_carries_a_v2_type_without_a_reader_mapping():
         assert not reader_cert_permits(cert, item_type, every)
 
 
-def test_the_2_kib_bucket_exists():
-    assert 2048 in ITEM_SIZE_BUCKETS
-    assert list(ITEM_SIZE_BUCKETS) == sorted(ITEM_SIZE_BUCKETS)
-    assert len(pad_json_object({"x": "y" * 1100})) == 2048
+def test_the_2_kib_bucket_is_for_event_shaped_items_only():
+    assert 2048 in EVENT_ITEM_SIZE_BUCKETS
+    assert 2048 not in ITEM_SIZE_BUCKETS
+    assert list(EVENT_ITEM_SIZE_BUCKETS) == sorted(EVENT_ITEM_SIZE_BUCKETS)
+    padded = pad_json_object({"x": "y" * 1100}, buckets=EVENT_ITEM_SIZE_BUCKETS)
+    assert len(padded) == 2048

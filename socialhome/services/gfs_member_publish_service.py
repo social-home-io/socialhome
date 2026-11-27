@@ -34,17 +34,31 @@ Publishing runs in the background (:meth:`GfsMemberPublishService
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import secrets
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import orjson
 
-from ..domain.federation import GfsConnection
+from ..crypto import ed25519_public_key
+from ..domain.federation import FederationEventType, GfsConnection
+from ..domain.gfs_channel import RING_CLASS_DURABLE
 from ..domain.space import SpaceFeatures, SpaceType
 from ..domain.space_item import (
+    AUTHORITY_ITEM_TYPES,
+    AUTHORITY_KIND_FIELD,
+    AUTHORITY_KIND_SPACE_EVENT,
+    EVENT_ITEM_SIZE_BUCKETS,
+    ITEM_SIZE_BUCKETS,
+    ITEM_SPECS,
     ITEM_TYPE_POST,
+    MAX_MENTION_NOTES,
     SUPPORTED_ITEM_TYPES,
+    V1_CHANNEL_EVENT_TYPES,
+    SealedItem,
     pad_json_object,
     reader_cert_permits,
     required_scope,
@@ -52,14 +66,22 @@ from ..domain.space_item import (
 from ..domain.writer_cert import WriterCert, scope_permits
 from ..task_drain import wait_tasks_done
 from .gfs_channel_service import CHANNEL_TIERS
+from .space_item_author import build_signed_event_item
+from .space_item_budget import SenderBudget
+from .space_public_authority import channel_authority_plaintext
 from .space_writer_cert_service import WRITER_CERT_FIELD
 
 if TYPE_CHECKING:
     from ..domain.space import Space
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
+    from ..repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_channel_service import GfsChannelService
     from .space_crypto_service import SpaceContentEncryption
+    from .space_mentions import SpaceMentionResolver
     from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
@@ -95,13 +117,21 @@ def _cert_lets(
     )
 
 
-def build_item_plaintext(item_type: str, inner: dict) -> bytes:
+#: v_97 (owner Q6 A) — how long the legacy event still goes to every
+#: member after this household first put a space's change on its channel.
+LEGACY_WINDOW: timedelta = timedelta(days=14)
+LEGACY_WINDOW_KEY_PREFIX: str = "space_items_channel_since:"
+
+
+def build_item_plaintext(
+    item_type: str, inner: dict, *, buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS
+) -> bytes:
     """The bytes a channel item encrypts: the real type + the inner, padded
     JSON (:func:`~socialhome.domain.space_item.pad_json_object`) — ASCII
     ``0`` in :data:`~socialhome.domain.space_item.PAD_FIELD` to exactly the
     smallest :data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS` size
     that fits (an item larger than the largest bucket is left unpadded)."""
-    return pad_json_object({"item_type": item_type, "inner": inner})
+    return pad_json_object({"item_type": item_type, "inner": inner}, buckets=buckets)
 
 
 def parse_item_plaintext(plaintext: bytes) -> tuple[str, dict] | None:
@@ -125,9 +155,14 @@ class GfsMemberPublishService:
     announce epochs there; heal the channels on a reconnect."""
 
     __slots__ = (
+        "_budget",
         "_channels",
+        "_config",
         "_conn_repo",
         "_crypto",
+        "_identity",
+        "_mentions",
+        "_remote_members",
         "_spaces",
         "_stopping",
         "_tasks",
@@ -152,6 +187,34 @@ class GfsMemberPublishService:
         #: The opaque channels (v_51 private, v_96 global). ``None`` → every
         #: write takes the host path.
         self._channels: GfsChannelService | None = None
+        #: v_97 — ``(instance_id, identity_seed, identity_pk)``: the origin
+        #: that signs this household's event-shaped space items.
+        self._identity: tuple[str, bytes, bytes] | None = None
+        #: v_97 — chat / location pacing for channel items.
+        self._budget = SenderBudget()
+        #: v_97 — the legacy-window start per space, the mention resolver
+        #: and the roster for mention notes (``attach_items``).
+        self._config: AbstractInstanceConfigRepo | None = None
+        self._mentions: SpaceMentionResolver | None = None
+        self._remote_members: AbstractSpaceRemoteMemberRepo | None = None
+
+    def attach_items(
+        self,
+        *,
+        config: AbstractInstanceConfigRepo,
+        mentions: SpaceMentionResolver,
+        remote_members: AbstractSpaceRemoteMemberRepo,
+    ) -> None:
+        """v_97 — what a GFS space's items need beyond sealing."""
+        self._config = config
+        self._mentions = mentions
+        self._remote_members = remote_members
+
+    def attach_identity(
+        self, *, instance_id: str, identity_seed: bytes, identity_pk: bytes
+    ) -> None:
+        """v_97 — the household identity that signs its space items."""
+        self._identity = (instance_id, identity_seed, identity_pk)
 
     def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the channel service (v_51 / v_96)."""
@@ -218,9 +281,10 @@ class GfsMemberPublishService:
         self._stopping = False
 
     async def stop(self) -> None:
-        """Let in-flight background publishes finish."""
+        """Let in-flight background publishes (and held items) finish."""
         self._stopping = True
         await self.wait_idle()
+        await self._budget.wait_idle()
 
     # ── Publishing an item ────────────────────────────────────────────────
 
@@ -382,6 +446,222 @@ class GfsMemberPublishService:
             space_id,
         )
         return None
+
+    # ── v_97 event-shaped items ──────────────────────────────────────────
+
+    async def seal_event_item(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        *,
+        whole_space: bool = True,
+    ) -> SealedItem | None:
+        """This household's change ``event_type`` / ``payload`` sealed as
+        ONE v_97 space item (``docs/protocol/space-items.md``): the v2 inner
+        signed by our identity key, our writer cert for the epoch inside,
+        padded, under the space content key.
+
+        * a **mesh space**: returned for ``SPACE_ITEM``;
+        * a **GFS space** (a channel here), for the whole space and a type
+          no v1 item carries: published on the channel (through the sender
+          budget, with the spec's ring class), returned ``via_channel`` with
+          the mention notes for mentioned households.
+
+        ``None`` (the legacy event goes to everyone) when it can't be: no
+        identity, no person item, a narrowed audience or a v1-carried type
+        in a GFS space, or no cert / key for the epoch."""
+        if self._identity is None or event_type.value not in ITEM_SPECS:
+            return None
+        on_channel = await self.channel_space(space_id)
+        if event_type.value in AUTHORITY_ITEM_TYPES:
+            # A host statement rides only a GFS space's channel (a mesh
+            # space's host sends it to its members directly).
+            if not on_channel or not whole_space:
+                return None
+            return await self._seal_authority(space_id, event_type, payload)
+        if on_channel and (
+            not whole_space or event_type.value in V1_CHANNEL_EVENT_TYPES
+        ):
+            return None
+        sealed = await self._seal_event(space_id, event_type, payload)
+        if sealed is None:
+            return None
+        epoch, ct = sealed
+        if not on_channel:
+            return SealedItem(space_id=space_id, epoch=epoch, item=ct)
+        spec = ITEM_SPECS[event_type.value]
+        await self._budget.submit(
+            space_id,
+            spec.budget,
+            str(payload.get("user_id") or payload.get("author") or ""),
+            functools.partial(
+                self._publish_channel_item, space_id, epoch, ct, spec.ring_class
+            ),
+        )
+        wire = {"space_id": space_id, "epoch": epoch, "item": ct}
+        return SealedItem(
+            space_id=space_id,
+            epoch=epoch,
+            item=ct,
+            via_channel=True,
+            legacy_window=await self._in_legacy_window(space_id),
+            notes=tuple(
+                (iid, wire)
+                for iid in await self._mentioned_households(space_id, payload)
+            ),
+        )
+
+    async def _publish_channel_item(
+        self, space_id: str, epoch: int, ct: str, ring_class: str, *, push_all=False
+    ) -> None:
+        if self._channels is None:
+            return
+        targets = await self._channels.plan(space_id)
+        if targets:
+            await self._channels.publish_sealed(
+                space_id, epoch, ct, targets, ring_class=ring_class, push_all=push_all
+            )
+
+    async def _seal_authority(
+        self, space_id: str, event_type: FederationEventType, payload: dict
+    ) -> SealedItem | None:
+        """A host statement as a channel authority item (``authority_kind:
+        space_event``): the v2 inner signed by OUR identity (the origin),
+        then signed by the space authority — only while we hold the seed
+        matching the pin. Pushed to every seat and kept in the ring (owner
+        F4)."""
+        assert self._identity is not None
+        space = await self._spaces.get(space_id)
+        seed = await self._spaces.get_space_seed(space_id)
+        if (
+            space is None
+            or seed is None
+            or ed25519_public_key(seed).hex() != space.identity_public_key
+        ):
+            return None
+        instance_id, identity_seed, identity_pk = self._identity
+        for _attempt in range(2):
+            epoch = await self._crypto.get_current_epoch(space_id)
+            if epoch is None:
+                return None
+            inner = build_signed_event_item(
+                item_type=event_type.value,
+                item_id=secrets.token_hex(16),
+                space_id=space_id,
+                epoch=epoch,
+                origin_instance_id=instance_id,
+                identity_seed=identity_seed,
+                identity_pk=identity_pk,
+                ts=datetime.now(UTC).isoformat(),
+                body=payload,
+            )
+            inner[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_SPACE_EVENT
+            plaintext = channel_authority_plaintext(
+                inner, space_id=space_id, epoch=epoch, space_seed=seed
+            )
+            try:
+                sealed_epoch, ct = await self._crypto.encrypt(space_id, plaintext)
+            except RuntimeError:
+                return None
+            if sealed_epoch != epoch:
+                continue
+            await self._publish_channel_item(
+                space_id, epoch, ct, RING_CLASS_DURABLE, push_all=True
+            )
+            return SealedItem(
+                space_id=space_id,
+                epoch=epoch,
+                item=ct,
+                via_channel=True,
+                legacy_window=await self._in_legacy_window(space_id),
+            )
+        return None
+
+    async def _seal_event(
+        self, space_id: str, event_type: FederationEventType, payload: dict
+    ) -> tuple[int, str] | None:
+        assert self._identity is not None
+        instance_id, seed, pk = self._identity
+        needed = required_scope(event_type.value)
+        for _attempt in range(2):
+            epoch = await self._crypto.get_current_epoch(space_id)
+            if epoch is None:
+                return None
+            cert = await self._writer_certs.own_cert(space_id, epoch)
+            if cert is None:
+                # The seed holder (the owner) holds no cert from anyone:
+                # it signs its own.
+                cert = await self._writer_certs.issue_for_instance(
+                    space_id, instance_id, epoch=epoch, instance_pk_hint=pk
+                )
+            if cert is None or not scope_permits(cert.scope, needed):
+                return None
+            inner = build_signed_event_item(
+                item_type=event_type.value,
+                item_id=secrets.token_hex(16),
+                space_id=space_id,
+                epoch=epoch,
+                origin_instance_id=instance_id,
+                identity_seed=seed,
+                identity_pk=pk,
+                ts=datetime.now(UTC).isoformat(),
+                body=payload,
+            )
+            inner[WRITER_CERT_FIELD] = cert.to_wire()
+            try:
+                sealed_epoch, ct = await self._crypto.encrypt(
+                    space_id,
+                    build_item_plaintext(
+                        event_type.value, inner, buckets=EVENT_ITEM_SIZE_BUCKETS
+                    ),
+                )
+            except RuntimeError:
+                return None
+            if sealed_epoch == epoch:
+                return epoch, ct
+        return None
+
+    async def _in_legacy_window(self, space_id: str) -> bool:
+        """v_97 (owner Q6 A) — for 14 days after this household first put a
+        space's change on its channel, the legacy event still goes to every
+        member; the start is kept in ``instance_config``."""
+        if self._config is None:
+            return False
+        key = LEGACY_WINDOW_KEY_PREFIX + space_id
+        now = datetime.now(UTC)
+        raw = await self._config.get(key)
+        if raw is None:
+            await self._config.set(key, now.isoformat())
+            return True
+        try:
+            since = datetime.fromisoformat(raw)
+        except ValueError:
+            return False
+        return now - since < LEGACY_WINDOW
+
+    async def _mentioned_households(self, space_id: str, payload: dict) -> list[str]:
+        """The other households whose people ``payload``'s text @-mentions
+        (≤ :data:`MAX_MENTION_NOTES`): they get a ``SPACE_MENTION_NOTE`` so
+        the mention notifies at once. ``@here`` notifies watchers live and
+        everyone else by badge (owner F7) — no notes."""
+        if self._mentions is None or self._remote_members is None:
+            return []
+        content = payload.get("content")
+        if not isinstance(content, str) or "@" not in content:
+            return []
+        author = payload.get("author") or payload.get("user_id")
+        mentions = await self._mentions.resolve(
+            space_id, content, author_id=str(author) if author else None
+        )
+        users = {m.user_id for m in mentions if m.user_id}
+        if not users:
+            return []
+        out: list[str] = []
+        for seat in await self._remote_members.list_for_space(space_id):
+            if seat.user_id in users and seat.instance_id not in out:
+                out.append(seat.instance_id)
+        return out[:MAX_MENTION_NOTES]
 
     # ── Epoch notices ─────────────────────────────────────────────────────
 

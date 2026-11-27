@@ -327,6 +327,25 @@ ITEM_SPECS: dict[str, ItemSpec] = {
     )
 }
 
+#: The event types whose content already rides a GFS space's channel as a
+#: v1 item (``POST_SHAPED_ITEM_TYPES`` / ``GENERIC_ITEM_TYPES``) until v_98:
+#: in a GFS space they keep that path, so a v_96 seat still reads them.
+V1_CHANNEL_EVENT_TYPES: frozenset[str] = frozenset(
+    t.value
+    for t in (
+        _E.SPACE_POST_CREATED,
+        _E.SPACE_POST_UPDATED,
+        _E.SPACE_POST_DELETED,
+        _E.SPACE_POST_REACTION,
+        _E.SPACE_COMMENT_CREATED,
+        _E.SPACE_COMMENT_UPDATED,
+        _E.SPACE_COMMENT_DELETED,
+    )
+)
+
+#: Mentioned households one item sends a ``SPACE_MENTION_NOTE`` to.
+MAX_MENTION_NOTES: int = 20
+
 #: The person-action item types (author-signed v2 inners).
 PERSON_ITEM_TYPES: frozenset[str] = frozenset(
     t for t, spec in ITEM_SPECS.items() if not spec.authority
@@ -335,6 +354,27 @@ PERSON_ITEM_TYPES: frozenset[str] = frozenset(
 AUTHORITY_ITEM_TYPES: frozenset[str] = frozenset(
     t for t, spec in ITEM_SPECS.items() if spec.authority
 )
+
+
+@dataclass(slots=True, frozen=True)
+class SealedItem:
+    """One sealed v_97 space item, ready to send (``FederationService.
+    _broadcast_as_item``): ``SPACE_ITEM`` wire ``{space_id, epoch, item}``;
+    ``via_channel`` — it already went on the GFS space's channel (no
+    ``SPACE_ITEM``); ``legacy_window`` — the legacy event still goes to
+    every member (the 14-day window after the space became a GFS space
+    here); ``notes`` — ``(household, SPACE_MENTION_NOTE payload)`` for the
+    households whose people it mentions."""
+
+    space_id: str
+    epoch: int
+    item: str
+    via_channel: bool = False
+    legacy_window: bool = False
+    notes: tuple[tuple[str, dict], ...] = ()
+
+    def wire(self) -> dict:
+        return {"space_id": self.space_id, "epoch": self.epoch, "item": self.item}
 
 
 def item_spec(item_type: object) -> ItemSpec | None:
@@ -481,9 +521,13 @@ class StaleItemStamp(Exception):
 #: the bucket — a reaction, a comment, a removal notice and a short post all
 #: look alike. The largest stays well under the GFS payload cap once
 #: encrypted and base64'd.
-#: v_97 adds the 2 KiB bucket (a chat message or a pin padded to 4 KiB
-#: doubled the GFS egress of the busiest items; owner sign-off 4).
-ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 2048, 4096, 16384, 65536, 131072)
+ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
+
+#: v_97 — the buckets an event-shaped item is padded to: the same plus
+#: 2 KiB (a chat message or a pin padded to 4 KiB doubled the GFS egress of
+#: the busiest items; owner sign-off 4). Only items use it — the envelope
+#: paddings that share :data:`ITEM_SIZE_BUCKETS` keep theirs.
+EVENT_ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 2048, 4096, 16384, 65536, 131072)
 
 #: The padding field. A JSON key, so the padding sits INSIDE the AEAD
 #: (authenticated with the item) and a receiver from before padding — which
@@ -528,8 +572,14 @@ AUTHORITY_KIND_REMOVAL: str = "removal"
 #: signature, under the authority signature) is what lets a follower accept
 #: that. A seed holder never relays a member's inner that already carries it.
 AUTHORITY_KIND_APPROVED_POST: str = "approved_post"
+#: v_97 — a host statement as a space item (``docs/protocol/space-items.md``
+#: › "Authority inner"): the event-shaped v2 inner, signed by the household
+#: that made the statement (so its ORIGIN is proven — a delegated admin can
+#: never pose as the owner for an owner-only rule), carrying this kind, all
+#: of it signed again by the space authority (so only a seed holder speaks).
+AUTHORITY_KIND_SPACE_EVENT: str = "space_event"
 SUPPORTED_AUTHORITY_KINDS: frozenset[str] = frozenset(
-    {AUTHORITY_KIND_REMOVAL, AUTHORITY_KIND_APPROVED_POST}
+    {AUTHORITY_KIND_REMOVAL, AUTHORITY_KIND_APPROVED_POST, AUTHORITY_KIND_SPACE_EVENT}
 )
 
 #: v_96 — the ``item_type`` of an authority-only item on a space's opaque

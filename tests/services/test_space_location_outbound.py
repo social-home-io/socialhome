@@ -220,6 +220,7 @@ async def env(tmp_dir):
     e.space_repo = space_repo
     e.zone_repo = zone_repo
     e.make_space = _make_space
+    e.outbound = outbound
     yield e
     await db.shutdown()
 
@@ -343,6 +344,39 @@ async def test_no_zone_name_in_federation_payload(env):
     assert call["payload"]["accuracy_m"] == 12.0
     assert "zone_name" not in call["payload"]
     assert "state" not in call["payload"]
+
+
+async def test_a_shared_pin_is_republished_by_the_keepalive(env):
+    """v_97 (owner F3): every 15 minutes the latest pin goes again, so a
+    member opening the map (or a GFS ring keeping pins 15 min) has it."""
+    sp = await env.make_space("sp_office")
+    await env.space_repo.save_member(
+        SpaceMember(
+            space_id=sp.id,
+            user_id=env.alice_uid,
+            role="member",
+            joined_at="2026-04-27T00:00:00+00:00",
+            location_share_enabled=True,
+        ),
+    )
+    await env.space_repo.add_space_instance(sp.id, "remote_instance_a")
+    await env.bus.publish(
+        PresenceUpdated(
+            username="alice",
+            state="zone",
+            zone_name="Office",
+            latitude=47.3769,
+            longitude=8.5417,
+            gps_accuracy_m=12.0,
+            updated_at="2026-04-27T12:00:00+00:00",
+        ),
+    )
+    assert len(env.federation.calls) == 1
+    assert await env.outbound.keepalive() == 1
+    first, again = env.federation.calls
+    assert again["payload"] == first["payload"]
+    await env.outbound.start()
+    await env.outbound.stop()
 
 
 # ─── Negative paths ─────────────────────────────────────────────────────
