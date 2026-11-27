@@ -606,14 +606,16 @@ async def test_a_ring_socket_skips_unwatched_items_without_queueing(registry):
     assert len(ws.sent) == 1
 
 
-async def test_push_all_and_direct_sends_reach_a_ring_socket(registry):
+async def test_direct_sends_reach_a_ring_socket_and_push_all_is_no_bypass(registry):
     ws = _FakeWS()
     await registry.register("inst-1", ws, ring=True)
+    # No item bypasses the watch filter (a ``push_all`` key means nothing).
     assert await registry.send("inst-1", _item(push_all=True)) is True
+    assert ws.sent == []
     assert await registry.send_direct("inst-1", _item()) is True
     # Not a channel item at all: never filtered.
     assert await registry.send("inst-1", {"type": "envelope", "sealed": {}}) is True
-    assert len(ws.sent) == 3
+    assert len(ws.sent) == 2
 
 
 async def test_a_v96_socket_takes_every_item_and_watches_nothing(registry):

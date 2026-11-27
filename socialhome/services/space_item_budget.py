@@ -1,14 +1,13 @@
 """Sender budgets for a GFS space's channel items (v_97).
 
-Per household and space, in priority order authority > content > chat >
-location (``docs/protocol/space-items.md`` › "Sender budgets and
-location"):
+Per household and space, in priority order content > chat > location
+(``docs/protocol/space-items.md`` › "Sender budgets and location"):
 
 * **chat** — at most :data:`CHAT_PER_MINUTE` items a minute; the rest wait
   for the next minute, in order;
 * **location** — at most one pin per person per :data:`LOCATION_INTERVAL_S`,
   latest only: a newer pin replaces one still waiting;
-* **content and authority** — never held here (the GFS's own publish
+* **content** — never held here (the GFS's own publish
   budgets and the person's own pace bound them).
 
 A held item is published by a background task when its slot opens; it is

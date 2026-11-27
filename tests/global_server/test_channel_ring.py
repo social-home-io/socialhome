@@ -1,8 +1,7 @@
 """The channel ring (v_97, capability ``channel_ring``) — GFS side.
 
 End to end over the real GFS app (``create_gfs_app``) and its real SQLite:
-seq allocation and ring ids, live push only to watchers (and every seat for
-``push_all``), heads pings, fetch pages, gaps, the seat check on every watch
+seq allocation and ring ids, live push only to watchers, heads pings, fetch pages, gaps, the seat check on every watch
 and fetch, offline copies only for households that do not read the ring,
 and the bounds (count, bytes, age, the server cap).
 """
@@ -53,9 +52,7 @@ from tests.global_server.test_channels import (  # noqa: F401 — the fixture
 pytestmark = pytest.mark.security
 
 
-def _publish_body(
-    ch: _Channel, epoch: int = 3, *, ring_class=None, push_all=False, payload=CT
-) -> dict:
+def _publish_body(ch: _Channel, epoch: int = 3, *, ring_class=None, payload=CT) -> dict:
     grant = ch.writer(epoch)
     req = ChannelPublishAnonRequest(
         gfs_instance_id=GFS_ID,
@@ -67,7 +64,6 @@ def _publish_body(
         writer_sig="",
         writer_sig_suite="ed25519",
         ring_class=ring_class,
-        push_all=push_all,
     )
     return sign_publish_anon(
         req, writer_seed=b64url_decode(grant.writer_seed)
@@ -119,21 +115,24 @@ async def test_ring_fields_are_signed(gfs) -> None:
     body["ring_class"] = "durable"  # tampered after signing
     resp = await gfs.post("/gfs/channels/publish-anon", json=body)
     assert resp.status == 403
+    # No publish reaches every seat: a ``push_all`` key is refused.
     body = _publish_body(gfs.ch)
-    body["push_all"] = True  # added after signing
+    body["push_all"] = True
     resp = await gfs.post("/gfs/channels/publish-anon", json=body)
-    assert resp.status == 403
+    assert resp.status in (400, 403)
+    state = await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)
+    assert state is None or state.head_seq == 0
 
 
 async def test_bad_ring_fields_are_refused_at_parse() -> None:
     ch = _Channel()
-    for bad in ({"ring_class": "forever"}, {"push_all": False}, {"push_all": 1}):
+    for bad in ({"ring_class": "forever"}, {"push_all": True}, {"push_all": False}):
         body = {**_publish_body(ch), **bad}
         with pytest.raises(InvalidChannelWire):
             ChannelPublishAnonRequest.from_wire(body)
 
 
-# ── Live push: watchers only, push_all to everyone ───────────────────────
+# ── Live push: watchers only ─────────────────────────────────────────────
 
 
 async def test_a_ring_socket_gets_live_items_only_while_watching(gfs) -> None:
@@ -155,23 +154,6 @@ async def test_a_ring_socket_gets_live_items_only_while_watching(gfs) -> None:
         await _nothing(ws)
     # Not watching is not "offline": the ring holds it, nothing is queued.
     assert await _queued(gfs, gfs.member) == []
-
-
-async def test_push_all_reaches_every_seat_and_queues_offline(gfs) -> None:
-    await _ready(gfs)
-    await _seat(gfs, gfs.member)
-    await _seat(gfs, gfs.other)
-    async with gfs.ws_connect("/gfs/ws") as ws:
-        await ws.send_json(_ring_hello(gfs.member))
-        await _wait_connected(gfs.app_, gfs.member.instance_id)
-        # Mark ``other`` as a ring household that is offline right now.
-        await gfs.app_[gfs_channel_ring_repo_key].set_channel_ring(
-            gfs.other.instance_id, True
-        )
-        await _publish(gfs, push_all=True)
-        frame = await _recv(ws)
-        assert frame["push_all"] is True and frame["seq"] == 1
-    assert len(await _queued(gfs, gfs.other)) == 1
 
 
 async def test_an_offline_ring_household_gets_no_offline_copy(gfs) -> None:
@@ -491,24 +473,6 @@ async def test_two_copies_of_one_publish_are_stored_once(gfs) -> None:
     assert sorted([first.status, second.status]) == [200, 403]
     state = await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)
     assert state.head_seq == 1
-
-
-async def test_push_all_over_its_budget_is_kept_but_not_pushed_to_all(gfs) -> None:
-    """Any writer can set ``push_all``: past its small budget the item is
-    still stored (downgraded, never refused — nobody can crowd the host's
-    statements out), but no longer reaches or queues for every seat."""
-    await _ready(gfs)
-    await _seat(gfs, gfs.other)
-    await gfs.app_[gfs_channel_ring_repo_key].set_channel_ring(
-        gfs.other.instance_id, True
-    )
-    for _ in range(channels_mod.CHANNEL_PUSH_ALL_MAX_PER_MINUTE):
-        await _publish(gfs, push_all=True)
-    await _publish(gfs, push_all=True)
-    state = await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)
-    assert state.head_seq == channels_mod.CHANNEL_PUSH_ALL_MAX_PER_MINUTE + 1
-    queued = await _queued(gfs, gfs.other)
-    assert len(queued) == channels_mod.CHANNEL_PUSH_ALL_MAX_PER_MINUTE
 
 
 async def test_a_channel_has_a_byte_budget(gfs, monkeypatch) -> None:

@@ -131,10 +131,6 @@ def required_scope(item_type: str) -> str:
     for a type this build does not carry."""
     spec = ITEM_SPECS.get(item_type)
     if spec is not None:
-        if spec.authority:
-            raise ValueError(
-                f"{item_type!r} is a host statement, never cert-authorized"
-            )
         return spec.scope
     try:
         return _REQUIRED_SCOPE[item_type]
@@ -156,18 +152,15 @@ def required_scope(item_type: str) -> str:
 #:   the older one standing until the 30-minute incremental sync corrects it
 #:   — the documented residual of ``sync.md`` "Not on the rule yet" (RSVP,
 #:   schedule answer, and since v_97 the update types marked so here);
-#: * ``state`` — a host statement whose repeat converges (roster, config).
 IDEMPOTENCY_CLASSES: frozenset[str] = frozenset(
-    {"id", "lww", "tombstone", "advance", "latest", "arrival", "state"}
+    {"id", "lww", "tombstone", "advance", "latest", "arrival"}
 )
 
 #: Sender priority classes, highest first (``space-items.md`` › budgets).
-BUDGET_AUTHORITY: str = "authority"
 BUDGET_CONTENT: str = "content"
 BUDGET_CHAT: str = "chat"
 BUDGET_LOCATION: str = "location"
 BUDGET_CLASSES: tuple[str, ...] = (
-    BUDGET_AUTHORITY,
     BUDGET_CONTENT,
     BUDGET_CHAT,
     BUDGET_LOCATION,
@@ -183,13 +176,11 @@ class ItemSpec:
     receiver hands it to that event's own handler. ``scope`` is the writer
     cert scope a person item needs; ``reader_as`` the v1 type a follower's
     ``reader`` cert is judged as (:func:`reader_cert_permits`; ``None`` —
-    a reader cert never carries it). ``authority`` marks a host statement
-    (an authority ``space_event`` inner, never author-signed)."""
+    a reader cert never carries it)."""
 
     event_type: _E
     scope: str = WRITER_SCOPE_WRITE
     ring_class: str = RING_CLASS_DURABLE
-    authority: bool = False
     idempotency: str = "id"
     budget: str = BUDGET_CONTENT
     reader_as: str | None = None
@@ -214,23 +205,16 @@ def _person(
     )
 
 
-def _authority(event_type: _E, idempotency: str = "state") -> ItemSpec:
-    return ItemSpec(
-        event_type=event_type,
-        authority=True,
-        idempotency=idempotency,
-        budget=BUDGET_AUTHORITY,
-    )
-
-
 _C = WRITER_SCOPE_COMMENT
 
 #: Every v_97 space item type, by ``item_type`` (the event type's value).
-#: Person actions broadcast to a whole space, and the host statements of
-#: ``space-items.md``. Targeted secrets (rekeys, key shares, grants, roster
-#: snapshots, invites and joins, moderation submissions, reports, DMs,
-#: bazaar threads and offers, app sessions, sync, media blobs) are never
-#: items. The v1 shapes above stay on the channel for the types they carry
+#: Space CONTENT only — person actions broadcast to a whole space, each an
+#: author-signed v2 inner. Control (bans, roles, dissolve, config, roster,
+#: keys, invites and joins, reports) is never an item: it stays on the
+#: per-household guaranteed path by design (owner 2026-11-27). Targeted
+#: secrets (rekeys, key shares, grants, moderation submissions, DMs, bazaar
+#: threads and offers, app sessions, sync, media blobs) are never items
+#: either. The v1 shapes above stay on the channel for the types they carry
 #: until v_98.
 ITEM_SPECS: dict[str, ItemSpec] = {
     spec.event_type.value: spec
@@ -313,17 +297,6 @@ ITEM_SPECS: dict[str, ItemSpec] = {
             budget=BUDGET_LOCATION,
             ring_class=RING_CLASS_EPHEMERAL,
         ),
-        # ── Host statements (authority ``space_event`` inners) ──
-        _authority(_E.SPACE_MEMBER_JOINED),
-        _authority(_E.SPACE_MEMBER_LEFT),
-        _authority(_E.SPACE_MEMBER_BANNED),
-        _authority(_E.SPACE_MEMBER_UNBANNED),
-        _authority(_E.SPACE_MEMBER_ROLE_CHANGED),
-        _authority(_E.SPACE_CONFIG_CHANGED, "lww"),
-        _authority(_E.SPACE_AGE_GATE_UPDATED, "lww"),
-        _authority(_E.SPACE_DISSOLVED, "advance"),
-        _authority(_E.SPACE_MODERATION_DECIDED, "advance"),
-        _authority(_E.SPACE_ADMIN_PROPOSAL_UPDATED, "advance"),
     )
 }
 
@@ -345,15 +318,6 @@ V1_CHANNEL_EVENT_TYPES: frozenset[str] = frozenset(
 
 #: Mentioned households one item sends a ``SPACE_MENTION_NOTE`` to.
 MAX_MENTION_NOTES: int = 20
-
-#: The person-action item types (author-signed v2 inners).
-PERSON_ITEM_TYPES: frozenset[str] = frozenset(
-    t for t, spec in ITEM_SPECS.items() if not spec.authority
-)
-#: The host-statement item types (authority ``space_event`` inners).
-AUTHORITY_ITEM_TYPES: frozenset[str] = frozenset(
-    t for t, spec in ITEM_SPECS.items() if spec.authority
-)
 
 
 @dataclass(slots=True, frozen=True)
@@ -572,14 +536,8 @@ AUTHORITY_KIND_REMOVAL: str = "removal"
 #: signature, under the authority signature) is what lets a follower accept
 #: that. A seed holder never relays a member's inner that already carries it.
 AUTHORITY_KIND_APPROVED_POST: str = "approved_post"
-#: v_97 — a host statement as a space item (``docs/protocol/space-items.md``
-#: › "Authority inner"): the event-shaped v2 inner, signed by the household
-#: that made the statement (so its ORIGIN is proven — a delegated admin can
-#: never pose as the owner for an owner-only rule), carrying this kind, all
-#: of it signed again by the space authority (so only a seed holder speaks).
-AUTHORITY_KIND_SPACE_EVENT: str = "space_event"
 SUPPORTED_AUTHORITY_KINDS: frozenset[str] = frozenset(
-    {AUTHORITY_KIND_REMOVAL, AUTHORITY_KIND_APPROVED_POST, AUTHORITY_KIND_SPACE_EVENT}
+    {AUTHORITY_KIND_REMOVAL, AUTHORITY_KIND_APPROVED_POST}
 )
 
 #: v_96 — the ``item_type`` of an authority-only item on a space's opaque

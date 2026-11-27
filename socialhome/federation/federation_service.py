@@ -448,9 +448,10 @@ ItemSealer = Callable[..., Awaitable["SealedItem | None"]]
 
 def sends_as_item(event_type: FederationEventType, *, per_peer: object = None) -> bool:
     """v_97 — whether a space broadcast goes as ONE space item: a change of
-    :data:`~socialhome.domain.space_item.ITEM_SPECS` (a person's, or a host
-    statement — the sealer decides what it can seal) that is the same for
-    every recipient. A per-peer payload is targeted (one
+    :data:`~socialhome.domain.space_item.ITEM_SPECS` — space content only;
+    control (bans, roles, dissolve, config, roster, keys) is never there and
+    stays on the per-household guaranteed path — that is the same for every
+    recipient. A per-peer payload is targeted (one
     household's own cert, …) and stays the event it is."""
     return per_peer is None and event_type.value in ITEM_SPECS
 

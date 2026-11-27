@@ -389,11 +389,14 @@ parse step as unknown. The space-keyed `space_post_public` relay is gone with
 it; see [discovery.md](./discovery.md#since-v_96-space-content-reaches-a-gfs-only-through-a-channel).
 
 **Space items (v_97)** — `SPACE_ITEM` (one sealed, author-signed space
-item, `{space_id, epoch, item}`) carries every space change of a mesh space
+item, `{space_id, epoch, item}`) carries every content change of a mesh space
 to a v_97 member household; `SPACE_MENTION_NOTE` (same shape) brings an item
 that mentions someone to that person's household at once. In a GFS space
 every item rides only the channel. Each item applies through the same gates
-and handler as the event it replaces; see [space items](./space-items.md).
+and handler as the event it replaces; see [space items](./space-items.md). Content rides
+items; control (bans, roles, dissolve, config, roster, keys) never does —
+it stays on the per-household guaranteed path ([two kinds of space, two
+kinds of message](./space-items.md#two-kinds-of-space-two-kinds-of-message-owner-approved-2026-11-27)).
 
 ## Flow — create + join
 

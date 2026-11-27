@@ -194,7 +194,7 @@ async def test_a_dropped_live_item_keeps_the_cursor(world):
 
 
 async def test_a_hole_badges_a_non_viewer_and_never_pulls_a_backlog(world):
-    """A push_all item to an unwatched seat must not fetch its backlog."""
+    """A live item far past the cursor must not fetch its backlog."""
     await world.client.on_frame(_heads(100), gfs_id=GFS)
     await world.client.on_frame(_item(700), gfs_id=GFS)
     assert _fetches(world) == []

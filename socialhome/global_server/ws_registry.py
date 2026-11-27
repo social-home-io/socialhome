@@ -315,7 +315,7 @@ class GfsWebSocketRegistry:
 
     def _ring_skips(self, instance_id: str, payload: dict[str, Any]) -> bool:
         """A channel item a ring socket does not take live: it does not
-        watch the channel and the item is not ``push_all`` — the ring holds
+        watch the channel — the ring holds
         it for the household's next fetch."""
         if (
             instance_id not in self._ring
@@ -324,7 +324,7 @@ class GfsWebSocketRegistry:
         ):
             return False
         channel_id = payload.get("channel_id")
-        if not isinstance(channel_id, str) or payload.get("push_all") is True:
+        if not isinstance(channel_id, str):
             return False
         if "seq" not in payload or "ring_id" not in payload:
             # Not from a ring (an older node in a mixed cluster, a channel

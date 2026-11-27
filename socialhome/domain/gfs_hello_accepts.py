@@ -36,7 +36,7 @@ ACCEPTS_ENVELOPE_MEDIA: str = "envelope_media"
 
 #: v_97 — the household reads its channels from the GFS's channel ring: the
 #: socket sends ``channel_watch`` / ``channel_fetch`` frames, gets live items
-#: only for the channels it watches (and every ``push_all`` item), a
+#: only for the channels it watches, a
 #: ``channel_heads`` ping, and no offline copies of channel items
 #: (``docs/protocol/space-items.md``).
 ACCEPTS_CHANNEL_RING: str = "channel_ring"

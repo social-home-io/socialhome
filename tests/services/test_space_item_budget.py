@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 from socialhome.domain.space_item import (
-    BUDGET_AUTHORITY,
     BUDGET_CHAT,
     BUDGET_CONTENT,
     BUDGET_LOCATION,
@@ -29,11 +28,11 @@ def _publisher(log: list, name: str):
     return publish
 
 
-async def test_content_and_authority_go_at_once():
+async def test_content_goes_at_once():
     budget, sent = SenderBudget(), []
-    for kind in (BUDGET_CONTENT, BUDGET_AUTHORITY):
-        assert await budget.submit("sp", kind, "u", _publisher(sent, kind))
-    assert sent == [BUDGET_CONTENT, BUDGET_AUTHORITY]
+    for n in range(3):
+        assert await budget.submit("sp", BUDGET_CONTENT, "u", _publisher(sent, n))
+    assert sent == [0, 1, 2]
 
 
 async def test_chat_waits_past_twenty_a_minute_and_keeps_its_order(monkeypatch):

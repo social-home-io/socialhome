@@ -20,7 +20,7 @@ A GFS proving ``channel_ring`` keeps one ring of recent items per channel
   id, and those move the cursor over the page's holes (expired location
   pins — a missing DURABLE item is a ``channel_gap``). A live item moves it
   only in order; a hole before one is a badge (a non-viewer) or a fetch;
-  a ``push_all`` item never pulls a backlog by itself. An item the inbound
+  a live item never pulls a backlog by itself. An item the inbound
   path DROPPED (over its budget) keeps the cursor before it, and that fetch
   stops; pages follow each other at most every :data:`PAGE_INTERVAL_S`, so
   a backlog never outruns the per-channel inbound budget;
@@ -341,8 +341,8 @@ class ChannelRingClient:
         elif seq == cur[1] + 1:
             self._set_cursor(gfs_id, channel_id, ring_id, seq)
         elif seq > cur[1] + 1:
-            # A hole before a live item (another node raced it, an
-            # unwatched seat's push_all): pull it only where someone looks.
+            # A hole before a live item (another node raced it): pull it
+            # only where someone looks.
             known = self._heads.get(key)
             top = max(seq, known[1]) if known and known[0] == ring_id else seq
             self._heads[key] = (ring_id, top)

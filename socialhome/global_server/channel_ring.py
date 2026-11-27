@@ -5,8 +5,7 @@ not a copy per seat. A household socket that listed ``channel_ring`` in
 its hello:
 
 * gets an item live only while it **watches** that channel
-  (``channel_watch``; the filter is in :class:`~.ws_registry.GfsWebSocketRegistry`)
-  — or for every item published with ``push_all`` (a host statement);
+  (``channel_watch``; the filter is in :class:`~.ws_registry.GfsWebSocketRegistry`);
 * gets ``channel_heads`` right after its hello and then every
   :data:`HEADS_PING_INTERVAL_S` (owner F2: 15 min), naming only the channels
   whose head moved since the last ping to that socket;
@@ -147,7 +146,7 @@ class GfsChannelRing:
         if pos is None:
             return frame
         seq, ring_id = pos
-        return ring_frame(frame, seq=seq, ring_id=ring_id, push_all=req.push_all)
+        return ring_frame(frame, seq=seq, ring_id=ring_id)
 
     # ── Seats ────────────────────────────────────────────────────────────
 
@@ -270,7 +269,6 @@ class GfsChannelRing:
                 channel_frame(item.channel_id, item.epoch, item.payload),
                 seq=item.seq,
                 ring_id=state.ring_id,
-                push_all=False,
             )
             # Straight to the socket: a fetch answer is never watch-filtered.
             # ``fetch`` names the request it answers: the household moves its

@@ -59,7 +59,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
@@ -99,7 +99,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(60) == [
         "Names for new followers right away",
@@ -138,7 +138,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(61) == [
         "Public moments encrypted from the GFS",
@@ -176,7 +176,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(62) == [
         "Photos and videos in public moments",
@@ -213,7 +213,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(63) == [
         "Time-stamped public moments",
@@ -249,7 +249,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
@@ -284,7 +284,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(65) == [
         "Deletes reach every copy of a moment",
@@ -318,7 +318,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(66) == [
         "Reactions reach authors further away",
@@ -351,7 +351,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(67) == [
         "Reactions reach authors you follow through a GFS",
@@ -383,7 +383,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(68) == [
         "Everyone sees the full reaction count",
@@ -414,7 +414,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(69) == [
         "A highlight taken away stays away",
@@ -444,7 +444,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(70) == [
         "Reporters in other households hear their report was reviewed",
@@ -473,7 +473,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -501,7 +501,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -528,7 +528,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -554,7 +554,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -579,7 +579,7 @@ def test_local_community_area_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "local_communities" in _slugs_at(59)
 
@@ -634,7 +634,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
@@ -675,7 +675,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "synced_picture_resets" in _slugs_at(58)
 
@@ -730,7 +730,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -789,7 +789,7 @@ def test_sync_series_rows_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "synced_recurring_events" in _slugs_at(56)
 
@@ -843,7 +843,7 @@ def test_space_chat_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -887,7 +887,7 @@ def test_space_chat_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -904,7 +904,7 @@ def test_space_chat_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_feature_keys_missing_below(54) == [
         "space_chat",
@@ -978,7 +978,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -1023,7 +1023,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -1080,7 +1080,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -1126,7 +1126,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -1182,7 +1182,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -1216,7 +1216,7 @@ def test_space_authority_rotation_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(45) == [
         "Catching up on missed security updates",
@@ -1270,7 +1270,7 @@ def test_space_authority_rotation_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -1323,7 +1323,7 @@ def test_space_authority_rotation_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -1354,7 +1354,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -1407,7 +1407,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -1437,7 +1437,7 @@ def test_space_report_scope_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -1471,7 +1471,7 @@ def test_federated_moderation_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "Reviewing posts from other households" not in fc.features_missing_below(43)
 
@@ -1507,7 +1507,7 @@ def test_content_access_enforcement_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -1544,7 +1544,7 @@ def test_space_moderator_role_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -1582,7 +1582,7 @@ def test_task_priority_labels_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -1660,7 +1660,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -1700,7 +1700,7 @@ def test_moment_origin_signature_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -2020,7 +2020,7 @@ def test_forwarded_role_change_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(47) == [
         "Shared pages without lost edits",
@@ -2072,7 +2072,7 @@ def test_forwarded_role_change_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -2100,7 +2100,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(48) == [
         "Members can post without the host",
@@ -2151,7 +2151,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -2211,7 +2211,7 @@ def test_member_gfs_publish_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -2270,7 +2270,7 @@ def test_strict_member_publish_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -2329,7 +2329,7 @@ def test_private_channels_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 
@@ -2527,7 +2527,7 @@ def test_space_author_profile_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_feature_keys_missing_below(59) == [
         "follower_author_names",
@@ -2594,7 +2594,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "follower_names_on_join" in _slugs_at(61)
 
@@ -2644,7 +2644,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "encrypted_public_moments" in _slugs_at(62)
 
@@ -2692,7 +2692,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "public_moment_media" in _slugs_at(63)
 
@@ -2750,7 +2750,7 @@ def test_long_lived_moments_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "follower_moment_retention" in _slugs_at(65)
 
@@ -2835,7 +2835,7 @@ def test_moment_reaction_counts_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "moment_reaction_counts" in _slugs_at(69)
 
@@ -2878,7 +2878,7 @@ def test_highlight_audience_change_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "highlight_audience_change" in _slugs_at(70)
 
@@ -2919,7 +2919,7 @@ def test_remote_report_answer_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -2947,7 +2947,7 @@ def test_remote_report_answer_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -2974,7 +2974,7 @@ def test_remote_report_answer_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -3000,7 +3000,7 @@ def test_remote_report_answer_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -3025,7 +3025,7 @@ def test_remote_report_answer_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "remote_report_answers" in _slugs_at(71)
 
@@ -3060,7 +3060,7 @@ def test_app_session_ended_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "app_games_end_on_uninstall" in _slugs_at(72)
     assert 72 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3097,7 +3097,7 @@ def test_bazaar_offers_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "bazaar_offers" in _slugs_at(73)
     assert 73 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3148,7 +3148,7 @@ def test_bazaar_thread_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -3173,7 +3173,7 @@ def test_bazaar_thread_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "bazaar_ask_the_seller" in _slugs_at(74)
     assert 74 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3208,7 +3208,7 @@ def test_bazaar_faq_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(75) == [
         "Games for groups of players",
@@ -3232,7 +3232,7 @@ def test_bazaar_faq_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "bazaar_listing_faq" in _slugs_at(75)
     assert 75 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3280,7 +3280,7 @@ def test_app_groups_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(76) == [
         "Games in a space",
@@ -3303,7 +3303,7 @@ def test_app_groups_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "app_groups" in _slugs_at(76)
     assert 76 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3336,7 +3336,7 @@ def test_space_app_tables_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(77) == [
         "Gift draws",
@@ -3358,7 +3358,7 @@ def test_space_app_tables_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.FederationCapability.MIN_FOR_SPACE_APP_TABLES in (
         fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3404,7 +3404,7 @@ def test_app_draw_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(78) == [
         "Edit photos in a space",
@@ -3425,7 +3425,7 @@ def test_app_draw_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "app_engines" in _slugs_at(78)
     assert 78 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3468,7 +3468,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "space_gallery_item_edits" in _slugs_at(79)
     assert 79 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -3570,7 +3570,7 @@ def test_media_https_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(81) == [
         "Pictures in a space's pages",
@@ -3588,7 +3588,7 @@ def test_media_https_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "lighter_media_transfers" in _slugs_at(81)
 
@@ -3671,7 +3671,7 @@ def test_content_file_hashes_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(85) == [
         fills,
@@ -3685,7 +3685,7 @@ def test_content_file_hashes_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_features_missing_below(84) == [
         label,
@@ -3694,7 +3694,7 @@ def test_content_file_hashes_capability_threshold():
         reactions,
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "content_file_hashes" in _slugs_at(85)
 
@@ -3717,7 +3717,7 @@ def test_trusted_file_fills_capability_threshold():
         "Reactions on space posts reach every household",
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "trusted_file_fills" in _slugs_at(86)
 
@@ -3779,7 +3779,7 @@ def test_anon_member_publish_only_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(90) == [
         multi,
@@ -3789,7 +3789,7 @@ def test_anon_member_publish_only_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "anonymous_gfs_posting_only" in _slugs_at(90)
 
@@ -3815,7 +3815,7 @@ def test_multi_mailbox_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(91) == [
         wanted,
@@ -3824,7 +3824,7 @@ def test_multi_mailbox_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "multi_mailbox" in _slugs_at(91)
 
@@ -3850,7 +3850,7 @@ def test_space_media_wanted_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(92) == [
         reactions,
@@ -3858,14 +3858,14 @@ def test_space_media_wanted_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_features_missing_below(91) == [
         label,
         reactions,
         "Poll votes count the same in every household",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "space_media_wanted" in _slugs_at(92)
 
@@ -3893,20 +3893,20 @@ def test_space_post_reactions_capability_threshold():
         pages,
         reach,
         seats,
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(93) == [
         votes,
         pages,
         reach,
         seats,
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_features_missing_below(92) == [
         label,
         votes,
         seats,
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "space_post_reactions" in _slugs_at(93)
 
@@ -3928,22 +3928,22 @@ def test_item_merge_stamps_capability_threshold():
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(94) == [
         "Space sync status, even without the host",
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_features_missing_below(93) == [
         label,
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.space_features_missing_below(94) == [
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "poll_vote_stamps" in _slugs_at(94)
 
@@ -3964,12 +3964,12 @@ def test_sync_pages_capability_threshold():
         label,
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert fc.features_missing_below(95) == [
         "Choose how far your moments go",
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "sync_pages" in _slugs_at(95)
 
@@ -3988,12 +3988,10 @@ def test_subscriber_seats_capability_threshold():
     )
     label = "Follow spaces with one seat on every path"
     assert label in fc.features_missing_below(95)
-    assert fc.features_missing_below(96) == [
-        "Every space change travels as one space item"
-    ]
+    assert fc.features_missing_below(96) == ["Space content travels as one space item"]
     assert fc.space_features_missing_below(95) == [
         label,
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
     assert "subscriber_seats" in _slugs_at(96)
 
@@ -4013,9 +4011,7 @@ def test_moment_reach_capability_threshold():
     label = "Choose how far your moments go"
     assert label in fc.features_missing_below(95)
     assert label not in fc.space_features_missing_below(1)
-    assert fc.features_missing_below(96) == [
-        "Every space change travels as one space item"
-    ]
+    assert fc.features_missing_below(96) == ["Space content travels as one space item"]
     assert "moment_reach" in _slugs_at(96)
 
 
@@ -4048,7 +4044,7 @@ def test_two_features_sharing_v96_keep_both_slugs():
     ]
     assert fc.space_features_missing_below(95) == [
         "Follow spaces with one seat on every path",
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ]
 
 

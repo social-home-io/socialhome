@@ -43,15 +43,10 @@ from typing import TYPE_CHECKING
 
 import orjson
 
-from ..crypto import ed25519_public_key
 from ..domain.federation import FederationEventType, GfsConnection
 from ..domain.federation_retention import supersede_key
-from ..domain.gfs_channel import RING_CLASS_DURABLE
 from ..domain.space import SpaceFeatures, SpaceType
 from ..domain.space_item import (
-    AUTHORITY_ITEM_TYPES,
-    AUTHORITY_KIND_FIELD,
-    AUTHORITY_KIND_SPACE_EVENT,
     EVENT_ITEM_SIZE_BUCKETS,
     ITEM_SIZE_BUCKETS,
     ITEM_SPECS,
@@ -69,7 +64,6 @@ from ..task_drain import wait_tasks_done
 from .gfs_channel_service import CHANNEL_TIERS
 from .space_item_author import build_signed_event_item
 from .space_item_budget import SenderBudget
-from .space_public_authority import channel_authority_plaintext
 from .space_writer_cert_service import WRITER_CERT_FIELD
 
 if TYPE_CHECKING:
@@ -475,17 +469,6 @@ class GfsMemberPublishService:
         if self._identity is None or event_type.value not in ITEM_SPECS:
             return None
         on_channel = await self.channel_space(space_id)
-        if event_type.value in AUTHORITY_ITEM_TYPES:
-            # A host statement rides only a GFS space's channel (a mesh
-            # space's host sends it to its members directly).
-            if (
-                not on_channel
-                or not whole_space
-                or self._channels is None
-                or not await self._channels.plan(space_id)
-            ):
-                return None
-            return await self._seal_authority(space_id, event_type, payload)
         if on_channel and (
             not whole_space or event_type.value in V1_CHANNEL_EVENT_TYPES
         ):
@@ -544,70 +527,15 @@ class GfsMemberPublishService:
         )
 
     async def _publish_channel_item(
-        self, space_id: str, epoch: int, ct: str, ring_class: str, *, push_all=False
+        self, space_id: str, epoch: int, ct: str, ring_class: str
     ) -> None:
         if self._channels is None:
             return
         targets = await self._channels.plan(space_id)
         if targets:
             await self._channels.publish_sealed(
-                space_id, epoch, ct, targets, ring_class=ring_class, push_all=push_all
+                space_id, epoch, ct, targets, ring_class=ring_class
             )
-
-    async def _seal_authority(
-        self, space_id: str, event_type: FederationEventType, payload: dict
-    ) -> SealedItem | None:
-        """A host statement as a channel authority item (``authority_kind:
-        space_event``): the v2 inner signed by OUR identity (the origin),
-        then signed by the space authority — only while we hold the seed
-        matching the pin. Pushed to every seat and kept in the ring (owner
-        F4)."""
-        assert self._identity is not None
-        space = await self._spaces.get(space_id)
-        seed = await self._spaces.get_space_seed(space_id)
-        if (
-            space is None
-            or seed is None
-            or ed25519_public_key(seed).hex() != space.identity_public_key
-        ):
-            return None
-        instance_id, identity_seed, identity_pk = self._identity
-        for _attempt in range(2):
-            epoch = await self._crypto.get_current_epoch(space_id)
-            if epoch is None:
-                return None
-            inner = build_signed_event_item(
-                item_type=event_type.value,
-                item_id=secrets.token_hex(16),
-                space_id=space_id,
-                epoch=epoch,
-                origin_instance_id=instance_id,
-                identity_seed=identity_seed,
-                identity_pk=identity_pk,
-                ts=datetime.now(UTC).isoformat(),
-                body=payload,
-            )
-            inner[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_SPACE_EVENT
-            plaintext = channel_authority_plaintext(
-                inner, space_id=space_id, epoch=epoch, space_seed=seed
-            )
-            try:
-                sealed_epoch, ct = await self._crypto.encrypt(space_id, plaintext)
-            except RuntimeError:
-                return None
-            if sealed_epoch != epoch:
-                continue
-            await self._publish_channel_item(
-                space_id, epoch, ct, RING_CLASS_DURABLE, push_all=True
-            )
-            return SealedItem(
-                space_id=space_id,
-                epoch=epoch,
-                item=ct,
-                via_channel=True,
-                legacy_window=await self._in_legacy_window(space_id),
-            )
-        return None
 
     async def _seal_event(
         self, space_id: str, event_type: FederationEventType, payload: dict

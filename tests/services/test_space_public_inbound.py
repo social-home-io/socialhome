@@ -2692,40 +2692,25 @@ async def test_a_malformed_space_item_is_dropped(item_env, payload):
     assert dispatch.calls == []
 
 
-@pytest.mark.parametrize("archived", [False, True])
-async def test_a_host_statement_on_the_channel_reaches_the_item_dispatch(
-    item_env, archived
-):
-    """v_97 — an authority item of kind ``space_event`` (signature checked
-    against the pinned key) goes to the one receiver; a forged authority
-    signature never does. An archived space too: the unarchive itself, or a
-    ban while archived, is judged by its own event's gates."""
-    if archived:
-        space = await item_env["space_repo"].get("sp-1")
-        await item_env["space_repo"].save(replace(space, archived=True))
-    seen: list[dict] = []
-
-    class _Dispatch(_RecordingDispatch):
-        async def apply_authority(self, space, *, epoch, inner) -> bool:
-            seen.append(inner)
-            return True
-
-    item_env["inbound"].attach_item_dispatch(_Dispatch())
+@pytest.mark.security
+async def test_a_host_statement_on_the_channel_is_never_applied(item_env):
+    """Owner 2026-11-27 (option A): host statements keep their NEVER_DROP
+    event until v_98 orders them, so nothing applies one that arrives on the
+    channel — even under a valid space authority signature."""
+    dispatch = _RecordingDispatch()
+    item_env["inbound"].attach_item_dispatch(dispatch)
     inner = {
         "authority_kind": "space_event",
         "item_type": "space_member_banned",
-        "body": {"space_id": "sp-1"},
+        "space_id": "sp-1",
+        "body": {"space_id": "sp-1", "user_id": "u-x"},
     }
     epoch = await item_env["crypto"].get_current_epoch("sp-1")
-    for seed in (
-        item_env["space_kp"].private_key,
-        generate_space_keypair().private_key,
-    ):
-        plaintext = channel_authority_plaintext(
-            inner, space_id="sp-1", epoch=epoch, space_seed=seed
-        )
-        sealed_epoch, ct = await item_env["crypto"].encrypt("sp-1", plaintext)
-        await item_env["inbound"].handle_channel_item(
-            "sp-1", epoch=sealed_epoch, payload=ct
-        )
-    assert [i["item_type"] for i in seen] == ["space_member_banned"]
+    plaintext = channel_authority_plaintext(
+        inner, space_id="sp-1", epoch=epoch, space_seed=item_env["space_kp"].private_key
+    )
+    sealed_epoch, ct = await item_env["crypto"].encrypt("sp-1", plaintext)
+    await item_env["inbound"].handle_channel_item(
+        "sp-1", epoch=sealed_epoch, payload=ct
+    )
+    assert dispatch.calls == []

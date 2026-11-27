@@ -1,7 +1,22 @@
 # Space items: one delivery path for all space content (v_97)
 
-Every change to a space — a post, a chat message, a task, a calendar event,
-a location pin, a roster change — travels as one **space item**: the same
+## Two kinds of space, two kinds of message (owner-approved 2026-11-27)
+
+- A space is either a **mesh space** (no GFS: direct + mesh paths) or a
+  **GFS space** (a global space, or a private one with `private_gfs` on:
+  its GFS channel only, no mesh).
+- **Content** — posts, comments, reactions, chat, location, zones, polls,
+  calendar, tasks, pages, gallery, … — is one signed **space item**: it
+  rides the space's channel in a GFS space and `SPACE_ITEM` in a mesh
+  space, through one receiver path (`SpaceItemDispatch`).
+- **Control** — bans, role changes, dissolve, config, roster, keys,
+  invites / joins, reports — never rides the channel. It stays on the
+  per-household guaranteed path (direct / mailbox, NEVER_DROP) by design:
+  that path gives every household durable, in-order delivery, which a
+  channel ring does not.
+
+Every change to a space's content — a post, a chat message, a task, a
+calendar event, a location pin — travels as one **space item**: the same
 sealed bytes, checked the same way, whichever transport carries it. A
 **GFS space** carries its items only on its opaque channel at the GFS; a
 **mesh space** carries them in the new `SPACE_ITEM` federation event over
@@ -22,7 +37,7 @@ the numbers and rules below are the owner's.
   from it, and asks the person to connect to a GFS before joining a GFS
   space.
 - **GFS**: keeps one ring per channel (count, byte and age bounds), pushes
-  live items to watching seats and authority items to every seat, pings
+  live items to watching seats, pings
   heads, answers fetches and gaps. It still sees only ciphertext of a
   channel it knows by a random id.
 
@@ -57,7 +72,7 @@ A space item is the sealed plaintext every channel item already uses:
 encrypted under the space content key at the current epoch (AES-256-GCM,
 `SpaceContentEncryption`), padded to a size bucket: an event-shaped item to `EVENT_ITEM_SIZE_BUCKETS`
 (**1, 2**, 4, 16, 64, 128 KiB — the 2 KiB step keeps a chat message or a
-pin from doubling to 4 KiB); v1 and authority items keep
+pin from doubling to 4 KiB); v1 and channel authority items keep
 `ITEM_SIZE_BUCKETS` (1, 4, 16, 64, 128 KiB).
 
 ### Event-shaped inner (v2, person actions)
@@ -93,33 +108,18 @@ The v1 shapes (`post`, `post_edit`, `comment`, … — `POST_SHAPED_ITEM_TYPES`,
 types they already carry, so a v_96 seat keeps reading them; v_98 moves them
 to v2.
 
-### Authority inner (`space_event`, host statements)
+### Host statements stay on the guaranteed path
 
-A statement only the space authority makes — join / leave / ban / unban /
-role change / config / age gate / dissolve / moderation decided / proposal
-updated — rides a GFS space's channel as the existing channel authority
-item (`item_type: "authority"`), with a new `authority_kind: "space_event"`.
-Its inner is **signed twice**:
-
-1. it is the event-shaped v2 inner above (`item_type` = the statement's
-   event type, `body` = its payload), signed by the household that made
-   the statement — so its **origin is proven**: a delegated admin holding
-   the seed can never pose as the owner, and an owner-only rule (owner-only
-   config pins, …) is judged on that origin by the event's own handler;
-2. the whole inner (with `authority_kind`) and the sealing epoch are signed
-   by the space authority (`authority_sig` / `authority_sig_suite`, event
-   `space_channel_authority`, as every channel authority item) — so only a
-   seed holder speaks.
-
-The receiver also requires the origin to act as the space's host here
-(`host_equivalence.acts_as_host`: the owner, or the delegated admin that
-invited it while delegation is on). In a mesh space the host keeps sending
-its statements as events to its members directly.
-
-Authority items are **pushed to every seat** (watching or not, `push_all`)
-and also go into the ring (owner F4). Any writer could set `push_all`, so
-the GFS allows 6 a minute per channel and downgrades the rest (kept, not
-pushed to all) — never refused, so no writer can crowd the host out.
+Space content rides the channel; host statements stay on the per-household
+guaranteed path by design (owner 2026-11-27). A statement only the space
+authority makes — join / leave / ban / unban / role change / config / age
+gate / dissolve / moderation decided / proposal updated — is no space item.
+It keeps its event, queued NEVER_DROP in the outbox, to every member
+household on its own path (paired, mesh, mailbox / GFS relay), in a GFS
+space too: the outbox gives it durability and in-order delivery per
+household, which a ring of a channel does not. Nothing on a channel carries
+one, and a receiver applies none that arrives as an item or as a channel
+authority item.
 
 ## Registry: `ITEM_SPECS`
 
@@ -130,10 +130,9 @@ One entry per item type (`domain/space_item.py`):
 | `event_type` | the federation event type the item replaces |
 | `scope` | writer-cert scope the receiver requires (`write` / `comment`) |
 | `ring_class` | `durable` (24 h in the ring) or `ephemeral` (15 min — live location) |
-| `authority` | a host statement (authority inner) rather than a person action |
-| `idempotency` | the per-type stamp audit — how a copy is harmless: `id` (insert-once), `lww` (a stamp / version the handler compares: post and comment edits, post reactions, poll votes, pages, timetables), `tombstone` (a delete leaves a tombstone), `advance` (a state that only moves forward), `latest` (only the newest counts: a location pin), `state` (a host statement whose repeat converges), `arrival` (applied in arrival order — see below) |
+| `idempotency` | the per-type stamp audit — how a copy is harmless: `id` (insert-once), `lww` (a stamp / version the handler compares: post and comment edits, post reactions, poll votes, pages, timetables), `tombstone` (a delete leaves a tombstone), `advance` (a state that only moves forward), `latest` (only the newest counts: a location pin), `arrival` (applied in arrival order — see below) |
 | `reader_as` | the v1 type a follower's `reader` cert is judged as (comments, own comment deletes, post reactions); none → a reader cert never carries it |
-| `budget` | sender priority class: `authority` > `content` > `chat` > `location` |
+| `budget` | sender priority class: `content` > `chat` > `location` |
 
 **The `arrival` residual.** Tasks, task lists, stickies, calendar events,
 gallery albums and items, bazaar listings and FAQs, app tables, zones, chat
@@ -158,9 +157,9 @@ sequenceDiagram
     participant M as Member household
     A->>A: seal v2 item (author sig + writer cert)
     alt GFS space
-        A->>G: publish-anon (ring_class, push_all)
+        A->>G: publish-anon (ring_class)
         G->>G: seq += 1, ring insert, evict
-        G-->>M: relay {seq, ring_id} (watching or push_all)
+        G-->>M: relay {seq, ring_id} (watching)
         G-->>M: channel_heads every 15 min (not watching)
         M->>G: channel_fetch since_seq
         G-->>M: relay frames + channel_fetch_done | channel_gap
@@ -176,18 +175,16 @@ Both transports end in `SpacePublicInbound.handle_channel_item(space_id, epoch, 
 
 1. decrypt at the item's epoch (a missing key holds the item, as today);
 2. parse; a v1 shape goes to the existing v1 path unchanged;
-3. a v2 inner: drop our own echo; the type must be in `ITEM_SPECS` and not
-   `authority`; the signed `space_id` must be this space; `origin` derives
+3. a v2 inner: drop our own echo; the type must be in `ITEM_SPECS` (no
+   host statement is); the signed `space_id` must be this space; `origin` derives
    from `author_pk`; the author signature verifies; a seen `item_id` is
-   dropped here (an item reaches us from several GFSs and from the ring
-   after a live push); the writer cert verifies
+   dropped here, before the origin's inbound budget is charged (an item
+   reaches us from several GFSs and from the ring after a live push; a
+   replay never drains a budget); the writer cert verifies
    for this space, the item's epoch (fresh: newest or previous within the
    grace), `author_pk` and the spec's scope; `ts` is no more than 300 s
    ahead;
-4. an authority `space_event`: the authority signature verifies against
-   the pinned space key; `origin` must act as host
-   (`host_equivalence.acts_as_host`) at the time of applying;
-5. a `FederationEvent(event_type, from_instance=origin, space_id, payload=body)`
+4. a `FederationEvent(event_type, from_instance=origin, space_id, payload=body)`
    is built and run through **the same post-decrypt gates** a federation
    envelope gets (`FederationService.space_write_gates()`: ban, deprovisioned
    author, archived space, writer seat with hold-for-seat), then dispatched
@@ -237,8 +234,7 @@ holds a live seat on that channel at an open epoch):
 The GFS sends:
 
 - live `relay` frames (`seq`, `ring_id` added) to sockets **watching** the
-  channel, and to **every** seat's socket for an item published with
-  `push_all` (authority items);
+  channel (no item bypasses the watch filter);
 - `{"type": "channel_heads", "heads": [{"channel_id", "head_seq", "ring_id"}]}`
   right after the hello (every seated channel) and then every **15 min**
   (owner F2), naming only channels whose head moved since the last ping to
@@ -250,9 +246,10 @@ said `channel_ring` in a hello gets no offline copies (it pulls).
 
 ### Publish
 
-`ChannelPublishAnonRequest` gains two optional signed fields, sent only to a
-GFS proving `channel_ring`: `ring_class` (`durable` | `ephemeral`) and
-`push_all` (bool). They are inside the writer-key signature. The publish
+`ChannelPublishAnonRequest` gains one optional signed field, sent only to a
+GFS proving `channel_ring`: `ring_class` (`durable` | `ephemeral`), inside
+the writer-key signature. Any other key (a `push_all` asking to reach every
+seat included) is refused. The publish
 per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
 
 ## The household side
@@ -279,7 +276,7 @@ per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
 - **Fetching.** A fetched page moves the cursor over its holes (expired
   location pins; a missing durable item is a `channel_gap`). A live item
   moves it only in order; a hole before one is a badge for a non-viewer
-  (a `push_all` item never pulls a backlog by itself) and a fetch for a
+  (a live item never pulls a backlog by itself) and a fetch for a
   viewer. An item the inbound path dropped (over its budget) keeps the
   cursor before it and ends that page. Pages follow each other at most
   every 35 s, so a backlog never outruns the 960 / min per-channel inbound
@@ -301,7 +298,7 @@ per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
 
 ## Sender budgets and location
 
-Per household and space: authority > content > chat > location.
+Per household and space: content > chat > location.
 Chat ≤ 20 items/min (the rest wait for the next minute); location ≤ 1 per
 person per 60 s, latest only (a newer pin replaces a waiting one). In a GFS
 space a person sharing location has the pin republished every 15 min as a
@@ -342,7 +339,7 @@ shutdown every held item goes at once.
 ## Versioning
 
 - Household **v_97** (`FederationCapability.MIN_FOR_SPACE_ITEMS`):
-  `SPACE_ITEM`, `SPACE_MENTION_NOTE`, v2 and `space_event` inners. Below
+  `SPACE_ITEM`, `SPACE_MENTION_NOTE` and the v2 inner. Below
   v_97 a member gets the legacy event (`broadcast_to_space_members` splits
   the audience by `space_member_supports(MIN_FOR_SPACE_ITEMS)`; an unknown
   version counts as older). When no listed GFS can take an item right now,
@@ -362,8 +359,8 @@ Busy global space: 200 member + 10 000 follower households, 2 % watching,
 - Watchers live: 204 sockets × 56 items × ~2.6 KiB ≈ 30 MB/min ≈ 43 GB/day
   at peak hours (≈ 50 GB/day busy-day average incl. fetches).
 - Heads pings: 10 201 sockets × 4 per hour × ~120 B ≈ 120 MB/day.
-- Authority items to all seats (owner F4): ~100/day × 10 201 × 2.6 KiB ≈
-  2.5 GB/day.
+- Host statements: unchanged from v_96 (their legacy events, NEVER_DROP,
+  to every member household on its own path).
 - Fetch on open: one page of what was missed per open.
 - Ring storage: ≈ 56 × 60 × 24 × 2.6 KiB ≈ 210 MB per busy channel
   (bounded at 64 MiB / 32 768 items, so the ring holds ≈ 10 h of a busy

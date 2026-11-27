@@ -242,9 +242,9 @@ class GfsInfoView(GfsBaseView):
             # v_97 — every channel keeps one ring of recent items here: a
             # socket that says ``channel_ring`` in its hello watches /
             # fetches (``channel_watch`` / ``channel_fetch``), gets heads
-            # pings, and a publish may carry the signed ``ring_class`` /
-            # ``push_all``. A household sends those only to a server that
-            # proved this (an older one refuses the unknown publish keys).
+            # pings, and a publish may carry the signed ``ring_class``. A
+            # household sends it only to a server that proved this (an
+            # older one refuses the unknown publish key).
             "channel_ring": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }

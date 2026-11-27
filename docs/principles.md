@@ -1292,7 +1292,9 @@ that concedes, exactly:
 
 What does not change: the GFS reads nothing it relays and cannot forge an
 item (author signature + writer cert inside the ciphertext, or the space
-authority signature for host statements); the channel carries no space id;
+authority signature for a removal); host statements never ride the
+channel — they stay on the per-household guaranteed path; the channel
+carries no space id;
 non-member households on the mesh still see only `SPACE_ROUTED`
 ciphertext; no delivery depends on a role. Anything that lets the GFS read
 an item, keep it longer, or link a channel to a space is a new §2 change.

@@ -350,6 +350,23 @@ tabs), and refuses to set one the platform owns. The home stays in the
 household otherwise — a local-community join sends a ~1 km version only
 with the person's consent ([local communities](protocol/local-communities.md)).
 
+## Space delivery: content on items, control on the guaranteed path
+
+Owner-approved 2026-11-27 ([space items](protocol/space-items.md)). A space
+is either a **mesh space** (no GFS: direct + mesh) or a **GFS space**
+(global, or private with `private_gfs`: its GFS channel only, no mesh).
+
+- **Content** (posts, comments, reactions, chat, location, zones, polls,
+  calendar, tasks, pages, gallery, …) is one signed space item. In a GFS
+  space it rides the channel, where the GFS keeps a ring households watch
+  and fetch from; in a mesh space it travels as `SPACE_ITEM`. Either way
+  one receiver (`SpaceItemDispatch`) runs the same gates and the same
+  handler as the event it replaces, so no feature has its own fan-out.
+- **Control** (bans, role changes, dissolve, config, roster, keys, invites
+  / joins, reports) never rides the channel: it stays on the per-household
+  guaranteed path (direct / mailbox, queued NEVER_DROP), which gives each
+  household durable, in-order delivery.
+
 ## Identity (§4.1)
 
 Every identity in Social Home — instance and user — is bound to an

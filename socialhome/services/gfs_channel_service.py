@@ -2202,7 +2202,6 @@ class GfsChannelService:
         targets: list[GfsConnection],
         *,
         ring_class: str | None = None,
-        push_all: bool = False,
     ) -> list[GfsConnection]:
         """Publish an item already sealed at ``epoch`` (the member publisher
         sealed it with our space writer cert inside) to ``targets``,
@@ -2220,8 +2219,6 @@ class GfsChannelService:
         ring: dict = {}
         if ring_class is not None:
             ring["ring_class"] = ring_class
-        if push_all:
-            ring["push_all"] = True
         item = GfsPublish(
             space_id=space_id,
             event_type=_KIND_ANON,
@@ -2268,7 +2265,6 @@ class GfsChannelService:
                 # v_97 — the ring fields, only to a server that proved
                 # ``channel_ring`` (an older one refuses unknown keys).
                 ring_class=ring_class if ring else None,
-                push_all=bool(data.get("push_all")) and ring,
             ),
             writer_seed=b64url_decode(grant.writer_key.writer_seed),
         )

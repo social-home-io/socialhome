@@ -73,6 +73,6 @@ CREATE INDEX IF NOT EXISTS idx_gfs_channel_ring_created
     ON gfs_channel_ring(created_at);
 
 -- The household said ``channel_ring`` in a WS hello: it reads its channels
--- from the ring and gets no offline copy of a channel item (except the
--- ``push_all`` items every seat gets). Cleared again by a hello without it.
+-- from the ring and gets no offline copy of a channel item (it pulls).
+-- Cleared again by a hello without it.
 ALTER TABLE client_instances ADD COLUMN channel_ring INTEGER NOT NULL DEFAULT 0;

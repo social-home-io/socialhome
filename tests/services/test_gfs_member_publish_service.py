@@ -45,7 +45,6 @@ from socialhome.services.gfs_member_publish_service import (
     parse_item_plaintext,
 )
 from socialhome.services.space_item_author import verify_signed_event_item
-from socialhome.services.space_public_authority import open_channel_authority
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 SPACE_ID = "sp-pub"
@@ -132,17 +131,15 @@ class _Channels:
         self.healed: list[str] = []
         self.channel = True
         self.ring_classes: list = []
-        self.pushes: list = []
 
     async def plan(self, space_id):
         return [self.conn]
 
     async def publish_sealed(
-        self, space_id, epoch, ciphertext, targets, *, ring_class=None, push_all=False
+        self, space_id, epoch, ciphertext, targets, *, ring_class=None
     ):
         self.sealed.append((space_id, epoch, ciphertext, targets))
         self.ring_classes.append(ring_class)
-        self.pushes.append(push_all)
         return targets
 
     async def on_rotation(self, space_id):
@@ -825,49 +822,30 @@ async def test_a_v1_carried_type_or_a_narrowed_audience_keeps_its_old_path(world
     assert world["channels"].sealed == []
 
 
-async def test_a_host_statement_is_double_signed_and_pushed_to_every_seat(world):
-    """v_97 (owner F4): a seed holder's statement rides the channel as an
-    authority item — the origin's own signature inside, the space
-    authority's over it — pushed to every seat and kept in the ring."""
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_MEMBER_BANNED,
+        FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+        FederationEventType.SPACE_DISSOLVED,
+        FederationEventType.SPACE_CONFIG_CHANGED,
+    ],
+)
+async def test_a_gfs_space_host_statement_stays_the_event(world, event_type):
+    """Owner 2026-11-27 (option A): host statements keep their NEVER_DROP
+    event on every path until v_98 orders them — never sealed, never on the
+    channel, even for a seed holder."""
     svc = await _gfs_space(world)
 
     async def seed(space_id):
         return SPACE_SEED
 
     world["spaces"].get_space_seed = seed
-    sealed = await svc.seal_event_item(
-        SPACE_ID,
-        FederationEventType.SPACE_MEMBER_BANNED,
-        {"space_id": SPACE_ID, "user_id": "u-x"},
-    )
-    assert sealed.via_channel
-    assert world["channels"].pushes == [True]
-    inner = open_channel_authority(
-        world["crypto"].decrypt(sealed.item),
-        space_id=SPACE_ID,
-        epoch=3,
-        space_pubkey_hex=SPACE_PK.hex(),
-    )
-    assert inner["authority_kind"] == "space_event"
-    assert verify_signed_event_item(inner)
-    assert inner["origin_instance_id"] == world["me"].instance_id
-
-
-async def test_no_seed_no_host_statement(world):
-    svc = await _gfs_space(world)
-
-    async def no_seed(space_id):
-        return None
-
-    world["spaces"].get_space_seed = no_seed
     assert (
-        await svc.seal_event_item(
-            SPACE_ID,
-            FederationEventType.SPACE_MEMBER_BANNED,
-            {"space_id": SPACE_ID},
-        )
-        is None
+        await svc.seal_event_item(SPACE_ID, event_type, {"space_id": SPACE_ID}) is None
     )
+    assert world["channels"].sealed == []
 
 
 async def test_a_mesh_space_host_statement_stays_the_event(world):

@@ -7545,9 +7545,16 @@ def test_only_a_person_change_the_same_for_everyone_goes_as_an_item():
     assert sends_as_item(E.SPACE_CHAT_MESSAGE_CREATED)
     # A per-peer payload stays the event.
     assert not sends_as_item(E.SPACE_TASK_CREATED, per_peer=lambda *a: None)
-    # Host statements go to the sealer (it rides only a GFS space's
-    # channel); secrets and media never do.
-    assert sends_as_item(E.SPACE_MEMBER_BANNED)
+    # Control never does (owner 2026-11-27): host statements stay on the
+    # per-household guaranteed path; neither do secrets or media.
+    for control in (
+        E.SPACE_MEMBER_BANNED,
+        E.SPACE_MEMBER_ROLE_CHANGED,
+        E.SPACE_DISSOLVED,
+        E.SPACE_CONFIG_CHANGED,
+        E.SPACE_MEMBER_JOINED,
+    ):
+        assert not sends_as_item(control)
     assert not sends_as_item(E.SPACE_KEY_EXCHANGE_REKEY)
     assert not sends_as_item(E.SPACE_MEDIA_BLOB)
 

@@ -691,7 +691,7 @@ class GfsConnectionService:
         # followers on). Such a contact goes only to a server that proved it.
         self._subscriber_seats: dict[str, bool] = {}
         #: GFS id → proved ``channel_ring`` (v_97: per-channel ring, watch /
-        #: fetch / heads, signed ``ring_class`` / ``push_all`` on publish).
+        #: fetch / heads, signed ``ring_class`` on publish).
         self._channel_ring: dict[str, bool] = {}
         #: GFS id → proved ``listing_counts`` (folds a listing's signed
         #: ``member_count`` / ``follower_count`` into the bytes it verifies).
@@ -2618,7 +2618,7 @@ class GfsConnectionService:
         """Whether *conn*'s GFS proved ``channel_ring`` on /gfs/info (v_97).
 
         Gates everything this household does with a channel's ring there:
-        the signed ``ring_class`` / ``push_all`` publish fields (an older
+        the signed ``ring_class`` publish field (an older
         GFS refuses unknown publish keys) and the ring client's watch /
         fetch frames (``docs/protocol/space-items.md``)."""
         return await self._signed_capability_supported(

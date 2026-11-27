@@ -315,121 +315,41 @@ async def test_an_item_over_budget_keeps_no_trace_and_is_taken_later():
     assert await _apply(d, inner)
 
 
-# ── v_97: host statements (authority ``space_event`` inners) ─────────────
-
-HOST_KP = generate_identity_keypair()
-HOST = derive_instance_id(HOST_KP.public_key)
-
-
-def _statement(kp=HOST_KP, origin=None, item_type="space_member_banned", **over):
-    kw = {
-        "item_type": item_type,
-        "item_id": "ef" * 16,
-        "space_id": "sp-1",
-        "epoch": 1,
-        "origin_instance_id": origin or derive_instance_id(kp.public_key),
-        "identity_seed": kp.private_key,
-        "identity_pk": kp.public_key,
-        "ts": datetime.now(UTC).isoformat(),
-        "body": {"space_id": "sp-1", "user_id": "u-x"},
-    }
-    kw.update(over)
-    inner = build_signed_event_item(**kw)
-    inner["authority_kind"] = "space_event"
-    return inner
-
-
-def _host_dispatch(sink, hosts=(HOST,)) -> SpaceItemDispatch:
-    async def acts(space, origin):
-        return origin in hosts
-
-    return SpaceItemDispatch(
-        federation=sink,
-        writer_certs=_Certs(),  # type: ignore[arg-type]
-        own_instance_id="us",
-        host_signer=acts,
-    )
-
-
-async def test_a_host_statement_applies_from_its_proven_origin():
-    sink = _Sink()
-    assert await _host_dispatch(sink).apply_authority(
-        SPACE, epoch=1, inner=_statement()
-    )
-    (event,) = sink.events
-    assert event.event_type is FederationEventType.SPACE_MEMBER_BANNED
-    assert event.from_instance == HOST
-
-
-@pytest.mark.security
-async def test_a_seed_holder_cannot_pose_as_another_household():
-    """A delegated admin holds the seed (so its authority signature passes)
-    but can't claim the owner as origin: the origin's own key must sign."""
-    admin = generate_identity_keypair()
-    forged = _statement(kp=admin, origin=HOST)
-    sink = _Sink()
-    assert not await _host_dispatch(sink).apply_authority(SPACE, epoch=1, inner=forged)
-    assert sink.events == []
-
-
-@pytest.mark.security
-async def test_a_household_that_does_not_act_as_host_is_refused():
-    admin = generate_identity_keypair()
-    sink = _Sink()
-    assert not await _host_dispatch(sink).apply_authority(
-        SPACE, epoch=1, inner=_statement(kp=admin)
-    )
-    # Without a host check wired, nothing is a host.
-    bare = SpaceItemDispatch(
-        federation=sink,
-        writer_certs=_Certs(),  # type: ignore[arg-type]
-        own_instance_id="us",
-    )
-    assert not await bare.apply_authority(SPACE, epoch=1, inner=_statement())
-    assert sink.events == []
+# ── Host statements are no space item (owner 2026-11-27, option A) ───────
 
 
 @pytest.mark.security
 @pytest.mark.parametrize(
-    "inner",
+    "item_type",
     [
-        # A person's item dressed as a host statement.
-        lambda: _statement(item_type="space_task_created"),
-        # Another epoch, space or a bad stamp.
-        lambda: _statement(epoch=2),
-        lambda: _statement(space_id="sp-2"),
-        lambda: _statement(body={"space_id": "sp-2"}),
-        lambda: _statement(ts="2000-01-01T00:00:00+00:00"),
-        # Not a space_event kind.
-        lambda: {**_statement(), "authority_kind": "removal"},
-        # Tampered after signing.
-        lambda: {**_statement(), "body": {"space_id": "sp-1", "user_id": "u-y"}},
+        "space_member_banned",
+        "space_member_unbanned",
+        "space_member_role_changed",
+        "space_member_joined",
+        "space_config_changed",
+        "space_dissolved",
     ],
 )
-async def test_a_malformed_host_statement_is_refused(inner):
+async def test_a_host_statement_dressed_as_an_item_is_refused(item_type):
+    """Host statements keep their NEVER_DROP event until v_98 orders them:
+    nothing applies one that arrives as a space item, however well signed."""
     sink = _Sink()
-    assert not await _host_dispatch(sink).apply_authority(SPACE, epoch=1, inner=inner())
-    assert sink.events == []
+    d = _dispatch(sink)
+    inner = _inner(item_type=item_type, body={"space_id": "sp-1", "user_id": "u"})
+    assert not await _apply(d, inner, item_type=item_type)
+    assert sink.events == [] and sink.claimed == set()
+    assert not hasattr(d, "apply_authority")
 
 
 @pytest.mark.security
-async def test_a_replayed_host_statement_spends_no_budget():
+async def test_a_replayed_item_spends_no_budget():
     """A copy is refused before the origin's budget is charged, so nobody
-    can drain the owner's budget by re-sending one captured statement."""
+    can drain a household's budget by re-sending one captured item."""
     sink = _Sink()
-    d = _host_dispatch(sink)
-    inner = _statement()
-    assert await d.apply_authority(SPACE, epoch=1, inner=inner)
+    d = _dispatch(sink)
+    inner = _inner()
+    assert await _apply(d, inner)
     spent = sink.budget
     for _ in range(50):
-        assert not await d.apply_authority(SPACE, epoch=1, inner=inner)
+        assert not await _apply(d, inner)
     assert sink.budget == spent
-
-
-async def test_a_host_statement_is_applied_once():
-    sink = _Sink()
-    d = _host_dispatch(sink)
-    inner = _statement()
-    assert await d.apply_authority(SPACE, epoch=1, inner=inner)
-    assert not await d.apply_authority(SPACE, epoch=1, inner=inner)
-    assert len(sink.events) == 1

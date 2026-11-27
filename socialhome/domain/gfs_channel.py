@@ -841,9 +841,6 @@ class ChannelPublishAnonRequest:
     #: v_97 (GFS capability ``channel_ring``) — how long the ring keeps the
     #: item (:data:`RING_CLASSES`); ``None`` = omitted (durable). Signed.
     ring_class: str | None = None
-    #: v_97 — push the item to EVERY seat, watching or not (a host
-    #: statement, owner F4). ``False`` is omitted from the wire. Signed.
-    push_all: bool = False
 
     def signing_body(self) -> dict:
         body = _with_gfs_key(
@@ -862,8 +859,6 @@ class ChannelPublishAnonRequest:
         # Present only when set: the exact bytes an older household signs.
         if self.ring_class is not None:
             body["ring_class"] = self.ring_class
-        if self.push_all:
-            body["push_all"] = True
         return body
 
     def to_wire(self) -> dict:
@@ -881,10 +876,6 @@ class ChannelPublishAnonRequest:
         ring_class = body.get("ring_class")
         if ring_class is not None and ring_class not in RING_CLASSES:
             raise InvalidChannelWire("invalid field: ring_class")
-        push_all = body.get("push_all", False)
-        if not isinstance(push_all, bool) or ("push_all" in body and not push_all):
-            # ``false`` is never sent (omitted), so it never verifies either.
-            raise InvalidChannelWire("invalid field: push_all")
         return cls(
             gfs_key=_gfs_key(body),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
@@ -896,14 +887,11 @@ class ChannelPublishAnonRequest:
             writer_sig=_str(body, "writer_sig"),
             writer_sig_suite=_str(body, "writer_sig_suite", _MAX_ID_CHARS),
             ring_class=ring_class,
-            push_all=bool(push_all),
         )
 
 
 #: The optional, signed fields of a publish (v_97 adds the ring ones).
-PUBLISH_ANON_OPTIONAL_KEYS: frozenset[str] = GFS_KEY_FIELD | frozenset(
-    {"ring_class", "push_all"}
-)
+PUBLISH_ANON_OPTIONAL_KEYS: frozenset[str] = GFS_KEY_FIELD | frozenset({"ring_class"})
 
 
 # ─── Fan-out frame ───────────────────────────────────────────────────────
@@ -1096,13 +1084,10 @@ class ChannelHead:
 RING_POSITION_KEYS: frozenset[str] = frozenset({"seq", "ring_id"})
 
 
-def ring_frame(frame: dict, *, seq: int, ring_id: str, push_all: bool) -> dict:
+def ring_frame(frame: dict, *, seq: int, ring_id: str) -> dict:
     """A channel fan-out frame (:func:`channel_frame`) with its place in the
     ring. A v_96 household ignores the extra keys."""
-    out = {**frame, "seq": seq, "ring_id": ring_id}
-    if push_all:
-        out["push_all"] = True
-    return out
+    return {**frame, "seq": seq, "ring_id": ring_id}
 
 
 def ring_position(raw: dict) -> tuple[int, str] | None:

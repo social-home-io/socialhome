@@ -68,7 +68,6 @@ from ..domain.space import SpaceRole
 from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     AUTHORITY_KIND_REMOVAL,
-    AUTHORITY_KIND_SPACE_EVENT,
     ITEM_TYPE_POST,
     ITEM_TYPE_POST_EDIT,
     POST_SHAPED_ITEM_TYPES,
@@ -586,18 +585,15 @@ class SpacePublicInbound:
                     space, epoch=epoch, item_type=event_item[0], inner=event_item[1]
                 )
             return
+        if archive_refusal(space, "") is not None:
+            return
         if is_channel_authority(opened):
             # v_96 — an authority item on the space's opaque channel: the
             # inner carries the space authority signature (the frame has
             # none). Verified against the pin, then the host-relay checks.
-            # Before the archive check: a host statement (v_97 — the
-            # unarchive itself, a ban while archived) is judged by the
-            # gates of its own event.
             await self._on_channel_authority(
                 space, epoch=epoch, opened=opened, frame=frame
             )
-            return
-        if archive_refusal(space, "") is not None:
             return
         try:
             parsed = parse_item_plaintext(opened)
@@ -698,16 +694,6 @@ class SpacePublicInbound:
                 "failed its authority signature or epoch — dropped",
                 space.id,
             )
-            return
-        if inner.get(AUTHORITY_KIND_FIELD) == AUTHORITY_KIND_SPACE_EVENT:
-            # v_97 — a host statement: the one receiver, from its proven
-            # origin, through the same gates and handler as the event.
-            if self._item_dispatch is not None:
-                await self._item_dispatch.apply_authority(
-                    space, epoch=epoch, inner=inner
-                )
-            return
-        if archive_refusal(space, "") is not None:
             return
         await self._apply_authority_relayed(
             space,

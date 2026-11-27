@@ -220,14 +220,24 @@ def _publish(**kw) -> _gc.ChannelPublishAnonRequest:
 
 def test_a_publish_without_ring_fields_signs_the_v96_bytes():
     body = _publish().signing_body()
-    assert "ring_class" not in body and "push_all" not in body
+    assert "ring_class" not in body
 
 
 def test_ring_fields_round_trip_inside_the_signed_body():
-    req = _publish(ring_class=_gc.RING_CLASS_EPHEMERAL, push_all=True)
+    req = _publish(ring_class=_gc.RING_CLASS_EPHEMERAL)
     body = req.signing_body()
-    assert body["ring_class"] == "ephemeral" and body["push_all"] is True
+    assert body["ring_class"] == "ephemeral"
     assert _gc.ChannelPublishAnonRequest.from_wire(req.to_wire()) == req
+
+
+@pytest.mark.security
+def test_a_publish_asking_to_reach_every_seat_is_refused():
+    """No item is pushed to every seat (host statements stay events until
+    v_98): a ``push_all`` key is no publish field — the request is refused,
+    never an amplifier a writer could set."""
+    wire = {**_publish().to_wire(), "push_all": True}
+    with pytest.raises(_gc.InvalidChannelWire):
+        _gc.ChannelPublishAnonRequest.from_wire(wire)
 
 
 def test_watch_and_fetch_parse_and_bound():
@@ -266,10 +276,8 @@ def test_watch_and_fetch_parse_and_bound():
 
 def test_ring_frame_and_position():
     frame = _gc.channel_frame(_RING_CH, 3, "p")
-    ring = _gc.ring_frame(frame, seq=7, ring_id="0123456789abcdef", push_all=False)
+    ring = _gc.ring_frame(frame, seq=7, ring_id="0123456789abcdef")
     assert _gc.ring_position(ring) == (7, "0123456789abcdef")
-    assert "push_all" not in ring
-    assert _gc.ring_frame(frame, seq=1, ring_id="0" * 16, push_all=True)["push_all"]
     assert _gc.ring_position(frame) is None
     # A v_96 household still parses the frame (extra keys ignored).
     assert _gc.ChannelItemFrame.from_wire({"type": "relay", **ring}).epoch == 3

@@ -19,13 +19,11 @@ from socialhome.domain.federation import (
 from socialhome.domain.gfs_channel import RING_CLASS_EPHEMERAL, RING_CLASSES
 from socialhome.domain.space import SpaceFeatures
 from socialhome.domain.space_item import (
-    AUTHORITY_ITEM_TYPES,
     BUDGET_CLASSES,
     EVENT_ITEM_SIZE_BUCKETS,
     IDEMPOTENCY_CLASSES,
     ITEM_SIZE_BUCKETS,
     ITEM_SPECS,
-    PERSON_ITEM_TYPES,
     SUPPORTED_ITEM_TYPES,
     item_spec,
     pad_json_object,
@@ -78,13 +76,27 @@ def test_every_spec_is_classified(item_type):
 def test_every_person_item_is_a_gated_space_write():
     """The writer-seat gate fires on SPACE_WRITE_EVENT_TYPES only: a person
     item outside it would skip the follower / kicked-household refusal."""
-    person = {ITEM_SPECS[t].event_type for t in PERSON_ITEM_TYPES}
+    person = {spec.event_type for spec in ITEM_SPECS.values()}
     assert person <= SPACE_WRITE_EVENT_TYPES
 
 
-def test_no_authority_item_is_a_person_write():
-    authority = {ITEM_SPECS[t].event_type for t in AUTHORITY_ITEM_TYPES}
-    assert not authority & SPACE_WRITE_EVENT_TYPES
+@pytest.mark.security
+def test_no_host_statement_is_an_item():
+    """Host statements keep their NEVER_DROP event until v_98 orders them
+    (owner 2026-11-27, option A): none is in the registry."""
+    host = {
+        E.SPACE_MEMBER_JOINED,
+        E.SPACE_MEMBER_LEFT,
+        E.SPACE_MEMBER_BANNED,
+        E.SPACE_MEMBER_UNBANNED,
+        E.SPACE_MEMBER_ROLE_CHANGED,
+        E.SPACE_CONFIG_CHANGED,
+        E.SPACE_AGE_GATE_UPDATED,
+        E.SPACE_DISSOLVED,
+        E.SPACE_MODERATION_DECIDED,
+        E.SPACE_ADMIN_PROPOSAL_UPDATED,
+    }
+    assert not host & {spec.event_type for spec in ITEM_SPECS.values()}
 
 
 def test_no_targeted_secret_is_an_item():
@@ -98,11 +110,6 @@ def test_every_item_is_allowed_from_a_link_seated_household():
 
 def test_v2_types_never_collide_with_v1_types():
     assert not set(ITEM_SPECS) & SUPPORTED_ITEM_TYPES
-
-
-def test_person_and_authority_partition_the_registry():
-    assert PERSON_ITEM_TYPES | AUTHORITY_ITEM_TYPES == set(ITEM_SPECS)
-    assert not PERSON_ITEM_TYPES & AUTHORITY_ITEM_TYPES
 
 
 def test_only_the_location_pin_is_ephemeral():

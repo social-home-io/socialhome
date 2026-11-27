@@ -1926,14 +1926,18 @@ under the server-wide cap).
 
 ### The channel ring (GFS capability `channel_ring`, v_97)
 
+The channel carries a space's **content** only; control (bans, roles,
+dissolve, config, roster, keys) stays on the per-household guaranteed path
+— see [two kinds of space, two kinds of message](./space-items.md#two-kinds-of-space-two-kinds-of-message-owner-approved-2026-11-27).
+
 A GFS that lists `channel_ring` in its signed `/gfs/info` block keeps one
 ring of recent items per channel (64 MiB / 32 768 items / 24 h, 15 min for
 `ephemeral` items, 8 GiB per server with fair eviction; GFS migration 0034
 adds `gfs_channel_ring` and `head_seq` / `ring_id` / `ring_bytes` on
 `gfs_channels`). A household socket that says `channel_ring` in its hello
 gets live items only for the channels it **watches** (`channel_watch`), a
-`channel_heads` ping every 15 minutes when something moved, every
-`push_all` item (authority statements) live, and pulls the rest with
+`channel_heads` ping every 15 minutes when something moved, and pulls the
+rest with
 `channel_fetch` (pages ≤ 500 items / 4 MiB; `channel_gap` when its cursor is
 no longer in the ring). Every watch and fetch needs a live seat on the
 channel at an open epoch — the same seat check as a push. A socket without

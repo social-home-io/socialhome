@@ -1683,7 +1683,7 @@ from __future__ import annotations
 #:   **Fallback**: a member household below v_97 gets the legacy event
 #:   (``broadcast_to_space_members`` splits the audience) for one release
 #:   window; v_98 removes the legacy fan-out. Space-scoped. Labelled
-#:   "Every space change travels as one space item".
+#:   "Space content travels as one space item".
 OURS: int = 97
 
 
@@ -2809,7 +2809,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_SPACE_ITEMS,
-        "Every space change travels as one space item",
+        "Space content travels as one space item",
     ),
 ]
 
@@ -3013,7 +3013,7 @@ CAPABILITY_FEATURE_KEYS: dict[str, str] = {
     # MIN_FOR_MOMENT_REACH
     "Choose how far your moments go": "moment_reach",
     # MIN_FOR_SPACE_ITEMS
-    "Every space change travels as one space item": "space_items",
+    "Space content travels as one space item": "space_items",
 }
 
 
