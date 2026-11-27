@@ -111,7 +111,7 @@ class _Fed:
 class _Certs:
     """The real cert verification; every epoch is fresh here."""
 
-    async def check_item(self, space, raw, **kw) -> bool:
+    async def check_item(self, space, raw, *, require_fresh=True, **kw) -> bool:
         return SpaceWriterCertService.check_item_cert(space, raw, **kw)
 
 
@@ -331,11 +331,30 @@ async def test_a_cert_for_another_household_is_refused(world):
     )
 
 
-async def test_a_comment_scope_cert_cannot_carry_a_write(world):
+async def test_a_comment_scope_cert_cannot_carry_a_post(world):
+    """A ``comment`` cert (a member under moderated posts) never carries a
+    post-shaped item: posting directly is what the ``posts`` level gates."""
     fed, dispatch, spaces, members = world
     member = _Household("u-member")
     await _seat(members, member, SpaceRole.MEMBER.value)
     assert not await _via_item(
+        fed,
+        dispatch,
+        spaces,
+        E.SPACE_POST_CREATED,
+        member,
+        _cert(member, WRITER_SCOPE_COMMENT),
+    )
+
+
+async def test_a_comment_scope_cert_carries_a_task(world):
+    """M5 — a member under moderated posts still works on tasks (and chats,
+    votes, RSVPs) in a GFS space: the task's own access level is the
+    handler's to judge, as for the legacy event."""
+    fed, dispatch, spaces, members = world
+    member = _Household("u-member")
+    await _seat(members, member, SpaceRole.MEMBER.value)
+    assert await _via_item(
         fed,
         dispatch,
         spaces,

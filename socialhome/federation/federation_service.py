@@ -111,7 +111,7 @@ from ..domain.outbox import (
 )
 from ..domain.relay_media_frame import relay_event_payload_limit
 from ..domain.space import WRITER_ROLES, parse_have_seq
-from ..domain.space_item import ITEM_SPECS, SealedItem
+from ..domain.space_item import ITEM_SPECS, LEGACY_TWIN_FIELD, SealedItem
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
@@ -158,6 +158,7 @@ from .inbound_validator import (
     make_check_staged_half,
     make_check_timestamp,
     make_check_unpairing,
+    make_claim_item_twin,
     make_confirm_relay_approval,
     make_decrypt_and_parse,
     make_idempotency_check,
@@ -1013,6 +1014,8 @@ class FederationService:
             ),
             make_ban_check(federation_repo=self._federation_repo),
             make_persist_replay(federation_repo=self._federation_repo),
+            # v_97 (M10) — an item's legacy twin in the 14-day window.
+            make_claim_item_twin(note_replay_id=self.note_replay_id),
         ]
         # The post-decrypt gates (deprovisioned author, read-only
         # Follower) run LAST so the replay-id is recorded regardless — if
@@ -4226,12 +4229,17 @@ class FederationService:
             return None
         items_to: list[str] = []
         legacy_to: list[str] = []
+        #: v_97 members that get the legacy event only for the 14-day
+        #: window: it names the item, so they apply one of the two (M10).
+        twins_to: list[str] = []
         for iid in audience:
             v97 = await self.space_member_supports(
                 iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
             )
-            if not v97 or (sealed.via_channel and sealed.legacy_window):
+            if not v97:
                 legacy_to.append(iid)
+            elif sealed.via_channel and sealed.legacy_window:
+                (twins_to if sealed.item_id else legacy_to).append(iid)
             elif not sealed.via_channel:
                 items_to.append(iid)
         parts: list[BroadcastResult] = []
@@ -4269,6 +4277,17 @@ class FederationService:
                     legacy_payload=legacy_payload,
                     legacy_below=legacy_below,
                     only_instances=legacy_to,
+                    as_item=False,
+                )
+            )
+        if twins_to:
+            parts.append(
+                await self.broadcast_to_space_members(
+                    space_id,
+                    event_type,
+                    {**payload, LEGACY_TWIN_FIELD: sealed.item_id},
+                    min_proto_version=min_proto_version,
+                    only_instances=twins_to,
                     as_item=False,
                 )
             )

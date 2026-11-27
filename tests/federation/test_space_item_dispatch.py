@@ -356,3 +356,22 @@ async def test_a_space_item_from_anyone_but_its_origin_is_refused():
     assert await d.apply(
         SPACE, epoch=1, item_type="space_task_created", inner=inner, sender=ORIGIN
     )
+
+
+async def test_epoch_freshness_is_asked_only_of_a_channel_item():
+    """M1 — a mesh ``SPACE_ITEM`` comes from its origin through the durable
+    per-household outbox, which may hold it past a rekey: its epoch need
+    not be fresh (the cert still binds household and epoch, and the roster
+    still decides). A channel item names no household: fresh epochs only."""
+    certs = _Certs()
+    d = _dispatch(certs=certs)
+    assert await d.apply(SPACE, epoch=1, item_type="space_task_created", inner=_inner())
+    assert certs.calls[-1]["require_fresh"] is True
+    assert await d.apply(
+        SPACE,
+        epoch=1,
+        item_type="space_task_created",
+        inner=_inner(item_id="cd" * 16),
+        sender=ORIGIN,
+    )
+    assert certs.calls[-1]["require_fresh"] is False

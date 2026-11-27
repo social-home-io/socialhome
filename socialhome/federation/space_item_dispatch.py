@@ -44,6 +44,7 @@ from ..domain.gfs_channel import (
 )
 from ..domain.space_item import (
     ItemSpec,
+    item_replay_key,
     item_spec,
     item_stamp,
 )
@@ -76,9 +77,6 @@ def max_item_age_s(spec: ItemSpec, body: dict) -> int:
         return MAX_EPHEMERAL_ITEM_AGE_S
     return MAX_ITEM_AGE_S
 
-
-#: The replay-cache namespace of a claimed item.
-ITEM_REPLAY_PREFIX: str = "space-item:"
 
 #: The ``msg_id`` prefix of an event built from an item (never on a wire).
 ITEM_MSG_ID_PREFIX: str = "item:"
@@ -205,6 +203,12 @@ class SpaceItemDispatch:
             author_pk=bytes.fromhex(str(inner["author_pk"])),
             required_scope=spec.scope,
             item_type=item_type,
+            # M1 — a SPACE_ITEM envelope comes from its origin through the
+            # durable per-household outbox, which may hold it past a rekey
+            # (an offline member): any epoch whose key we hold, the cert
+            # still bound to it, the roster still deciding. A channel item
+            # names no household: a fresh epoch only.
+            require_fresh=sender is None,
         ):
             log.warning(
                 "space_item: writer cert refused for %s (%s) from %s in space %s",
@@ -219,7 +223,8 @@ class SpaceItemDispatch:
         # channel item already spent the channel's inbound budget (refused
         # there, it is not taken and comes again on the next fetch), and a
         # SPACE_ITEM envelope spent its sender's — which is the origin.
-        replay_key = f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
+        # The same key its legacy twin claims in the 14-day window (M10).
+        replay_key = item_replay_key(origin, item_id)
         if await self._federation.note_replay_id(replay_key):
             log.debug("space_item: %s from %s seen before — dropped", item_id, origin)
             return False

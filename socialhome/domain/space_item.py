@@ -216,6 +216,16 @@ _C = WRITER_SCOPE_COMMENT
 #: threads and offers, app sessions, sync, media blobs) are never items
 #: either. The v1 shapes above stay on the channel for the types they carry
 #: until v_98.
+#:
+#: Scope (M5): the post-shaped types — posts and what rides a post (a poll,
+#: a schedule, a Bazaar listing) and their authors' own follow-ups — need a
+#: ``write`` cert, which a household holds only where the ``posts`` access
+#: level lets its people post directly. Every other type needs ``comment``
+#: (any member household): its own feature's access level is judged by the
+#: receiver's handler, exactly as for its legacy event — otherwise a member
+#: under moderated posts could never chat, vote or RSVP in a GFS space. A
+#: follower's ``reader`` cert stays limited to comments and reactions
+#: (:func:`reader_cert_permits`).
 ITEM_SPECS: dict[str, ItemSpec] = {
     spec.event_type.value: spec
     for spec in (
@@ -243,57 +253,60 @@ ITEM_SPECS: dict[str, ItemSpec] = {
             reader_as=ITEM_TYPE_COMMENT_DELETE,
         ),
         # ── Pages, tasks, polls, stickies ──
-        _person(_E.SPACE_PAGE_CREATED, "id"),
-        _person(_E.SPACE_PAGE_UPDATED, "lww"),
-        _person(_E.SPACE_PAGE_DELETED, "tombstone"),
-        _person(_E.SPACE_TASK_CREATED, "id"),
-        _person(_E.SPACE_TASK_UPDATED, "arrival"),
-        _person(_E.SPACE_TASK_DELETED, "tombstone"),
-        _person(_E.SPACE_TASK_LIST_CREATED, "id"),
-        _person(_E.SPACE_TASK_LIST_UPDATED, "arrival"),
-        _person(_E.SPACE_TASK_LIST_DELETED, "tombstone"),
+        _person(_E.SPACE_PAGE_CREATED, "id", scope=_C),
+        _person(_E.SPACE_PAGE_UPDATED, "lww", scope=_C),
+        _person(_E.SPACE_PAGE_DELETED, "tombstone", scope=_C),
+        _person(_E.SPACE_TASK_CREATED, "id", scope=_C),
+        _person(_E.SPACE_TASK_UPDATED, "arrival", scope=_C),
+        _person(_E.SPACE_TASK_DELETED, "tombstone", scope=_C),
+        _person(_E.SPACE_TASK_LIST_CREATED, "id", scope=_C),
+        _person(_E.SPACE_TASK_LIST_UPDATED, "arrival", scope=_C),
+        _person(_E.SPACE_TASK_LIST_DELETED, "tombstone", scope=_C),
         _person(_E.SPACE_POLL_CREATED, "id"),
-        _person(_E.SPACE_POLL_VOTE_CAST, "lww"),
+        _person(_E.SPACE_POLL_VOTE_CAST, "lww", scope=_C),
         _person(_E.SPACE_POLL_CLOSED, "advance"),
-        _person(_E.SPACE_STICKY_CREATED, "id"),
-        _person(_E.SPACE_STICKY_UPDATED, "arrival"),
-        _person(_E.SPACE_STICKY_DELETED, "tombstone"),
+        _person(_E.SPACE_STICKY_CREATED, "id", scope=_C),
+        _person(_E.SPACE_STICKY_UPDATED, "arrival", scope=_C),
+        _person(_E.SPACE_STICKY_DELETED, "tombstone", scope=_C),
         # ── Calendar, schedules ──
-        _person(_E.SPACE_CALENDAR_EVENT_CREATED, "id"),
-        _person(_E.SPACE_CALENDAR_EVENT_UPDATED, "arrival"),
-        _person(_E.SPACE_CALENDAR_EVENT_DELETED, "tombstone"),
-        _person(_E.SPACE_RSVP_UPDATED, "arrival"),
-        _person(_E.SPACE_RSVP_DELETED, "arrival"),
+        _person(_E.SPACE_CALENDAR_EVENT_CREATED, "id", scope=_C),
+        _person(_E.SPACE_CALENDAR_EVENT_UPDATED, "arrival", scope=_C),
+        _person(_E.SPACE_CALENDAR_EVENT_DELETED, "tombstone", scope=_C),
+        _person(_E.SPACE_RSVP_UPDATED, "arrival", scope=_C),
+        _person(_E.SPACE_RSVP_DELETED, "arrival", scope=_C),
         _person(_E.SPACE_SCHEDULE_CREATED, "id"),
-        _person(_E.SPACE_SCHEDULE_RESPONSE_UPDATED, "arrival"),
+        _person(_E.SPACE_SCHEDULE_RESPONSE_UPDATED, "arrival", scope=_C),
         _person(_E.SPACE_SCHEDULE_FINALIZED, "advance"),
         # ── Gallery ──
-        _person(_E.SPACE_GALLERY_ALBUM_CREATED, "id"),
-        _person(_E.SPACE_GALLERY_ALBUM_UPDATED, "arrival"),
-        _person(_E.SPACE_GALLERY_ALBUM_DELETED, "tombstone"),
-        _person(_E.SPACE_GALLERY_ITEM_CREATED, "id"),
-        _person(_E.SPACE_GALLERY_ITEM_UPDATED, "arrival"),
-        _person(_E.SPACE_GALLERY_ITEM_DELETED, "tombstone"),
+        _person(_E.SPACE_GALLERY_ALBUM_CREATED, "id", scope=_C),
+        _person(_E.SPACE_GALLERY_ALBUM_UPDATED, "arrival", scope=_C),
+        _person(_E.SPACE_GALLERY_ALBUM_DELETED, "tombstone", scope=_C),
+        _person(_E.SPACE_GALLERY_ITEM_CREATED, "id", scope=_C),
+        _person(_E.SPACE_GALLERY_ITEM_UPDATED, "arrival", scope=_C),
+        _person(_E.SPACE_GALLERY_ITEM_DELETED, "tombstone", scope=_C),
         # ── Bazaar (listings and bids; threads and offers stay targeted) ──
         _person(_E.BAZAAR_LISTING_CREATED, "id"),
         _person(_E.BAZAAR_LISTING_UPDATED, "arrival"),
         _person(_E.BAZAAR_LISTING_FAQ_UPDATED, "arrival"),
-        _person(_E.BAZAAR_BID_PLACED, "id"),
+        _person(_E.BAZAAR_BID_PLACED, "id", scope=_C),
         _person(_E.BAZAAR_OFFER_ACCEPTED, "advance"),
         # ── Apps, zones, timetables ──
-        _person(_E.SPACE_APP_TABLE, "arrival"),
-        _person(_E.SPACE_ZONE_UPSERTED, "arrival"),
-        _person(_E.SPACE_ZONE_DELETED, "tombstone"),
-        _person(_E.SPACE_TIMETABLE_UPSERTED, "lww"),
-        _person(_E.SPACE_TIMETABLE_DELETED, "tombstone"),
+        _person(_E.SPACE_APP_TABLE, "arrival", scope=_C),
+        _person(_E.SPACE_ZONE_UPSERTED, "arrival", scope=_C),
+        _person(_E.SPACE_ZONE_DELETED, "tombstone", scope=_C),
+        _person(_E.SPACE_TIMETABLE_UPSERTED, "lww", scope=_C),
+        _person(_E.SPACE_TIMETABLE_DELETED, "tombstone", scope=_C),
         # ── Chat and location ──
-        _person(_E.SPACE_CHAT_MESSAGE_CREATED, "id", budget=BUDGET_CHAT),
-        _person(_E.SPACE_CHAT_MESSAGE_UPDATED, "arrival", budget=BUDGET_CHAT),
-        _person(_E.SPACE_CHAT_MESSAGE_DELETED, "tombstone", budget=BUDGET_CHAT),
-        _person(_E.SPACE_CHAT_REACTION, "arrival", budget=BUDGET_CHAT),
+        _person(_E.SPACE_CHAT_MESSAGE_CREATED, "id", budget=BUDGET_CHAT, scope=_C),
+        _person(_E.SPACE_CHAT_MESSAGE_UPDATED, "arrival", budget=BUDGET_CHAT, scope=_C),
+        _person(
+            _E.SPACE_CHAT_MESSAGE_DELETED, "tombstone", budget=BUDGET_CHAT, scope=_C
+        ),
+        _person(_E.SPACE_CHAT_REACTION, "arrival", budget=BUDGET_CHAT, scope=_C),
         _person(
             _E.SPACE_LOCATION_UPDATED,
             "latest",
+            scope=_C,
             budget=BUDGET_LOCATION,
             ring_class=RING_CLASS_EPHEMERAL,
         ),
@@ -336,9 +349,41 @@ class SealedItem:
     via_channel: bool = False
     legacy_window: bool = False
     notes: tuple[tuple[str, dict], ...] = ()
+    #: The item's own id (a channel item): its legacy twin in the window
+    #: names it to a v_97 member (:data:`LEGACY_TWIN_FIELD`), which then
+    #: applies one of the two (M10).
+    item_id: str = ""
 
     def wire(self) -> dict:
         return {"space_id": self.space_id, "epoch": self.epoch, "item": self.item}
+
+
+#: The replay-cache namespace of a claimed item: ``(origin, item_id)``.
+ITEM_REPLAY_PREFIX: str = "space-item:"
+
+#: v_97 (M10) — the payload field of the legacy event a v_97 member gets in
+#: the 14-day window beside a GFS space's item: the item's id. The receiver
+#: claims the item's replay key with it (the origin is the envelope's proven
+#: sender), so whichever of the two arrives second is a copy. Only to v_97
+#: members; stripped before any handler sees the payload.
+LEGACY_TWIN_FIELD: str = "_space_item_id"
+
+
+def item_replay_key(origin_instance_id: str, item_id: str) -> str:
+    """The replay-cache key of ``origin``'s item ``item_id`` — claimed by
+    the item's receiver and by its legacy twin alike."""
+    return f"{ITEM_REPLAY_PREFIX}{origin_instance_id}:{item_id}"
+
+
+def valid_item_id(value: object) -> str | None:
+    """An item id as an origin mints it (hex, ≤ 64 chars), else ``None``."""
+    if not isinstance(value, str) or not 0 < len(value) <= 64:
+        return None
+    try:
+        int(value, 16)
+    except ValueError:
+        return None
+    return value
 
 
 def item_spec(item_type: object) -> ItemSpec | None:

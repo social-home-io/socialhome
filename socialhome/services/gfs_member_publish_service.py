@@ -563,7 +563,7 @@ class GfsMemberPublishService:
             return None
         if sealed is None:
             return None
-        epoch, ct = sealed
+        epoch, ct, _item_id = sealed
         return SealedItem(space_id=space_id, epoch=epoch, item=ct)
 
     async def _channel_item(
@@ -593,7 +593,7 @@ class GfsMemberPublishService:
                 event_type.value,
             )
             return await self._unsent(space_id, event_type, author)
-        epoch, ct = sealed
+        epoch, ct, item_id = sealed
         spec = ITEM_SPECS[event_type.value]
         # A location "off" must outlive the pin it removes: kept like any
         # durable item (a household that fetches later still sees it) and
@@ -625,6 +625,7 @@ class GfsMemberPublishService:
             item=ct,
             via_channel=True,
             legacy_window=await self._in_legacy_window(space_id),
+            item_id=item_id,
             # Only a new message / item mentions anew (an edit would ring
             # the same people twice).
             notes=tuple(
@@ -661,7 +662,8 @@ class GfsMemberPublishService:
 
     async def _seal_event(
         self, space_id: str, event_type: FederationEventType, payload: dict
-    ) -> tuple[int, str] | None:
+    ) -> tuple[int, str, str] | None:
+        """``(epoch, ciphertext, item_id)`` or ``None``."""
         assert self._identity is not None
         instance_id, seed, pk = self._identity
         needed = required_scope(event_type.value)
@@ -700,7 +702,7 @@ class GfsMemberPublishService:
             except RuntimeError:
                 return None
             if sealed_epoch == epoch:
-                return epoch, ct
+                return epoch, ct, str(inner["item_id"])
         return None
 
     async def _in_legacy_window(self, space_id: str) -> bool:

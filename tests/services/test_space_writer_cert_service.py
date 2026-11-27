@@ -691,6 +691,26 @@ async def test_check_item_adds_freshness():
         required_scope="write",
         item_type="post",
     )
+    # M1 — an item its origin sent over the mesh: the cert still binds the
+    # epoch, freshness is not asked.
+    assert await svc.check_item(
+        space,
+        stale,
+        epoch=4,
+        author_pk=PEER_PK,
+        required_scope="write",
+        item_type="post",
+        require_fresh=False,
+    )
+    assert not await svc.check_item(
+        space,
+        "junk",
+        epoch=5,
+        author_pk=PEER_PK,
+        required_scope="write",
+        item_type="post",
+        require_fresh=False,
+    )
 
 
 async def test_peer_helpers():

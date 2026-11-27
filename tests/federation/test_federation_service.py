@@ -58,7 +58,7 @@ from socialhome.domain.media_chunking import (
     media_chunk_bytes,
 )
 from socialhome.domain.outbox import OutboxEntry
-from socialhome.domain.space_item import SealedItem
+from socialhome.domain.space_item import LEGACY_TWIN_FIELD, SealedItem
 from socialhome.federation import FederationService, routed_crypto
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation import media_framing as _mf
@@ -7693,6 +7693,27 @@ async def test_in_the_legacy_window_every_member_also_gets_the_event():
     fed = await _gfs_broadcast(sealed)
     ((_t, _p, kw),) = fed.calls
     assert kw["only_instances"] == ["a97", "b96", "c97"]
+
+
+async def test_in_the_legacy_window_a_v97_member_gets_the_items_id_to_dedupe():
+    """M10 — the event a v_97 member also gets in the window names the item
+    (so the receiver applies one of the two); a v_96 member's event is as
+    always, without the field."""
+    sealed = SealedItem(
+        space_id="sp",
+        epoch=3,
+        item="ct",
+        via_channel=True,
+        legacy_window=True,
+        item_id="ab" * 16,
+    )
+    fed = await _gfs_broadcast(sealed)
+    by_target = {tuple(kw["only_instances"]): payload for _t, payload, kw in fed.calls}
+    assert by_target[("b96",)] == {"space_id": "sp"}
+    assert by_target[("a97", "c97")] == {
+        "space_id": "sp",
+        LEGACY_TWIN_FIELD: "ab" * 16,
+    }
 
 
 async def test_mention_notes_go_to_v97_mentioned_households_only():

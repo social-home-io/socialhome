@@ -735,9 +735,12 @@ class SpaceWriterCertService:
         required_scope: str,
         item_type: str,
         space_pubkey_hex: str | None = None,
+        require_fresh: bool = True,
     ) -> bool:
         """:meth:`check_item_cert` plus epoch freshness (WARNING on a stale
-        epoch) — what every receiver of a cert-authorized item runs."""
+        epoch) — what every receiver of a cert-authorized item runs.
+        ``require_fresh=False`` skips the freshness check: an item its
+        proven origin sent itself over the mesh (M1)."""
         if not self.check_item_cert(
             space,
             raw,
@@ -748,7 +751,7 @@ class SpaceWriterCertService:
             space_pubkey_hex=space_pubkey_hex,
         ):
             return False
-        if not await self.epoch_is_fresh(space.id, epoch):
+        if require_fresh and not await self.epoch_is_fresh(space.id, epoch):
             log.warning(
                 "writer cert for space %s: epoch %d is no longer open here",
                 space.id,

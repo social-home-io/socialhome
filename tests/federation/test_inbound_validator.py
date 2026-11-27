@@ -21,9 +21,11 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space_item import LEGACY_TWIN_FIELD, item_replay_key
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
+    DROP_DEDUPED,
     INSTANCE_INBOUND_LIMIT,
     INSTANCE_INBOUND_WINDOW_S,
     INSTANCE_MEDIA_INBOUND_LIMIT,
@@ -51,6 +53,7 @@ from socialhome.federation.inbound_validator import (
     make_check_staged_half,
     make_check_timestamp,
     make_check_unpairing,
+    make_claim_item_twin,
     make_confirm_relay_approval,
     make_decrypt_and_parse,
     make_idempotency_check,
@@ -1295,6 +1298,9 @@ class _StubPipelineOwner:
 
     async def _notify_archived_write(self, event, space) -> None:
         return None
+
+    async def note_replay_id(self, msg_id: str) -> bool:
+        return False
 
     def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
         # The real composition, so a change to it is seen here.
@@ -2847,3 +2853,70 @@ async def test_instance_rate_refusal_takes_the_id_back_out_of_the_replay_cache()
     assert ctx.replay_undo is None
     again = _rate_ctx(inbox_id="inbox-1")
     await replay(again)  # not a replay: the id was forgotten
+
+
+# ── M10: an item's legacy twin in the 14-day window ─────────────────────
+
+
+class _Replay:
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    async def note(self, key: str) -> bool:
+        if key in self.seen:
+            return True
+        self.seen.add(key)
+        return False
+
+
+def _twin_event(payload: dict, *, event_type=FederationEventType.SPACE_TASK_CREATED):
+    return FederationEvent(
+        msg_id="m-legacy",
+        event_type=event_type,
+        from_instance="origin-a",
+        to_instance="me",
+        timestamp="t",
+        payload=payload,
+        space_id="sp",
+    )
+
+
+async def test_a_legacy_twin_claims_its_items_id_and_a_second_copy_drops():
+    replay = _Replay()
+    step = make_claim_item_twin(note_replay_id=replay.note)
+    ctx = InboundContext()
+    ctx.event = _twin_event({"space_id": "sp", LEGACY_TWIN_FIELD: "ab" * 16})
+    await step(ctx)
+    assert ctx.drop_reason is None
+    # The handler never sees the field.
+    assert LEGACY_TWIN_FIELD not in ctx.event.payload
+    # The item (same origin, same id) is then a copy — and the other way round.
+    assert replay.seen == {item_replay_key("origin-a", "ab" * 16)}
+    ctx2 = InboundContext()
+    ctx2.event = _twin_event({"space_id": "sp", LEGACY_TWIN_FIELD: "ab" * 16})
+    await step(ctx2)
+    assert ctx2.drop_reason == DROP_DEDUPED
+
+
+@pytest.mark.parametrize("value", [None, 7, "", "x" * 65, "not hex!", ["ab"]])
+async def test_a_bad_twin_field_is_stripped_and_claims_nothing(value):
+    replay = _Replay()
+    step = make_claim_item_twin(note_replay_id=replay.note)
+    ctx = InboundContext()
+    ctx.event = _twin_event({"space_id": "sp", LEGACY_TWIN_FIELD: value})
+    await step(ctx)
+    assert ctx.drop_reason is None
+    assert LEGACY_TWIN_FIELD not in ctx.event.payload
+    assert replay.seen == set()
+
+
+async def test_a_type_that_is_no_item_claims_nothing():
+    replay = _Replay()
+    step = make_claim_item_twin(note_replay_id=replay.note)
+    ctx = InboundContext()
+    ctx.event = _twin_event(
+        {LEGACY_TWIN_FIELD: "ab" * 16},
+        event_type=FederationEventType.SPACE_MEMBER_JOINED,
+    )
+    await step(ctx)
+    assert replay.seen == set()

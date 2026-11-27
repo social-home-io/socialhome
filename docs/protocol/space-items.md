@@ -128,7 +128,7 @@ One entry per item type (`domain/space_item.py`):
 | field | meaning |
 |---|---|
 | `event_type` | the federation event type the item replaces |
-| `scope` | writer-cert scope the receiver requires (`write` / `comment`) |
+| `scope` | writer-cert scope the receiver requires: `write` only for the post-shaped types (posts, and the poll, schedule and Bazaar listing that ride a post, with their authors' follow-ups) — a household holds `write` only where the `posts` access level lets its people post directly; `comment` for every other type, whose own feature's access level the receiver's handler judges exactly as for the legacy event (so a member under moderated posts still chats, votes, RSVPs and shares a pin in a GFS space) |
 | `ring_class` | `durable` (24 h in the ring) or `ephemeral` (15 min — live location) |
 | `idempotency` | the per-type stamp audit — how a copy is harmless: `id` (insert-once), `lww` (a stamp / version the handler compares: post and comment edits, post reactions, poll votes, pages, timetables), `tombstone` (a delete leaves a tombstone), `advance` (a state that only moves forward), `latest` (only the newest counts: a location pin), `arrival` (applied in arrival order — see below) |
 | `reader_as` | the v1 type a follower's `reader` cert is judged as (comments, own comment deletes, post reactions); none → a reader cert never carries it |
@@ -184,9 +184,12 @@ Both transports end in `SpacePublicInbound.handle_channel_item(space_id, epoch, 
    the channel's inbound budget (refused there, it is not taken and comes
    again on the next fetch), a `SPACE_ITEM` its envelope's — the origin's;
    the writer cert verifies
-   for this space, the item's epoch (fresh: newest or previous within the
-   grace), `author_pk` and the spec's scope; `ts` is no more than 300 s
-   ahead;
+   for this space, the item's epoch, `author_pk` and the spec's scope; a
+   channel item's epoch must be fresh (newest, or the previous one within
+   the grace) — a `SPACE_ITEM` its origin sent itself through the durable
+   per-household outbox may be older (the outbox can hold it past a rekey
+   while a member is offline; the cert still binds household and epoch, and
+   the roster still decides); `ts` is no more than 300 s ahead;
 4. a `FederationEvent(event_type, from_instance=origin, space_id, payload=body)`
    is built and run through **the same post-decrypt gates** a federation
    envelope gets (`FederationService.space_write_gates()`: ban, deprovisioned
@@ -346,10 +349,14 @@ content never waits. The budget only sets when an item is first due — the
 item waits for its slot in the durable queue, never in memory. In a GFS
 space a person sharing location has the pin republished every 15 min as a
 keepalive (owner F3), since the ring keeps a location item only 15 min
-(`ephemeral`). Each keepalive is rebuilt from what is true then — still a
-member, still sharing, location on, a live position, still inside a zone
-for `zone_only` — and otherwise the pin is forgotten and never repeated. A
-mesh space's households keep the last pin, so nothing repeats there.
+(`ephemeral`). Each pin goes again on its own schedule — 15 min after it
+last went, less up to the 1-minute tick so the ring never drops it first —
+so a household's pins stay spread the way they first went, never all at
+one tick (no random delay). Each keepalive is rebuilt from what is true
+then — still a member, still sharing, location on, a live position, the
+space not archived, still inside a zone for `zone_only` — and otherwise the
+pin is forgotten and never repeated. A mesh space's households keep the
+last pin, so nothing repeats there.
 
 ## GFS spaces: joining and switching
 
@@ -414,9 +421,24 @@ mesh space's households keep the last pin, so nothing repeats there.
   space has no GFS path.
 - **The 14-day window** (Q6 A). For 14 days after a space became a GFS space
   on this household, its items also go as legacy events to every member
-  household (receivers dedupe); afterwards only to households below v_97.
-  A v_97 household in a GFS space with no GFS connection shows a Connect
-  prompt.
+  household; afterwards only to households below v_97. A v_97 member's
+  legacy copy names the item (`_space_item_id`, inside the encrypted
+  payload): the receiver claims that item's replay key with it (the origin
+  is the envelope's proven sender, so nobody claims another household's
+  item) and applies whichever of the two comes first; the field is
+  stripped before any handler. A v_96 member's legacy event is unchanged.
+  A v_97 household in a GFS space with no GFS connection to one of its
+  GFSs gets the **Connect prompt** in the space (`GET /api/spaces/{id}`
+  `gfs_connect_needed`): one row per listed GFS it isn't on (or one row
+  pointing at Connections when none can be named), never dismissible;
+  "Connect" for a household admin (the Connections page's GFS flow), "Ask
+  a household admin" for anyone else. It goes once a connection carries
+  the space's channel.
+- **v_96 sockets.** A GFS marks the fan-out frame of an item a v_97
+  household published (it signed a `ring_class`) with `ring_class`; a
+  socket without `channel_ring` in its hello is not pushed such a frame —
+  its household gets that publisher's legacy event instead (it could only
+  drop the v2 item). A v_96 publisher's items reach it as before.
 - **Owner seat.** In a GFS space the owner household takes a seat like
   every member (it used to publish only).
 

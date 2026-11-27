@@ -16,6 +16,7 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_REMOVAL,
     GENERIC_ITEM_TYPES,
     ITEM_SIZE_BUCKETS,
+    ITEM_SPECS,
     ITEM_TYPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE,
     ITEM_TYPE_COMMENT_EDIT,
@@ -119,6 +120,37 @@ def test_the_two_inner_shapes_partition_the_supported_types():
 )
 def test_each_type_names_the_scope_it_needs(item_type, scope):
     assert required_scope(item_type) == scope
+
+
+#: M5 — the post-shaped v_97 types, whose authors the ``posts`` access level
+#: decides: the only ones a ``write`` cert must carry.
+_POST_SHAPED_V97 = {
+    "space_post_created",
+    "space_post_updated",
+    "space_post_deleted",
+    "space_poll_created",
+    "space_poll_closed",
+    "space_schedule_created",
+    "space_schedule_finalized",
+    "bazaar_listing_created",
+    "bazaar_listing_updated",
+    "bazaar_listing_faq_updated",
+    "bazaar_offer_accepted",
+}
+
+
+def test_only_post_shaped_items_need_a_write_cert():
+    """M5 — a member under moderated posts holds a ``comment`` cert: it
+    must still chat, vote, RSVP, share a pin and work on tasks in a GFS
+    space (each feature's own access level is the receiver's handler's to
+    judge, as for the legacy event)."""
+    for item_type, spec in ITEM_SPECS.items():
+        want = (
+            WRITER_SCOPE_WRITE
+            if item_type in _POST_SHAPED_V97
+            else WRITER_SCOPE_COMMENT
+        )
+        assert spec.scope == want, item_type
 
 
 def test_an_unknown_type_has_no_scope():

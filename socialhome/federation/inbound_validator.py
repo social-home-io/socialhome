@@ -81,6 +81,12 @@ from ..domain.pairing_events import (
     ENDS_PAIRING_EVENT_TYPES,
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
+from ..domain.space_item import (
+    ITEM_SPECS,
+    LEGACY_TWIN_FIELD,
+    item_replay_key,
+    valid_item_id,
+)
 from .host_equivalence import acts_as_host
 from .multi_recipient import (
     MULTI_TO_INSTANCE,
@@ -1271,6 +1277,34 @@ def make_idempotency_check(*, cache_holder) -> InboundStep:
             drop(ctx, DROP_DEDUPED)
 
     return idempotency_check
+
+
+def make_claim_item_twin(*, note_replay_id) -> InboundStep:
+    """v_97 (M10) — the legacy event a v_97 member gets in the 14-day window
+    beside a GFS space's item names the item (:data:`LEGACY_TWIN_FIELD`):
+    claim that item's replay key, so whichever of the two comes second is a
+    copy (dropped as deduped). The origin is the envelope's proven sender,
+    so nobody can claim another household's item. The field is stripped
+    whatever it holds: no handler ever sees it."""
+
+    async def claim_item_twin(ctx: InboundContext) -> None:
+        event = ctx.event
+        if event is None or not isinstance(event.payload, dict):
+            return
+        if LEGACY_TWIN_FIELD not in event.payload:
+            return
+        item_id = valid_item_id(event.payload.pop(LEGACY_TWIN_FIELD))
+        if item_id is None or event.event_type.value not in ITEM_SPECS:
+            return
+        if await note_replay_id(item_replay_key(event.from_instance, item_id)):
+            log.debug(
+                "inbound: %s from %s — its item came first; dropped",
+                event.event_type.value,
+                event.from_instance,
+            )
+            drop(ctx, DROP_DEDUPED)
+
+    return claim_item_twin
 
 
 def make_ban_check(*, federation_repo) -> InboundStep:
