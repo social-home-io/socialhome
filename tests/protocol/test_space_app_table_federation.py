@@ -92,7 +92,10 @@ def _queue(net, sender, to, event_type, payload):
     net.space_of[id(payload)] = SPACE
 
 
-async def test_nothing_of_a_table_reaches_followers_or_outsiders(net):
+async def test_a_follower_sees_the_card_never_the_play_and_outsiders_nothing(net):
+    """P10 (owner 2026-11-26): a follower household gets the table's card
+    like a member (it sees the tables) but never a session message (it
+    doesn't play); an outsider gets nothing."""
     h = _h(net)
     sid = await _table(net)
     await h["host"].home.groups.start(
@@ -103,10 +106,12 @@ async def test_nothing_of_a_table_reaches_followers_or_outsiders(net):
         app_id=APP, session_id=sid, actor_user_id=h["b"].uid("ben"), data="SECRET-77"
     )
     await net.flush()
-    for name in ("f", "x"):
-        to = h[name].instance
-        assert [p for _s, t, p in net.sent if t == to] == []
-        assert await h[name].home.group_repo.get(sid) is None
+    to_f = h["f"].instance
+    assert {net.types[id(p)] for _s, t, p in net.sent if t == to_f} <= {TABLE}
+    assert b"SECRET-77" not in orjson.dumps([p for _s, t, p in net.sent if t == to_f])
+    to_x = h["x"].instance
+    assert [p for _s, t, p in net.sent if t == to_x] == []
+    assert await h["x"].home.group_repo.get(sid) is None
     # Every envelope of the table rode the space (never a bare app event).
     assert {net.types[id(p)] for _s, _t, p in net.sent} <= {TABLE, SESSION}
     assert b"SECRET-77" in orjson.dumps([p for _s, _t, p in net.sent])
@@ -298,5 +303,7 @@ async def test_the_last_move_ends_a_space_table_finished_for_every_member(net):
         )
         (card,) = [t for t in got["tables"] if t["session_id"] == sid]
         assert (card["state"], card["end_reason"]) == ("closed", "finished")
-    for name in ("f", "x"):
-        assert await h[name].home.group_repo.get(sid) is None
+    # The follower household holds the card (P10) and hears it ended.
+    seen = await h["f"].home.group_repo.get(sid)
+    assert seen is not None and seen.state == "ended"
+    assert await h["x"].home.group_repo.get(sid) is None

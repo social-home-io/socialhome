@@ -104,7 +104,6 @@ from ..domain.file_hashes import (
     space_content_media_name,
 )
 from ..domain.media_constraints import is_safe_media_name
-from ..domain.space import WRITER_ROLES
 from ..federation.host_equivalence import acting_hosts
 from ..federation.sync.space.file_gate import (
     CatchUpFileGates,
@@ -452,10 +451,7 @@ class SpaceMediaWanted:
         that are not here (see the module docstring, "Without a view");
         the names added."""
         added: set[str] = set()
-        # A follower household fetches through its GFS (#1317, v_83).
-        if self._dir is None or not await holds_seat(
-            self._spaces, space_id, roles=WRITER_ROLES
-        ):
+        if self._dir is None or not await holds_seat(self._spaces, space_id):
             return added
         wall = self._utcnow()
         cutoff = (wall - timedelta(seconds=SWEEP_MAX_AGE_S)).strftime(_SQL_TIME)
@@ -513,8 +509,8 @@ class SpaceMediaWanted:
             for space_id, item_id, _created in rows:
                 if name in per_space.get(space_id, {}):
                     continue
-                if not await holds_seat(self._spaces, space_id, roles=WRITER_ROLES):
-                    continue  # a follower fetches through its GFS (v_83)
+                if not await holds_seat(self._spaces, space_id):
+                    continue  # nobody of ours is seated there
                 per_space.setdefault(space_id, {})[name] = item_id
                 added = True
             if not added:

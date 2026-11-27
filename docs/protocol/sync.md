@@ -317,10 +317,9 @@ reaches a helper. One incremental BEGIN per 30-min tick stays under the
 host's 5 / h per (household, space).
 
 Rights do not grow. A household that is not the space's roster authority
-answers only a household holding a writer (member) seat in its roster
-mirror (`SpaceWriterHouseholds.may_receive`, the §25.6 provider's gate for
-member-only data — a follower-only household gets nothing from a helper;
-the roster authority keeps its own gate, where a follower gets its subset),
+answers only a household holding a seat in its roster mirror — a
+follower's included (P10; `SpaceWriterHouseholds.may_receive` with
+`SEAT_ROLES`); a follower gets from a helper what a member gets,
 replays **only its own people's rows** (tombstones by its own people's
 deletes) — every receiver takes other people's rows only from the
 household acting as host (`_acts_as_host`) — and ships **only those rows'
@@ -447,7 +446,7 @@ with `waiting_to_send` — the space's content items still in our outbox,
 control traffic, never the `SPACE_MEDIA_BLOB` chunks of an item's files, and
 content queued for the mesh as `SPACE_ROUTED` is not counted; the payload is sealed, so on the host this includes the
 members' content it forwards) and, when the state or the waiting count
-changes, the local `space.sync_state` frame, members only — the outbox tells
+changes, the local `space.sync_state` frame, to every seat — the outbox tells
 the status when a space's rows are queued, delivered or dropped. Every
 trigger takes one recheck path per space: one at a time (frames in order),
 at most one frame per 2 s per space (fixed), never one per row. **Sync now** (`POST /api/spaces/{id}/sync`) sends the incremental
@@ -506,7 +505,7 @@ settings page learns of the limit on its own next press (or a reload).
 space's authority seed seals, lazily and at most every 15 minutes, a signed
 commitment to the space's state (a **page**: 256 bucket hashes under one
 root). It pushes each new page — `SPACE_SYNC_PAGE`, sealed under the
-content key — to every member household (never a follower), at most once
+content key — to every seated household (a follower's included, P10), at most once
 an hour per space (one multi upload per GFS for the GFS-reached ones); a
 member whose BEGIN `page` is older than the page a signer last pushed
 gets that page from the signer alone (a plain member relays it only in a

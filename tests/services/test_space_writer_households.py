@@ -24,7 +24,7 @@ class _Seats:
         return [iid for iid, role in self._seats.items() if role in roles]
 
 
-async def test_member_households_leave_out_followers_and_ourselves():
+async def test_writer_households_leave_out_followers_and_ourselves():
     seats = _Seats(
         {
             "house-a": "admin",
@@ -33,12 +33,15 @@ async def test_member_households_leave_out_followers_and_ourselves():
             "me": "member",
         }
     )
-    members = SpaceWriterHouseholds(seats, own_instance_id="me")
+    members = SpaceWriterHouseholds(seats, own_instance_id="me", roles=WRITER_ROLES)
     assert await members.households("sp") == {"house-a", "house-m"}
     assert "subscriber" not in seats.asked[0]
     assert await members.may_receive("sp", "house-m")
     assert not await members.may_receive("sp", "house-f")
     assert not await members.may_receive("sp", "me")
+    # P10: the default is every seat, a follower's included.
+    every = SpaceWriterHouseholds(seats, own_instance_id="me")
+    assert await every.households("sp") == {"house-a", "house-m", "house-f"}
 
 
 async def test_the_seat_set_counts_every_role_a_followers_included():

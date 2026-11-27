@@ -88,8 +88,10 @@ export function SpaceChatView({ spaceId, spaceName, canModerate, archived = fals
         allowAttachments={false}
         allowDelete
         canModerate={canModerate}
-        readOnly={archived}
-        readOnlyNote={t('space.chat.read_only_archived')}
+        readOnly={archived || chat?.can_post === false}
+        readOnlyNote={archived
+          ? t('space.chat.read_only_archived')
+          : t('space.chat.read_only_follower')}
         meta={meta}
         emptyNote={t('space.chat.empty', { space: spaceName })}
         logLabel={t('space.chat.log_aria', { space: spaceName })}
@@ -103,7 +105,7 @@ export function SpaceChatView({ spaceId, spaceName, canModerate, archived = fals
  * while the space page is open.
  *
  * - Fetched once the viewer may have it (``eligible``: the ``chat``
- *   feature on and a writer seat), again when that flips back on, on a
+ *   feature on and a seat — a follower's too), again when that flips back on, on a
  *   WS reconnect (frames missed while the socket was down) and on
  *   leaving the Chat view (the server's unread and watermark after what
  *   the open chat marked read).

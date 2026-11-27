@@ -111,7 +111,14 @@ function wire(opts: {
   const { role = 'member', features = {}, summary = SUMMARY, archived = false, solo = false } = opts
   apiGet.mockImplementation(async (url: string) => {
     if (url === '/api/spaces/s1') return { id: 's1', name: 'Choir', features, archived, my_role: role ?? undefined }
-    if (url === '/api/spaces/s1/members') return role ? [{ user_id: 'u1', role }, ...(solo ? [] : [{ user_id: 'u2', role: 'member' }])] : []
+    if (url === '/api/spaces/s1/members') {
+      if (!role) return []
+      const others = solo ? [] : [{ user_id: 'u2', role: 'member' }]
+      // A follower viewer: two members besides them, so the space isn't one
+      // member's (the chat needs a second member).
+      if (role === 'subscriber' && !solo) others.push({ user_id: 'u3', role: 'owner' })
+      return [{ user_id: 'u1', role }, ...others]
+    }
     if (url === '/api/spaces/s1/chat') {
       if (summary === 'fail') throw new Error('offline')
       return summary
@@ -237,13 +244,18 @@ describe('SpaceFeedPage — the Chat section', () => {
     expect(summaryCalls()).toBe(0)
   })
 
-  it('a follower gets no Chat and never asks for the chat', async () => {
-    wire({ role: 'subscriber' })
+  it('a follower reads the Chat read-only (P10: no composer)', async () => {
+    goTo('chat')
+    wire({ role: 'subscriber', summary: { ...SUMMARY, can_post: false } })
     const r = await renderPage()
-    await r.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/members'))
-    await new Promise(res => setTimeout(res, 50))
-    expect(chatLink(r)).toBeNull()
-    expect(summaryCalls()).toBe(0)
+    await r.waitFor(() => expect(summaryCalls()).toBe(1))
+    await r.waitFor(() => expect(chatLink(r)).not.toBeNull())
+    await r.waitFor(() => expect(r.getByTestId('conversation-view')).toBeTruthy())
+    await r.waitFor(() => expect(viewProps.at(-1)!.readOnly).toBe(true))
+    expect(viewProps.at(-1)).toMatchObject({
+      readOnly: true,
+      readOnlyNote: 'You follow this space: you can read its chat, but only members write here.',
+    })
   })
 
   it('a non-member (public space visitor) gets no Chat', async () => {

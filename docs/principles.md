@@ -1486,7 +1486,15 @@ peer-accept included ([`protocol/pairing.md`](./protocol/pairing.md#home-sharing
 Never via a GFS, never as a side effect of joining a space. The one other
 place a household's location travels is a join to a local community, below:
 coarse (~1 km), with the person's explicit consent, to that space's host only.
-Every other federation payload is location-free.
+A person may also share their live location in a space they hold a seat in,
+under their own per-space switch: off by default, offered only where the
+space's admins turned the map on, GPS rounded to 4 dp (or only the zone's
+name in `zone_only`). That pin reaches everyone seated in the space (members
+and followers alike; owner-approved 2026-11-27: a follower is a limited
+member but still a member). The switch says so, with the follower count. A
+follower never shares a pin of its own. The pin travels sealed to the seated
+households only: never readable by a GFS, never to a household with nobody
+seated. Every other federation payload is location-free.
 
 **The household home reaches a paired household only as an area
 (owner decision 2026-11-20).** What `share_home` sends is the centre of

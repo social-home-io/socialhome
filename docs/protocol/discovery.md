@@ -1577,14 +1577,12 @@ space-keyed seat before the space got a channel keeps it (and still applies
 a space-keyed item from a member below v_96) until P6/P7 remove that path.
 A third: the host's OWN items also reach a GFS-reached follower over
 federation (it holds the follower's space-session row) — one multi upload
-per GFS per host item; the same deferred lever. A non-host household does
-not try a GFS-reached follower at all in a space with a channel
-(`FederationService.channel_reached_followers`: no writer seat and no path
-of its own — no peer row, or only the lazy directory seat a card made (a
-`space_session` row without `relay_via`), and no mesh claim — never for the
-content key or the roster), nor queues it
-pictures it did not ask for, nor tries it in the mesh-announce sweep. A
-delegated admin's rotation reaches such a follower through the owner, which
+per GFS per host item; the same deferred lever. Since P10 (owner
+2026-11-27) every household tries a GFS-reached follower exactly like a
+GFS-reached member in the same position — the v_96
+`channel_reached_followers` skip is gone (live fan-out, pictures, the
+mesh-announce sweep): the cost is the cost those people would have as
+members. A delegated admin's rotation reaches such a follower through the owner, which
 re-sends the admin's signed rekey to the follower-only households it holds
 a space-session row for (`SpaceService.relay_admin_rekey_to_followers`,
 see [spaces.md](./spaces.md#keys-and-rotation)). The `channel_sent` mark is set when the author's publisher plans the send,

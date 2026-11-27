@@ -330,31 +330,31 @@ grant), and the routes meant for reaching a space you aren't in yet, each
 with its own uniform gate: the landing page (`GET /api/spaces/{id}`),
 `POST …/join-requests` and `POST` / `DELETE …/subscribe`. This also means
 the [space chat](./protocol/space-chat.md) answers a caller with no seat
-`403` (a follower, who has a seat, still gets its `404`).
+`403`.
 
-**Followers see less.** A follower reads the posts and is listed with the
-space's people, but takes no part in their whereabouts or governance (the
-chat refuses them too): `GET …/members` lists them
-the same seats as anyone in the space (members and followers, themselves
-included — v_96, followers are visible to everyone in the space) but without
-presence (`is_online`, `is_idle`, `last_seen_at`), `joined_at` or
-`location_share_enabled`; and `GET …/proposals`, `…/presence` (the map
-pins) and `…/zones` need a **member's** seat (owner, admin, moderator,
-member — `space_member_guard.require_member_seat`): a follower gets the
-outsider's `403 "Not a space member."`, and an unknown id the same. The
-live `space.proposal.updated`, `space_zone_changed`,
-`space.sync_state` (`{space_id, sync: {state, last_ok_at, waiting_to_send,
-may_be_missing, unsent_posts, page?}}`, the `sync` field of
-`GET /api/spaces/{id}`, sent only when it changes; `page` (v_95) —
+**Followers read like members (P10, owner 2026-11-26/27).** A follower is
+a limited member but still a member: every read answers it like a member —
+`GET …/members` (the same rows and fields, presence and `joined_at`
+included), `…/proposals`, `…/presence` (the map pins), `…/zones`,
+`…/games` (the tables, `can_edit_games` false), the space chat
+(`GET /api/spaces/{id}/chat` → `{enabled, can_post: false, …}`; its
+messages and `GET /api/conversations/{id}/members`), the `sync` status of
+`GET /api/spaces/{id}`, the list's `sync_may_be_missing`, `gfs_servers`,
+and `POST …/sync` ("Sync now"). Every live space frame
+(`space.proposal.updated`, `space_zone_changed`, `space.sync_state`,
+`space_location_updated`, the roster frames) reaches every seat.
+`space.sync_state` is `{space_id, sync: {state, last_ok_at,
+waiting_to_send, may_be_missing, unsent_posts, page?}}`, the `sync` field
+of `GET /api/spaces/{id}`, sent only when it changes; `page` (v_95) —
 `{seq, at, signer_role, match, missing, differing_buckets, conflict}` from
 the newest signed sync page held, absent without one, see
-[protocol/sync-pages.md](protocol/sync-pages.md#phase-2-as-built-v_95)) and
-`space_location_updated` frames skip followers likewise. The roster frames
-— `space.member.joined`, `space.member.left` and
-`space.member.profile_updated` — reach every seat, followers included, like
-the roster itself; only the "X joined" bell for a new follower rings the
-members only. `GET /api/spaces/{id}` carries `my_role` so a follower's SPA
-knows who it is before the roster loads.
+[protocol/sync-pages.md](protocol/sync-pages.md#phase-2-as-built-v_95).
+Only writes differ: a follower can't send to the chat (403), create or
+vote on a proposal, turn on its own location sharing (403
+`SUBSCRIBER_READ_ONLY`), or open / join / announce a game table; comments
+and reactions follow the space's follower switches. An unknown id answers
+the outsider's `403 "Not a space member."`. `GET /api/spaces/{id}` carries
+`my_role` so a follower's SPA knows who it is before the roster loads.
 
 **Space CRUD**
 

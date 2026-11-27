@@ -4684,8 +4684,8 @@ class NotificationService(ProtectionGateMixin):
         * a comment answering their comment / on their post (D6) →
           ``comment_replied`` / ``post_replied`` with a push, at ``all`` and
           ``mentions`` alike.
-        * ``@here`` → ``space_here`` with a push, members only — never a
-          follower (subscriber).
+        * ``@here`` → ``space_here`` with a push, to every seat — a
+          follower's included (P10).
         * otherwise the generic row (``generic_type``) **in the app only**,
           no push: at ``all``, or — for a comment — at ``mentions`` when they
           commented on that post too ("also commented").
@@ -4783,7 +4783,7 @@ class NotificationService(ProtectionGateMixin):
                 ntype, key, fallback = "space_mention", mention_key, mention_fallback
             elif reply is not None:
                 ntype, key, fallback = reply
-            elif here and member.role in WRITER_ROLES:
+            elif here:
                 ntype, key, fallback = (
                     "space_here",
                     "notification.space.here",
@@ -5527,14 +5527,10 @@ class NotificationService(ProtectionGateMixin):
             return
         members = await self._space_members(event.space_id)
         blocked = await self._withheld_from(event.user_id)
-        # A follower joining is news to the members only: followers see
-        # each other in the roster (D3, v_96), but a bell for every new
-        # follower would be noise to the other followers.
-        followers_too = event.role in WRITER_ROLES
+        # Every seat hears it alike, a follower's too (P10: no follower
+        # subset); the level (in-app at "Everything") keeps it quiet.
         for member in members:
             if member.user_id == event.user_id:
-                continue
-            if not followers_too and member.role not in WRITER_ROLES:
                 continue
             if member.user_id in blocked:
                 continue

@@ -12,7 +12,7 @@
   BEGIN never waits for it.
 * **Deliver (push; owner decision 2026-11-22).** A new page is pushed as
   ``SPACE_SYNC_PAGE`` (the page and its full vector, sealed under the space
-  content key) to every member household holding a writer seat, at most
+  content key) to every seated household (a follower's included, P10), at most
   once an hour per space (a seal within the hour waits for the hour mark;
   the scheduler's tick pushes the newest page then). A member whose BEGIN
   names an older page than the one last pushed gets the same event from
@@ -1367,7 +1367,7 @@ class SyncPageService:
                 await self._push(space_id)
 
     async def _push(self, space_id: str) -> None:
-        """Push the page sealed here to every writer household. Fail-soft."""
+        """Push the page sealed here to every seated household. Fail-soft."""
         self._push_pending.discard(space_id)
         if self._sender is None or self._seated is None:
             return
@@ -2305,7 +2305,8 @@ class SyncPageService:
 
     async def _fetch_round(self, space_id: str) -> None:
         """One round of asks: the member households at v_95 (never a host,
-        never us, never a follower), sorted and rotated from a stable
+        never us, never a follower: a deliverer serves others; a follower
+        household fetches like a member, P10), sorted and rotated from a stable
         per-household offset plus one step per round, at most
         :data:`MAX_FETCH_ASKS`, one at a time while no host answers and a
         bucket is still to fetch. One ask in flight per space."""

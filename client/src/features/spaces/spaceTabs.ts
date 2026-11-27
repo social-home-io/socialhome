@@ -81,15 +81,16 @@ export interface SpaceTabFeatures {
  *  yet): the games can't be read, so no Games. */
 export interface SectionViewer {
   chat: boolean
-  follower: boolean
   choosesGames?: boolean
   global?: boolean
-  writer?: boolean
+  /** The viewer's seat is known (any role — a follower reads everything a
+   *  member does, P10); ``false`` while the role loads. */
+  seated?: boolean
 }
 
 /** Does the Games section show? */
 export function gamesSectionShown(f: SpaceTabFeatures | undefined, viewer: SectionViewer): boolean {
-  if (viewer.follower || viewer.global || viewer.writer === false) return false
+  if (viewer.global || viewer.seated === false) return false
   return (f?.allowed_apps?.length ?? 0) > 0 || viewer.choosesGames === true
 }
 
@@ -107,7 +108,7 @@ export function visibleSpaceSections(
     gallery: f?.gallery ?? true,
     stickies: f?.stickies ?? true,
     bazaar: f?.bazaar ?? true,
-    map: !!f?.location && !viewer.follower,
+    map: !!f?.location,
     timetable: !!f?.timetable,
   }
   return SECTION_ORDER.filter((s) => on[s])

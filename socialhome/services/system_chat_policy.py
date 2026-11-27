@@ -40,6 +40,7 @@ from ..domain.space import (
     Space,
     SpaceArchivedError,
     SpacePermissionError,
+    SpaceRole,
 )
 from ..domain.user import User
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
@@ -57,6 +58,9 @@ HOUSEHOLD_CHAT_SECTION = "household_chat"
 SPACE_CHAT_SECTION = "space:chat"
 
 _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
+#: Every known seat role — a follower's included (P10); an unknown role
+#: (a newer peer's) stays out.
+_SEAT_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in SpaceRole)
 _CONTENT_ROLE_VALUES: frozenset[str] = frozenset(
     r.value for r in CONTENT_AUTHORITY_ROLES
 )
@@ -131,9 +135,10 @@ class SpaceChatAccess:
     moderator) may delete anyone's message (:meth:`may_moderate`).
 
     The members on other households come from the space roster
-    (``space_remote_members``, :meth:`remote_seats`) — never a follower,
-    a banned or a removed seat — so the composer can @-mention them and
-    their messages carry their names.
+    (``space_remote_members``, :meth:`remote_seats`) — every seat, a
+    follower's included (P10: it reads the chat), never a banned or a
+    removed seat — so the composer can @-mention them and their messages
+    carry their names.
     """
 
     __slots__ = ("_remote_members", "_spaces")
@@ -184,11 +189,11 @@ class SpaceChatAccess:
         return role in _CONTENT_ROLE_VALUES
 
     async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
-        """The space's writers on other households, seat-shaped.
+        """The space's seats on other households, seat-shaped — a
+        follower's included (P10: it reads the chat and may be mentioned).
 
-        Only writer roles are kept (an allow-list — a follower, or any role
-        added later, stays out); banned and removed (tombstoned) seats are
-        left out, as is everything while the space is unknown, dissolved
+        A role this household doesn't know stays out (an allow-list);
+        banned and removed (tombstoned) seats are left out, as is everything while the space is unknown, dissolved
         or has chat off. ``remote_username`` is always empty: the roster
         carries no login, so consumers look the person up by ``user_id``
         (``remote_users``), and the roster's ``display_name`` names them
@@ -205,7 +210,7 @@ class SpaceChatAccess:
         for seat in await self._remote_members.list_for_space(space.id):
             if seat.tombstoned or seat.user_id in seen or seat.user_id in banned:
                 continue
-            if seat.role not in _WRITER_ROLE_VALUES:
+            if seat.role not in _SEAT_ROLE_VALUES:
                 continue
             seen.add(seat.user_id)
             out.append(

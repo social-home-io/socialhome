@@ -2227,6 +2227,19 @@ async def test_here_notifies_all_and_mentions_levels_not_muted_or_author(stack):
     assert await _here_types(stack, u["anna"]) == []  # author
 
 
+async def test_here_reaches_a_follower_too(stack):
+    """P10 (owner 2026-11-27): ``@here`` pages every seat — a follower's
+    included."""
+    space_svc, space, u = await _here_space(stack)
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id, user_id=u["dan"].user_id, role="subscriber", joined_at=""
+        )
+    )
+    await _post(space_svc, space, u["anna"], "@here dinner is ready")
+    assert await _here_types(stack, u["dan"]) == ["space_here"]
+
+
 async def test_here_and_direct_mention_is_one_bell(stack):
     """A member both @-mentioned and covered by @here gets the direct
     mention only — never two bells for one post."""
@@ -3092,9 +3105,9 @@ async def test_automatic_household_seat_sends_no_joined_bell(stack):
     assert await _member_joined_bells(stack, anna) == []
 
 
-async def test_a_follower_joining_rings_no_follower(stack):
-    """Followers see the members, never each other (owner decision 13): a
-    new follower's "X joined" reaches the space's members only."""
+async def test_a_follower_joining_rings_every_seat(stack):
+    """P10 (owner 2026-11-27): no follower subset — a new follower's "X
+    joined" reaches every seat at "Everything", followers included."""
     anna = await stack.provision_user("anna")
     fern = await stack.provision_user("fern")
     gus = await stack.provision_user("gus")
@@ -3114,16 +3127,16 @@ async def test_a_follower_joining_rings_no_follower(stack):
     await stack.bus.publish(
         SpaceMemberJoined(space_id=space.id, user_id=gus.user_id, role="subscriber")
     )
-    assert [n.title for n in await _member_joined_bells(stack, anna)] == [
-        "gus joined Garden"
-    ]
-    assert await _member_joined_bells(stack, fern) == []
+    for who in (anna, fern):
+        assert [n.title for n in await _member_joined_bells(stack, who)] == [
+            "gus joined Garden"
+        ]
 
 
-async def test_a_member_joining_reaches_a_follower_only_at_everything(stack):
-    """A follower's reduced roster shows the members, so a new member is
-    news to them too — in the app, and only for a follower who chose
-    "Everything" (D5: following defaults to "Replies and mentions")."""
+async def test_a_member_joining_reaches_a_follower_like_a_member(stack):
+    """P10: a follower's level defaults like a member's ("Everything" in a
+    private space), so a new member is news to them at once; at "Replies
+    and mentions" it isn't."""
     await stack.provision_user("anna")
     fern = await stack.provision_user("fern")
     bob = await stack.provision_user("bob")
@@ -3143,16 +3156,16 @@ async def test_a_member_joining_reaches_a_follower_only_at_everything(stack):
     await stack.bus.publish(
         SpaceMemberJoined(space_id=space.id, user_id=bob.user_id, role="member")
     )
-    assert await _member_joined_bells(stack, fern) == []
+    assert [n.title for n in await _member_joined_bells(stack, fern)] == [
+        "bob joined Garden"
+    ]
     await stack.notif_repo.set_space_notif_level(
-        user_id=fern.user_id, space_id=space.id, level="all"
+        user_id=fern.user_id, space_id=space.id, level="mentions"
     )
     await stack.bus.publish(
         SpaceMemberJoined(space_id=space.id, user_id=bob.user_id, role="member")
     )
-    assert [n.title for n in await _member_joined_bells(stack, fern)] == [
-        "bob joined Garden"
-    ]
+    assert len(await _member_joined_bells(stack, fern)) == 1
 
 
 # ─── Web Push: one push per bell, content-free titles, collapse tag ────────

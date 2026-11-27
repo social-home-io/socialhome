@@ -8,6 +8,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+import pytest
+
 from socialhome.domain.federation import InstanceSource
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.file_hashes import (
@@ -229,7 +231,7 @@ class _Space:
 
 class _Spaces:
     """The reader's own channel id of a private space, and its seat: a
-    follower household by default (v_92: only a follower asks its GFS)."""
+    follower household by default (P10: it fetches like a member)."""
 
     def __init__(self, channel_id: str | None = CHANNEL_ID, *, member: bool = False):
         self.channel_id = channel_id
@@ -1179,16 +1181,17 @@ async def test_a_view_that_misses_asks_once_and_gets_the_bytes(tmp_path):
     assert (loc.item_id, loc.origin, loc.filename) == (ITEM, ORIGIN, "a.webp")
 
 
+@pytest.mark.parametrize("member", [True, False])
 async def test_a_member_household_never_asks_its_gfs_for_a_content_named_file(
-    tmp_path,
+    tmp_path, member
 ):
-    """v_92: a household holding a member seat in a space whose host is at
-    v_92 asks its host or a helper with ``SPACE_MEDIA_WANTED`` for an
+    """v_92: a household holding a seat — a follower's too (P10) — in a
+    space whose host is at v_92 asks its host or a helper with ``SPACE_MEDIA_WANTED`` for an
     ``sc-`` file — never its GFS's on-demand path."""
     data = b"x"
     blob = _blob("a.webp", data)
     gfs = _OnDemandGfs({}, served={_addr(blob): blob})
-    f = _fetcher(tmp_path, gfs, member=True)
+    f = _fetcher(tmp_path, gfs, member=member)
     await _recv_hashed(f, _wire("a.webp", blob), data)
     assert await f.ensure_local(_sc("a.webp", data)) is False
     assert gfs.wanted == []
@@ -1385,7 +1388,8 @@ async def test_a_wanted_content_named_file_is_verified_too(tmp_path, caplog):
     data = b"the real picture"
     wrong = _blob("a.webp", b"another picture")
     gfs = _OnDemandGfs({}, served={_addr(wrong): wrong})
-    f = _fetcher(tmp_path, gfs)
+    # A host below v_92 answers no SPACE_MEDIA_WANTED: the GFS is asked.
+    f = _fetcher(tmp_path, gfs, host_version=V92 - 1)
     await _recv_hashed(f, _wire("a.webp", wrong), data)
     with caplog.at_level("WARNING"):
         assert await f.ensure_local(_sc("a.webp", data)) is False

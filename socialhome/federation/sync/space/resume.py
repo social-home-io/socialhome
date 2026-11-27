@@ -284,11 +284,11 @@ class SpaceSyncResumeProvider(FileHashesMixin):
     ) -> None:
         """Wire whose rows a replay carries, and to whom (v_92): the roster
         authority (``roster_authority(space_id)``) replays every row to any
-        household of the space (a follower gets its subset there); any other
+        household of the space (a follower gets what a member gets, P10); any other
         household — a trusted helper asked while the host is offline —
         replays only its own people's rows (``own_members(space_id)``) and
-        their files, and only to a household holding a writer seat
-        (``member_gate(space_id, household)``,
+        their files, and only to a household holding a seat — a follower's
+        included (``member_gate(space_id, household)``,
         ``SpaceWriterHouseholds.may_receive``)."""
         self._roster_authority = roster_authority
         self._own_members = own_members

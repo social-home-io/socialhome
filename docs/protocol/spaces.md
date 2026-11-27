@@ -339,8 +339,8 @@ member card, where we hold one our roster lets us use
 
 `SPACE_MEMBER_ROLE_CHANGED` (v_8+), `SPACE_REMOTE_ADMIN_KICK` (v_9+),
 `SPACE_REMOTE_ADMIN_ACTION` (v_15+), `SPACE_ADMIN_PROPOSAL_UPDATED`
-(v_16+; mirrored onto **member** households only — never a follower-only
-one), the `moderator` role (v_41). Role propagation + remote admins
+(v_16+; mirrored onto every seated household — a follower-only one too,
+P10: followers read the proposals, only admins create and vote), the `moderator` role (v_41). Role propagation + remote admins
 running mutations on a space
 hosted elsewhere + multi-admin approval of critical actions. See
 "Cross-household admin promotion / kick / actions" and "Multi-admin
@@ -632,21 +632,13 @@ member seat). Cost: one roster gossip per step up, like a promotion.
 - **Members without a usable seat catch up from the host** (as for private
   channels): a household not connected to a channel server, or below v_96,
   gets the others' items over federation and the §25.6 catch-up when the
-  host is back. A GFS-reached follower is reached only through its own
-  channel seat (its card in the directory is only its mailbox address: a
-  member's lazy seat from it is no fan-out path), or by the host, which
-  holds its space-session row from the follow: in a space with a channel,
-  `broadcast_to_space_members` and the picture queue skip a follower-only
-  household they hold no path of their own for (no peer row or only that
-  directory seat, no mesh claim), instead of a mesh
-  route discovery per event (N × M at 10 000 followers) — never for the
-  content key or the roster events, and a member household never. The
-  mesh-announce sweep (`SpaceSyncScheduler._tick_mesh_announce`) skips
-  exactly the same households (one rule with the broadcast skip): before,
-  it tried each such follower 3 times and then every 8th sweep for the
-  life of the process — at 10 000 GFS followers ≈ 10 000 mesh route
-  discoveries per space at start and ≈ 1 250 per 30-minute sweep after;
-  now 0. A delegated admin's rekey reaches them through the owner (Keys
+  host is back. A GFS-reached follower is reached exactly like a
+  GFS-reached member in the same position (P10, owner 2026-11-27: no
+  follower-specific delivery rule; the v_96 `channel_reached_followers`
+  skip in `broadcast_to_space_members`, the picture queue and the
+  mesh-announce sweep is gone) — the cost is the cost those people would
+  have as members (see the PR's math). A delegated admin's rekey also
+  reaches them through the owner (Keys
   and rotation, above). After a restart, before the channel is
   re-registered in this process (the GFS unreachable), the owner's grants
   name the chosen capable servers (`GfsChannelService._grant_gfs_ids`, the
@@ -1884,9 +1876,27 @@ same or a paired household, else a listing thread whose messages
 (`BAZAAR_THREAD_MESSAGE`) go to the other person's household only, over the
 space's own transport. See [`bazaar.md`](./bazaar.md#ask-the-seller-v_74).
 
+## Followers read like members (P10, owner 2026-11-26/27)
+
+"A follower is a limited member but still a member." A follower seat reads,
+receives and syncs everything a member seat does, on the same paths: posts
+and comments, the chat (read-only, `can_post: false`), zones, the map pins
+and live location shares, proposals, game-table cards, the roster with the
+same fields (presence included), sync pages (pushed like a member's, one
+checksum), the sync status, "Sync now", and media. Every read audience is
+`SpaceWriterHouseholds(roles=SEAT_ROLES)` and the receiving half
+`holds_seat` (any seat); there is no follower-specific delivery rule.
+The only differences are writes: no chat send, no proposal create / vote,
+no location share of its own, no game table open / join / announce, and
+the existing comment / react switches. A follower household is not asked
+to deliver verified-fetch rows (it fetches from member households like a
+member). People's live location shared in a space reaches its followers
+too — a principle change, owner-approved 2026-11-27
+([principles](../principles.md#peoples-locations-are-never-shared-by-design)).
+
 ## Chat (on by default)
 
-`SpaceFeatures.chat` (column `spaces.feature_chat`, default **on** in every existing and new space, federated in `space_meta.features.chat`, an owner or admin turns it off) gives the space a chat next to its feed — its writers only, never a follower. Each household keeps its own copy (a system conversation); messages travel as `SPACE_CHAT_*` (v_55) to the households holding a writer seat, so a follower-only household receives nothing. Full flow, authorization table and catch-up: [`space-chat.md`](./space-chat.md).
+`SpaceFeatures.chat` (column `spaces.feature_chat`, default **on** in every existing and new space, federated in `space_meta.features.chat`, an owner or admin turns it off) gives the space a chat next to its feed — every seat reads it, its writers post (a follower reads, never writes, P10). Each household keeps its own copy (a system conversation); messages travel as `SPACE_CHAT_*` (v_55) to every household holding a seat, a follower-only one included. Full flow, authorization table and catch-up: [`space-chat.md`](./space-chat.md).
 
 ## Games (opt-in, v_77)
 
@@ -1898,7 +1908,8 @@ D9: the one setting a moderator changes); a remote moderator's edit is
 forwarded to the host like an admin's and may carry nothing else. Members
 with a writing seat open game tables of the listed apps and join each
 other's — households that aren't paired included — over the space's own
-transport; followers never see one, and global spaces have no games. Full
+transport; followers see the tables but never open or join one (P10),
+and global spaces have no games. Full
 flow, authorization and cost: [`app-groups.md`](./app-groups.md#space-tables-v_77).
 
 ## Timetable tab (opt-in)

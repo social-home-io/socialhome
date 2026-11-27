@@ -934,8 +934,9 @@ class SpaceAuthorityRotationService:
         seats = await self._remote_members.list_for_instance(
             space_id, sender, include_tombstoned=False
         )
-        if not any(r.role != SpaceRole.SUBSCRIBER for r in seats):
-            return  # no writer seat: nothing it holds can be owed
+        if not seats:
+            return  # no seat: nothing it holds can be owed (a follower's
+            # seat counts — P10, it heals like a member's)
         ceiling = int(time.time()) + MAX_ECHO_EPOCH_SKEW_S
         if max(parsed) > ceiling:
             log.warning(

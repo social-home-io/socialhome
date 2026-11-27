@@ -711,6 +711,24 @@ async def test_behind_member_gets_its_bundle_resent_once_per_interval(env):
     assert len(_sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)) == 1
 
 
+async def test_a_behind_follower_household_gets_its_bundle_resent_too(env):
+    """P10 (owner 2026-11-27): a follower-only household heals like a
+    member's — its echo gets the bundle re-sent (the old "no writer seat"
+    cut is gone)."""
+    await env.remote.add(
+        space_id=SPACE,
+        instance_id="v44",
+        user_id="u-v44",
+        user_pk=None,
+        display_name=None,
+        role="subscriber",
+    )
+    epoch = await env.svc.rotate(SPACE)
+    env.fed.sent.clear()
+    await _begin(env, echo={"key_epoch": epoch, "baseline_epoch": 0})
+    assert len(_sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)) == 1
+
+
 async def test_caught_up_member_gets_nothing(env):
     epoch = await env.svc.rotate(SPACE)
     env.fed.sent.clear()

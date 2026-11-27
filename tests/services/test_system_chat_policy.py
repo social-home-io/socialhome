@@ -339,10 +339,12 @@ def remote_env():
     return spaces, policy
 
 
-async def test_space_remote_seats_are_the_writers_on_other_households(remote_env):
+async def test_space_remote_seats_are_every_known_seat_on_other_households(remote_env):
+    """P10: a follower's seat is in the chat's roster too (it reads, and
+    may be mentioned); an unknown role stays out."""
     _spaces, policy = remote_env
     seats = await policy.remote_seats(_chat(SystemChatScope.SPACE))
-    assert [s.user_id for s in seats] == ["r-member", "r-admin"]
+    assert [s.user_id for s in seats] == ["r-member", "r-admin", "r-follower"]
     first = seats[0]
     assert first.conversation_id == "hh"
     assert first.instance_id == "peer-b"

@@ -91,7 +91,6 @@ from ..domain.file_hashes import (
 )
 from ..domain.gfs_space_media import SCOPE_CHANNEL, space_media_address
 from ..domain.media_constraints import is_gfs_space_media_name, is_reserved_media_name
-from ..domain.space import WRITER_ROLES
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
     MAX_PAGE_FILES,
@@ -676,10 +675,9 @@ class SpaceMediaGfsFetcher:
         return outcome
 
     async def _asks_its_gfs(self, ref: SpaceMediaRef) -> bool:
-        """v_83 on-demand is a FOLLOWER's path (v_92, #1317 — a transport
-        choice, not a read right: a GFS-reached follower may have no path to
-        a helper, and the GFS cache serves followers; P10 keeps it): a
-        member household asks its host or a helper with
+        """v_83 on-demand is the path of a household with no seat in the
+        space (v_92): a seated household — a follower's included (P10: it
+        syncs like a member) — asks its host or a helper with
         ``SPACE_MEDIA_WANTED``
         (:class:`~.space_media_wanted.SpaceMediaWanted`) instead — for an
         ``sc-`` content name only, the one name that request carries. A
@@ -690,7 +688,7 @@ class SpaceMediaGfsFetcher:
         if not is_space_content_media_name(ref.local_name):
             return True
         space_id = ref.space_id
-        if not await holds_seat(self._spaces, space_id, roles=WRITER_ROLES):
+        if not await holds_seat(self._spaces, space_id):
             return True
         space = await self._spaces.get(space_id)
         host = space.owner_instance_id if space is not None else ""

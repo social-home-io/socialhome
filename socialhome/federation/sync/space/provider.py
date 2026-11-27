@@ -1084,8 +1084,8 @@ class SpaceSyncService:
         record_limit: int | None,
     ) -> AsyncIterator[dict[str, Any]]:
         """``__listing__`` chunks for the ``buckets`` the BEGIN named (v_95,
-        sync pages): only to a member household (a writer seat); the page
-        service gates on its version. Nothing when none were asked.
+        sync pages): to any seated household, a follower's included (P10);
+        the page service gates on its version. Nothing when none were asked.
 
         Phase 3 (``rows: true`` — a verified fetch, which any member
         household may be asked): the listings of the buckets this household

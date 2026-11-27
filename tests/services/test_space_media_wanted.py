@@ -119,7 +119,8 @@ class _Spaces:
         return ["u-me"]
 
     async def list_members(self, space_id):
-        return [_Seat("u-me", self.role)]
+        # ``role=None``: nobody of ours is seated there.
+        return [] if self.role is None else [_Seat("u-me", self.role)]
 
     async def list_member_instances(self, space_id):
         return sorted(self.members)
@@ -315,15 +316,15 @@ async def test_a_name_without_a_space_row_is_not_left_on_cooldown():
     assert [_names(s) for s in fed.sent] == [[a]]
 
 
-async def test_a_name_a_follower_household_skipped_is_not_left_on_cooldown():
+async def test_a_name_a_household_with_no_seat_skipped_is_not_left_on_cooldown():
     a = _sc("a")
-    spaces = _Spaces(role=SpaceRole.SUBSCRIBER)
+    spaces = _Spaces(role=None)
     fed = _Fed({HOST: V92})
     w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), spaces=spaces, fed=fed)
     w.schedule(a)
     await w.drain()
-    assert fed.sent == []  # a follower keeps the GFS on-demand path (#1317)
-    spaces.role = SpaceRole.MEMBER  # joined as a member since
+    assert fed.sent == []  # nobody seated: nothing to ask for
+    spaces.role = SpaceRole.SUBSCRIBER  # followed since (P10: asks like a member)
     w.schedule(a)
     await w.drain()
     assert len(fed.sent) == 1
@@ -1115,13 +1116,13 @@ async def test_a_file_read_from_a_gfs_media_cache_is_not_asked_for(tmp_path):
     assert [_names(s) for s in fed.sent] == [[b]]
 
 
-async def test_a_follower_household_checks_nothing(tmp_path):
+async def test_a_household_with_no_seat_checks_nothing(tmp_path):
     refs = _Refs()
     refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-x", [_sc("a")])]}
     fed = _Fed({HOST: V92})
     w = _wanted(
         refs=refs,
-        spaces=_Spaces(role=SpaceRole.SUBSCRIBER),
+        spaces=_Spaces(role=None),
         fed=fed,
         media_dir=tmp_path,
     )

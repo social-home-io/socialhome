@@ -13,7 +13,7 @@ for the callers that pick writers on purpose.
 
 from __future__ import annotations
 
-from ..domain.space import WRITER_ROLES, SpaceRole
+from ..domain.space import SpaceRole
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 
@@ -23,8 +23,8 @@ SEAT_ROLES: frozenset[SpaceRole] = frozenset(SpaceRole)
 
 class SpaceWriterHouseholds:
     """The households of a space holding at least one live seat of
-    *roles* (writer seats by default; ``SEAT_ROLES`` — every seat, a
-    follower's included — for every read audience since P10), by this
+    *roles* (every seat by default — a follower's included, the read
+    audience since P10; ``WRITER_ROLES`` narrows it to writers), by this
     household's roster mirror. A household with no live roster row yet is
     left out — fail closed; catch-up fills it in later.
     """
@@ -36,21 +36,21 @@ class SpaceWriterHouseholds:
         remote_member_repo: AbstractSpaceRemoteMemberRepo,
         *,
         own_instance_id: str,
-        roles: frozenset[SpaceRole] = WRITER_ROLES,
+        roles: frozenset[SpaceRole] = SEAT_ROLES,
     ) -> None:
         self._seats = remote_member_repo
         self._own_instance_id = own_instance_id
         self._roles = frozenset(r.value for r in roles)
 
     async def households(self, space_id: str) -> frozenset[str]:
-        """Every other household holding a live seat of our roles (writer
-        seats by default) in ``space_id``."""
+        """Every other household holding a live seat of our roles (any seat
+        by default, P10) in ``space_id``."""
         ids = await self._seats.list_instances_with_roles(space_id, self._roles)
         return frozenset(i for i in ids if i and i != self._own_instance_id)
 
     async def may_receive(self, space_id: str, instance_id: str) -> bool:
-        """Whether household ``instance_id`` holds a seat of our roles (a
-        member's seat by default) in ``space_id``."""
+        """Whether household ``instance_id`` holds a seat of our roles (any
+        seat by default) in ``space_id``."""
         return instance_id in await self.households(space_id)
 
 

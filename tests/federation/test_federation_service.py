@@ -7218,77 +7218,26 @@ async def _fan_out(monkeypatch, *, channel: bool, event_type) -> list[str]:
     return sorted(tried)
 
 
-async def test_fan_out_skips_a_follower_it_cannot_address(monkeypatch):
-    """v_96 — in a space with a channel, a follower household we hold no
-    row for and that never claimed a version over the mesh (it followed
-    through a GFS) gets no per-event mesh route discovery: it is reached
-    through its channel seat or by the host. A member household in the same
-    position is still tried, and a follower we can address is too."""
-    tried = await _fan_out(
-        monkeypatch, channel=True, event_type=FederationEventType.SPACE_POST_CREATED
-    )
-    assert tried == ["follower-mesh", "member-mesh"]
-
-
+@pytest.mark.parametrize("channel", [True, False])
 @pytest.mark.parametrize(
-    ("channel", "event_type"),
+    "event_type",
     [
-        (False, FederationEventType.SPACE_POST_CREATED),
-        (True, FederationEventType.SPACE_KEY_EXCHANGE_REKEY),
-        (True, FederationEventType.SPACE_MEMBER_JOINED),
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        FederationEventType.SPACE_MEMBER_JOINED,
     ],
 )
-async def test_fan_out_tries_every_follower_without_a_channel_or_for_keys(
+async def test_fan_out_tries_a_gfs_reached_follower_like_a_member(
     monkeypatch, channel, event_type
 ):
-    """No channel → no skip (there is no other path); the key and roster
-    events are never skipped (no channel carries them)."""
+    """P10 (owner 2026-11-27): no follower-specific delivery rule — a
+    follower household reached only through a GFS is tried exactly like a
+    member household in the same position, with or without a channel, for
+    every event type (the old v_96 channel skip is gone)."""
     tried = await _fan_out(monkeypatch, channel=channel, event_type=event_type)
     assert tried == ["follower-gfs", "follower-mesh", "member-mesh"]
-
-
-async def test_a_followers_directory_seat_is_no_path_in_a_channel_space():
-    """v_96 same path: a member now holds a GFS follower's directory card
-    and seats it lazily (a ``space_session`` row, no ``relay_via``). That
-    row is the mailbox address, not a path of its own beside the channel:
-    a member's fan-out still skips the follower (no N x M federation copy
-    on top of the channel frame). The host's seat from the follower's own
-    redeem (``relay_via`` set) still reaches it; a writer is always tried."""
-    km = _make_kek_manager()
-    fed_repo = InMemoryFederationRepo()
-    rows = {}
-    for name, relay_via in (
-        ("lazy-fan", None),
-        ("redeemed-fan", "https://gfs.example"),
-        ("lazy-writer", None),
-    ):
-        row, _ = _make_remote_instance(km, session_key=b"\x01" * 32)
-        row = dataclasses.replace(
-            row, source=InstanceSource.SPACE_SESSION, relay_via=relay_via
-        )
-        await fed_repo.save_instance(row)
-        rows[name] = row.id
-    svc, _ = _make_service(federation_repo=fed_repo)
-    svc.attach_space_write_gate(_ChannelSpaces(True), _Seats({rows["lazy-writer"]}))
-    got = await svc.channel_reached_followers("sp", list(rows.values()))
-    assert got == frozenset({rows["lazy-fan"]})
-    svc.attach_space_write_gate(_ChannelSpaces(False), _Seats({rows["lazy-writer"]}))
-    assert await svc.channel_reached_followers("sp", list(rows.values())) == frozenset()
-
-
-async def test_a_mesh_reached_follower_with_a_directory_seat_is_still_tried():
-    """A directory seat is no path of its own — but a follower that claimed
-    its version over the mesh is reachable (no channel seat needed): its
-    lazy seat must not turn the mesh path off."""
-    km = _make_kek_manager()
-    fed_repo = InMemoryFederationRepo()
-    row, _ = _make_remote_instance(km, session_key=b"\x01" * 32)
-    row = dataclasses.replace(row, source=InstanceSource.SPACE_SESSION, relay_via=None)
-    await fed_repo.save_instance(row)
-    fed_repo.mesh_claims = {row.id: 96}
-    svc, _ = _make_service(federation_repo=fed_repo)
-    svc.attach_space_write_gate(_ChannelSpaces(True), _Seats(set()))
-    assert await svc.channel_reached_followers("sp", [row.id]) == frozenset()
 
 
 async def test_gfs_reached_followers_names_follower_only_seat_households():

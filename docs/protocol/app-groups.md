@@ -556,9 +556,9 @@ budget are exactly as above. What the space adds:
   owner's approval like any forwarded edit when delegation is off; a
   moderator's forward carrying anything else is dropped). A snapshot from an
   older household without the key leaves the list as it is.
-- **Who sees a table** — member households with a writer seat only. Never a
-  follower-only household, never a household outside the space, never a
-  GFS, never a **global** space (its members reach each other only
+- **Who sees a table** — every seated household, a follower-only one
+  included (P10: a follower sees the cards, never joins or plays). Never a
+  household outside the space, never a GFS, never a **global** space (its members reach each other only
   anonymously through GFSs); an **archived** space takes no new table.
   Private and public spaces (local communities included), D6.
 - **Who may sit** — anyone with a live writer seat on the joining household
@@ -598,7 +598,7 @@ budget are exactly as above. What the space adds:
 
 | Event | From → to | Plaintext | Sealed |
 |---|---|---|---|
-| `SPACE_APP_TABLE` | hub → every member household with a writer seat (`broadcast_to_space_members(only_instances=writer households, min_proto_version=77)`) | `space_id` | the **card**: `table_id, rev, app_id, host_user, host_user_id, host_name, note, players {min, max}, seated` (a count), `state` (`open` / `full` / `playing` / `closed`), `end_reason, late_join, created_at, started_at, expires_at, announce` — never the roster |
+| `SPACE_APP_TABLE` | hub → every seated household, followers' included (`broadcast_to_space_members(only_instances=seated households, min_proto_version=77)`) | `space_id` | the **card**: `table_id, rev, app_id, host_user, host_user_id, host_name, note, players {min, max}, seated` (a count), `state` (`open` / `full` / `playing` / `closed`), `end_reason, late_join, created_at, started_at, expires_at, announce` — never the roster |
 | `SPACE_APP_SESSION` | hub ↔ ONE player's household (`broadcast_to_space_members(only_instances={it})`: direct, `SPACE_ROUTED` sealed end to end across a relay, or the link-joined relay seat) | `space_id` | `kind` (`session` / `message`) and `body` — the `APP_SESSION` group verb or group `APP_MESSAGE` payload as above; a space join adds `user_id`, `name` and `identity_pk` |
 
 Both are `SPACE_WRITE_EVENT_TYPES` (the §24.11 writer gate refuses them
@@ -617,11 +617,11 @@ sequenceDiagram
     participant M as Mia's household (mesh only)
     participant F as A follower-only household
     H->>H: Anna opens Chess in Lakeside (on the list) → table, seat 1
-    par card to writer households only
+    par card to every seated household
         H->>B: SPACE_APP_TABLE {card: open, seated 1}
         H->>M: SPACE_APP_TABLE (SPACE_ROUTED, sealed end to end)
+        H->>F: SPACE_APP_TABLE (a follower sees it, never joins)
     end
-    Note over F: never sent anything
     M->>H: SPACE_APP_SESSION {group_join, user_id, identity_pk, seat_key}
     H->>H: writer seat on M? not banned? app still listed? key derives to M?
     H->>M: SPACE_APP_SESSION {group_seat, table}

@@ -62,7 +62,8 @@ checked against the signed page, not against who delivered it.
 - **GFS**: not involved. Pages travel only inside §25.6 sync sessions
   (paired, mesh `SPACE_ROUTED`, or the household path of a GFS mailbox
   seat). They are sealed end to end, so a relay sees no content.
-  Followers get no pages.
+  Followers get pages like members (P10: they sync the same rows, so one
+  checksum).
 - **Not covered**: media bytes (already content-addressed,
   `SPACE_MEDIA_WANTED`), space config (`SPACE_CONFIG_CATCH_UP`), the
   moderation queue, and the *host-only* resources in §2.
@@ -77,8 +78,8 @@ checked against the signed page, not against who delivered it.
   inside the per-pair encrypted payload; only `space_id` routes it. From
   the signer to every member household (pushed, ≤ 1 / h per space), or
   from any member-seated provider to one household whose BEGIN named an
-  older page. Never to a follower-only household, never to a non-member;
-  a GFS relays it sealed, as content.
+  older page. To every seated household, a follower-only one included
+  (P10), never to a non-member; a GFS relays it sealed, as content.
   A page sealed under an epoch whose content key has not landed at the
   receiver yet (a household that rotated while the receiver was away
   syncs before its rekey arrives) is no refusal: it is parked and taken
@@ -88,7 +89,8 @@ checked against the signed page, not against who delivered it.
   for an epoch after the newest key held and at most
   `KEY_WAIT_MAX_AHEAD` = 2 past it (the epoch is plaintext and read before
   anything is verified). Any other such page waits for the next sync; the
-  replay re-checks the receiver's own seat (no page to a follower).
+  replay re-checks the receiver's own seat (any seat, a follower's
+  included).
 - `SPACE_SYNC_BEGIN`: `page` (a reference to the requester's newest page)
   and `buckets` (≤ 8: the listings the stream should end with; Phase 2 on
   the incremental BEGIN to an acting host). Phase 3 as built adds `rows:
@@ -1017,8 +1019,10 @@ long absence" below).
 
 **Picking deliverers** (`trusted_helpers.member_deliverers`, the helper
 picker with other roles): every household with a live **member seat**
-(owner, admin, moderator, member) in our roster mirror at v_95, never
-a follower-only household, never us, never a household acting as host;
+(owner, admin, moderator, member) in our roster mirror at v_95 — a
+follower household fetches from them like a member does (P10), and is not
+asked itself (a deliverer serves others; reads are what parity covers) —
+never us, never a household acting as host;
 sorted, rotated from the stable per-household offset (`helper_offset`, never
 random) plus one step per round, at most `MAX_FETCH_ASKS` = 3 asked one
 after another per round — the next one only when an answer leaves

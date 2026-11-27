@@ -519,10 +519,8 @@ selects it in two cases:
   same path); a member seats each carded household lazily as a
   `space_session` row with no `relay_via` (static-static keys from the
   card's key-wrap key), so its own fan-out reaches that household's
-  mailbox — except a follower's in a space with a channel: there the seat
-  is only its mailbox address (key and roster events, its own frames),
-  and content reaches it at its channel seat
-  (`FederationService.channel_reached_followers`). A seat is not a pairing: a pairing handshake between the
+  mailbox — a follower's like a member's (P10: no follower-specific
+  delivery rule). A seat is not a pairing: a pairing handshake between the
   two keeps its pending half in memory beside the seat
   (`federation/pending_pairing.py`) and only the confirmed pair replaces
   the row; an unpair re-seats from the card. Such a directory seat is
@@ -1636,9 +1634,9 @@ by the existing `/api/conversations/{id}/...` routes.
   (`services/system_chat_policy.py`) answers read / write live with one
   access strategy per scope — household: an active local user while
   `feat_household_chat` is on; space (`SpaceChatAccess`): a local
-  `space_members` seat with a writer role (never a follower), not banned,
-  `features.chat` on, the space not dissolved — posting also needs it not
-  archived, and its owner / admins / moderators may delete anyone's
+  `space_members` seat (a follower reads, P10), not banned,
+  `features.chat` on, the space not dissolved — posting needs a writer
+  role and the space not archived, and its owner / admins / moderators may delete anyone's
   message; a scope without registered rules is refused.
   `DmService._require_membership` defers to it whenever `system_scope` is
   set. Seat rows only hold per-user state; `HouseholdChatService`
