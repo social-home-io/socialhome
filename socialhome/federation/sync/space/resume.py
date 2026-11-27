@@ -431,8 +431,62 @@ class SpaceSyncResumeProvider(FileHashesMixin):
             return 0
         if not self._claim_window(instance_id, space_id):
             return 0
-        since = _clamped_since(since)
-        own = await self._own_rows_only(space_id)
+        return await self._replay(
+            space_id,
+            instance_id,
+            _clamped_since(since),
+            await self._own_rows_only(space_id),
+        )
+
+    async def push_own_rows_to(
+        self, *, space_id: str, instance_id: str, since: str
+    ) -> int:
+        """Send a household our own people's rows of ``space_id`` newer than
+        ``since`` — unasked: the host's roster snapshot just added it, and
+        our live fan-out, planned over a roster that lacked it, never
+        reached it (``PrivateSpaceInviteHandler._push_to_gained``).
+
+        To any household with a live seat (a follower too: full read
+        parity), our own people's rows only — whatever our seat; everyone
+        else's come from the host. Its own cooldown, taken only once
+        something went out, so a failed push is retried by the next
+        snapshot and never holds back the household's own
+        ``SPACE_SYNC_RESUME`` or a resync. Never raises."""
+        key = (f"push:{instance_id}", space_id)
+        try:
+            if self._own_members is None:
+                return 0
+            last = self._last_resume.get(key)
+            if last is not None and self._clock() - last < RESUME_COOLDOWN_S:
+                return 0
+            if instance_id not in await self._space_repo.list_member_instances(
+                space_id
+            ):
+                return 0
+            own = frozenset(await self._own_members(space_id))
+            if not own:
+                return 0
+            sent = await self._replay(space_id, instance_id, _clamped_since(since), own)
+        except Exception:
+            log.warning(
+                "space %s: pushing our recent rows to %s failed",
+                space_id,
+                instance_id,
+                exc_info=True,
+            )
+            return 0
+        if sent:
+            self._last_resume[key] = self._clock()
+            self._last_resume.move_to_end(key)
+            while len(self._last_resume) > RESUME_COOLDOWN_TRACKED:
+                self._last_resume.popitem(last=False)
+        return sent
+
+    async def _replay(
+        self, space_id: str, instance_id: str, since: str, own: frozenset[str] | None
+    ) -> int:
+        """Every resource newer than ``since`` (only *own*'s rows unless
+        ``None``) to ``instance_id``, then their files."""
         to = instance_id
         media: _Media = []
         sent = 0

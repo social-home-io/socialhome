@@ -86,6 +86,7 @@ from ..services.space_service import (
 from ..services.space_writer_households import holds_member_seat
 from .host_equivalence import acts_as_host, holds_local_admin_seat
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
+from .sync.space.scheduler import PERIODIC_INTERVAL_SECONDS
 
 if TYPE_CHECKING:
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
+    from .sync.space.resume import SpaceSyncResumeProvider
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +105,16 @@ log = logging.getLogger(__name__)
 #: ``member_version`` may be. Versions are counters (one per roster change);
 #: a household that was away for years of changes is still far inside this.
 MAX_ROSTER_VERSION_LEAD: int = 2**32
+
+#: How far back a household the host's roster snapshot adds gets our rows
+#: (:meth:`PrivateSpaceInviteHandler._push_to_gained`): the §25.6 periodic
+#: catch-up tick — anything older reached the host a full tick ago, so the
+#: added household's own catch-up from the host carries it.
+GAINED_PUSH_WINDOW_S: float = PERIODIC_INTERVAL_SECONDS
+
+#: Households one snapshot pushes our rows to; any more catch up from the
+#: host (a repair to a mirror that was far off).
+MAX_GAINED_PUSHES: int = 64
 
 #: Longest ``join_request_id`` a host's ``SPACE_REMOTE_MEMBER_REMOVED`` may
 #: name (it is ``uuid4().hex`` on the host).
@@ -272,12 +284,14 @@ class PrivateSpaceInviteHandler:
         "_local_area_budget",
         "_location_removed",
         "_own_instance_id",
+        "_pushes",
         "_remote_locations",
         "_remote_members",
         "_removal_restated",
         "_snapshot_parts",
         "_space_crypto",
         "_space_repo",
+        "_space_resume",
         "_space_service",
         "_writer_certs",
     )
@@ -353,6 +367,12 @@ class PrivateSpaceInviteHandler:
         #: Set by :meth:`attach_to` — records a mesh-only accepting
         #: household's version + identity-key claim (migration 0078).
         self._federation: FederationService | None = None
+        #: Replays our recent rows to a household a roster snapshot adds
+        #: (:meth:`attach_space_resume`). ``None`` → no replay.
+        self._space_resume: SpaceSyncResumeProvider | None = None
+        #: Pushes under way (:meth:`_push_to_gained`), held so none is
+        #: collected mid-flight.
+        self._pushes: set[asyncio.Task[None]] = set()
 
     def attach_space_service(self, space_service) -> None:
         """Wire :class:`SpaceService` post-construction (#114 phase 2).
@@ -363,6 +383,11 @@ class PrivateSpaceInviteHandler:
         — degrading to a no-op rather than crashing the receiver.
         """
         self._space_service = space_service
+
+    def attach_space_resume(self, space_resume: SpaceSyncResumeProvider) -> None:
+        """Wire the §4.4 replay (built after this handler) that brings a
+        household the host's roster snapshot adds our recent rows."""
+        self._space_resume = space_resume
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert holder (built after this handler)."""
@@ -2095,7 +2120,13 @@ class PrivateSpaceInviteHandler:
         # ``add_space_instance`` is an idempotent upsert and
         # ``broadcast_to_space_members`` already excludes our own household, so
         # a gossip row naming our instance is harmless.
-        if not tombstoned:
+        # SECURITY: only for a household that holds a live seat now. A stale
+        # JOINED the version guard refused (one at or below a removal we
+        # hold) must not make a removed household a broadcast target again;
+        # an equal-version repeat still restores a missing row.
+        if not tombstoned and await self._remote_members.list_for_instance(
+            space_id, instance_id, include_tombstoned=False
+        ):
             await self._space_repo.add_space_instance(space_id, instance_id)
 
     async def _removed_without_admin_seat(
@@ -2218,6 +2249,11 @@ class PrivateSpaceInviteHandler:
         # :meth:`_restatable_removals`); a live entry at or below one of
         # them is dropped by the version guard below and answered after.
         restatable = await self._restatable_removals(space) if from_host else None
+        listed = (
+            set(await self._space_repo.list_member_instances(space_id))
+            if from_host
+            else set()
+        )
         unseen: dict[tuple[str, str], SpaceRemoteMember] = {}
         for (entry_type, payload, tombstoned), reason in zip(
             candidates, reasons, strict=True
@@ -2261,6 +2297,8 @@ class PrivateSpaceInviteHandler:
             )
         if restatable is not None and unseen:
             await self._restate_removals(space, restatable[0], list(unseen.values()))
+        if from_host:
+            await self._push_to_gained(space_id, listed)
         # The host's snapshot names the roster version it is complete up to;
         # echoed on our next BEGIN to the host, it spares us the periodic
         # resend of what we hold. Only a snapshot from the host, every entry
@@ -2298,6 +2336,83 @@ class PrivateSpaceInviteHandler:
             self._space_service.note_roster_snapshot_applied(
                 space_id, event.from_instance, roster_version
             )
+
+    async def _push_to_gained(self, space_id: str, listed: set[str]) -> None:
+        """Bring each household the host's snapshot just added to our roster
+        (``listed``: the member households before it) our people's rows of
+        the last :data:`GAINED_PUSH_WINDOW_S`. Our live fan-out reached only
+        the households our roster listed: a household that accepts an
+        invitation is seated from the roster the invitation carried — with
+        several invitations sent at once, the host alone — so its first
+        post, made before this snapshot landed, reached the other members
+        only at their next §25.6 catch-up (up to the 30-minute tick).
+
+        Reuses the §4.4 replay (``push_own_rows_to``; the receiver upserts
+        by id). Only the host's snapshot does this — sent to one household,
+        as it is seated or as a repair — so one join never makes every
+        member push. In a background task: the snapshot's own bookkeeping
+        never waits for it."""
+        if self._space_resume is None:
+            return
+        gained = sorted(
+            set(await self._space_repo.list_member_instances(space_id))
+            - listed
+            - {self._own_instance_id}
+        )
+        if not gained:
+            return
+        if len(gained) > MAX_GAINED_PUSHES:
+            log.info(
+                "space %s: roster snapshot added %d households — pushing our "
+                "recent rows to the first %d, the rest catch up from the host",
+                space_id,
+                len(gained),
+                MAX_GAINED_PUSHES,
+            )
+        since = (
+            datetime.now(UTC) - timedelta(seconds=GAINED_PUSH_WINDOW_S)
+        ).isoformat()
+        task = asyncio.create_task(
+            self._push_rows(
+                self._space_resume, space_id, gained[:MAX_GAINED_PUSHES], since
+            ),
+            name="roster-gained-push",
+        )
+        self._pushes.add(task)
+        task.add_done_callback(self._pushes.discard)
+
+    @staticmethod
+    async def _push_rows(
+        resume: SpaceSyncResumeProvider,
+        space_id: str,
+        households: list[str],
+        since: str,
+    ) -> None:
+        for instance_id in households:
+            sent = await resume.push_own_rows_to(
+                space_id=space_id, instance_id=instance_id, since=since
+            )
+            if sent:
+                log.info(
+                    "space %s: roster snapshot added %s — pushed %d recent row(s)",
+                    space_id,
+                    instance_id,
+                    sent,
+                )
+
+    async def drain_pushes(self) -> None:
+        """Wait for the pushes under way (tests)."""
+        while self._pushes:
+            await asyncio.gather(*self._pushes, return_exceptions=True)
+
+    async def stop(self) -> None:
+        """App cleanup: end the pushes under way (the next snapshot, or the
+        catch-up, brings what they did not send)."""
+        tasks = list(self._pushes)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _restatable_removals(
         self, space: Space

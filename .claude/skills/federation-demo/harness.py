@@ -22580,13 +22580,25 @@ def _message_texts(label: str, conv_id: str) -> set[str]:
     }
 
 
+def _calling_step() -> str:
+    """The demo step (``cmd_space_report`` → ``space-report``) whose body
+    is on the call stack, for messages of helpers several steps share."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        name = frame.f_code.co_name
+        if name.startswith("cmd_"):
+            return name[len("cmd_") :].replace("_", "-")
+        frame = frame.f_back
+    return "demo"
+
+
 def _wait_for(what: str, check, *, timeout: float = 45.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if check():
             return
         time.sleep(1.0)
-    raise SystemExit(f"group-dm: timed out waiting for {what}")
+    raise SystemExit(f"{_calling_step()}: timed out waiting for {what}")
 
 
 def _send_group(label: str, info: dict, conv_id: str, text: str) -> None:
@@ -22898,6 +22910,11 @@ def cmd_space_report() -> None:
     # (and a's moderator is other authority, so no anonymous fallback) —
     # b's queue as Bob would rightly stay empty.
     d = inst["d"]
+    # d posts a moment after it accepted: its roster is still the
+    # invitation's (b alone) until b's snapshot lands, so a and c get the
+    # post from d's replay when that snapshot comes
+    # (``PrivateSpaceInviteHandler._push_to_gained``), not at their next
+    # §25.6 catch-up — the wait below once timed out on that.
     s, post = _request(
         f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/posts",
         token=d["token"],
