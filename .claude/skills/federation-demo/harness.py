@@ -7470,7 +7470,7 @@ def _picture_via_gfs_media_cache(
     space_id: str,
     step: str,
     timeout: float = 90.0,
-    member_push_ok: bool = False,
+    member_push_ok: bool = True,
 ) -> str:
     """v_80 — *author* posts a ~0.7 MB photo in *space_id*; *reader*, which
     reads the space only through the GFS (a link-joined member or a
@@ -7490,8 +7490,9 @@ def _picture_via_gfs_media_cache(
     runs on the post's arrival, before the queued upload lands, and the
     10 s retry then finds the file stored. Either transport is accepted for
     *reader*'s copy (logged as such); the GFS must still hold the one
-    upload under the channel. A follower (the default) gets no push, so it
-    must fetch from the GFS.
+    upload under the channel. Since P10 a follower gets the push like a
+    member (no follower-specific delivery rule), so the default accepts
+    either transport for every reader.
 
     Returns the file name."""
     a = state["instances"][author]
