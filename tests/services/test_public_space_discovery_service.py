@@ -1090,3 +1090,76 @@ async def test_a_listing_that_takes_no_followers_caches_no_follower_count(env):
     await svc.poll_once()
     got = (await repo.list_active())[0]
     assert (got.member_count, got.follower_count) == (5, None)
+
+
+# ─── v_97: which of our GFSs list a space ───────────────────────────────
+
+
+class _DirsByUrl:
+    """A directory per GFS URL; a URL mapped to ``None`` does not answer."""
+
+    def __init__(self, by_url: dict[str, list[str] | None]) -> None:
+        self.by_url = by_url
+
+    def get(self, url, **kw):
+        for base, ids in self.by_url.items():
+            if url.startswith(base):
+                if ids is None:
+                    return _StubResp(503, {})
+                return _StubResp(
+                    200,
+                    {
+                        "spaces": [
+                            {"space_id": s, "instance_id": "i", "name": s} for s in ids
+                        ]
+                    },
+                )
+        return _StubResp(404, {})
+
+
+async def test_listed_on_names_the_gfss_whose_directory_lists_a_space(env):
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://g1.example"))
+    await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://g2.example"))
+    session = _DirsByUrl(
+        {"https://g1.example": ["sp-A", "sp-B"], "https://g2.example": ["sp-B"]}
+    )
+    svc = PublicSpaceDiscoveryService(
+        repo, gfs_connection_repo=gfs_repo, http_client=session
+    )
+    assert svc.listed_on("sp-A") is None  # not polled yet: unknown
+    await svc.poll_once()
+    assert svc.listed_on("sp-A") == frozenset({"gfs-1"})
+    assert svc.listed_on("sp-B") == frozenset({"gfs-1", "gfs-2"})
+    assert svc.listed_on("sp-C") == frozenset()
+
+
+async def test_listed_on_keeps_a_silent_gfs_until_it_answers(env):
+    """A GFS that did not answer this tick keeps what it listed (its rows
+    stay too); one that answered without the space loses it."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://g1.example"))
+    await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://g2.example"))
+    session = _DirsByUrl(
+        {"https://g1.example": ["sp-A"], "https://g2.example": ["sp-A"]}
+    )
+    svc = PublicSpaceDiscoveryService(
+        repo, gfs_connection_repo=gfs_repo, http_client=session
+    )
+    await svc.poll_once()
+    session.by_url = {"https://g1.example": None, "https://g2.example": []}
+    await svc.poll_once()
+    assert svc.listed_on("sp-A") == frozenset({"gfs-1"})
+
+
+async def test_listed_on_forgets_a_removed_connection(env):
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://g1.example"))
+    session = _DirsByUrl({"https://g1.example": ["sp-A"]})
+    svc = PublicSpaceDiscoveryService(
+        repo, gfs_connection_repo=gfs_repo, http_client=session
+    )
+    await svc.poll_once()
+    await gfs_repo.delete("gfs-1")
+    await svc.poll_once()
+    assert svc.listed_on("sp-A") == frozenset()

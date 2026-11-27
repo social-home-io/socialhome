@@ -353,16 +353,40 @@ mesh space's households keep the last pin, so nothing repeats there.
 
 ## GFS spaces: joining and switching
 
-- **Join preflight.** Joining or following a GFS space from Discover first
-  asks the household (`GET /api/public_spaces/{id}/join-preflight`) whether
-  it holds an active GFS connection that proves `channel_ring`. If not,
-  the SPA shows the consent dialog ("This space uses a GFS…"): **Connect
-  and join** for an admin (Q7 A — it connects the household to its default
-  GFS, then joins), **Ask an admin** for anyone else; **Cancel** sends
-  nothing. Which of the space's own listed GFSs the household reads it on
-  is settled after the join, from the owner's signed list in the space's
-  metadata (a household connected to none of them gets the Connect prompt
-  below).
+- **Join preflight — and a firm refusal** (owner 2026-11-27: "firm +
+  Connect prompt now"). Joining, asking to join or following a GFS space
+  needs an active GFS connection that proves `channel_ring` **to one of the
+  GFSs the space is listed on**. The household decides what the space is
+  from what it knows (`SpaceService.gfs_join_readiness`), never from the
+  client: a GFS directory listing (only a global space is ever listed on a
+  GFS) is a GFS space, its GFSs the connections whose directory lists it
+  (`PublicSpaceDiscoveryService.listed_on`, in memory, filled by the poll
+  at start); a row here (a follower stepping up) is one when its content
+  rides a channel (global, or private with `private_gfs`) and another
+  household hosts it, its GFSs our connections on the owner's signed list.
+  No list known (an owner before v_57, an empty list, before the first
+  poll): any `channel_ring` connection counts. A space hosted here, a
+  paired household's public space or an unknown id is none.
+  - `GET /api/public_spaces/{id}/join-preflight` answers `{gfs_space,
+    connected, may_connect}`; the SPA then shows the consent dialog ("This
+    space uses a GFS…"): **Connect and join** for an admin (Q7 A — it
+    connects the household to its default GFS, then joins), **Ask an
+    admin** for anyone else; **Cancel** sends nothing. A preflight that
+    fails is no "yes": the SPA sends nothing and says so (fail closed).
+  - The join itself is refused the same way, so no client can skip the
+    dialog: `409 GFS_CONNECTION_REQUIRED`, nothing sent. Every remote join,
+    request and follow passes through `request_join_remote` (paired, or
+    sealed through the GFS, v_84), which checks first. Entry points: the
+    Discover list (join / follow / ask), the space's About page, the ask
+    dialog, and an invite link.
+  - **Invite links.** A code names the space but not its tier; the check
+    runs when the space is already known here (its directory listing, a
+    row). Otherwise the tier arrives only with the redeem's answer — the
+    issuer has already seated the household — and the Connect prompt below
+    covers it. A check on the issuer would need the redeemer to declare
+    its GFS connections in the redeem (a new protocol field telling the
+    host which GFSs the household uses): left out.
+  - A space hosted here needs nothing: its people join on the host.
 - **Private ON/OFF.** Turning `private_gfs` ON makes the space a GFS space;
   OFF is refused while households reachable only through a GFS remain
   (`409 PRIVATE_GFS_LINK_MEMBERS`, unchanged).

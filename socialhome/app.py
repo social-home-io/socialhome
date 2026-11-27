@@ -3929,6 +3929,9 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_connection_service.attach_on_removed(
         public_space_discovery.on_connections_changed
     )
+    # v_97 — a join of a GFS-directory space needs a ring connection to a
+    # GFS whose directory lists it (firm consent).
+    space_service.attach_gfs_listing_sources(public_space_discovery.listed_on)
 
     # ── A space's member + follower counts (owner decision 2026-11-23) ───
     # Shown on the space page from the roster or the host's shared listing;

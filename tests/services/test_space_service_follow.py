@@ -587,6 +587,17 @@ async def test_a_follow_over_the_gfs_passes_the_role_through(stack):
 # ── follow_space ──────────────────────────────────────────────────────────
 
 
+class _RingGfs:
+    """A household connected to a GFS that proves ``channel_ring`` (v_97:
+    joining or following a GFS space needs one)."""
+
+    async def ring_connected(self, only=None) -> bool:
+        return True
+
+    async def server_targets(self, space_id):
+        return None
+
+
 async def _remote_stub(stack, space_id="sp-remote", *, allow_subscribers=True):
     stub = stub_space_from_metadata(
         space_id,
@@ -631,6 +642,7 @@ async def test_following_a_hosted_space_without_followers_is_refused(stack):
 
 async def test_following_a_space_hosted_elsewhere_sends_a_follow_request(stack):
     await _remote_stub(stack)
+    stack.svc.attach_gfs_connection_service(_RingGfs())
     fan = await stack.provision("fan")
     got = await stack.svc.follow_space(fan.user_id, "sp-remote")
     assert got == {"subscribed": False, "pending": True}
@@ -653,6 +665,7 @@ async def test_a_paired_follow_waits_briefly_then_asks_again(stack):
     lives 15 minutes, so a dropped follow is not stuck "pending" for days:
     after that a new follow asks again."""
     await _remote_stub(stack)
+    stack.svc.attach_gfs_connection_service(_RingGfs())
     fan = await stack.provision("fan")
     await stack.svc.follow_space(fan.user_id, "sp-remote")
     (sent,) = _join_request_sends(stack)
@@ -690,6 +703,7 @@ async def test_following_a_listed_space_asks_the_listings_host(stack):
         )
     )
     stack.svc.attach_public_space_directory(listings)
+    stack.svc.attach_gfs_connection_service(_RingGfs())
     got = await stack.svc.follow_space(fan.user_id, "sp-listed")
     assert got == {"subscribed": False, "pending": True}
     (sent,) = _join_request_sends(stack)

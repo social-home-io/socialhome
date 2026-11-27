@@ -226,6 +226,8 @@ from ..domain.space import (
     BannedFromSpaceError,
     BanNotAllowedError,
     ContentAction,
+    GfsConnectionRequiredError,
+    GfsJoinReadiness,
     GlobalGfsMembersError,
     HostedSpaceListing,
     HostNotPairedError,
@@ -319,6 +321,7 @@ from ..repositories.user_repo import AbstractUserRepo
 from ..task_drain import wait_tasks_done
 from ..utils.timezones import coerce_tz
 from .content_access import ContentAccessMixin
+from .gfs_channel_service import channel_on
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 from .local_community import (
@@ -774,6 +777,7 @@ class SpaceService(
         "_gallery",
         "_gfs",
         "_gfs_join",
+        "_gfs_listing_sources",
         "_gfs_selection",
         "_icons",
         "_instance_purger",
@@ -901,6 +905,9 @@ class SpaceService(
         #: public spaces (§D1a) and the GFS directory cache.
         self._peer_spaces: AbstractPeerSpaceDirectoryRepo | None = None
         self._public_spaces: AbstractPublicSpaceRepo | None = None
+        #: v_97 — which of our GFS connections list a space in their
+        #: directory (:meth:`PublicSpaceDiscoveryService.listed_on`).
+        self._gfs_listing_sources: Callable[[str], frozenset[str] | None] | None = None
         #: v_89 — our GFS mailboxes, released when no seat needs them.
         self._mailboxes: GfsMailboxService | None = None
         self._invite_forwarder = None
@@ -1123,6 +1130,79 @@ class SpaceService(
         whether the space takes followers."""
         self._public_spaces = repo
         self._peer_spaces = peer_directory
+
+    def attach_gfs_listing_sources(
+        self, getter: Callable[[str], frozenset[str] | None]
+    ) -> None:
+        """v_97 — wire which of our GFS connections list a space in their
+        directory (:meth:`PublicSpaceDiscoveryService.listed_on`): the GFSs
+        a join of a GFS-directory space needs a ring connection to
+        (:meth:`gfs_join_readiness`)."""
+        self._gfs_listing_sources = getter
+
+    async def gfs_join_readiness(self, space_id: str) -> GfsJoinReadiness:
+        """v_97 — whether asking to join (or follow) ``space_id`` needs a
+        GFS connection this household lacks (owner 2026-11-27, firm
+        consent; ``docs/protocol/space-items.md`` › joining).
+
+        Read from what this household knows, never from the client:
+
+        * a row here (a stub: a follower stepping up, a space we hold a row
+          for): a GFS space when its content rides a channel
+          (:func:`channel_on` — global, or private with ``private_gfs``) and
+          another household hosts it; the GFSs are the owner's signed list,
+          of which ours are the ``registered`` targets;
+        * else a GFS directory listing (``public_space_cache`` — only a
+          GLOBAL space is ever listed on a GFS): a GFS space; the GFSs are
+          those of our connections whose directory lists it;
+        * else (a paired household's public space, or nothing known): no
+          GFS space — a paired directory lists only PUBLIC spaces, and an
+          unknown space has nothing to check; its people get the Connect
+          prompt after the join if it turns out to be one.
+
+        With no list known (an owner before v_57, an empty list, Discover
+        not polled since the start) any ``channel_ring`` connection counts.
+        """
+        space = await self._spaces.get(space_id)
+        listed: frozenset[str] | None
+        if space is not None:
+            if not channel_on(space) or not self._hosted_elsewhere(space):
+                return GfsJoinReadiness(gfs_space=False, connected=True)
+            listed = await self._owner_listed_gfs_ids(space_id)
+        else:
+            listing = (
+                await self._public_spaces.get(space_id)
+                if self._public_spaces is not None
+                else None
+            )
+            if listing is None:
+                return GfsJoinReadiness(gfs_space=False, connected=True)
+            listed = (
+                self._gfs_listing_sources(space_id)
+                if self._gfs_listing_sources is not None
+                else None
+            )
+        connected = self._gfs is not None and await self._gfs.ring_connected(
+            only=listed
+        )
+        return GfsJoinReadiness(gfs_space=True, connected=connected)
+
+    async def _owner_listed_gfs_ids(self, space_id: str) -> frozenset[str] | None:
+        """Our connection ids among the owner's signed GFS list for
+        ``space_id``; ``None`` when no (non-empty) list is known."""
+        if self._gfs is None:
+            return None
+        targets = await self._gfs.server_targets(space_id)
+        if not targets:
+            return None
+        return frozenset(t.id for t in targets if t.registered)
+
+    async def _require_gfs_connection(self, space_id: str) -> None:
+        """Raise :class:`GfsConnectionRequiredError` (409) when joining
+        ``space_id`` needs a GFS connection this household lacks."""
+        ready = await self.gfs_join_readiness(space_id)
+        if ready.gfs_space and not ready.connected:
+            raise GfsConnectionRequiredError()
 
     def attach_gfs_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
         """Wire "Ask to join" through the GFS (v_84): a request to a global
@@ -8692,6 +8772,12 @@ class SpaceService(
             raise SpacePermissionError(
                 "cross-instance invite redeem is not available on this host",
             )
+        if bootstrap is not None and bootstrap.space_id:
+            # v_97 — a link to a space we already know is a GFS space (its
+            # directory listing, a row) needs a GFS connection first, like
+            # any join. Otherwise the space's tier comes only with the
+            # redeem's answer: the Connect prompt then shows in the space.
+            await self._require_gfs_connection(bootstrap.space_id)
         return await self._redeem_coordinator.request_redeem(
             token,
             viewer_user_id=user_id,
@@ -9537,6 +9623,10 @@ class SpaceService(
         """
         if self._federation is None or self._federation_repo is None:
             raise RuntimeError("federation not attached")
+        # v_97 — a GFS space only with a GFS connection (firm consent):
+        # every remote join, request and follow passes here, paired or
+        # through the GFS. Nothing is sent without it.
+        await self._require_gfs_connection(space_id)
         peer = await self._federation_repo.get_instance(host_instance_id)
         if (
             peer is None

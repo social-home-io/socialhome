@@ -187,6 +187,9 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "request_join",  # any user may request; gate is on approval
         "request_join_remote",  # cross-instance request
         "follow_space",  # public-space follow-only
+        # v_97 — whether a join needs a GFS connection first: read only, for
+        # the caller's own household (the preflight and the join guard).
+        "gfs_join_readiness",
         "unfollow_space",  # own subscription only
         # Federation inbound hooks — validated by the §24.11 inbound pipeline.
         "on_remote_join_request_approved",

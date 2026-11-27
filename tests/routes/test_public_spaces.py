@@ -498,14 +498,30 @@ async def test_list_returns_the_declared_counts_or_null(client):
 # ── v_97: joining a GFS space needs a GFS connection ─────────────────────
 
 
-async def test_join_preflight_says_a_global_space_needs_a_gfs(client, monkeypatch):
-    async def none(self):
+async def _global_listing(client, space_id="sp-g"):
+    await SqlitePublicSpaceRepo(client._db).upsert(
+        PublicSpaceListing(
+            space_id=space_id,
+            instance_id="remote-1",
+            name="Global",
+            join_mode="open",
+            allow_subscribers=True,
+        )
+    )
+
+
+async def _no_ring(monkeypatch):
+    async def none(self, only=None):
         return False
 
     monkeypatch.setattr(GfsConnectionService, "ring_connected", none)
+
+
+async def test_join_preflight_says_a_global_space_needs_a_gfs(client, monkeypatch):
+    await _no_ring(monkeypatch)
+    await _global_listing(client)
     r = await client.get(
-        "/api/public_spaces/sp-g/join-preflight?space_type=global",
-        headers=_auth(client._tok),
+        "/api/public_spaces/sp-g/join-preflight", headers=_auth(client._tok)
     )
     assert r.status == 200
     assert await r.json() == {
@@ -515,15 +531,56 @@ async def test_join_preflight_says_a_global_space_needs_a_gfs(client, monkeypatc
     }
 
 
-async def test_join_preflight_is_quiet_for_a_mesh_space(client):
+async def test_join_preflight_ignores_the_clients_space_type(client, monkeypatch):
+    """The server decides from what it knows: a GFS directory listing is a
+    GFS space whatever the SPA claims; an unknown id is none."""
+    await _no_ring(monkeypatch)
+    await _global_listing(client)
     r = await client.get(
-        "/api/public_spaces/sp-p/join-preflight?space_type=public",
+        "/api/public_spaces/sp-g/join-preflight?space_type=public",
+        headers=_auth(client._tok),
+    )
+    assert (await r.json())["gfs_space"] is True
+    r = await client.get(
+        "/api/public_spaces/sp-unknown/join-preflight?space_type=global",
         headers=_auth(client._tok),
     )
     body = await r.json()
     assert (body["gfs_space"], body["connected"]) == (False, True)
 
 
+async def test_join_preflight_is_quiet_for_a_mesh_space(client):
+    r = await client.get(
+        "/api/public_spaces/sp-p/join-preflight", headers=_auth(client._tok)
+    )
+    body = await r.json()
+    assert (body["gfs_space"], body["connected"]) == (False, True)
+
+
 async def test_join_preflight_needs_a_session(client):
-    r = await client.get("/api/public_spaces/sp-g/join-preflight?space_type=global")
+    r = await client.get("/api/public_spaces/sp-g/join-preflight")
     assert r.status == 401
+
+
+async def test_joining_a_gfs_space_without_a_gfs_is_409(client, monkeypatch):
+    """The join itself is refused, not only the SPA's preflight — nothing
+    is sent."""
+    await _no_ring(monkeypatch)
+    await _global_listing(client)
+    r = await client.post(
+        "/api/public_spaces/sp-g/join-request",
+        json={"host_instance_id": "remote-1"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409, await r.text()
+    assert (await r.json())["error"]["code"] == "GFS_CONNECTION_REQUIRED"
+
+
+async def test_following_a_gfs_space_without_a_gfs_is_409(client, monkeypatch):
+    await _no_ring(monkeypatch)
+    await _global_listing(client)
+    r = await client.post(
+        "/api/spaces/sp-g/subscribe", json={}, headers=_auth(client._tok)
+    )
+    assert r.status == 409, await r.text()
+    assert (await r.json())["error"]["code"] == "GFS_CONNECTION_REQUIRED"

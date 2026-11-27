@@ -1346,6 +1346,31 @@ class HostNotPairedError(CodedError, SpacePermissionError):
     detail = "host household is not a CONFIRMED peer — pair first"
 
 
+class GfsConnectionRequiredError(CodedError, SpacePermissionError):
+    """v_97 — a join or follow of a GFS space (a GLOBAL space, or a PRIVATE
+    one with ``private_gfs`` on) while this household holds no active
+    connection proving ``channel_ring`` to one of the GFSs the space is
+    listed on: its content rides only its channel there, so the household
+    connects first (owner 2026-11-27, firm consent). Nothing was sent."""
+
+    status = 409
+    code = "GFS_CONNECTION_REQUIRED"
+    detail = "Connect your household to this space's GFS first, then join."
+
+
+@dataclass(slots=True, frozen=True)
+class GfsJoinReadiness:
+    """Whether joining a space needs a GFS connection this household lacks
+    (:meth:`SpaceService.gfs_join_readiness`): ``gfs_space`` — the space's
+    content rides a GFS channel and another household hosts it;
+    ``connected`` — this household holds an active ``channel_ring``
+    connection to one of the GFSs it is listed on (always ``True`` when
+    ``gfs_space`` is ``False``)."""
+
+    gfs_space: bool
+    connected: bool
+
+
 class HostNotReachableError(CodedError, SpacePermissionError):
     """An "Ask to join" through the GFS could not reach the space's host:
     no GFS of ours has its keys, they don't belong to the listed host, or

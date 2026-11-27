@@ -158,27 +158,29 @@ class PublicSpaceJoinRequestView(BaseView):
 
 
 class PublicSpaceJoinPreflightView(BaseView):
-    """``GET /api/public_spaces/{space_id}/join-preflight?space_type=…`` —
-    v_97. Before joining (or following) a space found in Discover: a GLOBAL
-    space is a GFS space — its items ride only its channel — so this
-    household must be connected to a GFS first. Answers ``{gfs_space,
-    connected, may_connect}`` (``may_connect``: the asker may connect the
-    household — an admin; anyone else asks an admin). Read only: nothing
-    is sent anywhere."""
+    """``GET /api/public_spaces/{space_id}/join-preflight`` — v_97. Before
+    joining (or following) a space: a GFS space (global, or private with
+    ``private_gfs``) carries its content only on its channel at the GFSs it
+    is listed on, so this household must hold a ``channel_ring`` connection
+    to one of them first. Answers ``{gfs_space, connected, may_connect}``
+    (``may_connect``: the asker may connect the household — an admin;
+    anyone else asks an admin). The server decides what the space is from
+    what it knows (:meth:`SpaceService.gfs_join_readiness`) — a
+    ``space_type`` query parameter from an older SPA is ignored. The join
+    itself is refused the same way (``409 GFS_CONNECTION_REQUIRED``). Read
+    only: nothing is sent anywhere."""
 
     async def get(self) -> web.Response:
         ctx = self.user
         if ctx is None or ctx.user_id is None:
             return web.json_response({"error": "unauthenticated"}, status=401)
-        gfs_space = self.request.query.get("space_type") == "global"
-        connected = True
-        if gfs_space:
-            gfs = self.request.app.get(K.gfs_connection_service_key)
-            connected = gfs is not None and await gfs.ring_connected()
+        ready = await self.svc(K.space_service_key).gfs_join_readiness(
+            self.match("space_id")
+        )
         return web.json_response(
             {
-                "gfs_space": gfs_space,
-                "connected": connected,
+                "gfs_space": ready.gfs_space,
+                "connected": ready.connected,
                 "may_connect": bool(ctx.is_admin),
             }
         )

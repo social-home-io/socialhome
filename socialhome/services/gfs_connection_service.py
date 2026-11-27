@@ -60,7 +60,7 @@ import hmac
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Literal
@@ -2605,11 +2605,14 @@ class GfsConnectionService:
             self._subscriber_seats,
         )
 
-    async def ring_connected(self) -> bool:
+    async def ring_connected(self, only: Collection[str] | None = None) -> bool:
         """v_97 — whether this household holds at least one active GFS
-        connection that proves ``channel_ring``: what joining a GFS space
-        needs (``docs/protocol/space-items.md`` › joining)."""
+        connection that proves ``channel_ring`` — among the connection ids
+        in ``only`` when given (the GFSs a space is listed on): what joining
+        a GFS space needs (``docs/protocol/space-items.md`` › joining)."""
         for conn in await self._repo.list_active():
+            if only is not None and conn.id not in only:
+                continue
             if conn.status == "active" and await self.channel_ring_supported(conn):
                 return True
         return False

@@ -82,6 +82,7 @@ class PublicSpaceDiscoveryService:
         "_cache_ttl",
         "_gfs_connection_repo",
         "_http_client",
+        "_listed_on",
         "_poll_interval",
         "_refresh_event",
         "_repo",
@@ -106,6 +107,10 @@ class PublicSpaceDiscoveryService:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._refresh_event: asyncio.Event | None = None
+        #: v_97 — GFS connection id → the space ids its directory listed at
+        #: its last answer; ``None`` until the first poll. In memory: the
+        #: poll at start fills it again (:meth:`listed_on`).
+        self._listed_on: dict[str, frozenset[str]] | None = None
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         """Provide the shared aiohttp session after construction."""
@@ -160,6 +165,16 @@ class PublicSpaceDiscoveryService:
         connect / disconnect request on a directory download."""
         await self.refresh_now()
 
+    def listed_on(self, space_id: str) -> frozenset[str] | None:
+        """v_97 — the ids of our active GFS connections whose directory
+        lists ``space_id`` (as of their last answer): the GFSs a join of
+        that GFS space needs a ``channel_ring`` connection to
+        (:meth:`SpaceService.gfs_join_readiness`). ``None`` before the first
+        poll since the start — not known yet."""
+        if self._listed_on is None:
+            return None
+        return frozenset(g for g, ids in self._listed_on.items() if space_id in ids)
+
     # ─── Public single-tick API (also drivable from tests) ───────────────
 
     async def poll_once(self) -> int:
@@ -177,14 +192,21 @@ class PublicSpaceDiscoveryService:
         #: older server) declares none — the row must not flap with the
         #: connection order.
         declared: dict[str, tuple[int | None, int | None]] = {}
+        previous = self._listed_on or {}
+        listed_on: dict[str, frozenset[str]] = {}
         for conn in active_connections:
             listings = await self._fetch_directory(conn.inbox_url)
             if listings is None:
                 complete = False
+                # Silent this tick: it keeps what it listed (its rows stay).
+                if conn.id in previous:
+                    listed_on[conn.id] = previous[conn.id]
                 continue
+            listed: set[str] = set()
             for listing in listings:
                 if await self._repo.is_instance_blocked(listing.instance_id):
                     continue
+                listed.add(listing.space_id)
                 # v_84 — the host's join contact is pinned on first sight and
                 # refused when a listing later shows another authority key
                 # (``federation/join_contact_pin.py``).
@@ -208,7 +230,10 @@ class PublicSpaceDiscoveryService:
                         follower_count=counts[1],
                     )
                 )
+            listed_on[conn.id] = frozenset(listed)
             total += len(listings)
+
+        self._listed_on = listed_on
 
         # Every directory answered (or there is no GFS left): this tick is the
         # whole picture, so a row it didn't write — a space a GFS dropped, or
