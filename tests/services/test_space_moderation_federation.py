@@ -320,6 +320,13 @@ class _GfsFetcher:
             refs=("ref",) if described else (),
         )
 
+    def localize_proposal(self, space_id, raw, added, *, item_id, origin):
+        self.localized.append({"raw": raw, "item_id": item_id, "origin": origin})
+        described = set(raw or {})
+        return SpaceMediaLocalization(
+            refs=tuple(local for name, local in added.items() if name in described)
+        )
+
     async def keep(self, loc, *, prefetch_all=False):
         self.kept.append((loc, prefetch_all))
 
@@ -327,10 +334,10 @@ class _GfsFetcher:
 async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
     monkeypatch,
 ):
-    """v_97 — the reviewer side: a described file takes the GFS cache's
-    name (bound to the sending household, sealed for the item) and its
-    descriptor row is kept once the item is stored; a file the sender did
-    not describe keeps the pushed, submitter-bound name."""
+    """v_97 — the reviewer side: a described file is fetched from the GFS
+    cache (bound to the sending household, sealed for the item) and its
+    descriptor row is kept once the item is stored; every file keeps the
+    pushed, submitter-bound name."""
     out, _ = _fed(own="host")
     fetcher = _GfsFetcher()
     out.attach_gfs_media(fetcher)
@@ -404,8 +411,12 @@ async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
     )
     await out._on_submitted(event)
     (item,) = stored
+    a_here = space_direct_media_name("sp", "house-a", "a.webp")
+    # Review H1: a described file keeps the very name the push would give
+    # it (bound to the sender), so the host's release and its follower copy
+    # match it as before; only its bytes come from the GFS cache.
     assert item.payload["image_urls"] == [
-        "api/media/sg-a.webp",
+        f"api/media/{a_here}",
         f"api/media/{space_direct_media_name('sp', 'house-a', 'b.webp')}",
     ]
     assert fetcher.localized[0]["item_id"] == "item-9"
@@ -413,7 +424,7 @@ async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
     # Kept once stored — every file fetched on the space's host, which
     # releases the item once approved.
     ((loc, everything),) = fetcher.kept
-    assert loc.refs == ("ref",) and everything is True
+    assert loc.refs == (a_here,) and everything is True
 
 
 async def test_a_held_calendar_events_cover_goes_to_the_reviewers():

@@ -83,7 +83,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -94,7 +94,11 @@ from ..domain.federation import (
     FederationEventType,
 )
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.file_hashes import parse_file_hashes
+from ..domain.file_hashes import (
+    FileHash,
+    is_space_content_media_name,
+    parse_file_hashes,
+)
 from ..domain.media_constraints import space_media_ref
 from ..domain.presence import truncate_coord
 from ..domain.space import (
@@ -127,7 +131,7 @@ from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json, load_json
 from ..utils.datetime import parse_iso8601_optional
 from .file_hashes_sender import FileHashesMixin
-from .inbound_media_store import media_basename
+from .inbound_media_store import media_basename, space_direct_media_name
 from .space_media_names import SpaceMediaNamer, feature_media_urls, renamed_media
 from .space_media_refs import SpaceMediaRefsMixin
 from .space_moderation_service import (
@@ -1151,31 +1155,24 @@ class SpaceModerationFederation(FileHashesMixin, SpaceMediaRefsMixin):
             held_urls = [*held_urls, *await self._page_media(space_id, target_id)]
         hashes = parse_file_hashes(p) if feature != "pages" else None
         proposed = feature_media_urls(feature, clean)
-        # v_97 — the files its sender described (a reviewer household that
-        # reads the GFS space from the cache only): the GFS cache's names,
-        # bound to the sending household; never pushed here.
-        gfs_files = (
-            await self._gfs_media.localize(
-                space_id,
-                p.get(MEDIA_REFS_FIELD),
-                proposed,
-                item_id=item_id,
-                origin=str(event.from_instance or ""),
-                hashes=hashes,
-            )
-            if self._gfs_media is not None
-            else SpaceMediaLocalization()
-        )
+        sender = str(event.from_instance or "")
         names = self._media_names.localize(
             space_id,
-            str(event.from_instance or ""),
-            [u for u in proposed if media_basename(u) not in gfs_files.names],
+            sender,
+            proposed,
             held=held_urls,
             # v_85 — hashed files take their content names (never a page's:
             # page files stay page-scoped).
             hashes=hashes,
         )
-        names = SpaceMediaLocalization(names={**names.names, **gfs_files.names})
+        # v_97 — the files its sender described (a reviewer household that
+        # reads the GFS space from the cache only) keep the very names the
+        # push would give them (bound to the sender, or their content
+        # names) and are fetched from the GFS cache — so the host's release
+        # and its follower copy match them as before (review H1).
+        gfs_files = await self._described_files(
+            space_id, p.get(MEDIA_REFS_FIELD), proposed, names, sender, item_id, hashes
+        )
         clean = renamed_media(feature, clean, names.url)
         if relay is not None:
             clean[PUBLIC_RELAY_KEY] = relay
@@ -1219,6 +1216,48 @@ class SpaceModerationFederation(FileHashesMixin, SpaceMediaRefsMixin):
             expires_at=expires_at,
             status=ModerationStatus.PENDING,
         ), gfs_files
+
+    async def _described_files(
+        self,
+        space_id: str,
+        raw: object,
+        proposed: list[str],
+        names: SpaceMediaLocalization,
+        sender: str,
+        item_id: str,
+        hashes: Mapping[str, FileHash] | None,
+    ) -> SpaceMediaLocalization:
+        """The GFS cache rows for a submission's described files, each under
+        the name *names* gives it here: a sender-bound name
+        (``localize_proposal``) or a content name (``localize`` with the
+        hashes, kept only where it gives the same name)."""
+        if self._gfs_media is None or raw is None:
+            return SpaceMediaLocalization()
+        direct = {
+            name: local
+            for name, local in names.names.items()
+            if local == space_direct_media_name(space_id, sender, name)
+        }
+        refs = list(
+            self._gfs_media.localize_proposal(
+                space_id, raw, direct, item_id=item_id, origin=sender
+            ).refs
+        )
+        content = [
+            u
+            for u in proposed
+            if is_space_content_media_name(names.names.get(media_basename(u) or "", ""))
+        ]
+        if content:
+            loc = await self._gfs_media.localize(
+                space_id, raw, content, item_id=item_id, origin=sender, hashes=hashes
+            )
+            refs.extend(
+                ref
+                for ref in loc.refs
+                if names.names.get(ref.filename) == ref.local_name
+            )
+        return SpaceMediaLocalization(refs=tuple(refs))
 
     async def _writes_on(self, space_id: str, instance_id: str, user_id: str) -> bool:
         """``user_id`` holds a live writer seat in ``space_id`` on household
