@@ -18,6 +18,21 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.services.space_service import SpaceService
 
 
+class _RingConnectedGfs:
+    """The invitee household holds a GFS connection that can carry a GFS
+    space's channel (v_97: accepting an invitation to one needs it — the
+    consent check is tested in ``tests/services/test_space_service_gfs_consent.py``)."""
+
+    async def ring_connected(self, only=None) -> bool:
+        return True
+
+    async def ring_connected_at(self, gfs_url: str) -> bool:
+        return True
+
+    async def server_targets(self, space_id: str):
+        return None
+
+
 def accepting_service(
     db,
     space_repo,
@@ -51,6 +66,7 @@ def accepting_service(
     )
     if space_crypto_service is not None:
         svc.attach_space_crypto_service(space_crypto_service)
+    svc.attach_gfs_connection_service(_RingConnectedGfs())
     return svc
 
 

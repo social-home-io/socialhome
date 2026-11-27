@@ -2617,6 +2617,18 @@ class GfsConnectionService:
                 return True
         return False
 
+    async def ring_connected_at(self, gfs_url: str) -> bool:
+        """v_97 — whether this household's active connection to the GFS at
+        ``gfs_url`` (its base URL, as an invite link names it) proves
+        ``channel_ring``."""
+        want = gfs_url.rstrip("/")
+        ids = {
+            c.id
+            for c in await self._repo.list_active()
+            if (c.inbox_url or "").rstrip("/") == want
+        }
+        return bool(ids) and await self.ring_connected(only=ids)
+
     async def channel_ring_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS proved ``channel_ring`` on /gfs/info (v_97).
 

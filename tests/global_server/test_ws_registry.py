@@ -627,6 +627,20 @@ async def test_a_v96_socket_takes_every_item_and_watches_nothing(registry):
     assert len(ws.sent) == 1
 
 
+async def test_a_v96_socket_skips_an_item_a_v97_household_published(registry):
+    """M6 — an item published with ``ring_class`` comes from a v_97
+    household, which sends a v_96 member household the legacy event too: a
+    v_96 socket would only log it as unsupported (double traffic)."""
+    ws = _FakeWS()
+    await registry.register("inst-1", ws)
+    assert registry.skips_live("inst-1", _item(ring_class="durable")) is True
+    assert await registry.send("inst-1", _item(ring_class="durable")) is True
+    assert ws.sent == []
+    # A v_96 publisher's item (no ring class) still reaches it.
+    assert await registry.send("inst-1", _item()) is True
+    assert len(ws.sent) == 1
+
+
 async def test_watching_is_bounded_and_dies_with_the_socket(registry, monkeypatch):
     monkeypatch.setattr(ws_registry_mod, "MAX_WATCHED_CHANNELS", 2)
     ws = _FakeWS()

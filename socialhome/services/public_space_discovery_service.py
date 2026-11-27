@@ -162,7 +162,11 @@ class PublicSpaceDiscoveryService:
         """A GFS connection became active or was removed: refresh now, so
         Discover gains or loses its spaces without waiting for the hourly
         tick (or a restart). Only wakes the loop — never blocks the
-        connect / disconnect request on a directory download."""
+        connect / disconnect request on a directory download.
+
+        Until that poll answers, which GFS lists what is not known: a
+        just-connected GFS may list a space no other did."""
+        self._listed_on = None
         await self.refresh_now()
 
     def listed_on(self, space_id: str) -> frozenset[str] | None:
@@ -194,13 +198,17 @@ class PublicSpaceDiscoveryService:
         declared: dict[str, tuple[int | None, int | None]] = {}
         previous = self._listed_on or {}
         listed_on: dict[str, frozenset[str]] = {}
+        unknown = False
         for conn in active_connections:
             listings = await self._fetch_directory(conn.inbox_url)
             if listings is None:
                 complete = False
                 # Silent this tick: it keeps what it listed (its rows stay).
+                # Never heard from: unknown, not "lists nothing".
                 if conn.id in previous:
                     listed_on[conn.id] = previous[conn.id]
+                else:
+                    unknown = True
                 continue
             listed: set[str] = set()
             for listing in listings:
@@ -233,7 +241,9 @@ class PublicSpaceDiscoveryService:
             listed_on[conn.id] = frozenset(listed)
             total += len(listings)
 
-        self._listed_on = listed_on
+        # An active GFS whose directory we never read: what lists a space is
+        # not known (any ``channel_ring`` connection counts meanwhile).
+        self._listed_on = None if unknown else listed_on
 
         # Every directory answered (or there is no GFS left): this tick is the
         # whole picture, so a row it didn't write — a space a GFS dropped, or

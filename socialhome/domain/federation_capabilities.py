@@ -1670,9 +1670,10 @@ from __future__ import annotations
 #:   upgrade resync asks for it once it reaches v_96). Not space-scoped. Labelled "Choose how far
 #:   your moments go".
 #: * **v_97** (2026-11-27) — **space items** (``docs/protocol/
-#:   space-items.md``, owner-approved design 2026-11-27): every space change
-#:   travels as one sealed, author-signed item (v2 inner,
-#:   ``space-item-author:v2:``, or the authority ``space_event`` inner),
+#:   space-items.md``, owner-approved design 2026-11-27): every content
+#:   change travels as one sealed, author-signed item (v2 inner,
+#:   ``space-item-author:v2:``; host statements — roster, bans, config,
+#:   keys — stay on the guaranteed per-household path by design),
 #:   received through one door (``SpaceItemDispatch``) that runs the same
 #:   gates and handler as the event it replaces. New event types
 #:   ``SPACE_ITEM`` (a mesh space's item to a member household) and
@@ -2433,8 +2434,8 @@ class FederationCapability:
     #: peer-class step, so it gets nothing, as before.
     MIN_FOR_SESSION_SYNC_REFUSAL = 96
     #: v_97 — space items: ``SPACE_ITEM`` / ``SPACE_MENTION_NOTE`` and the
-    #: v2 / ``space_event`` inners (``docs/protocol/space-items.md``). A
-    #: member household at or above it gets a space change as one item; one
+    #: v2 inner (``docs/protocol/space-items.md``). A member household at or
+    #: above it gets a content change as one item; one
     #: below it the legacy event.
     MIN_FOR_SPACE_ITEMS = 97
 

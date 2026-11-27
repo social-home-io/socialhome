@@ -571,6 +571,7 @@ async def test_a_follow_over_the_gfs_passes_the_role_through(stack):
     gfs_join.host_of_listing = AsyncMock(return_value=HOST)
     gfs_join.request_join = AsyncMock(return_value="rq-gfs")
     stack.svc._gfs_join = gfs_join
+    stack.svc.attach_gfs_connection_service(_RingGfs())
     rid = await stack.svc.request_join_remote(
         "sp-remote",
         applicant_user_id=fan.user_id,
@@ -749,6 +750,7 @@ async def test_following_a_space_only_a_gfs_lists_asks_through_the_gfs(stack):
     gfs_join.host_of_listing = AsyncMock(return_value=HOST)
     gfs_join.request_join = AsyncMock(return_value="rq-gfs")
     stack.svc._gfs_join = gfs_join
+    stack.svc.attach_gfs_connection_service(_RingGfs())
     got = await stack.svc.follow_space(fan.user_id, "sp-gfs")
     assert got == {"subscribed": False, "pending": True}
     kwargs = gfs_join.request_join.await_args.kwargs

@@ -47,7 +47,7 @@ from typing import Any
 import orjson
 from aiohttp import web
 
-from ..domain.gfs_channel import MAX_WATCHED_CHANNELS
+from ..domain.gfs_channel import MAX_WATCHED_CHANNELS, RING_CLASS_FIELD
 from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.ws_binary_frame import encode_binary_frame
 from .fanout_stats import FanoutStats, frame_kind
@@ -322,15 +322,18 @@ class GfsWebSocketRegistry:
         return self._ring_skips(instance_id, payload)
 
     def _ring_skips(self, instance_id: str, payload: dict[str, Any]) -> bool:
-        """A channel item a ring socket does not take live: it does not
-        watch the channel — the ring holds
-        it for the household's next fetch."""
-        if (
-            instance_id not in self._ring
-            or instance_id not in self._by_instance
-            or payload.get("type") != "relay"
-        ):
+        """A channel item a socket does not take live:
+
+        * a ring socket that does not watch the channel — the ring holds it
+          for the household's next fetch;
+        * a v_96 socket (no ``channel_ring`` in its hello) and an item a
+          v_97 household published (``ring_class`` on the frame): that
+          household sends a v_96 member household the legacy event as well,
+          and the v_96 household could only drop the v2 item (M6)."""
+        if instance_id not in self._by_instance or payload.get("type") != "relay":
             return False
+        if instance_id not in self._ring:
+            return RING_CLASS_FIELD in payload
         channel_id = payload.get("channel_id")
         if not isinstance(channel_id, str):
             return False

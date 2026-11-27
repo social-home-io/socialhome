@@ -364,28 +364,46 @@ mesh space's households keep the last pin, so nothing repeats there.
   at start); a row here (a follower stepping up) is one when its content
   rides a channel (global, or private with `private_gfs`) and another
   household hosts it, its GFSs our connections on the owner's signed list.
-  No list known (an owner before v_57, an empty list, before the first
-  poll): any `channel_ring` connection counts. A space hosted here, a
-  paired household's public space or an unknown id is none.
+  Both can hold — a directory listing beside a row a tier change has not
+  reached yet — and then the GFSs of both count. No list known (an owner
+  before v_57, an empty list, an active GFS whose directory has not
+  answered since the start, or a connection change until the next poll):
+  any `channel_ring` connection counts. A space hosted here, a paired
+  household's public space or an unknown id is none. (Any GFS of ours can
+  list a space id it likes and so make a join of it need a GFS — a refusal,
+  never a way in.)
   - `GET /api/public_spaces/{id}/join-preflight` answers `{gfs_space,
     connected, may_connect}`; the SPA then shows the consent dialog ("This
     space uses a GFS…"): **Connect and join** for an admin (Q7 A — it
     connects the household to its default GFS, then joins), **Ask an
     admin** for anyone else; **Cancel** sends nothing. A preflight that
     fails is no "yes": the SPA sends nothing and says so (fail closed).
-  - The join itself is refused the same way, so no client can skip the
-    dialog: `409 GFS_CONNECTION_REQUIRED`, nothing sent. Every remote join,
-    request and follow passes through `request_join_remote` (paired, or
-    sealed through the GFS, v_84), which checks first. Entry points: the
+  - The join itself is refused the same way: `409 GFS_CONNECTION_REQUIRED`,
+    nothing sent. Every remote join, request and follow passes through
+    `request_join_remote` (paired, or sealed through the GFS, v_84), which
+    checks first; a sealed ask through the GFS needs a `channel_ring`
+    connection even when the directory row is gone (the join-contact pin
+    outlives it — only a global space is asked that way). Entry points: the
     Discover list (join / follow / ask), the space's About page, the ask
-    dialog, and an invite link.
-  - **Invite links.** A code names the space but not its tier; the check
-    runs when the space is already known here (its directory listing, a
-    row). Otherwise the tier arrives only with the redeem's answer — the
-    issuer has already seated the household — and the Connect prompt below
-    covers it. A check on the issuer would need the redeemer to declare
-    its GFS connections in the redeem (a new protocol field telling the
-    host which GFSs the household uses): left out.
+    dialog, a by-name invitation and an invite code.
+  - **A by-name invitation** (`accept_remote_invite`) reads the tier from
+    the host's snapshot the invitation carries, before anything is seated
+    or sent: a GFS space needs any `channel_ring` connection (the owner's
+    list is applied only once seated, after its signature check; a
+    household on none of its GFSs then gets the Connect prompt).
+  - **A GFS invite link** exists only for a GFS space (global, or private
+    with `private_gfs`; a grandfathered link turns it on), so its redeem
+    needs a `channel_ring` connection to the link's own GFS. A body that
+    leaves the GFS URL out has no GFS leg at all.
+  - **A code from a paired or mesh-reachable issuer** names the space but
+    not its tier: checked when the space is known here (its listing, a
+    row); otherwise the tier arrives only with the redeem's answer, after
+    the issuer seated the household, and the Connect prompt covers it.
+    Refusing then would leave the seat on the issuer; a check on the issuer
+    would need the redeemer to tell it which GFSs it uses — left out.
+  - The v_84 approval's seat (the coordinator's redeem) goes through the
+    same GFS link check: a household that lost its GFS between the ask and
+    the approval is seated once it connects again, within the token's life.
   - A space hosted here needs nothing: its people join on the host.
 - **Private ON/OFF.** Turning `private_gfs` ON makes the space a GFS space;
   OFF is refused while households reachable only through a GFS remain

@@ -63,9 +63,12 @@ from socialhome.repositories.public_space_repo import (
     SqlitePublicSpaceRepo,
 )
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
-from tests.federation.test_invite_bootstrap_gfs_e2e import _FakeGfs, _household
+from tests.federation.test_invite_bootstrap_gfs_e2e import (
+    _FakeGfs,
+    _household,
+    _RingCapableGfs,
+)
 
 try:
     import pytest_socket  # noqa: F401
@@ -84,7 +87,7 @@ MESSAGE = "hello-from-a-do-not-leak"
 async def _wire_join(h, http_session):
     """Wire the v_84 coordinator onto a household the way ``app.py`` does."""
     gfs_repo = SqliteGfsConnectionRepo(h.db)
-    gfs_service = GfsConnectionService(gfs_repo, http_client=http_session)
+    gfs_service = _RingCapableGfs(gfs_repo, http_client=http_session)
     gfs_service.attach_publish_context(
         space_repo=h.space_repo,
         own_instance_id=h.instance_id,

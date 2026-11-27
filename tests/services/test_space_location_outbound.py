@@ -22,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -57,7 +58,11 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import space_location_outbound as location_mod
-from socialhome.services.space_location_outbound import SpaceLocationOutbound
+from socialhome.services.space_location_outbound import (
+    KEEPALIVE_S,
+    KEEPALIVE_TICK_S,
+    SpaceLocationOutbound,
+)
 
 
 class _FakeWS:
@@ -389,21 +394,50 @@ async def _sharing(env, *, space_type=SpaceType.GLOBAL, mode="gps"):
     return sp
 
 
+def _later() -> float:
+    """Past every pin's due time (one keepalive window on)."""
+    return time.monotonic() + KEEPALIVE_S
+
+
 async def test_a_shared_pin_is_republished_by_the_keepalive(env):
     """v_97 (owner F3): every 15 minutes the pin goes again in a GFS space
     (its ring keeps a pin 15 min), the same pin with "here since" kept."""
     await _sharing(env)
-    assert await env.outbound.keepalive() == 1
+    assert await env.outbound.keepalive(now=_later()) == 1
     first, again = env.federation.calls
     assert again["payload"] == first["payload"]
     await env.outbound.start()
     await env.outbound.stop()
 
 
+async def test_each_pin_goes_again_on_its_own_schedule(env):
+    """M7 — not all of a household's pins at one tick: a pin is due a
+    window after it last went (less one tick, before the ring drops it),
+    so pins stay spread the way they first went."""
+    await _sharing(env)
+    assert await env.outbound.keepalive() == 0
+    assert len(env.federation.calls) == 1
+    soon = time.monotonic() + KEEPALIVE_S - KEEPALIVE_TICK_S - 5
+    assert await env.outbound.keepalive(now=soon) == 0
+    due = time.monotonic() + KEEPALIVE_S - KEEPALIVE_TICK_S + 1
+    assert await env.outbound.keepalive(now=due) == 1
+    # It went again: due a window after THAT, not at the next tick.
+    assert await env.outbound.keepalive(now=time.monotonic() + KEEPALIVE_TICK_S) == 0
+
+
+@pytest.mark.security
+async def test_the_keepalive_never_repeats_a_pin_into_an_archived_space(env):
+    """M7 — an archived space is read-only: its households refuse a pin."""
+    sp = await _sharing(env)
+    await env.space_repo.save(dataclasses.replace(sp, archived=True))
+    assert await env.outbound.keepalive(now=_later()) == 0
+    assert len(env.federation.calls) == 1
+
+
 async def test_the_keepalive_never_repeats_a_pin_in_a_mesh_space(env):
     """A mesh space's households keep the last pin: nothing repeats."""
     await _sharing(env, space_type=SpaceType.PRIVATE)
-    assert await env.outbound.keepalive() == 0
+    assert await env.outbound.keepalive(now=_later()) == 0
     assert len(env.federation.calls) == 1
 
 
@@ -417,10 +451,10 @@ async def test_the_keepalive_stops_once_the_pin_is_no_longer_shared(env):
     await env.space_repo.save_member(
         dataclasses.replace(member, location_share_enabled=False)
     )
-    assert await env.outbound.keepalive() == 0
+    assert await env.outbound.keepalive(now=_later()) == 0
     # Forgotten: sharing again does not revive the old pin by itself.
     await env.space_repo.save_member(member)
-    assert await env.outbound.keepalive() == 0
+    assert await env.outbound.keepalive(now=_later()) == 0
     assert len(env.federation.calls) == 1
 
 
@@ -434,7 +468,7 @@ async def test_the_keepalive_sends_no_coordinates_into_a_zone_only_space(env):
             sp, features=dataclasses.replace(sp.features, location_mode="zone_only")
         )
     )
-    assert await env.outbound.keepalive() == 0
+    assert await env.outbound.keepalive(now=_later()) == 0
     assert len(env.federation.calls) == 1
 
 

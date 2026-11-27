@@ -96,6 +96,10 @@ SPACE_ITEM_EVENT_TYPE: str = "space_item"
 RING_CLASS_DURABLE: str = "durable"
 RING_CLASS_EPHEMERAL: str = "ephemeral"
 RING_CLASSES: frozenset[str] = frozenset({RING_CLASS_DURABLE, RING_CLASS_EPHEMERAL})
+#: v_97 — the key a GFS sets on a fan-out frame of an item a v_97 household
+#: published (it signed a ``ring_class``): a v_96 socket does not take such
+#: a frame live (it gets the legacy event from that household instead).
+RING_CLASS_FIELD = "ring_class"
 RING_DURABLE_TTL_S: int = 24 * 3600
 RING_EPHEMERAL_TTL_S: int = 15 * 60
 

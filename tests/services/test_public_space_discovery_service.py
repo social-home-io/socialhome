@@ -1163,3 +1163,35 @@ async def test_listed_on_forgets_a_removed_connection(env):
     await gfs_repo.delete("gfs-1")
     await svc.poll_once()
     assert svc.listed_on("sp-A") == frozenset()
+
+
+async def test_a_gfs_never_heard_from_makes_listed_on_unknown(env):
+    """A restart whose first poll a GFS does not answer: what it lists is
+    not known — never "listed nowhere" (that would refuse every join)."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://g1.example"))
+    await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://g2.example"))
+    session = _DirsByUrl({"https://g1.example": None, "https://g2.example": ["sp-A"]})
+    svc = PublicSpaceDiscoveryService(
+        repo, gfs_connection_repo=gfs_repo, http_client=session
+    )
+    await svc.poll_once()
+    assert svc.listed_on("sp-A") is None
+    session.by_url = {"https://g1.example": [], "https://g2.example": ["sp-A"]}
+    await svc.poll_once()
+    assert svc.listed_on("sp-A") == frozenset({"gfs-2"})
+
+
+async def test_a_connection_change_forgets_what_lists_what_until_the_next_poll(env):
+    _, repo, gfs_repo = env
+    conn = _gfs_conn("gfs-1", inbox_url="https://g1.example")
+    await gfs_repo.save(conn)
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_DirsByUrl({"https://g1.example": ["sp-A"]}),
+    )
+    await svc.poll_once()
+    assert svc.listed_on("sp-A") == frozenset({"gfs-1"})
+    await svc.on_connections_changed(conn)
+    assert svc.listed_on("sp-A") is None

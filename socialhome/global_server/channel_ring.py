@@ -48,6 +48,7 @@ from ..domain.gfs_channel import (
     FETCH_PAGE_MAX_BYTES,
     FETCH_PAGE_MAX_ITEMS,
     RING_CLASS_DURABLE,
+    RING_CLASS_FIELD,
     ChannelFetch,
     ChannelHead,
     ChannelWatch,
@@ -145,7 +146,12 @@ class GfsChannelRing:
         if pos is None:
             return frame
         seq, ring_id = pos
-        return ring_frame(frame, seq=seq, ring_id=ring_id)
+        out = ring_frame(frame, seq=seq, ring_id=ring_id)
+        if req.ring_class is not None:
+            # A v_97 publisher (it signs ``ring_class``): a v_96 socket gets
+            # the legacy event from it instead (``skips_live``).
+            out[RING_CLASS_FIELD] = req.ring_class
+        return out
 
     # ── Seats ────────────────────────────────────────────────────────────
 

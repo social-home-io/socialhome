@@ -446,9 +446,10 @@ class FederationEventType(str, enum.Enum):
     #: BEGIN names an older page than the one last pushed.
     SPACE_SYNC_PAGE = "space_sync_page"
     #: v_97 space items (``docs/protocol/space-items.md``): ``{space_id,
-    #: epoch, item}`` — one space change sealed under the space content key
-    #: (an author-signed v2 inner, or an authority ``space_event``), applied
-    #: by the handler of the event it replaces after the same gates. A mesh
+    #: epoch, item}`` — one content change sealed under the space content
+    #: key (an author-signed v2 inner; host statements stay on the guaranteed
+    #: per-household path, never an item), applied by the handler of the
+    #: event it replaces after the same gates. A mesh
     #: space's items go to its v_97 member households as this event.
     SPACE_ITEM = "space_item"
     #: v_97 — the same sealed item, sent to ONE household whose people it

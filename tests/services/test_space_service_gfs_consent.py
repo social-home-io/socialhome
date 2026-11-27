@@ -13,6 +13,7 @@ never from the client.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -223,3 +224,108 @@ async def test_an_invite_link_to_a_known_gfs_space_needs_the_gfs_too(stack):  # 
         await stack.svc.redeem_invite_token(
             "tok", user_id=fan.user_id, issuer_instance_id=HOST, bootstrap=hint
         )
+
+
+# ── Review round 1 (Fable) ────────────────────────────────────────────────
+
+
+class _UrlGfs(_Gfs):
+    """…with ``ring_at`` — the base URLs of the ring connections."""
+
+    def __init__(self, ring=(), ring_at=()) -> None:
+        super().__init__(ring=ring)
+        self.ring_at = set(ring_at)
+
+    async def ring_connected_at(self, gfs_url: str) -> bool:
+        return gfs_url.rstrip("/") in self.ring_at
+
+
+def _hint(**over) -> InviteBootstrapHint:
+    base = {
+        "invite_token": "tok",
+        "space_id": "",
+        "instance_id": HOST,
+        "identity_pk": "aa",
+        "keywrap_pk": "bb",
+        "keywrap_sig": "cc",
+        "gfs_url": "https://gfs.example",
+    }
+    base.update(over)
+    return InviteBootstrapHint(**base)
+
+
+async def test_a_gfs_invite_link_needs_a_ring_connection_to_that_gfs(stack):  # noqa: F811
+    """A GFS link exists only for a GFS space: whatever space id the body
+    names (none here), the link's own GFS must carry the channel."""
+    fan = await stack.provision("fan")
+    redeemed: list = []
+
+    async def request_redeem(token, **kw):
+        redeemed.append(token)
+        return {"space_id": "sp-x", "role": "member"}
+
+    stack.svc._redeem_coordinator = SimpleNamespace(request_redeem=request_redeem)
+    stack.svc.attach_gfs_connection_service(
+        _UrlGfs(ring={"gfs-a"}, ring_at={"https://other.example"})
+    )
+    with pytest.raises(GfsConnectionRequiredError):
+        await stack.svc.redeem_invite_token(
+            "tok", user_id=fan.user_id, issuer_instance_id=HOST, bootstrap=_hint()
+        )
+    assert redeemed == []
+    stack.svc.attach_gfs_connection_service(
+        _UrlGfs(ring={"gfs-a"}, ring_at={"https://gfs.example"})
+    )
+    await stack.svc.redeem_invite_token(
+        "tok", user_id=fan.user_id, issuer_instance_id=HOST, bootstrap=_hint()
+    )
+    assert redeemed == ["tok"]
+
+
+@pytest.mark.parametrize(
+    ("meta", "refused"),
+    [
+        ({"space_type": "global"}, True),
+        ({"space_type": "private", "features": {"private_gfs": True}}, True),
+        ({"space_type": "private"}, False),
+        ({"space_type": "public"}, False),
+    ],
+)
+async def test_a_by_name_invite_reads_the_tier_from_the_hosts_snapshot(
+    stack,  # noqa: F811
+    meta,
+    refused,
+):
+    stack.svc.attach_gfs_connection_service(_Gfs())
+    meta = {"name": "Invited", **meta}
+    if refused:
+        with pytest.raises(GfsConnectionRequiredError):
+            await stack.svc._require_gfs_for_snapshot("sp-i", HOST, meta)
+    else:
+        await stack.svc._require_gfs_for_snapshot("sp-i", HOST, meta)
+    stack.svc.attach_gfs_connection_service(_Gfs(ring={"gfs-a"}))
+    await stack.svc._require_gfs_for_snapshot("sp-i", HOST, meta)
+
+
+async def test_a_stale_public_stub_does_not_hide_a_gfs_listing(stack):  # noqa: F811
+    await _stub(stack, space_type=SpaceType.PUBLIC)
+    await _listed(stack, "sp-s", sources=frozenset({"gfs-b"}))
+    stack.svc.attach_gfs_connection_service(_Gfs(ring={"gfs-a"}, targets=None))
+    ready = await stack.svc.gfs_join_readiness("sp-s")
+    assert (ready.gfs_space, ready.connected) == (True, False)
+
+
+async def test_an_ask_through_the_gfs_needs_a_ring_connection_without_a_listing(
+    stack,  # noqa: F811
+):
+    """The join-contact pin outlives the directory row: the sealed ask
+    through the GFS is still a GFS space's."""
+    stack.fed_repo.get_instance = AsyncMock(return_value=None)
+    gfs_join = MagicMock()
+    gfs_join.host_of_listing = AsyncMock(return_value=HOST)
+    gfs_join.request_join = AsyncMock(return_value="rq-gfs")
+    stack.svc._gfs_join = gfs_join
+    stack.svc.attach_gfs_connection_service(_Gfs())
+    with pytest.raises(GfsConnectionRequiredError):
+        await _ask(stack, "sp-pinned")
+    gfs_join.request_join.assert_not_awaited()

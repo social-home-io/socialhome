@@ -120,6 +120,22 @@ from socialhome.services.peer_unpair_service import PeerUnpairService
 from socialhome.services.space_member_directory import SpaceMemberDirectory
 from socialhome.services.space_service import SpaceService
 
+
+class _RingCapableGfs(GfsConnectionService):
+    """The fake GFS predates v_97's signed ``channel_ring`` block: count its
+    connection as one that can carry a GFS space's channel, so these flows
+    pass the join consent check (tested on its own in
+    ``tests/services/test_space_service_gfs_consent.py``)."""
+
+    __slots__ = ()
+
+    async def ring_connected(self, only=None) -> bool:
+        return True
+
+    async def ring_connected_at(self, gfs_url: str) -> bool:
+        return True
+
+
 try:
     import pytest_socket  # noqa: F401
 
@@ -353,7 +369,7 @@ async def _household(
             paired_at="2026-01-01T00:00:00+00:00",
         ),
     )
-    gfs_service = GfsConnectionService(
+    gfs_service = _RingCapableGfs(
         gfs_repo, http_client=http_session, publish_client=http_session
     )
 
@@ -365,6 +381,9 @@ async def _household(
         own_instance_id=instance_id,
     )
     space_service.attach_federation(federation, federation_repo, remote_members)
+    # v_97 — a join of a GFS space checks the household's GFS connection
+    # (as ``app.py`` wires it).
+    space_service.attach_gfs_connection_service(gfs_service)
     space_service.attach_instance_purger(
         PeerUnpairService(
             bus=bus,

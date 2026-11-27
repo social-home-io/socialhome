@@ -4880,3 +4880,22 @@ async def test_ring_connected_needs_an_active_ring_server(env):
     assert not await svc.ring_connected()
     await repo.save(_make_conn("ring-1", public_key=_GFS_KP.public_key.hex()))
     assert await svc.ring_connected()
+
+
+async def test_ring_connected_only_among_the_listed_and_at_a_url(env):
+    """v_97 — the join check names the GFSs a space is listed on (``only``)
+    or the GFS an invite link points at (``ring_connected_at``)."""
+    _db, repo = env
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id="inst-ring-1", capabilities={"channel_ring": True}
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    conn = _make_conn("ring-1", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    assert await svc.ring_connected(only={"ring-1"})
+    assert not await svc.ring_connected(only={"another"})
+    assert not await svc.ring_connected(only=set())
+    assert await svc.ring_connected_at(conn.inbox_url.rstrip("/") + "/")
+    assert not await svc.ring_connected_at("https://elsewhere.example")

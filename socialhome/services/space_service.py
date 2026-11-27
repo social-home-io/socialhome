@@ -1164,24 +1164,30 @@ class SpaceService(
         not polled since the start) any ``channel_ring`` connection counts.
         """
         space = await self._spaces.get(space_id)
-        listed: frozenset[str] | None
-        if space is not None:
-            if not channel_on(space) or not self._hosted_elsewhere(space):
-                return GfsJoinReadiness(gfs_space=False, connected=True)
-            listed = await self._owner_listed_gfs_ids(space_id)
-        else:
-            listing = (
-                await self._public_spaces.get(space_id)
-                if self._public_spaces is not None
-                else None
-            )
-            if listing is None:
-                return GfsJoinReadiness(gfs_space=False, connected=True)
-            listed = (
+        if space is not None and not self._hosted_elsewhere(space):
+            return GfsJoinReadiness(gfs_space=False, connected=True)
+        sources: list[frozenset[str] | None] = []
+        if space is not None and channel_on(space):
+            sources.append(await self._owner_listed_gfs_ids(space_id))
+        # A directory listing makes it a GFS space even beside a row that
+        # says otherwise (a tier change not synced here yet).
+        listing = (
+            await self._public_spaces.get(space_id)
+            if self._public_spaces is not None
+            else None
+        )
+        if listing is not None:
+            sources.append(
                 self._gfs_listing_sources(space_id)
                 if self._gfs_listing_sources is not None
                 else None
             )
+        if not sources:
+            return GfsJoinReadiness(gfs_space=False, connected=True)
+        known = [x for x in sources if x is not None]
+        listed: frozenset[str] | None = (
+            frozenset().union(*known) if len(known) == len(sources) else None
+        )
         connected = self._gfs is not None and await self._gfs.ring_connected(
             only=listed
         )
@@ -1196,6 +1202,29 @@ class SpaceService(
         if not targets:
             return None
         return frozenset(t.id for t in targets if t.registered)
+
+    async def _require_gfs_for_snapshot(
+        self, space_id: str, host_instance_id: str, meta: dict
+    ) -> None:
+        """A by-name invitation: the host's snapshot names the tier. A GFS
+        space needs any ``channel_ring`` connection before the accept (its
+        owner's list is applied only once seated, after its signature
+        check; a household on none of its GFSs then gets the Connect
+        prompt)."""
+        snap = stub_space_from_metadata(
+            space_id, host_instance_id=host_instance_id, meta=meta
+        )
+        if not channel_on(snap) or not self._hosted_elsewhere(snap):
+            return
+        if self._gfs is None or not await self._gfs.ring_connected():
+            raise GfsConnectionRequiredError()
+
+    async def _require_ring_at(self, gfs_url: str) -> None:
+        """Raise :class:`GfsConnectionRequiredError` unless this household
+        holds an active ``channel_ring`` connection to the GFS at
+        ``gfs_url``."""
+        if self._gfs is None or not await self._gfs.ring_connected_at(gfs_url):
+            raise GfsConnectionRequiredError()
 
     async def _require_gfs_connection(self, space_id: str) -> None:
         """Raise :class:`GfsConnectionRequiredError` (409) when joining
@@ -8403,6 +8432,13 @@ class SpaceService(
                     "This invitation's proof of the space's owner no longer "
                     "holds — ask for a new invitation."
                 )
+        # v_97 — a GFS space needs a GFS connection first (firm consent),
+        # checked before anything is seated or sent. The tier comes from the
+        # host's snapshot the invitation carries, else from a row here.
+        if opened is not None:
+            await self._require_gfs_for_snapshot(space_id, host_instance, opened.meta)
+        else:
+            await self._require_gfs_connection(space_id)
         # A local community: the accept carries this household's home
         # rounded to ~1 km — only once the person agreed (the SPA asks on
         # ``LOCATION_REQUIRED`` and accepts again), and only to the host.
@@ -8772,11 +8808,18 @@ class SpaceService(
             raise SpacePermissionError(
                 "cross-instance invite redeem is not available on this host",
             )
+        if bootstrap is not None and bootstrap.gfs_url:
+            # v_97 — a GFS invite link exists only for a GFS space (global,
+            # or private with ``private_gfs``; a grandfathered link turns it
+            # on): connected to that very GFS, with ``channel_ring``, first.
+            # Not something the body can claim away — without the GFS URL
+            # there is no bootstrap leg.
+            await self._require_ring_at(bootstrap.gfs_url)
         if bootstrap is not None and bootstrap.space_id:
-            # v_97 — a link to a space we already know is a GFS space (its
-            # directory listing, a row) needs a GFS connection first, like
-            # any join. Otherwise the space's tier comes only with the
-            # redeem's answer: the Connect prompt then shows in the space.
+            # …and a space we already know is a GFS space (its directory
+            # listing, a row), like any join. Otherwise (a paired or mesh
+            # issuer) the tier comes only with the redeem's answer: the
+            # Connect prompt then shows in the space.
             await self._require_gfs_connection(bootstrap.space_id)
         return await self._redeem_coordinator.request_redeem(
             token,
@@ -9643,6 +9686,10 @@ class SpaceService(
                 self._gfs_join is not None
                 and await self._gfs_join.host_of_listing(space_id) == host_instance_id
             ):
+                # Only a global space is asked through a GFS: even with its
+                # directory row gone (the pin outlives it), a GFS space.
+                if self._gfs is None or not await self._gfs.ring_connected():
+                    raise GfsConnectionRequiredError()
                 return await self._gfs_join.request_join(
                     space_id,
                     applicant_user_id=applicant_user_id,
