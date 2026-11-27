@@ -127,6 +127,19 @@ Each per-peer send goes through `send_with_mesh_fallback`:
 An event that arrived from another household carries `origin_instance_id`
 and is never sent on again.
 
+### Since v_97: chat messages are space items
+
+A chat message, its edit, its delete and a chat reaction travel as
+[space items](./space-items.md) (`item_type` = the `SPACE_CHAT_*` event type,
+body = its payload): in a mesh space as `SPACE_ITEM` to v_97 member
+households, in a GFS space only on the channel. Watching households get
+them live; everyone else sees a badge from the 15-minute heads ping and
+fetches on open. A household sends at most 20 chat items a minute per space
+(the rest wait for the next minute). A member household below v_97 still
+gets the `SPACE_CHAT_*` events. `@here` / `@everyone` notify watchers live
+and the rest by badge; a mention of a person in another household also
+goes to that household as `SPACE_MENTION_NOTE`.
+
 ## Flow
 
 ```mermaid

@@ -1582,6 +1582,20 @@ the gap these close).
 
 Tripwire: `tests/protocol/test_space_more_tombstones.py` (§27.9).
 
+## Channel ring gaps fall back to §25.6 (v_97)
+
+A household reading a GFS space from the channel ring
+([space items](./space-items.md#the-channel-ring-gfs-capability-channel_ring))
+keeps a cursor per ring. When the GFS answers `channel_gap` (the ring was
+reset, the cursor fell off the ring, or it is ahead of the head), or the
+household is more than 2 000 items / 8 MiB behind, it moves its cursor to
+the head, fetches the current location pins, and runs the ordinary §25.6
+catch-up for that space — the same stream, records and watermarks; nothing
+in `SYNC_RECORD_LINES` or `COMMIT_SPECS` changes, because a space item
+applies through the same handlers and stores the same rows as the event it
+replaces. A new seat starts at the head; its history comes from the join
+catch-up.
+
 ## Backpressure
 
 There is no application-level acknowledgement per chunk. Before each

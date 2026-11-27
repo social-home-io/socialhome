@@ -1245,6 +1245,58 @@ next authority rotation or heal, so a drop is undone at once unless the GFS
 kept a per-channel registrant identity it deliberately doesn't keep, and
 every report would leave the GFS a stored channel ↔ space link.
 
+### Sign-off: space items on the channel ring (v_97, owner-approved 2026-11-27)
+
+**Owner-approved 2026-11-27** (design `channel-items-design`: sign-offs 1–4
+with Q1–Q8, sign-offs 5–7 with F1–F8). Since v_97 every space change is one
+sealed space item ([`protocol/space-items.md`](./protocol/space-items.md)):
+a GFS space carries all of them on its opaque channel, and each channel
+keeps a ring at the GFS from which households pull what they missed. What
+that concedes, exactly:
+
+1. **A location pin rides the channel too** — as ciphertext under the space
+   content key, padded like every item, never readable by the GFS. The GFS
+   sees that an `ephemeral` item went by (a 15-minute ring class), which a
+   location pin and its 15-minute keepalive are. "People's locations are
+   never shared by design" still holds: the pin goes only to the space's
+   members (followers included, as members), as before; the GFS gains no
+   location, only the item's size bucket and timing.
+2. **Joining a GFS space needs a GFS registration.** A household must be
+   registered on at least one of the space's listed GFSs before it joins
+   (consent up front in the join dialog: "Connect and join" / "Ask an
+   admin" / "Cancel" — Cancel sends nothing). This replaces "a member can
+   decline to connect to the GFS" for GFS spaces; mesh spaces need no GFS.
+3. **The owner takes a channel seat** in a GFS space, like every member
+   (until v_97 it only published). The GFS learns one more seated household
+   for the channel — the owner's — which it could already link by IP and
+   timing (sign-off "members know who follows", item 3).
+4. **The ring class and the 2 KiB bucket are visible to the GFS.** A
+   publish says `durable` or `ephemeral`, and the smallest buckets are now
+   1 KiB and 2 KiB, so the GFS learns which items are short-lived and that
+   small items are small. It learns no item type and no content.
+5. **The GFS learns who is watching, and when households fetch.** A
+   household tells the GFS which channels it is watching (a person has the
+   space open, plus 2 minutes) and fetches from the ring when a space is
+   opened. The GFS therefore learns, per seated household and channel,
+   viewing periods and fetch times — not which person, and still not which
+   space the channel is. The host's household always watches.
+6. **A mention note reveals its timing.** An item that mentions people in
+   another household also goes to that household's mailbox at once
+   (`SPACE_MENTION_NOTE`, the item's ciphertext): the GFS sees a mailbox
+   envelope at the moment of a channel publish, so it can link "this channel
+   item mentioned someone behind this mailbox". It never sees who or what.
+7. **The ring keeps ciphertext for up to 24 h** (15 min for ephemeral
+   items), one copy per channel (not per seat), bounded per channel (64 MiB,
+   32 768 items) and per server (8 GiB). Until v_97 a GFS queued a copy per
+   offline seat for 24 h; it now keeps one per channel for everyone.
+
+What does not change: the GFS reads nothing it relays and cannot forge an
+item (author signature + writer cert inside the ciphertext, or the space
+authority signature for host statements); the channel carries no space id;
+non-member households on the mesh still see only `SPACE_ROUTED`
+ciphertext; no delivery depends on a role. Anything that lets the GFS read
+an item, keep it longer, or link a channel to a space is a new §2 change.
+
 ### Mailbox tickets hide a household among its epoch's households
 
 Creating a GFS mailbox spends an anonymous Privacy Pass ticket the

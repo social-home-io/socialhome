@@ -1924,6 +1924,29 @@ under the server-wide cap).
 6. **The owner replaces a channel another key holder moved past it**
    (self-heal above).
 
+### The channel ring (GFS capability `channel_ring`, v_97)
+
+A GFS that lists `channel_ring` in its signed `/gfs/info` block keeps one
+ring of recent items per channel (64 MiB / 32 768 items / 24 h, 15 min for
+`ephemeral` items, 8 GiB per server with fair eviction; GFS migration 0034
+adds `gfs_channel_ring` and `head_seq` / `ring_id` / `ring_bytes` on
+`gfs_channels`). A household socket that says `channel_ring` in its hello
+gets live items only for the channels it **watches** (`channel_watch`), a
+`channel_heads` ping every 15 minutes when something moved, every
+`push_all` item (authority statements) live, and pulls the rest with
+`channel_fetch` (pages ≤ 500 items / 4 MiB; `channel_gap` when its cursor is
+no longer in the ring). Every watch and fetch needs a live seat on the
+channel at an open epoch — the same seat check as a push. A socket without
+`channel_ring` keeps the v_96 push-everything behaviour and its offline
+copies during the release window. The full protocol, the household side and
+the cost math are in [space items](./space-items.md).
+
+**GFS spaces.** Since v_97 a space with a channel (a global space, a private
+space with `private_gfs` ON) carries every item only on the channel; the
+owner takes a seat too, and joining needs a GFS registration on one of the
+listed servers (a consent dialog). A global space cannot become public while
+households reachable only through a GFS remain (`409 GLOBAL_GFS_MEMBERS`).
+
 ### Owner-chosen channel servers (v_57)
 
 **The owner picks.** A private space with `private_gfs` ON lives on the

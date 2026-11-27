@@ -153,6 +153,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Sync pages](./sync-pages.md) — authority-signed state pages: "am I behind?" (Phase 2) and verified catch-up from any member household while the host is offline (Phase 3); v_95, built (`page_match` anti-entropy not yet)
     and verified catch-up from any member (Phase 3, design).
   - [Discovery](./discovery.md) — GFS-brokered public-space directory.
+  - [Space items](./space-items.md) — one delivery path for every space change: one sealed, author-signed item checked by the same gates on every path; a GFS space carries them only on its channel, whose per-channel ring at the GFS pushes live to watching households and lets everyone else pull (`SPACE_ITEM`, `SPACE_MENTION_NOTE`, capability v_97, GFS capability `channel_ring`).
   - [Local communities](./local-communities.md) — a public space bound to an area; every join carries the joiner's home rounded to ~1 km (with consent, sealed to the host) and the host decides — near the edge always an admin; the directory shows only the radius, never the centre (capability v_59).
 - **Content**
   - [Feeds](./feeds.md) — posts, comments, reactions.

@@ -178,6 +178,19 @@ When `lat`/`lon` is `None` (accuracy gate fired upstream) we skip
 both space fan-outs entirely. The household dashboard still receives
 `zone_name`, so the member stays visible there.
 
+### Since v_97: a space location pin is an ephemeral space item
+
+A `SPACE_LOCATION_UPDATED` pin travels as a [space item](./space-items.md)
+of ring class `ephemeral` (15 minutes in the GFS ring): in a GFS space only
+on the channel, live to the households watching the space (a person has it
+open) — opening the map fetches the latest pins once. The sender publishes
+at most one pin per person per 60 s (latest only: a newer pin replaces one
+still waiting) and republishes the latest pin every 15 minutes while the
+person shares (keepalive); a receiver shows a pin older than 45 minutes as
+stale. The pin is ciphertext under the space content key, truncated to 4 dp
+as before; the GFS learns only that an ephemeral item went by
+([principles](../principles.md#sign-off-space-items-on-the-channel-ring-v_97-owner-approved-2026-11-27)).
+
 ## Household zones (local only)
 
 The household keeps its own zone list — Home, School, Work… — in

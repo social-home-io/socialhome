@@ -2040,6 +2040,17 @@ retry queue lands them); a floor on the per-node share would loosen the
 one-holder bound and is an owner decision. The route-level per-IP limiter
 (120 a minute) and the publish replay cache stay per node.
 
+## The channel ring replaces per-seat offline copies (v_97)
+
+For a household whose socket says `channel_ring` in its hello, a GFS proving
+`channel_ring` no longer queues channel items per offline seat: the channel
+keeps one ring of recent items, and the household pulls what it missed when
+a space is opened (or, for the host, at every 15-minute heads ping). Sockets
+without `channel_ring` keep the per-seat offline copies of this section for
+the release window. The per-(channel, address) publish limit gets a per-node
+floor of 8/min (so ~32/min on a 4-node cluster) — a busy household's chat
+no longer hits `429`. See [space items](./space-items.md).
+
 ## Inbound budgets on the household
 
 Every household that reaches us through a GFS — members seated from an

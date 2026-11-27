@@ -388,6 +388,13 @@ any member, and an envelope still naming the type is refused at the §24.11
 parse step as unknown. The space-keyed `space_post_public` relay is gone with
 it; see [discovery.md](./discovery.md#since-v_96-space-content-reaches-a-gfs-only-through-a-channel).
 
+**Space items (v_97)** — `SPACE_ITEM` (one sealed, author-signed space
+item, `{space_id, epoch, item}`) carries every space change of a mesh space
+to a v_97 member household; `SPACE_MENTION_NOTE` (same shape) brings an item
+that mentions someone to that person's household at once. In a GFS space
+every item rides only the channel. Each item applies through the same gates
+and handler as the event it replaces; see [space items](./space-items.md).
+
 ## Flow — create + join
 
 ```mermaid
