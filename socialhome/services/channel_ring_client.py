@@ -401,7 +401,7 @@ class ChannelRingClient:
                 await self._fetch(gfs_id, channel_id)
                 return
         for space_id in spaces:
-            await self._report(space_id, active=True)
+            await self.report_activity(space_id, active=True)
 
     async def _on_done(self, gfs_id: str, frame: dict) -> None:
         channel_id = valid_channel_id(frame.get("channel_id"))
@@ -427,7 +427,7 @@ class ChannelRingClient:
         if head > cur[1]:
             self._set_cursor(gfs_id, channel_id, ring_id, head)
         for space_id in await self._spaces_of(gfs_id, channel_id):
-            await self._report(space_id, active=False)
+            await self.report_activity(space_id, active=False)
 
     async def _on_gap(self, gfs_id: str, frame: dict) -> None:
         channel_id = valid_channel_id(frame.get("channel_id"))
@@ -504,7 +504,14 @@ class ChannelRingClient:
         if await self._send(gfs_id, req.to_wire()):
             self._fetching[key] = (req.req, self._clock())
 
-    async def _report(self, space_id: str, *, active: bool) -> None:
+    def has_activity(self, space_id: str) -> bool:
+        """Whether *space_id* wears the "New activity" badge right now —
+        what ``GET /api/spaces`` carries as ``new_activity``, so a reloaded
+        page shows it again (in memory: a restart badges again at the next
+        heads ping above the persisted cursor)."""
+        return space_id in self._active
+
+    async def report_activity(self, space_id: str, *, active: bool) -> None:
         """The badge: on when something new waits, off once caught up —
         published only on a change, and "New activity" at most once per
         :data:`ACTIVITY_QUIET_S` per space."""

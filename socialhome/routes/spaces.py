@@ -15,6 +15,7 @@ from aiohttp.multipart import BodyPartReader
 
 from ..app_keys import (
     alias_resolver_key,
+    channel_ring_client_key,
     child_protection_service_key,
     federation_repo_key,
     gfs_server_selection_service_key,
@@ -214,8 +215,16 @@ class SpaceCollectionView(BaseView):
                 # detail's ``sync.may_be_missing`` — a follower's too (P10:
                 # it syncs like a member).
                 "sync_may_be_missing": await self._may_be_missing(s.id),
+                # v_97 — the "New activity" badge (the space's channel ring
+                # holds items not fetched yet), so a reload keeps it; the
+                # ``space.activity`` frame moves it live.
+                "new_activity": self._new_activity(s.id),
             }
         )
+
+    def _new_activity(self, space_id: str) -> bool:
+        ring = self.request.app.get(channel_ring_client_key)
+        return ring is not None and ring.has_activity(space_id)
 
     async def _may_be_missing(self, space_id: str) -> bool:
         status_svc = self.request.app.get(space_sync_status_key)

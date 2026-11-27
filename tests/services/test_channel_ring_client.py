@@ -481,3 +481,14 @@ async def test_a_space_without_a_channel_is_not_watched(world):
 async def test_the_loop_starts_and_stops(world):
     await world.client.start()
     await world.client.stop()
+
+
+async def test_the_badge_is_readable_for_the_spaces_list(world):
+    """``has_activity`` backs ``GET /api/spaces`` ``new_activity``."""
+    assert world.client.has_activity("sp-1") is False
+    await world.client.on_frame(_heads(10), gfs_id=GFS)
+    await world.client.on_frame(_heads(20), gfs_id=GFS)
+    assert world.client.has_activity("sp-1") is True
+    await world.client.viewing("sp-1")
+    await world.client.on_frame(_done(world, head=20), gfs_id=GFS)
+    assert world.client.has_activity("sp-1") is False

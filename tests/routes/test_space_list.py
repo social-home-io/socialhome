@@ -16,6 +16,8 @@ Only the caller's own seats are listed, and nothing about another user.
 
 import pytest
 
+from socialhome.app_keys import channel_ring_client_key
+
 from .test_space_home import _MEMBER, _OWNER, seeded  # noqa: F401 — the fixture
 
 _ROW_KEYS = {
@@ -36,6 +38,7 @@ _ROW_KEYS = {
     "unread_posts",
     "icon_url",
     "needs_you",
+    "new_activity",
 }
 
 
@@ -279,3 +282,16 @@ async def test_a_follower_marks_too_and_an_outsider_cannot(seeded):  # noqa: F81
     assert r.status == 403
     r = await client.post("/api/spaces/nope/feed/read", headers=hdr["guest"])
     assert r.status == 403
+
+
+async def test_new_activity_survives_a_reload(seeded):  # noqa: F811
+    """v_97 — the "New activity" badge (a heads ping above the cursor) is
+    in every list row, so a reloaded Spaces page shows it again; it goes
+    once the household caught up."""
+    client, hdr, sid = seeded
+    ring = client.app[channel_ring_client_key]
+    assert (await _row(client, hdr["member"], sid))["new_activity"] is False
+    await ring.report_activity(sid, active=True)
+    assert (await _row(client, hdr["member"], sid))["new_activity"] is True
+    await ring.report_activity(sid, active=False)
+    assert (await _row(client, hdr["member"], sid))["new_activity"] is False
