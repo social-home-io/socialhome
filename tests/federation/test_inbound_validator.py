@@ -1297,9 +1297,17 @@ class _StubPipelineOwner:
         return None
 
     def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
-        return self.post_decrypt_gate_steps(include_ban_check=True)
+        # The real composition, so a change to it is seen here.
+        from socialhome.federation.federation_service import FederationService
 
-    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False):
+        return FederationService.space_write_gates(
+            self,  # type: ignore[arg-type]
+            hold_for_seat=hold_for_seat,
+        )
+
+    def post_decrypt_gate_steps(
+        self, *, include_ban_check: bool = False, hold_for_seat: bool = True
+    ):
         # The real method, so the mutation guards below exercise the
         # actual composition rather than a stand-in.
         from socialhome.federation.federation_service import FederationService
@@ -1307,6 +1315,7 @@ class _StubPipelineOwner:
         return FederationService.post_decrypt_gate_steps(
             self,  # type: ignore[arg-type]
             include_ban_check=include_ban_check,
+            hold_for_seat=hold_for_seat,
         )
 
 

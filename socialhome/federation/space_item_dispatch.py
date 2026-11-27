@@ -39,7 +39,6 @@ import orjson
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.gfs_channel import RING_DURABLE_TTL_S
 from ..domain.space_item import item_spec, item_stamp
-from ..domain.writer_cert import WriterCert
 from ..services.space_item_author import (
     UnsupportedItemAuthorSigSuite,
     verify_signed_event_item,
@@ -68,6 +67,8 @@ class _ItemSink(Protocol):
     async def dispatch_space_item(self, event: FederationEvent) -> bool: ...
 
     async def note_replay_id(self, msg_id: str) -> bool: ...
+
+    def item_budget_allows(self, origin: str) -> bool: ...
 
 
 def parse_event_item(plaintext: bytes) -> tuple[str, dict] | None:
@@ -157,11 +158,6 @@ class SpaceItemDispatch:
             )
             return False
         raw_cert = inner.get(WRITER_CERT_FIELD)
-        try:
-            WriterCert.from_wire(raw_cert)
-        except ValueError:
-            log.warning("space_item: %s carries no valid writer cert", item_id)
-            return False
         if not await self._writer_certs.check_item(
             space,
             raw_cert,
@@ -176,6 +172,16 @@ class SpaceItemDispatch:
                 item_type,
                 origin,
                 space.id,
+            )
+            return False
+        # The origin's inbound budget, before the claim: an item refused
+        # here keeps no trace and is taken when it comes again (a ring
+        # re-fetch, another GFS).
+        if not self._federation.item_budget_allows(origin):
+            log.warning(
+                "space_item: %s from %s dropped — over its inbound budget",
+                item_id,
+                origin,
             )
             return False
         # Claimed only now — after the signature and the cert — so nobody
@@ -197,6 +203,7 @@ class SpaceItemDispatch:
             space_id=space.id,
             epoch=epoch,
         )
-        # Claimed whatever the gates say: the same item again gets the same
-        # verdict (a held one is replayed by the seat buffer itself).
+        # Claimed whatever the gates say: their verdict is stable, so the
+        # same item again gets the same one (a held item is replayed by the
+        # seat buffer itself).
         return await self._federation.dispatch_space_item(event)

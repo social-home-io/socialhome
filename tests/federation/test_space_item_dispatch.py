@@ -26,7 +26,10 @@ from socialhome.federation.space_item_dispatch import (
     parse_event_item,
 )
 from socialhome.services.space_item_author import build_signed_event_item
-from socialhome.services.space_writer_cert_service import WRITER_CERT_FIELD
+from socialhome.services.space_writer_cert_service import (
+    WRITER_CERT_FIELD,
+    SpaceWriterCertService,
+)
 
 KP = generate_identity_keypair()
 ORIGIN = derive_instance_id(KP.public_key)
@@ -57,6 +60,11 @@ class _Sink:
         self.events: list = []
         self.verdict = verdict
         self.claimed: set[str] = set()
+        self.budget = 10**6
+
+    def item_budget_allows(self, origin: str) -> bool:
+        self.budget -= 1
+        return self.budget >= 0
 
     async def note_replay_id(self, msg_id: str) -> bool:
         if msg_id in self.claimed:
@@ -73,9 +81,11 @@ class _Certs:
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
         self.calls: list[dict] = []
+        self.raws: list = []
 
     async def check_item(self, space, raw, **kw) -> bool:
         self.calls.append(kw)
+        self.raws.append(raw)
         return self.ok
 
 
@@ -144,9 +154,9 @@ async def test_a_refused_item_is_still_remembered():
     assert len(sink.events) == 1
 
 
-async def test_a_copy_is_refused_after_a_restart():
-    """The claim lives in the durable replay cache, not in the dispatcher:
-    a new dispatcher (a restart) over the same cache refuses the copy."""
+async def test_the_claim_lives_outside_the_dispatcher():
+    """The claim lives in the (durable) replay cache, not in the
+    dispatcher: a new dispatcher over the same cache refuses the copy."""
     sink = _Sink()
     inner = _inner()
     assert await _apply(_dispatch(sink), inner)
@@ -252,11 +262,22 @@ async def test_a_future_stamp_is_refused():
 
 
 async def test_no_cert_or_a_refused_cert_is_refused():
-    sink = _Sink()
+    """The cert check sees exactly what the item carries — no cert at all
+    reaches it as ``None`` (which the real check refuses)."""
+    sink, certs = _Sink(), _Certs(ok=False)
     bare = _inner()
     del bare[WRITER_CERT_FIELD]
-    assert not await _apply(_dispatch(sink), bare)
+    assert not await _apply(_dispatch(sink, certs), bare)
+    assert certs.raws == [None]
     assert not await _apply(_dispatch(sink, _Certs(ok=False)), _inner())
+    assert not SpaceWriterCertService.check_item_cert(
+        SPACE,
+        None,
+        epoch=1,
+        author_pk=KP.public_key,
+        required_scope="write",
+        item_type="space_task_created",
+    )
     assert sink.events == []
 
 
@@ -278,3 +299,14 @@ def test_parse_event_item_takes_only_v2_types():
     assert parse_event_item(orjson.dumps({"item_type": "space_task_created"})) is None
     assert parse_event_item(b"[1]") is None
     assert parse_event_item(b"not json") is None
+
+
+async def test_an_item_over_budget_keeps_no_trace_and_is_taken_later():
+    sink = _Sink()
+    sink.budget = 0
+    d = _dispatch(sink)
+    inner = _inner()
+    assert not await _apply(d, inner)
+    assert sink.claimed == set()
+    sink.budget = 10
+    assert await _apply(d, inner)

@@ -138,13 +138,12 @@ from .gfs_relay_transport import (
 from .host_equivalence import acting_hosts, serves_as_host
 from .inbound_retry import InboundRetry
 from .inbound_validator import (
-    INSTANCE_INBOUND_LIMIT,
-    INSTANCE_INBOUND_WINDOW_S,
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
+    InboundStep,
     _InboxInstance,
-    instance_bucket,
+    charge_instance_budget,
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
@@ -1203,7 +1202,16 @@ class FederationService:
             )
         return steps
 
-    def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+    def item_budget_allows(self, origin: str) -> bool:
+        """v_97 — spend one unit of ``origin``'s per-household inbound budget
+        (§24.11 step 5a, the bucket its envelopes spend) for a space item:
+        an item is no cheaper a way in. Charged BEFORE the item's id is
+        claimed, so an item refused here is taken when it comes again."""
+        if self._inbound_limiter is None:
+            return True
+        return charge_instance_budget(self._inbound_limiter, origin, media=False)
+
+    def space_write_gates(self, *, hold_for_seat: bool = True) -> list[InboundStep]:
         """The gates every space write that skipped the §24.11 pipeline
         runs before its handler — ban (the ORIGIN's), deprovisioned author,
         archived space, writer seat (hold-for-seat) — composed from the
@@ -1220,32 +1228,14 @@ class FederationService:
 
         ``event`` was built by
         :class:`~socialhome.federation.space_item_dispatch.SpaceItemDispatch`
-        from an item whose origin the author (or space authority) signature
-        proved; ``from_instance`` is that origin. It runs
+        from an item whose origin the author signature proved;
+        ``from_instance`` is that origin. It runs
         :meth:`space_write_gates` and then the very registry handler a
         federation envelope of that type reaches, so an item can do no more
         than the legacy event from the same household. Returns whether it
         was dispatched (``False``: a gate refused or held it)."""
-        # The origin's per-household budget (§24.11 step 5a) — the same
-        # bucket its envelopes spend: an item is no cheaper a way in. An
-        # item over it is dropped (the ring keeps it; catch-up heals).
-        if self._inbound_limiter is not None and not self._inbound_limiter.is_allowed(
-            instance_bucket(event.from_instance, media=False),
-            limit=INSTANCE_INBOUND_LIMIT,
-            window_s=INSTANCE_INBOUND_WINDOW_S,
-        ):
-            log.warning(
-                "space item %s from %s dropped — over its inbound budget",
-                event.event_type.value,
-                event.from_instance,
-            )
-            return False
-        payload = event.payload if isinstance(event.payload, dict) else {}
         ctx = InboundContext(
-            envelope={
-                "space_id": event.space_id or payload.get("space_id") or None,
-                "from_instance": event.from_instance,
-            },
+            envelope={"space_id": event.space_id, "from_instance": event.from_instance},
             event=event,
         )
         if not await run_post_decrypt_gates(ctx, steps=self.space_write_gates()):

@@ -602,7 +602,8 @@ class _RoutedTarget(_MemberTargetFed):
         self._real = real_fed
 
     def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
-        return self.post_decrypt_gate_steps(include_ban_check=True)
+        # The app's real composition, so a change to it is seen here.
+        return self._real.space_write_gates(hold_for_seat=hold_for_seat)
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         return self._real.post_decrypt_gate_steps(include_ban_check=include_ban_check)

@@ -1110,6 +1110,19 @@ def make_verify_signature(*, encoder) -> InboundStep:
     return verify_signature
 
 
+def charge_instance_budget(limiter: RateLimiter, sender: str, *, media: bool) -> bool:
+    """Spend one unit of ``sender``'s per-household inbound budget (step 5a):
+    :data:`INSTANCE_INBOUND_LIMIT` envelopes (or
+    :data:`INSTANCE_MEDIA_INBOUND_LIMIT` media chunks) per
+    :data:`INSTANCE_INBOUND_WINDOW_S`. ``False`` when it is spent."""
+    limit = INSTANCE_MEDIA_INBOUND_LIMIT if media else INSTANCE_INBOUND_LIMIT
+    return limiter.is_allowed(
+        instance_bucket(sender, media=media),
+        limit=limit,
+        window_s=INSTANCE_INBOUND_WINDOW_S,
+    )
+
+
 def make_check_instance_rate(
     *,
     limiter: RateLimiter | None,
@@ -1143,9 +1156,8 @@ def make_check_instance_rate(
             return
         sender = str(ctx.envelope.get("from_instance") or "")
         media = ctx.envelope.get("event_type") in media_values
-        limit = INSTANCE_MEDIA_INBOUND_LIMIT if media else INSTANCE_INBOUND_LIMIT
         bucket = instance_bucket(sender, media=media)
-        if limiter.is_allowed(bucket, limit=limit, window_s=INSTANCE_INBOUND_WINDOW_S):
+        if charge_instance_budget(limiter, sender, media=media):
             return
         if ctx.replay_undo is not None:
             ctx.replay_undo()

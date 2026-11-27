@@ -30,6 +30,11 @@ that names an authority kind.
 Both relays pad their plaintext to :data:`ITEM_SIZE_BUCKETS`
 (:func:`pad_json_object`).
 
+**v_97 event-shaped items** (:data:`ITEM_SPECS`): every other space change
+travels as an item whose ``item_type`` is the federation event type it
+replaces and whose body is that event's payload, applied by that event's
+own handler (``docs/protocol/space-items.md``).
+
 Pure module — no I/O.
 """
 
@@ -126,6 +131,10 @@ def required_scope(item_type: str) -> str:
     for a type this build does not carry."""
     spec = ITEM_SPECS.get(item_type)
     if spec is not None:
+        if spec.authority:
+            raise ValueError(
+                f"{item_type!r} is a host statement, never cert-authorized"
+            )
         return spec.scope
     try:
         return _REQUIRED_SCOPE[item_type]

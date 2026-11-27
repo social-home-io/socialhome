@@ -425,6 +425,9 @@ class _FakeFederationService:
         return self._peer_min_version >= min_version
 
     def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+        # A recording stand-in: the real composition is pinned by
+        # tests/protocol/test_space_item_equivalence.py.
+        self.hold_for_seat = hold_for_seat
         return self.post_decrypt_gate_steps(include_ban_check=True)
 
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:

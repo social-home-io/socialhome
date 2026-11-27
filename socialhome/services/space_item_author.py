@@ -26,6 +26,12 @@ Signed fields (every one always present — ``None`` when unused — except
     author_sig_suite
 
 ``author_sig`` (b64url Ed25519) signs the rest.
+
+**v_97 event-shaped inner** (``space-item-author:v2:``, same suite tag):
+``{item_type, item_id, space_id, epoch, origin_instance_id, author_pk, ts,
+body}`` signed by the ORIGIN household's identity key — ``body`` is the
+payload of the federation event ``item_type`` names
+(:func:`build_signed_event_item` / :func:`verify_signed_event_item`).
 """
 
 from __future__ import annotations
