@@ -1523,7 +1523,7 @@ class SpaceRoutedHandler:
         )
         return await run_post_decrypt_gates(
             ctx,
-            steps=self._federation.post_decrypt_gate_steps(include_ban_check=True),
+            steps=self._federation.space_write_gates(),
         )
 
     # ── Route-stale nack (SPACE_ROUTE_STALE) ───────────────────────────

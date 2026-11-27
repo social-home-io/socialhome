@@ -424,6 +424,9 @@ class _FakeFederationService:
     async def peer_supports(self, instance_id, *, min_version):
         return self._peer_min_version >= min_version
 
+    def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+        return self.post_decrypt_gate_steps(include_ban_check=True)
+
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         """§24.11 gates the routed handler runs on an unwrapped inner
         event. No repos wired in these fixtures → nothing to enforce."""

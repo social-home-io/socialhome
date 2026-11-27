@@ -36,6 +36,7 @@ from ..canonical_json import canonical_bytes
 from ..crypto import (
     b64url_decode,
     b64url_encode,
+    derive_instance_id,
     derive_user_id,
     sign_ed25519,
     verify_ed25519,
@@ -195,3 +196,105 @@ def verify_signed_item_inner(inner: dict) -> bool:
     except ValueError:
         return False
     return verify_ed25519(author_pk, item_signing_bytes(inner), sig)
+
+
+# ── v_97 event-shaped inner (``space-item-author:v2:``) ─────────────────
+
+#: Domain separation of the v2 (event-shaped) author signature — a v1 post
+#: or generic item signature never verifies as v2, nor the reverse.
+_EVENT_ITEM_SIG_DOMAIN: bytes = b"space-item-author:v2:"
+
+#: The fields the v2 author signature covers (all always present).
+_EVENT_SIGNED_FIELDS: tuple[str, ...] = (
+    "item_type",
+    "item_id",
+    "space_id",
+    "origin_instance_id",
+    "author_pk",
+    "ts",
+    "body",
+    "author_sig_suite",
+)
+
+#: Hex characters of a v2 ``item_id`` (128 random bits).
+EVENT_ITEM_ID_HEX_CHARS: int = 32
+
+
+def event_item_signing_bytes(inner: dict) -> bytes:
+    """The canonical, domain-separated bytes a v2 inner's author signs."""
+    body = {k: inner.get(k) for k in _EVENT_SIGNED_FIELDS}
+    return _EVENT_ITEM_SIG_DOMAIN + canonical_bytes(body)
+
+
+def build_signed_event_item(
+    *,
+    item_type: str,
+    item_id: str,
+    space_id: str,
+    origin_instance_id: str,
+    identity_seed: bytes,
+    identity_pk: bytes,
+    ts: str,
+    body: dict,
+) -> dict:
+    """Build and sign one v_97 event-shaped inner: ``body`` is the payload
+    of the federation event ``item_type`` names, signed by the ORIGIN
+    household's identity key (``origin_instance_id`` must derive from it).
+    The writer cert is added by the sealer, outside the signature."""
+    inner: dict[str, object] = {
+        "item_type": item_type,
+        "item_id": item_id,
+        "space_id": space_id,
+        "origin_instance_id": origin_instance_id,
+        "author_pk": identity_pk.hex(),
+        "ts": ts,
+        "body": body,
+        "author_sig_suite": ITEM_AUTHOR_SIG_SUITE_ED25519,
+    }
+    inner["author_sig"] = b64url_encode(
+        sign_ed25519(identity_seed, event_item_signing_bytes(inner))
+    )
+    return inner
+
+
+def is_event_item_id(value: object) -> bool:
+    """A v2 ``item_id``: 32 lowercase hex characters."""
+    return (
+        isinstance(value, str)
+        and len(value) == EVENT_ITEM_ID_HEX_CHARS
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def verify_signed_event_item(inner: object) -> bool:
+    """True iff ``inner`` is a well-formed v2 inner signed by the household
+    it names: string type / space / ts, a v2 ``item_id``, a dict ``body``,
+    ``origin_instance_id`` derived from ``author_pk``, and ``author_sig``
+    verifying over :func:`event_item_signing_bytes`. Fail-closed; an
+    unknown ``author_sig_suite`` raises :class:`UnsupportedItemAuthorSigSuite`."""
+    if not isinstance(inner, dict):
+        return False
+    suite = inner.get("author_sig_suite")
+    if suite not in SUPPORTED_ITEM_AUTHOR_SIG_SUITES:
+        raise UnsupportedItemAuthorSigSuite(str(suite))
+    for key in ("item_type", "space_id", "origin_instance_id", "author_pk", "ts"):
+        value = inner.get(key)
+        if not isinstance(value, str) or not value:
+            return False
+    if not is_event_item_id(inner.get("item_id")):
+        return False
+    if not isinstance(inner.get("body"), dict):
+        return False
+    try:
+        author_pk = bytes.fromhex(str(inner["author_pk"]))
+        if len(author_pk) != 32:
+            return False
+        if derive_instance_id(author_pk) != inner["origin_instance_id"]:
+            return False
+        sig_text = inner.get("author_sig")
+        if not isinstance(sig_text, str) or not sig_text:
+            return False
+        sig = b64url_decode(sig_text)
+    except ValueError:
+        return False
+    return verify_ed25519(author_pk, event_item_signing_bytes(inner), sig)

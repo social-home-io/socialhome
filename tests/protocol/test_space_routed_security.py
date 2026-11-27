@@ -695,6 +695,9 @@ class _MemberTargetFed(_RecordingFed):
         super().__init__(own_instance_id)
         self.gate_calls: list[dict] = []
 
+    def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+        return self.post_decrypt_gate_steps(include_ban_check=True)
+
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         async def _record(ctx):
             self.gate_calls.append(dict(ctx.envelope))

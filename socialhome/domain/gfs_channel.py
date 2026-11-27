@@ -89,6 +89,16 @@ from .writer_cert import MAX_WRITER_CERT_EPOCH
 #: post, a comment, an authority item …) travels inside the ciphertext.
 SPACE_ITEM_EVENT_TYPE: str = "space_item"
 
+#: v_97 — the ring class a publish names (GFS capability ``channel_ring``):
+#: how long the GFS keeps the item in the channel's ring. ``durable`` items
+#: stay up to :data:`RING_DURABLE_TTL_S`, ``ephemeral`` ones (a live location
+#: pin) up to :data:`RING_EPHEMERAL_TTL_S` (owner F1, 2026-11-27).
+RING_CLASS_DURABLE: str = "durable"
+RING_CLASS_EPHEMERAL: str = "ephemeral"
+RING_CLASSES: frozenset[str] = frozenset({RING_CLASS_DURABLE, RING_CLASS_EPHEMERAL})
+RING_DURABLE_TTL_S: int = 24 * 3600
+RING_EPHEMERAL_TTL_S: int = 15 * 60
+
 #: Length bounds of an anonymous request's ``nonce`` (b64url of >= 12 random
 #: bytes).
 MIN_NONCE_CHARS: int = 16

@@ -1200,6 +1200,42 @@ class FederationService:
             )
         return steps
 
+    def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+        """The gates every space write that skipped the §24.11 pipeline
+        runs before its handler — ban (the ORIGIN's), deprovisioned author,
+        archived space, writer seat (hold-for-seat) — composed from the
+        pipeline's own steps (:meth:`post_decrypt_gate_steps` with the ban
+        check). One list for every such door: a held event's replay, the
+        inner event of a ``SPACE_ROUTED`` unwrap and (v_97) a space item
+        from the channel or ``SPACE_ITEM`` (:meth:`dispatch_space_item`)."""
+        return self.post_decrypt_gate_steps(
+            include_ban_check=True, hold_for_seat=hold_for_seat
+        )
+
+    async def dispatch_space_item(self, event: FederationEvent) -> bool:
+        """v_97 — apply a verified space item as the event it replaces.
+
+        ``event`` was built by
+        :class:`~socialhome.federation.space_item_dispatch.SpaceItemDispatch`
+        from an item whose origin the author (or space authority) signature
+        proved; ``from_instance`` is that origin. It runs
+        :meth:`space_write_gates` and then the very registry handler a
+        federation envelope of that type reaches, so an item can do no more
+        than the legacy event from the same household. Returns whether it
+        was dispatched (``False``: a gate refused or held it)."""
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        ctx = InboundContext(
+            envelope={
+                "space_id": event.space_id or payload.get("space_id") or None,
+                "from_instance": event.from_instance,
+            },
+            event=event,
+        )
+        if not await run_post_decrypt_gates(ctx, steps=self.space_write_gates()):
+            return False
+        await self._dispatch_event(event)
+        return True
+
     def add_archived_write_listener(self, listener) -> None:
         """Call ``listener(event, space)`` for every write the archived-space
         gate refuses."""
@@ -1391,10 +1427,7 @@ class FederationService:
             event=held,
         )
         return await run_post_decrypt_gates(
-            ctx,
-            steps=self.post_decrypt_gate_steps(
-                include_ban_check=True, hold_for_seat=hold_for_seat
-            ),
+            ctx, steps=self.space_write_gates(hold_for_seat=hold_for_seat)
         )
 
     async def replay_held(self, held: FederationEvent, *, reason: str) -> None:

@@ -1296,6 +1296,9 @@ class _StubPipelineOwner:
     async def _notify_archived_write(self, event, space) -> None:
         return None
 
+    def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+        return self.post_decrypt_gate_steps(include_ban_check=True)
+
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False):
         # The real method, so the mutation guards below exercise the
         # actual composition rather than a stand-in.

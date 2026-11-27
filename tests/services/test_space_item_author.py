@@ -15,8 +15,12 @@ from socialhome.domain.file_hashes import FileHash
 from socialhome.services.space_item_author import (
     ITEM_AUTHOR_SIG_SUITE_ED25519,
     UnsupportedItemAuthorSigSuite,
+    build_signed_event_item,
     build_signed_item_inner,
+    event_item_signing_bytes,
+    is_event_item_id,
     item_signing_bytes,
+    verify_signed_event_item,
     verify_signed_item_inner,
 )
 from socialhome.services.space_public_author import (
@@ -164,3 +168,72 @@ def test_a_comments_file_hashes_ride_outside_the_item_bytes():
     assert verify_signed_item_inner(signed)
     assert verified_file_hashes(signed) == {"x.webp": FileHash("e" * 64)}
     assert verified_file_hashes(dict(signed, item_target="c-2")) == {}
+
+
+# ── v_97 event-shaped inner ──────────────────────────────────────────────
+
+
+def _event(**over) -> dict:
+    kw = {
+        "item_type": "space_task_created",
+        "item_id": "ab" * 16,
+        "space_id": "sp-1",
+        "origin_instance_id": ORIGIN,
+        "identity_seed": KP.private_key,
+        "identity_pk": KP.public_key,
+        "ts": "2026-11-27T12:00:00+00:00",
+        "body": {"space_id": "sp-1", "task_id": "t-1", "title": "Milk"},
+    }
+    kw.update(over)
+    return build_signed_event_item(**kw)
+
+
+def test_an_event_item_verifies():
+    assert verify_signed_event_item(_event())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("item_type", "space_task_deleted"),
+        ("item_id", "cd" * 16),
+        ("space_id", "sp-2"),
+        ("ts", "2026-11-27T12:00:01+00:00"),
+        ("body", {"space_id": "sp-1", "task_id": "t-2", "title": "Milk"}),
+    ],
+)
+def test_every_event_item_field_is_signed(field, value):
+    assert not verify_signed_event_item(dict(_event(), **{field: value}))
+
+
+def test_an_event_item_from_another_household_is_refused():
+    other = generate_identity_keypair()
+    forged = _event(origin_instance_id=derive_instance_id(other.public_key))
+    assert not verify_signed_event_item(forged)
+    # A key that is not the named origin's signs nothing for it either.
+    assert not verify_signed_event_item(
+        dict(_event(), author_pk=other.public_key.hex())
+    )
+
+
+def test_an_event_item_needs_a_v2_item_id_and_a_dict_body():
+    assert not verify_signed_event_item(_event(item_id="short"))
+    assert not verify_signed_event_item(_event(item_id="AB" * 16))
+    assert not verify_signed_event_item(dict(_event(), body="x"))
+    assert not verify_signed_event_item("x")
+
+
+def test_an_event_item_with_an_unknown_suite_raises():
+    with pytest.raises(UnsupportedItemAuthorSigSuite):
+        verify_signed_event_item(dict(_event(), author_sig_suite="rsa"))
+
+
+def test_v1_and_v2_signatures_never_cross():
+    """Domain separation: the v1 generic signature over the same key never
+    verifies a v2 inner, nor the reverse."""
+    inner = _event()
+    v1_sig = b64url_encode(sign_ed25519(KP.private_key, item_signing_bytes(inner)))
+    assert not verify_signed_event_item(dict(inner, author_sig=v1_sig))
+    assert event_item_signing_bytes(inner).startswith(b"space-item-author:v2:")
+    assert is_event_item_id("0" * 32)
+    assert not is_event_item_id(1)

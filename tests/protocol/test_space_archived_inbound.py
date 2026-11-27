@@ -601,6 +601,9 @@ class _RoutedTarget(_MemberTargetFed):
         super().__init__("victim-instance")
         self._real = real_fed
 
+    def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+        return self.post_decrypt_gate_steps(include_ban_check=True)
+
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         return self._real.post_decrypt_gate_steps(include_ban_check=include_ban_check)
 

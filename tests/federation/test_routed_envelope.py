@@ -122,6 +122,9 @@ class _LinkedFederationService:
     async def peer_identity_public_key(self, instance_id: str) -> bytes | None:
         return self.identity_pks.get(instance_id)
 
+    def space_write_gates(self, *, hold_for_seat: bool = True) -> list:
+        return self.post_decrypt_gate_steps(include_ban_check=True)
+
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
         return list(self.gate_steps)
 

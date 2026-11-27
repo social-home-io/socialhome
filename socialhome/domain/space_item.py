@@ -43,6 +43,8 @@ from typing import TypeGuard
 import orjson
 
 from .errors import CodedError
+from .federation import FederationEventType as _E
+from .gfs_channel import RING_CLASS_DURABLE, RING_CLASS_EPHEMERAL
 from .space import SpaceFeatures
 from .user import looks_like_emoji
 from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
@@ -119,12 +121,217 @@ MAX_REACTIONS_PER_USER_PER_POST: int = 5
 
 
 def required_scope(item_type: str) -> str:
-    """The scope a cert must grant for ``item_type``; :class:`ValueError`
+    """The scope a cert must grant for ``item_type`` — a v1 item type or
+    (v_97) an event-shaped one of :data:`ITEM_SPECS`; :class:`ValueError`
     for a type this build does not carry."""
+    spec = ITEM_SPECS.get(item_type)
+    if spec is not None:
+        return spec.scope
     try:
         return _REQUIRED_SCOPE[item_type]
     except KeyError:
         raise ValueError(f"unsupported space item type {item_type!r}") from None
+
+
+# ── v_97 event-shaped items: the registry ────────────────────────────────
+
+#: How a re-delivered or out-of-order copy of an item stays harmless at the
+#: receiver (the per-type stamp audit, ``docs/protocol/space-items.md``):
+#: * ``id`` — an owner-bound / unique id, inserted once (a copy is a no-op);
+#: * ``lww`` — a signed stamp or version, the newest wins (``item_merge``);
+#: * ``tombstone`` — a removal leaves a tombstone, a late copy never revives;
+#: * ``advance`` — a state that only moves forward (a bid, a poll close);
+#: * ``latest`` — only the newest value counts (a location pin);
+#: * ``arrival`` — applied in arrival order (RSVP / schedule answer live,
+#:   corrected by the 30-minute incremental sync — the documented residual
+#:   of ``sync.md`` "Not on the rule yet");
+#: * ``state`` — a host statement whose repeat converges (roster, config).
+IDEMPOTENCY_CLASSES: frozenset[str] = frozenset(
+    {"id", "lww", "tombstone", "advance", "latest", "arrival", "state"}
+)
+
+#: Sender priority classes, highest first (``space-items.md`` › budgets).
+BUDGET_AUTHORITY: str = "authority"
+BUDGET_CONTENT: str = "content"
+BUDGET_CHAT: str = "chat"
+BUDGET_LOCATION: str = "location"
+BUDGET_CLASSES: tuple[str, ...] = (
+    BUDGET_AUTHORITY,
+    BUDGET_CONTENT,
+    BUDGET_CHAT,
+    BUDGET_LOCATION,
+)
+
+
+@dataclass(slots=True, frozen=True)
+class ItemSpec:
+    """One v_97 event-shaped space item type (:data:`ITEM_SPECS`).
+
+    ``event_type`` is the federation event the item replaces — its value
+    is the item's ``item_type`` and its payload the item's ``body``, so the
+    receiver hands it to that event's own handler. ``scope`` is the writer
+    cert scope a person item needs; ``reader_as`` the v1 type a follower's
+    ``reader`` cert is judged as (:func:`reader_cert_permits`; ``None`` —
+    a reader cert never carries it). ``authority`` marks a host statement
+    (an authority ``space_event`` inner, never author-signed)."""
+
+    event_type: _E
+    scope: str = WRITER_SCOPE_WRITE
+    ring_class: str = RING_CLASS_DURABLE
+    authority: bool = False
+    idempotency: str = "id"
+    budget: str = BUDGET_CONTENT
+    reader_as: str | None = None
+
+
+def _person(
+    event_type: _E,
+    idempotency: str,
+    *,
+    scope: str = WRITER_SCOPE_WRITE,
+    budget: str = BUDGET_CONTENT,
+    ring_class: str = RING_CLASS_DURABLE,
+    reader_as: str | None = None,
+) -> ItemSpec:
+    return ItemSpec(
+        event_type=event_type,
+        scope=scope,
+        ring_class=ring_class,
+        idempotency=idempotency,
+        budget=budget,
+        reader_as=reader_as,
+    )
+
+
+def _authority(event_type: _E, idempotency: str = "state") -> ItemSpec:
+    return ItemSpec(
+        event_type=event_type,
+        authority=True,
+        idempotency=idempotency,
+        budget=BUDGET_AUTHORITY,
+    )
+
+
+_C = WRITER_SCOPE_COMMENT
+
+#: Every v_97 space item type, by ``item_type`` (the event type's value).
+#: Person actions broadcast to a whole space, and the host statements of
+#: ``space-items.md``. Targeted secrets (rekeys, key shares, grants, roster
+#: snapshots, invites and joins, moderation submissions, reports, DMs,
+#: bazaar threads and offers, app sessions, sync, media blobs) are never
+#: items. The v1 shapes above stay on the channel for the types they carry
+#: until v_98.
+ITEM_SPECS: dict[str, ItemSpec] = {
+    spec.event_type.value: spec
+    for spec in (
+        # ── Feed ──
+        _person(_E.SPACE_POST_CREATED, "id"),
+        _person(_E.SPACE_POST_UPDATED, "lww"),
+        _person(_E.SPACE_POST_DELETED, "tombstone"),
+        _person(
+            _E.SPACE_POST_REACTION,
+            "lww",
+            scope=_C,
+            reader_as=ITEM_TYPE_REACTION_ADD,
+        ),
+        _person(_E.SPACE_COMMENT_CREATED, "id", scope=_C, reader_as=ITEM_TYPE_COMMENT),
+        _person(
+            _E.SPACE_COMMENT_UPDATED,
+            "lww",
+            scope=_C,
+            reader_as=ITEM_TYPE_COMMENT_EDIT,
+        ),
+        _person(
+            _E.SPACE_COMMENT_DELETED,
+            "tombstone",
+            scope=_C,
+            reader_as=ITEM_TYPE_COMMENT_DELETE,
+        ),
+        # ── Pages, tasks, polls, stickies ──
+        _person(_E.SPACE_PAGE_CREATED, "id"),
+        _person(_E.SPACE_PAGE_UPDATED, "lww"),
+        _person(_E.SPACE_PAGE_DELETED, "tombstone"),
+        _person(_E.SPACE_TASK_CREATED, "id"),
+        _person(_E.SPACE_TASK_UPDATED, "lww"),
+        _person(_E.SPACE_TASK_DELETED, "tombstone"),
+        _person(_E.SPACE_TASK_LIST_CREATED, "id"),
+        _person(_E.SPACE_TASK_LIST_UPDATED, "lww"),
+        _person(_E.SPACE_TASK_LIST_DELETED, "tombstone"),
+        _person(_E.SPACE_POLL_CREATED, "id"),
+        _person(_E.SPACE_POLL_VOTE_CAST, "lww"),
+        _person(_E.SPACE_POLL_CLOSED, "advance"),
+        _person(_E.SPACE_STICKY_CREATED, "id"),
+        _person(_E.SPACE_STICKY_UPDATED, "lww"),
+        _person(_E.SPACE_STICKY_DELETED, "tombstone"),
+        # ── Calendar, schedules ──
+        _person(_E.SPACE_CALENDAR_EVENT_CREATED, "id"),
+        _person(_E.SPACE_CALENDAR_EVENT_UPDATED, "lww"),
+        _person(_E.SPACE_CALENDAR_EVENT_DELETED, "tombstone"),
+        _person(_E.SPACE_RSVP_UPDATED, "arrival"),
+        _person(_E.SPACE_RSVP_DELETED, "arrival"),
+        _person(_E.SPACE_SCHEDULE_CREATED, "id"),
+        _person(_E.SPACE_SCHEDULE_RESPONSE_UPDATED, "arrival"),
+        _person(_E.SPACE_SCHEDULE_FINALIZED, "advance"),
+        # ── Gallery ──
+        _person(_E.SPACE_GALLERY_ALBUM_CREATED, "id"),
+        _person(_E.SPACE_GALLERY_ALBUM_UPDATED, "lww"),
+        _person(_E.SPACE_GALLERY_ALBUM_DELETED, "tombstone"),
+        _person(_E.SPACE_GALLERY_ITEM_CREATED, "id"),
+        _person(_E.SPACE_GALLERY_ITEM_UPDATED, "lww"),
+        _person(_E.SPACE_GALLERY_ITEM_DELETED, "tombstone"),
+        # ── Bazaar (listings and bids; threads and offers stay targeted) ──
+        _person(_E.BAZAAR_LISTING_CREATED, "id"),
+        _person(_E.BAZAAR_LISTING_UPDATED, "lww"),
+        _person(_E.BAZAAR_LISTING_FAQ_UPDATED, "lww"),
+        _person(_E.BAZAAR_BID_PLACED, "advance"),
+        _person(_E.BAZAAR_OFFER_ACCEPTED, "advance"),
+        # ── Apps, zones, timetables ──
+        _person(_E.SPACE_APP_TABLE, "lww"),
+        _person(_E.SPACE_ZONE_UPSERTED, "lww"),
+        _person(_E.SPACE_ZONE_DELETED, "tombstone"),
+        _person(_E.SPACE_TIMETABLE_UPSERTED, "lww"),
+        _person(_E.SPACE_TIMETABLE_DELETED, "tombstone"),
+        # ── Chat and location ──
+        _person(_E.SPACE_CHAT_MESSAGE_CREATED, "id", budget=BUDGET_CHAT),
+        _person(_E.SPACE_CHAT_MESSAGE_UPDATED, "lww", budget=BUDGET_CHAT),
+        _person(_E.SPACE_CHAT_MESSAGE_DELETED, "tombstone", budget=BUDGET_CHAT),
+        _person(_E.SPACE_CHAT_REACTION, "lww", budget=BUDGET_CHAT),
+        _person(
+            _E.SPACE_LOCATION_UPDATED,
+            "latest",
+            budget=BUDGET_LOCATION,
+            ring_class=RING_CLASS_EPHEMERAL,
+        ),
+        # ── Host statements (authority ``space_event`` inners) ──
+        _authority(_E.SPACE_MEMBER_JOINED),
+        _authority(_E.SPACE_MEMBER_LEFT),
+        _authority(_E.SPACE_MEMBER_BANNED),
+        _authority(_E.SPACE_MEMBER_UNBANNED),
+        _authority(_E.SPACE_MEMBER_ROLE_CHANGED),
+        _authority(_E.SPACE_CONFIG_CHANGED, "lww"),
+        _authority(_E.SPACE_AGE_GATE_UPDATED, "lww"),
+        _authority(_E.SPACE_DISSOLVED, "advance"),
+        _authority(_E.SPACE_MODERATION_DECIDED, "advance"),
+        _authority(_E.SPACE_ADMIN_PROPOSAL_UPDATED, "advance"),
+    )
+}
+
+#: The person-action item types (author-signed v2 inners).
+PERSON_ITEM_TYPES: frozenset[str] = frozenset(
+    t for t, spec in ITEM_SPECS.items() if not spec.authority
+)
+#: The host-statement item types (authority ``space_event`` inners).
+AUTHORITY_ITEM_TYPES: frozenset[str] = frozenset(
+    t for t, spec in ITEM_SPECS.items() if spec.authority
+)
+
+
+def item_spec(item_type: object) -> ItemSpec | None:
+    """The :class:`ItemSpec` of a v_97 event-shaped ``item_type``, or
+    ``None`` (a v1 type, an unknown one, or not a string)."""
+    if not isinstance(item_type, str):
+        return None
+    return ITEM_SPECS.get(item_type)
 
 
 #: v_96 — what a follower's ``reader`` cert may carry, by the follower switch
@@ -156,6 +363,13 @@ def reader_cert_permits(
     item."""
     if not cert.reader:
         return True
+    spec = item_spec(item_type)
+    if spec is not None:
+        # v_97 — an event-shaped item is judged as the v1 type it maps to;
+        # a type with none is never a follower's to send.
+        if spec.reader_as is None:
+            return False
+        item_type = spec.reader_as
     if item_type == ITEM_TYPE_COMMENT_DELETE:
         return True
     if item_type in _READER_COMMENT_TYPES:
@@ -256,7 +470,9 @@ class StaleItemStamp(Exception):
 #: the bucket — a reaction, a comment, a removal notice and a short post all
 #: look alike. The largest stays well under the GFS payload cap once
 #: encrypted and base64'd.
-ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
+#: v_97 adds the 2 KiB bucket (a chat message or a pin padded to 4 KiB
+#: doubled the GFS egress of the busiest items; owner sign-off 4).
+ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 2048, 4096, 16384, 65536, 131072)
 
 #: The padding field. A JSON key, so the padding sits INSIDE the AEAD
 #: (authenticated with the item) and a receiver from before padding — which

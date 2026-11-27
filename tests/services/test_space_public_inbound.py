@@ -2576,3 +2576,36 @@ async def test_a_channel_item_that_beats_its_rekey_lands_once_the_key_does(item_
     got = await item_env["post_repo"].get("post-1")
     assert got is not None and got[1].content == "member-published content"
     assert len(item_env["events"]) == 1
+
+
+# ── v_97: an event-shaped item goes to the one receiver ──────────────────
+
+
+class _RecordingDispatch:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def apply(self, space, *, epoch, item_type, inner) -> bool:
+        self.calls.append((space.id, epoch, item_type, inner))
+        return True
+
+
+async def test_an_event_shaped_item_reaches_the_item_dispatch(item_env):
+    dispatch = _RecordingDispatch()
+    item_env["inbound"].attach_item_dispatch(dispatch)
+    inner = {"item_type": "space_task_created", "body": {"task_id": "t"}}
+    frame = await _item_frame(item_env, inner=inner, item_type="space_task_created")
+    await _relay(item_env["inbound"], frame)
+    ((space_id, epoch, item_type, got),) = dispatch.calls
+    assert (space_id, item_type) == ("sp-1", "space_task_created")
+    assert epoch == frame["epoch"]
+    assert got["body"] == {"task_id": "t"}
+    # Nothing went down the v1 path.
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_an_event_shaped_item_without_a_dispatch_is_dropped(item_env):
+    inner = {"item_type": "space_task_created", "body": {}}
+    frame = await _item_frame(item_env, inner=inner, item_type="space_task_created")
+    await _relay(item_env["inbound"], frame)
+    assert item_env["events"] == []

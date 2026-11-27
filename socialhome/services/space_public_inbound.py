@@ -83,6 +83,7 @@ from ..federation.pending_parent_buffer import (
     PendingParentBuffer,
     Replay,
 )
+from ..federation.space_item_dispatch import SpaceItemDispatch, parse_event_item
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
@@ -145,6 +146,7 @@ class SpacePublicInbound:
         "_bus",
         "_crypto",
         "_gfs_media",
+        "_item_dispatch",
         "_items",
         "_mentions",
         "_own_instance_id",
@@ -194,6 +196,12 @@ class SpacePublicInbound:
         #: v_80 — keeps a relayed post's ``media_refs`` (its pictures in the
         #: GFS media cache, sealed under the space key) and fetches them.
         self._gfs_media: SpaceMediaGfsFetcher | None = None
+        #: v_97 — the one receiver of event-shaped items. ``None``: dropped.
+        self._item_dispatch: SpaceItemDispatch | None = None
+
+    def attach_item_dispatch(self, dispatch: SpaceItemDispatch) -> None:
+        """Wire the v_97 event-shaped item receiver."""
+        self._item_dispatch = dispatch
 
     def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
         """Wire the v_80 GFS media fetcher."""
@@ -541,6 +549,15 @@ class SpacePublicInbound:
             await self._on_channel_authority(
                 space, epoch=epoch, opened=opened, frame=frame
             )
+            return
+        event_item = parse_event_item(opened)
+        if event_item is not None:
+            # v_97 — an event-shaped item: one receiver, the federation
+            # gates and the event's own handler (SpaceItemDispatch).
+            if self._item_dispatch is not None:
+                await self._item_dispatch.apply(
+                    space, epoch=epoch, item_type=event_item[0], inner=event_item[1]
+                )
             return
         try:
             parsed = parse_item_plaintext(opened)

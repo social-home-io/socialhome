@@ -88,6 +88,7 @@ from .federation.private_invite_handler import PrivateSpaceInviteHandler
 from .federation.route_discovery import RouteDiscoveryService
 from .federation.routed_envelope import SpaceRoutedHandler
 from .federation.space_authorship import SpaceAuthorship
+from .federation.space_item_dispatch import SpaceItemDispatch
 from .federation.sync import (
     BansExporter,
     BazaarExporter,
@@ -5435,6 +5436,15 @@ def create_app(config: Config | None = None) -> web.Application:
         if space_public_inbound is not None:
             space_public_inbound.attach_authorship(fed.space_authorship)
             space_public_inbound.attach_pending_parents(fed.pending_parent_buffer)
+            # v_97 — event-shaped space items: verified here, then the same
+            # gates and handler as the federation event they replace.
+            space_public_inbound.attach_item_dispatch(
+                SpaceItemDispatch(
+                    federation=federation_service,
+                    writer_certs=writer_certs,
+                    own_instance_id=real_instance_id,
+                )
+            )
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()
