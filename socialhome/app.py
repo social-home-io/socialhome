@@ -5923,6 +5923,10 @@ def create_app(config: Config | None = None) -> web.Application:
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
         fed.bazaar_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
+        # v_97 — a submission's files for a reviewer household that reads a
+        # GFS space from the cache only: described, uploaded, kept.
+        moderation_federation.attach_media_gfs(space_media_uploader)
+        moderation_federation.attach_gfs_media(space_media_fetcher)
         # …and the outbox skips a SPACE_MEDIA_BLOB push to one of them only
         # while its GFS is known to hold the file (every member is pushed
         # the rest, through the relay like any envelope).
