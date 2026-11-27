@@ -160,6 +160,13 @@ takes them from the GFS space media cache — the item carries the
 wait in the durable queue (rows of kind `space_media_upload`), files over
 8 MiB go in proven 8 MiB pieces, and a miss is fetched on demand
 ([media.md](./media.md#gfs-spaces-every-household-from-the-cache-v_97)).
+The targeted paths that carry files describe them the same way for a
+household that reads the space from the cache only — a page proposal, a
+moderation submission (to that reviewer household's copy), the §25.6
+catch-up and a `SPACE_SYNC_RESUME` replay — so such a household is never
+pushed a file and never asks for one it has a descriptor for. A file the
+author named elsewhere too gets a copy of its own in the space when the
+item is created.
 
 ## One receiver: `SpaceItemDispatch`
 

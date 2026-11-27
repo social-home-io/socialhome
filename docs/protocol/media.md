@@ -1076,30 +1076,75 @@ Owner 2026-11-27: in a **GFS space** (a global space, or a private one with
 paired, mesh, link-joined, member or follower — takes the space's pictures
 and files from the GFS space media cache. One path:
 
+The rule applies per household (`SpaceMediaGfsUploader.cache_only`): a
+v_97 household of a space whose channel is stored here, once the space's
+14-day window closed, while the space's host is v_97 too. A v_96 host (its
+own files carry no descriptor) or a space with no stored channel yet keeps
+the push.
+
 - **Descriptor on the shared copy.** A post, a comment's picture, a
   calendar cover, a gallery item, a bazaar listing's photos or a page
-  version carries `media_refs` on the one payload every household reads (so
-  it still goes as ONE space item), not in a per-household copy. A §25.6
-  catch-up describes its records' files for every v_97 requester of a GFS
-  space too (planned on the channel's GFSs, bounded by the catch-up media
-  budget).
+  version with its open conflict sides (up to 64 files) carries
+  `media_refs` on the one payload every household reads (so it still goes
+  as ONE space item), not in a per-household copy.
+- **Every other path describes too.** A page proposal to a cache-only
+  host; a moderation submission to a cache-only reviewer household (only
+  that household's copy carries the descriptor; uploaded at once through
+  the durable queue; the space's host prefetches every file of a held
+  submission, as it will release it); a §25.6 catch-up to a cache-only
+  requester (lazy: described from our copy, never uploaded); a
+  `SPACE_SYNC_RESUME` replay (lazy too).
+- **The lazy catch-up describes every record** — no record or byte budget
+  falls back to asking. The cost is CPU only: one seal (AES-GCM + SHA-256)
+  per file per stream, in a worker thread, at most 2 describing streams per
+  household at once (the rest wait), the stream yielding between records;
+  the address does not depend on the requester, so the provider remembers
+  16 384 of them (≈ 10 MB) and the next requester of the same epoch costs a
+  lookup. Measured ≈ 650 MiB/s on an x86 dev box; a Raspberry Pi 4 (no
+  AES / SHA extensions) ≈ 60–100 MiB/s: a full stream of a space holding
+  10 GiB of files ≈ 15 s here, ≈ 2–3 min of one core on a Pi 4 — once per
+  full stream (a join, a crossed sync line); an incremental stream
+  describes its changed records only.
+- **A file held only as a descriptor is fetched before it is described
+  again.** A household republishing a file it never fetched (a video
+  nobody viewed here) — a host releasing an approved item, its catch-up, a
+  replay — fetches it first: at most 2 such fetches per space at once,
+  each waited for at most 20 s (the fetch goes on). A catch-up holds a
+  record back while its file is still on its way (the stream is not clean,
+  so the requester's watermark stays and the next stream sends it,
+  described); a replay leaves such a row to the catch-up. A cache-only
+  household never gets an item with files and no descriptor.
+- **A file named elsewhere gets a copy of its own.** At post, comment,
+  listing and space event creation, a file another place already
+  references (another space, the household feed, a DM) is given a copy
+  local to this space — a new name, the same bytes (a hard link where the
+  file system allows; `MediaRefGuard.space_copies`) — and the item names
+  the copy, so it is this space's own (`confined_to_space`) on every path.
+  The cache holds it once per space it is posted to, as it would two
+  uploads.
 - **Uploads** go to every GFS the space's channel lives on (plus each
   link-joined member's), through the durable item queue (above).
-- **No push.** No `SPACE_MEDIA_BLOB` row is queued for a v_97 household
-  of a GFS space — live, catch-up or asked for
-  (`SpaceMediaGfsUploader.push_targets`). Households below v_97 keep the
-  push, and so does everyone while the space's 14-day window is open (the
-  households the legacy events are for).
-- **No `SPACE_MEDIA_WANTED`.** A household never asks a host or a helper
-  for a GFS space's file; a miss in the cache goes through v_83 on demand
+- **No push.** No `SPACE_MEDIA_BLOB` row is queued for a cache-only
+  household — live, catch-up or replay (`SpaceMediaGfsUploader
+  .push_targets`) — except the answer to its own `SPACE_MEDIA_WANTED`.
+- **`SPACE_MEDIA_WANTED` only without a descriptor.** A household asks
+  only for a file it holds no descriptor for (a v_96 author's, whose items
+  carry none); a described file's miss goes through v_83 on demand
   (below), for members as for followers.
 - **A file the cache can't take is shown, never pushed.** No GFS of the
   space keeps media (or this household holds no upload authorization):
   its author sees "Couldn't send" (`refused`); a file over 8 MiB with no
-  GFS keeping pieces, or over 200 MiB: "too large to send". (A file that
-  is not only this space's content — the same picture in another space —
-  is never sealed under the space's key; it is the one residual a GFS-space
-  reader can't get, as before.)
+  GFS keeping pieces, or over 200 MiB: "too large to send".
+- **Residual: a held submission's file evicted before review.** The
+  review queue shows a submission's picture count, never the pictures; the
+  host prefetches them on arrival. A file the GFS evicted before the host
+  fetched it (the host offline past the cache's TTL) is not uploaded again
+  by the submitter (no retry cycle for submissions): the released item
+  shows it missing. Documented, not fixed (coordinator 1A).
+
+`tests/protocol/test_gfs_space_media_cache_only.py` pins the rule across
+every path: each module that queues a push names the test proving a
+cache-only household gets the same files described.
 
 Mesh spaces keep the push and `SPACE_MEDIA_WANTED` unchanged.
 
@@ -1223,8 +1268,9 @@ reserved `dm-` / `gm-` name), requires that only this space's content
 references it (`confined_to_space`) and that a **live** row of the space
 shows it (`live_in_space`: not a deleted post, comment, listing, event, page
 or album item — a page's cover and every picture its body shows count, as
-the page is now — never only a moderation queue, an edit history or an open
-conflict side; a deleted item's picture never comes back), seals it again (deterministic, so
+the page is now, with its version history and open conflict sides (v_97:
+its members see them) — never only a moderation queue or a closed snapshot,
+never a deleted page's; a deleted item's picture never comes back), seals it again (deterministic, so
 byte-identical) and checks that it sits at exactly the asked address (a
 file held but at another address: `bad_hint`). A locator's
 addresses are remembered for 10 minutes, so the same locator sent with
