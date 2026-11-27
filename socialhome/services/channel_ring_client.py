@@ -76,6 +76,8 @@ RECENT_AFTER_GAP: int = 200
 FETCH_TIMEOUT_S: float = 30.0
 #: The loop's tick (linger expiry, cursor flush).
 TICK_S: float = 10.0
+#: A gap runs the §25.6 catch-up for a space at most once per this long.
+GAP_CATCH_UP_INTERVAL_S: float = 600.0
 #: ``instance_config`` key prefix of a GFS's cursors.
 CURSOR_KEY_PREFIX: str = "channel_ring_cursors:"
 
@@ -99,6 +101,7 @@ class ChannelRingClient:
 
     __slots__ = (
         "_bus",
+        "_caught_up_at",
         "_channels",
         "_clock",
         "_config",
@@ -145,6 +148,8 @@ class ChannelRingClient:
         self._viewed: dict[str, float] = {}
         #: gfs id → the channels we told that GFS we watch.
         self._watched: dict[str, set[str]] = {}
+        #: space id → when a gap last ran its catch-up.
+        self._caught_up_at: dict[str, float] = {}
         #: space id → the unread count last reported.
         self._unread: dict[str, int] = {}
         self._stop = asyncio.Event()
@@ -325,6 +330,10 @@ class ChannelRingClient:
                 or space.owner_instance_id == self._own_instance_id
             ):
                 continue
+            last = self._caught_up_at.get(space_id)
+            if last is not None and self._clock() - last < GAP_CATCH_UP_INTERVAL_S:
+                continue
+            self._caught_up_at[space_id] = self._clock()
             log.info(
                 "channel ring: gap on space %s's channel — §25.6 catch-up", space_id
             )

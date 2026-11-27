@@ -35,6 +35,7 @@ from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_channel_ring_key,
     gfs_channel_ring_repo_key,
+    gfs_channel_service_key,
     gfs_fed_repo_key,
     gfs_ws_registry_key,
 )
@@ -492,16 +493,52 @@ async def test_two_copies_of_one_publish_are_stored_once(gfs) -> None:
     assert state.head_seq == 1
 
 
-async def test_push_all_has_its_own_small_budget(gfs) -> None:
+async def test_push_all_over_its_budget_is_kept_but_not_pushed_to_all(gfs) -> None:
+    """Any writer can set ``push_all``: past its small budget the item is
+    still stored (downgraded, never refused — nobody can crowd the host's
+    statements out), but no longer reaches or queues for every seat."""
     await _ready(gfs)
+    await _seat(gfs, gfs.other)
+    await gfs.app_[gfs_channel_ring_repo_key].set_channel_ring(
+        gfs.other.instance_id, True
+    )
     for _ in range(channels_mod.CHANNEL_PUSH_ALL_MAX_PER_MINUTE):
         await _publish(gfs, push_all=True)
-    resp = await gfs.post(
-        "/gfs/channels/publish-anon", json=_publish_body(gfs.ch, push_all=True)
+    await _publish(gfs, push_all=True)
+    state = await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)
+    assert state.head_seq == channels_mod.CHANNEL_PUSH_ALL_MAX_PER_MINUTE + 1
+    queued = await _queued(gfs, gfs.other)
+    assert len(queued) == channels_mod.CHANNEL_PUSH_ALL_MAX_PER_MINUTE
+
+
+async def test_a_channel_has_a_byte_budget(gfs, monkeypatch) -> None:
+    """No writer can roll the ring past a household between two pings."""
+    monkeypatch.setattr(
+        channels_mod, "CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE", 3 * len(CT)
     )
+    svc = gfs.app_[gfs_channel_service_key]
+    svc._byte_budget = channels_mod.ByteBudget(3 * len(CT))
+    await _ready(gfs)
+    for _ in range(3):
+        await _publish(gfs)
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_publish_body(gfs.ch))
     assert resp.status == 429
-    # Ordinary items are not charged to it.
+
+
+async def test_expired_pins_never_push_durable_items_out(gfs, monkeypatch) -> None:
+    """The count bound is on rows held: many short-lived pins that expired
+    leave the durable item (and no gap)."""
+    monkeypatch.setattr(ring_mod, "RING_MAX_ITEMS", 3)
+    await _ready(gfs)
     await _publish(gfs)
+    ring = gfs.app_[gfs_channel_ring_key]
+    base = time.time()
+    for n in range(5):
+        await _publish(gfs, ring_class=RING_CLASS_EPHEMERAL)
+        ring._clock = lambda n=n: base + (n + 1) * 16 * 60
+        await ring.sweep()
+    state = await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)
+    assert (state.oldest_seq, state.durable_floor) == (1, 0)
 
 
 async def test_watch_changes_are_rate_limited(gfs) -> None:
@@ -649,3 +686,22 @@ async def test_a_ring_frame_error_never_closes_the_socket(gfs, monkeypatch) -> N
         )
         await asyncio.sleep(0.2)
         assert not ws.closed
+
+
+async def test_trimming_never_cuts_a_batch_below_the_next_ring(gfs) -> None:
+    """With more rings than one pass looks at, the rings it cuts never go
+    below the biggest one it did not look at."""
+    repo = gfs.app_[gfs_channel_ring_repo_key]
+    ids = []
+    for count in (6, 6, 5, 5):
+        gfs.ch = _Channel()
+        await _ready(gfs)
+        for _ in range(count):
+            await _publish(gfs)
+        ids.append(gfs.ch.id)
+    await repo.trim_to_cap(cap=18 * len(CT), batch=2)
+    held = []
+    for cid in ids:
+        st = await repo.state(cid)
+        held.append(st.head_seq - st.oldest_seq + 1)
+    assert held[0] >= 5 and held[1] >= 5

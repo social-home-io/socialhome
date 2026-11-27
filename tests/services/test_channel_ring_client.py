@@ -349,3 +349,13 @@ async def test_a_space_without_a_channel_is_not_watched(world):
 async def test_the_loop_starts_and_stops(world):
     await world.client.start()
     await world.client.stop()
+
+
+async def test_gap_catch_ups_are_rate_limited_per_space(world):
+    await world.client.on_frame(_heads(10), gfs_id=GFS)
+    for n in (1, 2):
+        await world.client.on_frame(_heads(900 * n, f"{n:x}" * 16), gfs_id=GFS)
+    assert len(world.sync.calls) == 1
+    world.clock.t += mod.GAP_CATCH_UP_INTERVAL_S + 1
+    await world.client.on_frame(_heads(5000, "3" * 16), gfs_id=GFS)
+    assert len(world.sync.calls) == 2

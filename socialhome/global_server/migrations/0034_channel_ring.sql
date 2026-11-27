@@ -33,7 +33,7 @@
 -- 3. Smallest change: one new table (dropped with its channel: ON DELETE
 --    CASCADE, so unregister and the idle sweeps empty it), three additive
 --    columns on ``gfs_channels`` with defaults (``head_seq`` 0,
---    ``ring_bytes`` 0, ``durable_floor_seq`` 0, ``ring_id`` NULL until the
+--    ``ring_bytes`` 0, ``ring_items`` 0, ``durable_floor_seq`` 0, ``ring_id`` NULL until the
 --    first item) and a partial index for the server cap, one NOT NULL
 --    DEFAULT 0 column on ``client_instances``. No backfill, no rewrite.
 --
@@ -47,6 +47,9 @@
 ALTER TABLE gfs_channels ADD COLUMN head_seq INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gfs_channels ADD COLUMN ring_id TEXT;
 ALTER TABLE gfs_channels ADD COLUMN ring_bytes INTEGER NOT NULL DEFAULT 0;
+-- Rows the ring holds (its count bound is on rows, not on seq distance:
+-- expired location pins never push durable items out).
+ALTER TABLE gfs_channels ADD COLUMN ring_items INTEGER NOT NULL DEFAULT 0;
 -- The highest seq of a DURABLE item the ring dropped (evicted or expired):
 -- a cursor below it missed something that is gone (a gap); an expired
 -- ephemeral item (a location pin) never makes a gap.

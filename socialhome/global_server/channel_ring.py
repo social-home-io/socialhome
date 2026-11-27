@@ -240,6 +240,31 @@ class GfsChannelRing:
             max_items=FETCH_PAGE_MAX_ITEMS,
             max_bytes=FETCH_PAGE_MAX_BYTES,
         )
+        # Read again AFTER the items: an eviction between the two reads may
+        # have dropped durable items after the cursor — then this is a gap,
+        # never a page that silently skips them.
+        after = await self._ring.state(req.channel_id)
+        if (
+            after is None
+            or after.ring_id != state.ring_id
+            or req.since_seq < after.durable_floor
+        ):
+            await self._send(
+                instance_id,
+                {
+                    "type": CHANNEL_GAP_FRAME,
+                    "channel_id": req.channel_id,
+                    "req": req.req,
+                    "head_seq": after.head_seq if after else state.head_seq,
+                    "ring_id": (after.ring_id if after else None) or state.ring_id,
+                    "oldest_seq": (
+                        after.oldest_seq
+                        if after and after.oldest_seq is not None
+                        else state.head_seq + 1
+                    ),
+                },
+            )
+            return
         for item in items:
             frame = ring_frame(
                 channel_frame(item.channel_id, item.epoch, item.payload),
@@ -311,10 +336,15 @@ class GfsChannelRing:
         """Drop items past their age, then trim the biggest rings while the
         server is over :data:`SERVER_MAX_BYTES`. Returns items expired."""
         now = self._now()
-        expired = await self._ring.expire(
-            durable_before=now - RING_DURABLE_TTL_S,
-            ephemeral_before=now - RING_EPHEMERAL_TTL_S,
-        )
+        expired = 0
+        for _ in range(64):  # bounded batches, each its own transaction
+            n = await self._ring.expire(
+                durable_before=now - RING_DURABLE_TTL_S,
+                ephemeral_before=now - RING_EPHEMERAL_TTL_S,
+            )
+            expired += n
+            if n == 0:
+                break
         # Until the server is under its cap (each pass cuts the biggest rings
         # to one level; bounded so a sweep always ends).
         for _ in range(64):

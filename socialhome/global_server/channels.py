@@ -58,6 +58,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -164,6 +165,40 @@ CHANNEL_ANON_PER_NODE_FLOOR: int = 8
 #: channel, refused past it.
 CHANNEL_PUSH_ALL_MAX_PER_MINUTE: int = 6
 
+#: v_97 — payload bytes one channel may publish per minute (cluster-wide,
+#: each node its share): the 64 MiB ring then spans at least an hour, four
+#: heads intervals, so no writer can roll it past a household between two
+#: pings. A busy space (56 items/min of ~2.7 KiB) uses ~150 KiB/min.
+CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE: int = 1024 * 1024
+
+
+class ByteBudget:
+    """Bytes per key per sliding minute, in this process (each node allows
+    its :func:`~.public.node_share`). Bounded keys (oldest dropped)."""
+
+    __slots__ = ("_limit", "_max_keys", "_used")
+
+    def __init__(self, limit: int, *, max_keys: int = 10_000) -> None:
+        self._limit = limit
+        self._max_keys = max_keys
+        self._used: dict[str, list[tuple[float, int]]] = {}
+
+    def allow(
+        self, key: str, size: int, nodes: int, *, now: float | None = None
+    ) -> bool:
+        at = time.monotonic() if now is None else now
+        hits = [h for h in self._used.get(key, []) if at - h[0] < 60.0]
+        limit = node_share(self._limit, nodes)
+        if hits and sum(n for _, n in hits) + size > limit:
+            self._used[key] = hits
+            return False
+        hits.append((at, size))
+        self._used.pop(key, None)
+        self._used[key] = hits
+        while len(self._used) > self._max_keys:
+            self._used.pop(next(iter(self._used)))
+        return True
+
 
 #: Live channel rows this server keeps at most — anonymous registration's
 #: server-wide bound (with the per-address limit and the unused-row TTL).
@@ -204,6 +239,7 @@ class GfsChannelService:
         "_addressee",
         "_anon_ip_limiter",
         "_anon_seen",
+        "_byte_budget",
         "_channel_limiter",
         "_channels",
         "_clock",
@@ -256,6 +292,7 @@ class GfsChannelService:
         #: v_97 — the channel rings; ``None`` keeps the v_96 behaviour.
         self._ring: GfsChannelRing | None = None
         self._push_all_limiter = SlidingWindowCounter(CHANNEL_PUSH_ALL_MAX_PER_MINUTE)
+        self._byte_budget = ByteBudget(CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE)
 
     def attach_ring(self, ring: GfsChannelRing) -> None:
         """Wire the v_97 channel ring (capability ``channel_ring``)."""
@@ -265,6 +302,9 @@ class GfsChannelService:
 
     def _now(self) -> int:
         return int(self._clock())
+
+    def _node_count(self) -> int:
+        return self._nodes() if self._nodes is not None else 1
 
     def _allow(
         self, counter: SlidingWindowCounter, key: str, *, floor: int = 1
@@ -279,9 +319,9 @@ class GfsChannelService:
         cluster at about L; a balancer that pins a client to one node makes
         it stricter, never looser (:func:`~.public.node_share`)."""
         nodes = self._nodes() if self._nodes is not None else 1
-        # The floor never above this node's share of the channel's own
-        # budget: on a big cluster one address cannot spend it all.
-        floor = min(floor, node_share(self._channel_limiter.limit, nodes))
+        # The floor never above half this node's share of the channel's
+        # own budget: on a big cluster one address cannot spend it all.
+        floor = min(floor, max(1, node_share(self._channel_limiter.limit, nodes) // 2))
         share = max(floor, node_share(counter.limit, nodes))
         return counter.allow(key, limit=min(share, counter.limit))
 
@@ -638,20 +678,29 @@ class GfsChannelService:
         digest = SeenPayloadCache.digest(req.to_wire())
         if self._anon_seen.seen(digest):
             raise PermissionError("replayed request")
-        # v_97 — recorded before the ring append awaits, so two copies of
-        # one request on this node can never both be stored and fanned out.
-        self._anon_seen.record(digest)
         if req.push_all and not self._allow(self._push_all_limiter, req.channel_id):
             # A ``push_all`` item reaches every seat and is queued offline
-            # for each: only the rare host statement needs it, so it has its
-            # own small budget per channel (any writer can set the flag).
+            # for each: only the rare host statement needs it, so it has a
+            # small budget per channel (any writer can set the flag). Over
+            # it the item is kept — downgraded, never refused, so no writer
+            # can crowd the host's statements out: watchers get it live and
+            # everyone else by the heads ping.
+            req = replace(req, push_all=False)
+        if not self._byte_budget.allow(
+            req.channel_id, len(req.payload), self._node_count()
+        ):
+            # The ring must span several heads intervals: one writer
+            # uploading large items must not roll it for everyone.
             raise ChannelRateLimited()
-        # v_97 — into the channel's ring first: the frame carries its place
-        # (``seq`` / ``ring_id``). Without a ring the v_96 frame; a ring
-        # field from a household is never honoured by a server without one.
         if not self._fan_out.has_room(f"ch:{req.channel_id}"):
             # Refused before the append: no item stored that never goes out.
             raise ChannelBusy()
+        # Recorded after the synchronous refusals (a refused request may be
+        # sent again) and before the ring append awaits, so two copies of
+        # one request on this node can never both be stored.
+        self._anon_seen.record(digest)
+        # v_97 — into the channel's ring first: the frame carries its place
+        # (``seq`` / ``ring_id``). Without a ring the v_96 frame.
         frame = (
             await self._ring.append(req)
             if self._ring is not None
