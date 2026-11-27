@@ -7303,6 +7303,18 @@ async def test_the_host_itself_is_never_left_out(monkeypatch):
     }
 
 
+async def test_a_delegated_admin_serving_as_host_tries_everyone(monkeypatch):
+    """Fable round 3 (L-B): a household serving as the space's host (a
+    delegated admin holding the seed) leaves nobody to another host."""
+
+    async def _serves(*_a, **_kw):
+        return True
+
+    monkeypatch.setattr(federation_service_mod, "serves_as_host", _serves)
+    tried, _ = await _fan_out(monkeypatch, channel=False, host="host-x")
+    assert sorted(tried) == ["gfs-follower", "gfs-member", "mesh-follower"]
+
+
 async def test_households_with_a_row_go_before_mesh_discoveries(monkeypatch):
     """P10 H1: the households we hold a row for are sent to first; the
     ones that need a mesh discovery come after, whatever their ids."""

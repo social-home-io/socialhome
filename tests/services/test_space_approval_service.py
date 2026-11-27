@@ -450,6 +450,57 @@ async def test_mirror_update_shows_host_tally_not_local_recompute(stack):
     assert listed[0]["needed"] == 2
 
 
+async def test_a_mirror_never_keeps_an_old_hosts_ban_reason(stack):
+    """Fable round 3 (M-A): a host on an older build still sends a forwarded
+    ban's reason in ``params.fwd_params`` and the top-level ``fwd_params``;
+    the mirror scrubs both before it stores, frames or lists the view."""
+    from socialhome.domain.space import JoinMode, Space, SpaceFeatures
+
+    stub = Space(
+        id="sp-remote3",
+        name="S",
+        owner_instance_id="host-instance",
+        owner_username="hostowner",
+        identity_public_key="",
+        config_sequence=0,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+        emoji="🏠",
+        description="",
+    )
+    await stack.space_repo.save(stub)
+    seen: list = []
+
+    async def _capture(e):
+        seen.append(e)
+
+    stack.bus.subscribe(SpaceProposalUpdated, _capture)
+    fwd = {"user_id": "u-victim", "reason": "harassed my kid"}
+    await stack.approvals.apply_mirror_update(
+        stub.id,
+        {
+            "id": "prop-3",
+            "space_id": stub.id,
+            "action": ProposalAction.REMOTE_ADMIN_ACTION.value,
+            "params": {"fwd_action": "ban", "fwd_params": dict(fwd)},
+            "fwd_action": "ban",
+            "fwd_params": dict(fwd),
+            "status": "pending",
+            "proposed_by_instance": "host-instance",
+            "proposed_by_user": "hostadmin",
+            "created_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+        },
+    )
+    (listed,) = await _open(stack, stub.id)
+    assert b"harassed" not in orjson.dumps(listed)
+    assert all(b"harassed" not in orjson.dumps(e.view) for e in seen)
+    (row,) = await stack.proposals.list_open(stub.id)
+    assert b"harassed" not in orjson.dumps(row.host_view)
+    assert b"harassed" not in orjson.dumps(row.params)
+
+
 async def test_mirror_update_drops_resolved_proposal(stack):
     """A resolved (executed/rejected) host view removes the mirror row."""
     from socialhome.domain.space import JoinMode, Space, SpaceFeatures

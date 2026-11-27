@@ -1694,10 +1694,10 @@ DELIVERY_ERROR_MESH_DEFERRED: str = "mesh_retry_scheduled"
 DELIVERY_ERROR_MESH_DEFER_FULL: str = "mesh_retry_queue_full"
 
 #: :attr:`DeliveryResult.error` value meaning "not tried: this household
-#: has no path of ours (no ``remote_instances`` row, no mesh claim) and the
-#: space reaches it another way" — the host (which holds its seat) and its
-#: catch-up, or the space's opaque channel. Role-neutral (P10, H1): a
-#: member and a follower in that position alike. NOT a loss.
+#: has no path of ours (no ``remote_instances`` row, no mesh claim) and
+#: another household hosts the space" — the host holds its seat and serves
+#: its catch-up. Role-neutral (P10, H1): a member and a follower in that
+#: position alike. NOT a loss.
 DELIVERY_ERROR_HOST_HOP: str = "reached_by_host"
 
 

@@ -395,6 +395,9 @@ class SpaceApprovalService(ProtectionGateMixin):
         pid = str(view.get("id") or "")
         if not pid:
             return
+        # A host on an older build still sends a forwarded ban's reason:
+        # never store or show it here (owner 2026-11-27: admins only).
+        view = _public_view(view)
         status = str(view.get("status") or "")
         if status != ProposalStatus.PENDING.value:
             await self._proposals.delete(pid)
@@ -846,10 +849,7 @@ class SpaceApprovalService(ProtectionGateMixin):
         # against this household's possibly-stale roster. Only the current
         # status is taken from the local row.
         if proposal.host_view is not None:
-            view = {**proposal.host_view, "status": proposal.status.value}
-            if isinstance(view.get("params"), dict):
-                view["params"] = _public_params(view["params"])
-            return view
+            return {**_public_view(proposal.host_view), "status": proposal.status.value}
         if proposal.action == ProposalAction.REMOTE_ADMIN_ACTION:
             owner_key = await self._owner_key(proposal.space_id)
             votes = await self._proposals.list_votes(proposal.id)
@@ -968,6 +968,17 @@ def _public_fwd(fwd: object) -> object:
     if not isinstance(fwd, dict):
         return fwd
     return {k: v for k, v in fwd.items() if k not in _PRIVATE_FWD_KEYS}
+
+
+def _public_view(view: dict) -> dict:
+    """A proposal view without a forwarded action's private free text —
+    in ``params`` and in the top-level ``fwd_params`` alike."""
+    out = dict(view)
+    if isinstance(out.get("params"), dict):
+        out["params"] = _public_params(out["params"])
+    if "fwd_params" in out:
+        out["fwd_params"] = _public_fwd(out["fwd_params"])
+    return out
 
 
 def _public_params(params: dict) -> dict:

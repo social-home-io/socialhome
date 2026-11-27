@@ -99,7 +99,12 @@ from ..domain.events import (
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import admin_seed_key_prefix
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, mirrorable_remote_role
+from ..domain.space import (
+    PUBLIC_SPACE_TIERS,
+    WRITER_ROLES,
+    SpaceRole,
+    mirrorable_remote_role,
+)
 from ..federation.host_equivalence import holds_local_admin_seat
 from ..infrastructure.event_bus import EventBus
 from ..task_drain import wait_tasks_done
@@ -954,12 +959,13 @@ class SpaceAuthorityRotationService:
         # other household holds a writer seat at all (owner + followers
         # only): then nobody else could ever prove a forgotten epoch, and
         # the cert is the owner's own signature either way.
-        writer = any(r.role != SpaceRole.SUBSCRIBER for r in seats) or not (
-            await self._remote_members.list_instances_with_roles(
-                space_id,
-                frozenset(r.value for r in SpaceRole if r is not SpaceRole.SUBSCRIBER),
+        writer = any(r.role != SpaceRole.SUBSCRIBER for r in seats) or not [
+            i
+            for i in await self._remote_members.list_instances_with_roles(
+                space_id, frozenset(r.value for r in WRITER_ROLES)
             )
-        )
+            if i and i != self._own_instance_id
+        ]
         ceiling = int(time.time()) + MAX_ECHO_EPOCH_SKEW_S
         if max(parsed) > ceiling:
             log.warning(

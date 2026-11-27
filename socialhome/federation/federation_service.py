@@ -135,7 +135,7 @@ from .gfs_relay_transport import (
     normalize_gfs_base,
     relay_envelope_fits,
 )
-from .host_equivalence import acting_hosts
+from .host_equivalence import acting_hosts, serves_as_host
 from .inbound_retry import InboundRetry
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
@@ -318,9 +318,9 @@ MAX_DEFERRED_MESH_TARGETS: int = 256
 
 #: At most this many households without a row of ours are tried over the
 #: mesh (each a possible ``SPACE_FIND_ROUTE`` flood, up to ~4 s) in ONE
-#: space broadcast; the rest go to their deferred queue (P10, H1). The
-#: household with no row AND no mesh claim in a space with a host hop or a
-#: channel is not tried at all (:data:`DELIVERY_ERROR_HOST_HOP`).
+#: space broadcast; the rest go to their deferred queue (P10, H1). A
+#: household with no row AND no mesh claim in a space another household
+#: hosts is not tried at all (:data:`DELIVERY_ERROR_HOST_HOP`).
 MAX_MESH_DISCOVERIES_PER_BROADCAST: int = 32
 
 #: Ceiling on queued broadcasts per target. Each lives at most the retry
@@ -496,7 +496,7 @@ class FederationService:
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
-        "_mesh_cap_offset",
+        "_mesh_cap_offsets",
         "_mesh_claim_answer",
         "_mesh_claim_answer_tasks",
         "_moment_looks",
@@ -673,7 +673,7 @@ class FederationService:
         self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
         #: Where the next broadcast's mesh-discovery window starts among its
         #: row-less targets (P10, H1) — moves on so none is always capped.
-        self._mesh_cap_offset = 0
+        self._mesh_cap_offsets: dict[str, int] = {}
         #: See :meth:`attach_mesh_claim_answer`.
         self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
         #: Answers on their way (:meth:`_spawn_mesh_claim_answer`).
@@ -4249,10 +4249,11 @@ class FederationService:
         # ours is a mesh discovery (up to ~4 s each, one after another), so
         # it goes last, at most MAX_MESH_DISCOVERIES_PER_BROADCAST of them
         # (the rest wait in their deferred queue) — and none at all when it
-        # never claimed a version over the mesh either and the space reaches
-        # it another way: the host's seat for it and its catch-up, or the
-        # space's channel. Trade-off: what no catch-up carries (live
-        # location) reaches such a household only from the host's people.
+        # never claimed a version over the mesh either and another household
+        # hosts the space (it holds the seat and serves the catch-up; the
+        # host itself is never skipped, and a host tries everyone).
+        # Trade-off: what no catch-up carries (live location) reaches such
+        # a household only from the host's people.
         hosts: frozenset[str] | None = None
         direct: list[tuple[str, dict]] = []
         rowless: list[tuple[str, dict]] = []
@@ -4277,9 +4278,13 @@ class FederationService:
             rowless.append((iid, peer_payload))
         # The cap's window starts somewhere else on each broadcast, so no
         # household is always past it.
-        if rowless:
-            start = self._mesh_cap_offset % len(rowless)
-            self._mesh_cap_offset += MAX_MESH_DISCOVERIES_PER_BROADCAST
+        if len(rowless) > MAX_MESH_DISCOVERIES_PER_BROADCAST:
+            # Per space, so another space's broadcasts never pin it.
+            offset = self._mesh_cap_offsets.get(space_id, 0)
+            start = offset % len(rowless)
+            self._mesh_cap_offsets[space_id] = (
+                start + MAX_MESH_DISCOVERIES_PER_BROADCAST
+            )
             rowless = rowless[start:] + rowless[:start]
         capped = {
             iid
@@ -4405,7 +4410,13 @@ class FederationService:
         except Exception:
             log.debug("space %s: host lookup failed", space_id, exc_info=True)
             return frozenset()
-        return frozenset() if self._own_instance_id in hosts else hosts
+        if self._own_instance_id in hosts or await serves_as_host(
+            self._space_repo, space, own_instance_id=self._own_instance_id
+        ):
+            # We host it (the owner, or a delegated admin serving as host):
+            # nobody else reaches the households we have no path for.
+            return frozenset()
+        return hosts
 
     async def _has_row(self, instance_id: str) -> bool:
         """We hold a ``remote_instances`` row for it (fail-soft: yes)."""
@@ -4772,7 +4783,12 @@ class FederationService:
             name=f"fed-mesh-deferred-send[{target}]",
         )
         self._deferred_mesh_tasks[target] = task
-        log.info(
+        # A capped send (P10 H1) is routine at scale: DEBUG, not one INFO
+        # line per household per broadcast.
+        log.log(
+            logging.DEBUG
+            if result.error == DELIVERY_ERROR_MESH_DEFER_FULL
+            else logging.INFO,
             "broadcast_to_space_members: space=%s event=%s — mesh cannot"
             " reach %s yet (%s); re-sending in %.1fs",
             space_id,
