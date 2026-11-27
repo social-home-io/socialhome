@@ -317,9 +317,14 @@ class PageProposalForwarder:
         host taking binary relay frames gains nothing from a cache for one
         recipient) — or on any failure (the draft goes out without them;
         logged)."""
-        if (
-            self._media_gfs is None
-            or not await self._media_gfs.is_relay_reader(host)
+        if self._media_gfs is None:
+            return None
+        # v_97 (owner B-1): a host that takes a GFS space's files only from
+        # the GFS cache gets no push — the draft's new files are described
+        # and uploaded eagerly (the host holds none of them yet).
+        cache_only = await self._media_gfs.cache_only(space_id, host)
+        if not cache_only and (
+            not await self._media_gfs.is_relay_reader(host)
             or await self._media_gfs.takes_relay_frames(host)
             or not await self._federation.space_member_supports(
                 host, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
@@ -341,6 +346,14 @@ class PageProposalForwarder:
                     space_id,
                 )
                 return None
+            if cache_only:
+                return await self._media_gfs.plan(
+                    space_id,
+                    urls,
+                    item_id=page_id,
+                    followers=False,
+                    author_user_id=proposal.actor_user_id or "",
+                )
             return await self._media_gfs.plan_for_reader(
                 space_id, urls, host, item_id=page_id
             )

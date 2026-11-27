@@ -372,13 +372,27 @@ class _Plan:
 
 class _GfsUploader:
     def __init__(
-        self, *, reader: bool, authorized: bool = True, frames: bool = False
+        self,
+        *,
+        reader: bool,
+        authorized: bool = True,
+        frames: bool = False,
+        cache_only: bool = False,
     ) -> None:
         self.reader = reader
         self.authorized = authorized
         self.frames = frames
+        self.cache_only_host = cache_only
         self.planned: list[tuple] = []
+        self.eager: list[tuple] = []
         self.uploaded: list = []
+
+    async def cache_only(self, space_id, iid):
+        return self.cache_only_host and iid == HOST
+
+    async def plan(self, space_id, urls, *, item_id, followers, author_user_id=""):
+        self.eager.append((space_id, list(urls), item_id, followers, author_user_id))
+        return _Plan(list(urls))
 
     async def is_relay_reader(self, iid):
         return self.reader and iid == HOST
@@ -484,3 +498,19 @@ async def test_the_queued_files_memory_is_bounded_and_cleared(env, media, monkey
     del env.conflicts.drafts["p2"]
     assert not await env.fwd.kick(SID, "p2")
     assert env.fwd._queued == {}
+
+
+async def test_a_cache_only_host_gets_the_new_files_described_never_pushed(env, media):
+    """v_97 (owner B-1): a host that takes a GFS space's files only from
+    the GFS cache gets no push of a proposal's new files — they are
+    described in the proposal and uploaded eagerly (the host holds none of
+    them), whatever the path to the host."""
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=False, cache_only=True)
+    env.fwd.attach_media_gfs(gfs)
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert set(env.fed.sent[0][2]["media_refs"]) == {"a.webp"}
+    assert [e[:4] for e in gfs.eager] == [(SID, ["api/media/a.webp"], "pg", False)]
+    assert gfs.planned == [] and len(gfs.uploaded) == 1
+    assert media.calls == []

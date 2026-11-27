@@ -2905,11 +2905,16 @@ def _build_page_files_reach_host(
     also over the GFS relay when the host takes binary relay frames (v_87).
     Only a household whose host's relay cannot carry the push (a v_80–86
     seat, a GFS without ``envelope_media``) hands them over through its GFS
-    media cache, which it needs an upload authorization for."""
+    media cache, which it needs an upload authorization for. v_97: a host
+    that takes a GFS space's files only from the cache gets them described
+    and queued in the durable outbox — sent once this household's grant
+    lands (the queue tells the author if it never does)."""
 
     async def _reach(space_id: str) -> bool:
         mode, host = await page_conflicts.mode(space_id)
         if mode is not PageMode.MEMBER or not host:
+            return True
+        if await uploader.cache_only(space_id, host):
             return True
         if not await uploader.is_relay_reader(host):
             return True
