@@ -11487,6 +11487,34 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_96 moment reach gate in place ✓")
+    # v_97 — every space change travels as one space item: between v_97
+    # households a mesh space's changes go as SPACE_ITEM, applied by the one
+    # receiver, which claims each item id in the durable replay table
+    # (``space-item:<origin>:<item_id>``). The space steps above (calendar,
+    # RSVP, chat, tasks) ran between v_97 households, so some household
+    # must hold such a claim — proof the items crossed the real wire.
+    if int(_Cap.MIN_FOR_SPACE_ITEMS) != 97 or _OURS < 97:
+        failures.append(
+            "MIN_FOR_SPACE_ITEMS moved off v_97 (or OURS fell below it) — "
+            "space changes would never travel as one space item"
+        )
+    else:
+        counts = {}
+        for name in ("a", "b", "c"):
+            rows = _rows(
+                name,
+                "SELECT COUNT(*) FROM federation_replay_cache "
+                "WHERE msg_id LIKE 'space-item:%'",
+                (),
+            )
+            counts[name] = rows[0][0] if rows else 0
+        if not any(counts.values()):
+            failures.append(
+                f"v_97: no household applied a space item ({counts}) — "
+                "space changes did not travel as SPACE_ITEM"
+            )
+        else:
+            print(f"  v_97 space items applied on the real wire {counts} ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
