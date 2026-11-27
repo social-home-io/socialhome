@@ -2044,6 +2044,24 @@ async def test_echo_from_a_subscriber_or_seatless_household_is_ignored(
     assert (await w.o_space()).authority_key_epoch == e2
 
 
+async def test_a_followers_proof_rotates_only_when_no_writer_household_exists(
+    world, monkeypatch
+):
+    """Fable P10 round 2 (M-4): with owner + followers only, no writer
+    household could ever prove a forgotten epoch — a follower's proof (the
+    owner's own signed cert) then starts the rotation; while a writer
+    household exists it does not (above)."""
+    w = world
+    e1, e2 = await _forget_e1(w, monkeypatch, inflate=False)
+    proof = {"forgotten_epoch": e1, "forgotten_cert": _cert_of(w, e1)}
+    o_rm = w.o_app[space_remote_member_repo_key]
+    await o_rm.set_role(w.space_id, w.m_id, "um", SpaceRole.SUBSCRIBER.value)
+    await o_rm.remove(w.space_id, A_ID, "ua")
+    await o_rm.remove(w.space_id, B_ID, "ub")
+    await _echo_to_owner(w, sender=w.m_id, echo=proof)
+    assert (await w.o_space()).authority_key_epoch != e2
+
+
 async def test_old_peer_without_the_echo_changes_nothing(world):
     """A v_45 member's BEGIN carries no echo: the owner does nothing. And a
     member never sends the echo to an owner it knows is below v_46."""

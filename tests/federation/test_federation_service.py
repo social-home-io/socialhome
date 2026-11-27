@@ -7202,7 +7202,10 @@ class _ChannelSpaces:
         self.host = host
 
     async def get(self, space_id):
-        return types.SimpleNamespace(owner_instance_id=self.host)
+        return types.SimpleNamespace(id=space_id, owner_instance_id=self.host)
+
+    async def get_invited_by(self, space_id):
+        return None
 
     async def get_gfs_channel(self, space_id):
         return ("c" * 32, "pk") if self.channel else None
@@ -7255,17 +7258,17 @@ async def _fan_out(
         FederationEventType.SPACE_MEMBER_JOINED,
     ],
 )
-@pytest.mark.parametrize(("channel", "host"), [(True, None), (False, "host-x")])
+@pytest.mark.parametrize("channel", [True, False])
 async def test_a_household_with_no_path_is_left_to_the_host_member_or_follower(
-    monkeypatch, event_type, channel, host
+    monkeypatch, event_type, channel
 ):
-    """P10 H1 (role-neutral): a household we hold no row for that never
-    claimed a version over the mesh is not tried — no route discovery flood
-    — when the space reaches it another way (the host's seat and catch-up,
-    or the channel); a member there exactly like a follower. One that
+    """P10 H1 (role-neutral): in a space another household hosts, a
+    household we hold no row for that never claimed a version over the mesh
+    is not tried — no route discovery flood — the host holds its seat and
+    serves its catch-up; a member there exactly like a follower. One that
     claimed over the mesh is tried. Not a loss: nothing terminal."""
     tried, result = await _fan_out(
-        monkeypatch, channel=channel, host=host, event_type=event_type
+        monkeypatch, channel=channel, host="host-x", event_type=event_type
     )
     assert tried == ["mesh-follower"]
     skipped = {r.instance_id: r.error for r in result.results if not r.ok}
@@ -7276,11 +7279,28 @@ async def test_a_household_with_no_path_is_left_to_the_host_member_or_follower(
     assert result.terminal_failures == ()
 
 
-async def test_the_host_without_a_channel_tries_every_household(monkeypatch):
-    """Hosted here and no channel: nobody else reaches them — every
-    household is tried, row or not."""
-    tried, _ = await _fan_out(monkeypatch, channel=False, host=None)
+@pytest.mark.parametrize("channel", [True, False])
+async def test_the_host_tries_every_household(monkeypatch, channel):
+    """Hosted here (a channel or not — the channel carries posts only):
+    nobody else reaches them, so every household is tried, row or not."""
+    tried, _ = await _fan_out(monkeypatch, channel=channel, host=None)
     assert sorted(tried) == ["gfs-follower", "gfs-member", "mesh-follower"]
+
+
+async def test_the_host_itself_is_never_left_out(monkeypatch):
+    """Fable round 2 (H-1): the host is the one everyone relies on — a
+    member that has no row and no claim for it yet still sends to it."""
+    tried, result = await _fan_out(
+        monkeypatch,
+        channel=False,
+        host="host-x",
+        targets=("host-x", "gfs-follower"),
+        claims={},
+    )
+    assert tried == ["host-x"]
+    assert {r.instance_id: r.error for r in result.results if not r.ok} == {
+        "gfs-follower": DELIVERY_ERROR_HOST_HOP
+    }
 
 
 async def test_households_with_a_row_go_before_mesh_discoveries(monkeypatch):
@@ -7307,10 +7327,40 @@ async def test_mesh_discoveries_per_broadcast_are_capped(monkeypatch):
         targets=("m-1", "m-2"),
         claims={"m-1": 96, "m-2": 96},
     )
-    assert tried == ["m-1"]
-    deferred = [r for r in result.results if r.instance_id == "m-2"]
+    assert len(tried) == 1
+    other = ({"m-1", "m-2"} - set(tried)).pop()
+    deferred = [r for r in result.results if r.instance_id == other]
     assert deferred and deferred[0].error == DELIVERY_ERROR_MESH_DEFERRED
     assert result.terminal_failures == ()
+
+
+async def test_the_cap_window_moves_on_each_broadcast(monkeypatch):
+    """Fable round 2 (M-2): the cap's window starts elsewhere on the next
+    broadcast, so the same household is never always past it."""
+    monkeypatch.setattr(federation_service_mod, "MAX_MESH_DISCOVERIES_PER_BROADCAST", 1)
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = {"m-1": 96, "m-2": 96}
+    for iid in ("m-1", "m-2"):
+        fed_repo.add_space_member("sp", iid)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    svc.attach_space_write_gate(_ChannelSpaces(False), _Seats(set()))
+    tried: list[str] = []
+
+    async def _send(self, *, to_instance_id, **_kw):
+        tried.append(to_instance_id)
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    def _defer(self, result, **_kw):
+        return result
+
+    monkeypatch.setattr(type(svc), "send_with_mesh_fallback", _send)
+    monkeypatch.setattr(type(svc), "_defer_mesh_send", _defer)
+    for _ in range(2):
+        await svc.broadcast_to_space_members(
+            "sp", FederationEventType.SPACE_POST_CREATED, {"space_id": "sp"}
+        )
+    assert sorted(tried) == ["m-1", "m-2"]
 
 
 async def test_gfs_reached_followers_names_follower_only_seat_households():

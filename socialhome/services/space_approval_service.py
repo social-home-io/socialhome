@@ -266,6 +266,7 @@ class SpaceApprovalService(ProtectionGateMixin):
         the lazy expiry, so an outsider can't trigger its writes either."""
         await require_seat(self._spaces, space_id, viewer_user_id)
         out: list[dict] = []
+        admin: bool | None = None
         for p in await self._proposals.list_open(space_id):
             if p.expires_at <= _now():
                 # Lazy expiry — only the host mutates state; a mirror just
@@ -280,8 +281,22 @@ class SpaceApprovalService(ProtectionGateMixin):
             view = await self._view(p)
             # Per reader, so never part of ``_view`` (which is broadcast).
             view["voted_by_me"] = await self._has_voted(p, viewer_user_id)
+            if admin is None:
+                admin = await self._is_space_admin(space_id, viewer_user_id)
+            reason = _forwarded_reason(p)
+            if admin and reason is not None:
+                # The host's own row: an owner / admin sees why.
+                view["fwd_reason"] = reason
             out.append(view)
         return out
+
+    async def _is_space_admin(self, space_id: str, user_id: str) -> bool:
+        """``user_id`` (a local user) holds an owner / admin seat."""
+        member = await self._spaces.get_member(space_id, user_id)
+        return member is not None and str(member.role) in (
+            SpaceRole.OWNER.value,
+            SpaceRole.ADMIN.value,
+        )
 
     async def _has_voted(self, proposal: SpaceAdminProposal, user_id: str) -> bool:
         """Has ``user_id`` (a local user) already voted on ``proposal``?
@@ -865,7 +880,7 @@ class SpaceApprovalService(ProtectionGateMixin):
                 ),
                 "owner_only": True,
                 "fwd_action": p.get("fwd_action"),
-                "fwd_params": p.get("fwd_params"),
+                "fwd_params": _public_fwd(p.get("fwd_params")),
                 "fwd_target_label": await self._resolve_fwd_target_label(
                     proposal.space_id, p.get("fwd_action"), p.get("fwd_params")
                 ),
@@ -942,9 +957,36 @@ class SpaceApprovalService(ProtectionGateMixin):
 _UNTRUSTED_PARAM_KEYS = frozenset({"actor_instance", "actor_user"})
 
 
+#: Free-text keys of a forwarded admin action that never ride a proposal
+#: view (broadcast to every seat, mirrored, framed, listed): a ban's reason
+#: goes to owner / admin households only (owner 2026-11-27).
+_PRIVATE_FWD_KEYS = frozenset({"reason"})
+
+
+def _public_fwd(fwd: object) -> object:
+    """A forwarded action's params without its private free text."""
+    if not isinstance(fwd, dict):
+        return fwd
+    return {k: v for k, v in fwd.items() if k not in _PRIVATE_FWD_KEYS}
+
+
 def _public_params(params: dict) -> dict:
-    """``params`` without the untrusted proposer copies."""
-    return {k: v for k, v in params.items() if k not in _UNTRUSTED_PARAM_KEYS}
+    """``params`` without the untrusted proposer copies and without a
+    forwarded action's private free text."""
+    out = {k: v for k, v in params.items() if k not in _UNTRUSTED_PARAM_KEYS}
+    if "fwd_params" in out:
+        out["fwd_params"] = _public_fwd(out["fwd_params"])
+    return out
+
+
+def _forwarded_reason(proposal: SpaceAdminProposal) -> str | None:
+    """A forwarded action's free-text reason, on the row that holds it (the
+    host's — a mirror's row is the public view, without it)."""
+    if proposal.host_view is not None:
+        return None
+    fwd = proposal.params.get("fwd_params")
+    reason = fwd.get("reason") if isinstance(fwd, dict) else None
+    return reason if isinstance(reason, str) and reason else None
 
 
 def _vote_str(approve: bool) -> str:

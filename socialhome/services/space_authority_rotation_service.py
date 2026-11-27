@@ -950,8 +950,16 @@ class SpaceAuthorityRotationService:
             return  # no seat: nothing it holds can be owed (a follower's
             # seat counts — P10, it heals like a member's)
         # Only a writer seat's proof may start a ROTATION (review M3); a
-        # follower's echo gets its bundle re-sent, never more.
-        writer = any(r.role != SpaceRole.SUBSCRIBER for r in seats)
+        # follower's echo gets its bundle re-sent, never more — unless no
+        # other household holds a writer seat at all (owner + followers
+        # only): then nobody else could ever prove a forgotten epoch, and
+        # the cert is the owner's own signature either way.
+        writer = any(r.role != SpaceRole.SUBSCRIBER for r in seats) or not (
+            await self._remote_members.list_instances_with_roles(
+                space_id,
+                frozenset(r.value for r in SpaceRole if r is not SpaceRole.SUBSCRIBER),
+            )
+        )
         ceiling = int(time.time()) + MAX_ECHO_EPOCH_SKEW_S
         if max(parsed) > ceiling:
             log.warning(

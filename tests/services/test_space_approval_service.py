@@ -12,6 +12,7 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -524,6 +525,37 @@ async def test_enqueue_owner_approval_creates_pending_no_vote(stack):
     assert await stack.proposals.list_votes(v["id"]) == []
     # An update event was emitted.
     assert any(e.proposal_id == v["id"] for e in seen)
+
+
+async def test_a_forwarded_ban_reason_reaches_owner_and_admins_only(stack):
+    """Owner 2026-11-27 (M2) / Fable round 2 (H-2): a forwarded ban's
+    free-text reason never rides the proposal view — not the broadcast
+    event, not a mirror, not a plain seat's list; an owner / admin reading
+    the host's own row sees it as ``fwd_reason``."""
+    owner = await _user(stack, "alice")
+    space = await stack.setup.create_space(owner_username="alice", name="S")
+    seen: list = []
+
+    async def _capture(e):
+        seen.append(e)
+
+    stack.bus.subscribe(SpaceProposalUpdated, _capture)
+    await stack.approvals.enqueue_owner_approval(
+        space.id,
+        actor_instance="host-B",
+        actor_user="ben",
+        fwd_action="ban",
+        fwd_params={"user_id": "u-victim", "reason": "harassed my kid"},
+    )
+    (plain,) = await _open(stack, space.id)
+    assert "reason" not in plain["params"]["fwd_params"]
+    assert "reason" not in plain["fwd_params"]
+    assert "fwd_reason" not in plain
+    assert all(b"harassed" not in orjson.dumps(e.view) for e in seen)
+    (mine,) = await stack.approvals.list_for_space(
+        space.id, viewer_user_id=owner.user_id
+    )
+    assert mine["fwd_reason"] == "harassed my kid"
 
 
 async def test_enqueue_owner_approval_no_dedup(stack):

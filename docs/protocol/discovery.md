@@ -1582,13 +1582,13 @@ per GFS per host item; the same deferred lever. Since P10 (owner
 `channel_reached_followers` skip is gone. Instead, one rule for everyone:
 A household we hold no `remote_instances` row for (no pairing, no
 directory seat from its card) that never claimed a version over the mesh is
-**not tried** in a space another household hosts or that runs a channel
+**not tried** in a space another household hosts
 (`DELIVERY_ERROR_HOST_HOP`, not a loss): the host holds its seat and serves
-its catch-up, the channel carries posts. Role-neutral — a member and a
+its catch-up. The host itself is never left out, and the host tries everyone. Role-neutral — a member and a
 follower in that position alike (P10, owner 2026-11-27). Households with a
 row go first; at most `MAX_MESH_DISCOVERIES_PER_BROADCAST` = 32 row-less
 households are tried over the mesh per broadcast, the rest wait in their
-deferred queue. **Known gap:** what no catch-up carries — a live location
+deferred queue; the window moves on each broadcast so no household is always past it. A new mesh-only household is tried once its mesh claim lands (the startup announce or the 30-minute sweep); until then the host and its catch-up reach it. **Known gap:** what no catch-up carries — a live location
 pin — reaches such a household only from the host's own people. The
 follow-up is one general path: every space item type rides the channel like
 posts. A delegated admin's rotation reaches such a follower through the owner, which

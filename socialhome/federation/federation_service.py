@@ -135,6 +135,7 @@ from .gfs_relay_transport import (
     normalize_gfs_base,
     relay_envelope_fits,
 )
+from .host_equivalence import acting_hosts
 from .inbound_retry import InboundRetry
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
@@ -495,6 +496,7 @@ class FederationService:
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
+        "_mesh_cap_offset",
         "_mesh_claim_answer",
         "_mesh_claim_answer_tasks",
         "_moment_looks",
@@ -669,6 +671,9 @@ class FederationService:
         #: unreferenced task can be GC'd mid-flight); it removes both entries
         #: when its queue is empty. :meth:`stop` cancels the rest.
         self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
+        #: Where the next broadcast's mesh-discovery window starts among its
+        #: row-less targets (P10, H1) — moves on so none is always capped.
+        self._mesh_cap_offset = 0
         #: See :meth:`attach_mesh_claim_answer`.
         self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
         #: Answers on their way (:meth:`_spawn_mesh_claim_answer`).
@@ -4248,24 +4253,21 @@ class FederationService:
         # it another way: the host's seat for it and its catch-up, or the
         # space's channel. Trade-off: what no catch-up carries (live
         # location) reaches such a household only from the host's people.
-        host_hop: bool | None = None
+        hosts: frozenset[str] | None = None
         direct: list[tuple[str, dict]] = []
         rowless: list[tuple[str, dict]] = []
         for iid, peer_payload in planned:
             if iid in queued:
                 results.append(queued[iid])
                 continue
-            if (
-                iid in self._deferred_mesh_queues
-                or await self._federation_repo.get_instance(iid) is not None
-            ):
+            if iid in self._deferred_mesh_queues or await self._has_row(iid):
                 direct.append((iid, peer_payload))
                 continue
-            claim = await self._federation_repo.get_space_member_version(iid)
-            if claim is None or claim[0] <= 0:
-                if host_hop is None:
-                    host_hop = await self._space_reached_another_way(space_id)
-                if host_hop:
+            if not await self._claimed_over_mesh(iid):
+                if hosts is None:
+                    hosts = await self._hosts_elsewhere(space_id)
+                # Never the host itself: it is the one everyone relies on.
+                if hosts and iid not in hosts:
                     results.append(
                         DeliveryResult(
                             instance_id=iid, ok=False, error=DELIVERY_ERROR_HOST_HOP
@@ -4273,24 +4275,32 @@ class FederationService:
                     )
                     continue
             rowless.append((iid, peer_payload))
-        discoveries = 0
+        # The cap's window starts somewhere else on each broadcast, so no
+        # household is always past it.
+        if rowless:
+            start = self._mesh_cap_offset % len(rowless)
+            self._mesh_cap_offset += MAX_MESH_DISCOVERIES_PER_BROADCAST
+            rowless = rowless[start:] + rowless[:start]
+        capped = {
+            iid
+            for iid, _p in rowless[MAX_MESH_DISCOVERIES_PER_BROADCAST:]
+            if iid not in self._deferred_mesh_queues
+        }
         for iid, peer_payload in direct + rowless:
-            if iid not in self._deferred_mesh_queues and (iid, peer_payload) in rowless:
-                if discoveries >= MAX_MESH_DISCOVERIES_PER_BROADCAST:
-                    results.append(
-                        self._defer_mesh_send(
-                            DeliveryResult(
-                                instance_id=iid,
-                                ok=False,
-                                error=DELIVERY_ERROR_ROUTE_COOLDOWN,
-                            ),
-                            space_id=space_id,
-                            event_type=event_type,
-                            payload=peer_payload,
-                        )
+            if iid in capped:
+                results.append(
+                    self._defer_mesh_send(
+                        DeliveryResult(
+                            instance_id=iid,
+                            ok=False,
+                            error=DELIVERY_ERROR_MESH_DEFER_FULL,
+                        ),
+                        space_id=space_id,
+                        event_type=event_type,
+                        payload=peer_payload,
                     )
-                    continue
-                discoveries += 1
+                )
+                continue
             if iid in self._deferred_mesh_queues:
                 # A deferred send to this target is still pending: queue
                 # behind it rather than overtake it, so the target sees
@@ -4370,25 +4380,49 @@ class FederationService:
             )
         return broadcast
 
-    async def _space_reached_another_way(self, space_id: str) -> bool:
-        """Does ``space_id`` reach a household we hold no path for without
-        us (P10, H1)? Yes when another household hosts it (the host holds
-        every seat's row and serves its catch-up) or it runs an opaque
-        channel here. Fail open (``False``: try the mesh) when unknown."""
+    async def _hosts_elsewhere(self, space_id: str) -> frozenset[str]:
+        """The households acting as ``space_id``'s host HERE when that is
+        not us (P10, H1): they hold every seat's row and serve its catch-up,
+        so a household we have no path for is theirs to reach. Empty when we
+        host it (we must try everyone), it is unknown, or a lookup failed —
+        fail open: the mesh is tried."""
         if self._space_repo is None:
-            return False
+            return frozenset()
         try:
             space = await self._space_repo.get(space_id)
-            if (
-                space is not None
-                and space.owner_instance_id
-                and space.owner_instance_id != self._own_instance_id
-            ):
-                return True
-            return await self._space_repo.get_gfs_channel(space_id) is not None
+            if space is None:
+                return frozenset()
+            hosts = frozenset(
+                h
+                for h in await acting_hosts(
+                    self._space_repo,
+                    self._space_remote_member_repo,
+                    space,
+                    own_instance_id=self._own_instance_id,
+                )
+                if h
+            )
         except Exception:
-            log.debug("space %s: host-hop check failed", space_id, exc_info=True)
-            return False
+            log.debug("space %s: host lookup failed", space_id, exc_info=True)
+            return frozenset()
+        return frozenset() if self._own_instance_id in hosts else hosts
+
+    async def _has_row(self, instance_id: str) -> bool:
+        """We hold a ``remote_instances`` row for it (fail-soft: yes)."""
+        try:
+            return await self._federation_repo.get_instance(instance_id) is not None
+        except Exception:
+            log.debug("row lookup failed for %s", instance_id, exc_info=True)
+            return True
+
+    async def _claimed_over_mesh(self, instance_id: str) -> bool:
+        """It claimed a space version over the mesh (fail-soft: yes)."""
+        try:
+            claim = await self._federation_repo.get_space_member_version(instance_id)
+        except Exception:
+            log.debug("claim lookup failed for %s", instance_id, exc_info=True)
+            return True
+        return claim is not None and claim[0] > 0
 
     async def _queue_multi_groups(
         self,
