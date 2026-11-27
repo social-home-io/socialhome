@@ -97,6 +97,9 @@ class _Gfs:
     async def space_media_pieces(self, conn):
         return self.pieces
 
+    async def space_media_file_max(self, conn):
+        return 128 * 1024 * 1024 if self.pieces else 0
+
     def space_media_cache_off(self, conn) -> bool:
         return False
 
@@ -1447,3 +1450,29 @@ async def test_a_file_no_gfs_of_the_space_takes_is_told_to_its_author(tmp_path):
     )
     assert plan is None
     assert box.failed == [(SPACE, "anna", "refused")]
+
+
+async def test_a_file_over_half_a_channels_share_is_never_split(tmp_path):
+    """v_97 — a GFS keeps one file in pieces up to half its signed channel
+    share: a larger one is not described (its author is told), never half
+    uploaded."""
+    _write(tmp_path, "v.webm", BIG)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _pieced_uploader(tmp_path, gfs)
+
+    async def small_share(conn):
+        return BIG - 1
+
+    gfs.space_media_file_max = small_share
+    box = _Outbox()
+    u.attach_outbox(box)
+    plan = await u.plan(
+        SPACE,
+        ["api/media/v.webm"],
+        item_id=ITEM,
+        followers=False,
+        author_user_id="anna",
+    )
+    assert plan is None
+    assert box.failed == [(SPACE, "anna", "too_large")]

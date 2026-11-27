@@ -5909,6 +5909,7 @@ def create_app(config: Config | None = None) -> web.Application:
             # A private space with an opaque channel uploads under its
             # channel scope (the GFS never learns the space).
             space_media_uploader.attach_channels(gfs_channels)
+            space_media_fetcher.attach_channels(gfs_channels)
             # v_83 — a holder answers a channel request only for a seat it
             # holds on the asking GFS.
             app[K.space_media_gfs_responder_key].attach_channels(gfs_channels)

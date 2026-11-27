@@ -408,6 +408,12 @@ class GfsSpaceMediaStore:
         pieces of that file already kept here are added up — no new state.
         A file past it is refused (``413 file_over_share``) rather than
         evicting most of the space's pictures. Never charges anything."""
+        cap = self._limits.space_max_bytes // 2
+        # Every piece but the last is a full blob: a file whose pieces can't
+        # fit is refused at its FIRST piece, never half kept (evicting the
+        # space's pictures for a file that can't complete).
+        if (len(proof.manifest) - 1) * MAX_BLOB_BYTES > cap:
+            raise MediaRefused(413, "file_over_share")
         try:
             file_addr = pieced_file_address(scope_kind, scope_id, proof.manifest)
         except ValueError as exc:
@@ -419,7 +425,7 @@ class GfsSpaceMediaStore:
             blob = await self._repo.get_blob(piece_address(file_addr, index))
             if blob is not None:
                 held += blob.size
-        if held + size > self._limits.space_max_bytes // 2:
+        if held + size > cap:
             raise MediaRefused(413, "file_over_share")
 
     async def admit_upload(

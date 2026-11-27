@@ -1238,9 +1238,10 @@ async def test_a_cache_too_small_for_a_piece_does_not_advertise_pieces(gfs):
 async def test_one_file_holds_at_most_half_the_scopes_share(gfs):
     """v_97 — one big file can't evict most of a space's pictures: its
     pieces (known from the proof's manifest) take at most half the scope's
-    share; past it a piece is ``413 file_over_share``."""
+    share; a file that can't fit is refused at its FIRST piece (never half
+    kept), ``413 file_over_share``."""
     pieces = _pieces(3)
-    for index, want in ((0, 201), (1, 413)):
+    for index, want in ((0, 413),):
         proof = _proof(pieces, index)
         addr = _piece_addr(proof)
         r = await gfs.put(

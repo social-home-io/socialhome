@@ -631,11 +631,11 @@ class SpaceMediaGfsUploader:
             )
             await self._tell_unsent(space_id, author, UNSENT_REFUSED)
             return None
-        pieces = False
+        # The largest file in pieces a GFS of the plan keeps (half its
+        # signed channel share; 0: none keeps pieces).
+        pieces = 0
         for conn in targets:
-            if await self._gfs.space_media_pieces(conn):
-                pieces = True
-                break
+            pieces = max(pieces, await self._gfs.space_media_file_max(conn))
         refs = await self._describe_names(
             space_id, names, item_id, scoped=scoped, pieces=pieces, author=author
         )
@@ -653,7 +653,7 @@ class SpaceMediaGfsUploader:
         *,
         cached_only: bool = False,
         scoped: tuple[str, str] | None = None,
-        pieces: bool = False,
+        pieces: int = 0,
         author: str = "",
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
@@ -752,7 +752,7 @@ class SpaceMediaGfsUploader:
         scope: str,
         scope_id: str,
         *,
-        pieces: bool,
+        pieces: int,
         author: str,
     ) -> SpaceMediaRef | None:
         """The ``sm1p`` entry of a file over one blob — ``None``, and its
@@ -762,13 +762,15 @@ class SpaceMediaGfsUploader:
         stamp = await self._stamp(name)
         if path is None or stamp is None:
             return None
-        if not pieces or stamp[0] > MAX_PIECED_FILE_BYTES:
+        if stamp[0] > min(pieces, MAX_PIECED_FILE_BYTES):
             log.info(
                 "space media %s (%d bytes) of space %s: %s — not sent through a GFS",
                 name,
                 stamp[0],
                 space_id,
-                "over 200 MiB" if pieces else "no GFS of the space keeps pieces",
+                "over what a GFS of the space keeps for one file"
+                if pieces
+                else "no GFS of the space keeps pieces",
             )
             await self._tell_too_large(space_id, author)
             return None
@@ -980,7 +982,9 @@ class SpaceMediaGfsUploader:
         now = _monotonic()
         conns = list(plan.targets)
         if ref.pieced:
-            conns = [c for c in conns if await self._gfs.space_media_pieces(c)]
+            conns = [
+                c for c in conns if await self._gfs.space_media_file_max(c) >= ref.size
+            ]
             manifest = self._manifests.get(ref.blob_id)
             if manifest is None:
                 scoped = await self.scope_of(plan.space_id)
