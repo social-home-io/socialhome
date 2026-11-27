@@ -22,18 +22,19 @@ class _Gfs:
         self.items = []
         self.uploaded = []
 
-    async def plan(self, space_id, urls, *, item_id, followers):
+    async def plan(self, space_id, urls, *, item_id, followers, author_user_id=""):
         if self.boom:
             raise OSError("disk")
         self.calls.append((space_id, list(urls), followers))
         self.items.append(item_id)
+        self.authors = getattr(self, "authors", []) + [author_user_id]
         return self._plan
 
     async def is_relay_reader(self, iid):
         return iid in self.readers
 
-    def upload(self, plan):
-        self.uploaded.append(plan)
+    async def upload(self, plan, *, author_user_id=""):
+        self.uploaded.append((plan, author_user_id))
 
 
 class _Sender(SpaceMediaRefsMixin):
@@ -51,8 +52,8 @@ async def test_unwired_is_a_no_op():
         )
         is None
     )
-    assert s._media_refs_per_peer(None) is None
-    s._upload_media(None)
+    assert s._with_media_refs({"x": 1}, None) == {"x": 1}
+    await s._upload_media(None)
 
 
 async def test_no_urls_plans_nothing():
@@ -66,22 +67,28 @@ async def test_no_urls_plans_nothing():
     assert gfs.calls == []
 
 
-async def test_plan_per_peer_and_upload():
+async def test_plan_shared_descriptor_and_upload():
+    """v_97 — in a GFS space the descriptor rides the ONE shared payload
+    every household reads (no per-household copy), and the upload is
+    queued for its author."""
     s = _Sender()
     gfs = _Gfs(plan=_Plan(), readers={"e"})
     s.attach_media_gfs(gfs)
     plan = await s._plan_media_refs(
-        "sp", ["api/media/a.webp"], item_id="item-1", followers=True
+        "sp",
+        ["api/media/a.webp"],
+        item_id="item-1",
+        followers=True,
+        author_user_id="anna",
     )
     assert gfs.calls == [("sp", ["api/media/a.webp"], True)]
     assert gfs.items == ["item-1"]
-    per_peer = s._media_refs_per_peer(plan)
+    assert gfs.authors == ["anna"]
     base = {"x": 1}
-    assert (await per_peer("e", base))["media_refs"] == plan.wire()
-    assert await per_peer("b", base) is base
+    assert s._with_media_refs(base, plan) == {"x": 1, "media_refs": plan.wire()}
     assert base == {"x": 1}
-    s._upload_media(plan)
-    assert gfs.uploaded == [plan]
+    await s._upload_media(plan, author_user_id="anna")
+    assert gfs.uploaded == [(plan, "anna")]
 
 
 async def test_a_failure_is_logged_and_swallowed(caplog):

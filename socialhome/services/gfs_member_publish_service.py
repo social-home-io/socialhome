@@ -55,7 +55,6 @@ from ..domain.space_item import (
     ITEM_TYPE_POST,
     MAX_MENTION_NOTES,
     SUPPORTED_ITEM_TYPES,
-    V1_CHANNEL_EVENT_TYPES,
     SealedItem,
     pad_json_object,
     reader_cert_permits,
@@ -506,8 +505,8 @@ class GfsMemberPublishService:
 
         ``None`` (the legacy event goes to everyone) only where the legacy
         event IS the path: no identity, no person item, a narrowed
-        audience or a v1-carried type in a GFS space, latest-only state or
-        no cert / key for the epoch in a mesh space."""
+        audience in a GFS space, latest-only state or no cert / key for the
+        epoch in a mesh space."""
         if self._identity is None or event_type.value not in ITEM_SPECS:
             return None
         author = _author_of(payload)
@@ -525,7 +524,9 @@ class GfsMemberPublishService:
             )
             return await self._unsent(space_id, event_type, author)
         if on_channel:
-            if not whole_space or event_type.value in V1_CHANNEL_EVENT_TYPES:
+            # Posts and comments too (owner 2026-11-27): ONE delivery path
+            # for every content change of a GFS space — the durable queue.
+            if not whole_space:
                 return None
             try:
                 return await self._channel_item(space_id, event_type, payload, author)
@@ -678,6 +679,15 @@ class GfsMemberPublishService:
                 )
             if cert is None or not scope_permits(cert.scope, needed):
                 return None
+            if cert.reader:
+                # A follower's cert carries only what the space's follower
+                # switches allow — receivers refuse anything else, so it is
+                # never sealed (its author is told).
+                space = await self._spaces.get(space_id)
+                if space is None or not reader_cert_permits(
+                    cert, event_type.value, space.features
+                ):
+                    return None
             inner = build_signed_event_item(
                 item_type=event_type.value,
                 item_id=secrets.token_hex(16),

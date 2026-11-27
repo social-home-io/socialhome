@@ -2606,13 +2606,15 @@ class SpaceCalendarService(
         fresh = _new_event_files(event, previous_cover)
         media_plan = (
             await self._plan_media_refs(
-                space_id, fresh, item_id=event.id, followers=False
+                space_id,
+                fresh,
+                item_id=event.id,
+                followers=False,
+                author_user_id=actor_user_id or "",
             )
             if fresh
             else None
         )
-        per_peer = self._media_refs_per_peer(media_plan)
-        extra: dict = {"per_peer": per_peer} if per_peer is not None else {}
         payload: dict = {
             # The event itself in the one shape a resume replays too.
             **calendar_event_to_wire_dict(event, space_id),
@@ -2625,11 +2627,12 @@ class SpaceCalendarService(
         payload = await self._with_file_hashes(
             payload, item_media_urls("calendar", event)
         )
+        payload = self._with_media_refs(payload, media_plan)
         if MODERATION_BLOCK_KEY not in payload:
             await self._federation.broadcast_to_space_members(
-                space_id, evt_type, payload, **extra
+                space_id, evt_type, payload
             )
-            self._upload_media(media_plan)
+            await self._upload_media(media_plan, author_user_id=actor_user_id or "")
             return
         # A release is checked field by field and fails closed on a key it
         # does not classify: a household below v_56 (which never knew the
@@ -2640,9 +2643,8 @@ class SpaceCalendarService(
             payload,
             legacy_payload={k: v for k, v in payload.items() if k != "capacity"},
             legacy_below=FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
-            **extra,
         )
-        self._upload_media(media_plan)
+        await self._upload_media(media_plan, author_user_id=actor_user_id or "")
 
     async def _ship_cover(
         self,

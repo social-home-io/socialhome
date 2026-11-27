@@ -30,25 +30,40 @@ media is created in a space that has such readers, this household:
    seed holder, else the member's channel writer key from its grant. The
    GFS learns the channel id, never the space; nothing names the household.
 
-``200 already_stored`` is success (another uploader or an earlier try got
-there first) and is remembered per (GFS, blob) until min(:data:`KEEP_S`, that
-GFS's TTL) — after that the GFS may have dropped it and a repeat sends it
-again. A refusal (403 / 413 / 422) is logged and dropped; a transport error,
-408, 429 or 5xx (503 busy included) is retried at most :data:`MAX_ATTEMPTS`
-times with backoff. A space this household can't authorize for is warned
-about once and nothing is sent. The queue is in memory and bounded: a
-restart or a full queue loses pending uploads (logged) — a reader then has a
-descriptor for a blob that is not cached and shows the item without that
-picture until it is re-uploaded.
+**Files over one blob (v_97, ``sm1p``).** A file larger than 8 MiB (up to
+the 200 MiB upload cap) is split into fixed 8 MiB pieces, each sealed like a
+file under its piece name (:func:`~socialhome.space_media_seal
+.piece_aad_name`). Its ONE descriptor entry names the file's address — which
+commits to the SHA-256 of every sealed piece — its size and the whole
+file's SHA-256; each piece's address is derived from the file address and
+its index (:mod:`socialhome.domain.gfs_space_media`). It goes only to a GFS
+proving ``space_media.pieces``; with none, its author is told
+("too large to send").
 
-Cost per item: one upload per file per GFS (never per reader).
+**Uploads are durable (v_97).** Every blob — or piece — for every target
+GFS is ONE row of the durable item queue (``space_item_outbox``,
+:mod:`.space_item_outbox`), kind :data:`~socialhome.domain.space_item_outbox
+.MEDIA_UPLOAD_ROW`: a small locator (the file, the item, the epoch, a
+piece's index and the file's piece manifest), never the bytes — a row's
+blob is sealed again when it goes (deterministic: the same bytes).
+:meth:`SpaceMediaGfsUploader.deliver` makes one attempt: ``200
+already_stored`` / ``201`` is delivered (remembered per (GFS, blob) until
+min(:data:`KEEP_S`, that GFS's TTL)); a transport error, 408, 429 or 5xx
+waits and goes again (the queue's backoff, no limit — a restart loses
+nothing); a refusal (403 / 413 / 422) is shown to the author; a GFS that
+no longer takes the space's media drops its copy. A file deleted or changed
+meanwhile is not sent (the item no longer shows it).
+
+Cost per item: one upload per file (or piece) per GFS (never per reader).
 
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import pathlib
 import time
 from collections import OrderedDict
@@ -58,6 +73,7 @@ from typing import TYPE_CHECKING
 
 import aiofiles
 import aiofiles.os
+import orjson
 
 from ..crypto import b64url_decode, b64url_encode, sign_ed25519
 from ..domain.federation import InstanceSource
@@ -65,11 +81,18 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import CHANNEL_SUITE_ED25519
 from ..domain.gfs_space_media import (
     ADDR_SUITE_SM1,
+    ADDR_SUITE_SM1P,
     AUTH_CHANNEL,
     AUTH_WRITER_KEY,
+    MAX_PIECED_FILE_BYTES,
+    PIECE_BYTES,
     SCOPE_CHANNEL,
+    PieceProof,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
+    piece_address,
+    piece_count,
+    pieced_file_address,
     space_media_address,
 )
 from ..domain.media_constraints import (
@@ -77,15 +100,23 @@ from ..domain.media_constraints import (
     is_reserved_media_name,
     local_media_ref,
 )
+from ..domain.space_item_outbox import (
+    MEDIA_UPLOAD_ROW,
+    UNSENT_TOO_LARGE,
+    QueuedSpaceItem,
+)
 from ..domain.space_media_ref import SpaceMediaRef, media_refs_to_wire
 from ..gfs_channel import channel_pk_of, derive_channel_seed
+from ..moment_public_media import is_blob_id
 from ..space_media_seal import (
     MAX_SPACE_MEDIA_BYTES,
     SPACE_MEDIA_SUITE_AESGCM256_PADDED,
+    piece_aad_name,
     seal_space_media,
 )
 from ..writer_key import sign_with_writer_key
 from .gfs_channel_service import channel_on
+from .gfs_publish_retry import PublishOutcome
 from .inbound_media_store import media_file_path
 
 if TYPE_CHECKING:
@@ -97,18 +128,16 @@ if TYPE_CHECKING:
     from .gfs_channel_service import GfsChannelService
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
+    from .space_item_outbox import SpaceItemOutbox
 
 log = logging.getLogger(__name__)
 
 #: Files described per item (a post carries ≤ 10 pictures + a file + a card).
 MAX_FILES_PER_ITEM: int = 16
 
-#: Uploads waiting at once; past it a new one is dropped (WARNING).
-MAX_QUEUED: int = 2048
-
-#: Attempts per (blob, GFS) before giving up, and the first backoff.
-MAX_ATTEMPTS: int = 4
-RETRY_BASE_S: float = 30.0
+#: Piece manifests remembered per file address (a row carries its own; a
+#: holder asked for a piece on demand reads it from here first).
+MAX_MANIFESTS: int = 256
 
 #: How long the GFS is asked to keep a blob (it clamps to its own TTL).
 KEEP_S: int = 7 * 86_400
@@ -175,6 +204,89 @@ def seal_and_address_sync(
     return blob, space_media_address(scope, scope_id, blob)
 
 
+@dataclass(slots=True, frozen=True)
+class PiecedFile:
+    """A file sealed in pieces (v_97, ``sm1p``): its address (bound to the
+    scope and every piece), the whole file's SHA-256, the SHA-256 of each
+    sealed piece (the manifest a piece upload proves itself with) and its
+    size. Service-local DTO."""
+
+    address: str
+    sha256: str
+    manifest: tuple[str, ...]
+    size: int
+
+
+def describe_pieced_sync(
+    media_key: bytes,
+    space_id: str,
+    epoch: int,
+    item_id: str,
+    origin: str,
+    filename: str,
+    path: str,
+    scope: str,
+    scope_id: str,
+) -> PiecedFile | None:
+    """Seal every piece of the file at *path* once (8 MiB at a time, never
+    the whole file in memory) and describe it — ``None`` when its size is
+    no pieced size. The worker-thread body."""
+    size = os.path.getsize(path)
+    try:
+        count = piece_count(size)
+    except ValueError:
+        return None
+    whole = hashlib.sha256()
+    manifest: list[str] = []
+    with open(path, "rb") as fh:
+        for index in range(count):
+            data = fh.read(PIECE_BYTES)
+            whole.update(data)
+            blob = seal_file_sync(
+                media_key,
+                space_id,
+                epoch,
+                item_id,
+                origin,
+                piece_aad_name(filename, index, count),
+                data,
+            )
+            manifest.append(hashlib.sha256(blob).hexdigest())
+    return PiecedFile(
+        address=pieced_file_address(scope, scope_id, manifest),
+        sha256=whole.hexdigest(),
+        manifest=tuple(manifest),
+        size=size,
+    )
+
+
+def seal_piece_sync(
+    media_key: bytes,
+    space_id: str,
+    epoch: int,
+    item_id: str,
+    origin: str,
+    filename: str,
+    path: str,
+    index: int,
+    count: int,
+) -> bytes:
+    """Piece *index* of *count* of the file at *path*, sealed (the same
+    bytes every time). The worker-thread body."""
+    with open(path, "rb") as fh:
+        fh.seek(index * PIECE_BYTES)
+        data = fh.read(PIECE_BYTES)
+    return seal_file_sync(
+        media_key,
+        space_id,
+        epoch,
+        item_id,
+        origin,
+        piece_aad_name(filename, index, count),
+        data,
+    )
+
+
 def media_names(urls: Iterable[str | None]) -> list[str]:
     """The local file names *urls* reference (``api/media/<name>``), in
     order, without duplicates; anything else is ignored."""
@@ -203,13 +315,6 @@ class SpaceMediaPlan:
         return media_refs_to_wire(self.refs)
 
 
-@dataclass(slots=True, frozen=True)
-class _Job:
-    ref: SpaceMediaRef
-    conns: tuple[GfsConnection, ...]
-    attempt: int = 1
-
-
 class SpaceMediaGfsUploader:
     """Plan and upload a space item's files to the GFSs its readers use."""
 
@@ -221,15 +326,13 @@ class SpaceMediaGfsUploader:
         "_federation",
         "_federation_repo",
         "_gfs",
+        "_manifests",
         "_media_refs",
-        "_pending",
-        "_queue",
-        "_retries",
+        "_outbox",
+        "_pieced",
         "_spaces",
-        "_stop",
         "_stored",
         "_stored_names",
-        "_task",
         "_unauthorized",
     )
 
@@ -253,14 +356,15 @@ class SpaceMediaGfsUploader:
         self._federation: FederationService | None = None
         #: v_51 opaque channels — a private space's member grants.
         self._channels: GfsChannelService | None = None
-        self._queue: asyncio.Queue[_Job] = asyncio.Queue()
-        self._stop = asyncio.Event()
+        #: v_97 — the durable queue every upload waits in.
+        self._outbox: SpaceItemOutbox | None = None
         #: Spaces already warned about lacking any upload authorization.
         self._unauthorized: set[str] = set()
-        self._task: asyncio.Task | None = None
-        self._retries: set[asyncio.Task] = set()
-        #: Jobs queued or being retried — :meth:`drain` waits for zero.
-        self._pending = 0
+        #: v_97 — file address → its piece manifest (:data:`MAX_MANIFESTS`).
+        self._manifests: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+        #: v_97 — a holder's described pieced files, by what they were
+        #: sealed for and the file's (size, mtime) (:data:`MAX_MANIFESTS`).
+        self._pieced: OrderedDict[tuple, PiecedFile] = OrderedDict()
         #: (GFS, blob) → monotonic time until which the GFS holds it.
         self._stored: OrderedDict[tuple[str, str], float] = OrderedDict()
         #: (GFS connection id, local file name) → until when we know that
@@ -271,6 +375,11 @@ class SpaceMediaGfsUploader:
 
     def attach_federation(self, federation: FederationService) -> None:
         self._federation = federation
+
+    def attach_outbox(self, outbox: SpaceItemOutbox) -> None:
+        """v_97 — the durable queue uploads wait in (one row per blob or
+        piece per GFS; :meth:`deliver` sends one)."""
+        self._outbox = outbox
 
     def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the v_51 channel service: a private space with an opaque
@@ -406,20 +515,23 @@ class SpaceMediaGfsUploader:
         *,
         item_id: str,
         followers: bool,
+        author_user_id: str = "",
     ) -> SpaceMediaPlan | None:
         """The plan for item *item_id* of *space_id* referencing
         *media_urls*: link-joined v_80 members' GFSs, plus (``followers``)
         the GFSs the space's opaque channel is relayed on. ``None`` when the
         space runs no channel here, no capable GFS needs it or no file can
-        be described — nothing is sealed then."""
+        be described — nothing is sealed then. *author_user_id* is told
+        about a file no GFS here can take (v_97: over 8 MiB with no GFS
+        keeping pieces, or over 200 MiB)."""
         names = media_names(media_urls)
         scoped = await self.scope_of(space_id) if names else None
         if scoped is None:
             return None
-        conns = await self._relay_reader_conns(space_id)
-        if followers:
-            conns.extend(await self._gfs.space_media_follower_targets(space_id))
-        return await self._plan(space_id, names, conns, item_id, scoped=scoped)
+        conns = await self._media_targets(space_id, followers=followers)
+        return await self._plan(
+            space_id, names, conns, item_id, scoped=scoped, author=author_user_id
+        )
 
     async def plan_for_reader(
         self,
@@ -445,6 +557,7 @@ class SpaceMediaGfsUploader:
         item_id: str,
         *,
         scoped: tuple[str, str] | None = None,
+        author: str = "",
     ) -> SpaceMediaPlan | None:
         # One read of the space's scope per plan (it was up to four).
         if scoped is None:
@@ -459,7 +572,14 @@ class SpaceMediaGfsUploader:
         # fetch before the push lands.
         if not await self.can_upload(space_id, scoped=scoped):
             return None
-        refs = await self._describe_names(space_id, names, item_id, scoped=scoped)
+        pieces = False
+        for conn in targets:
+            if await self._gfs.space_media_pieces(conn):
+                pieces = True
+                break
+        refs = await self._describe_names(
+            space_id, names, item_id, scoped=scoped, pieces=pieces, author=author
+        )
         if not refs:
             return None
         return SpaceMediaPlan(
@@ -474,13 +594,17 @@ class SpaceMediaGfsUploader:
         *,
         cached_only: bool = False,
         scoped: tuple[str, str] | None = None,
+        pieces: bool = False,
+        author: str = "",
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
         household — the household a reader authenticates as delivering the
         item, so both are in the blob's AAD (:mod:`~socialhome.space_media_seal`).
         Nothing before this household knows its own id. ``cached_only``:
         never seal — only entries described before (every uploaded blob
-        was)."""
+        was). ``pieces``: a GFS of the plan keeps pieces, so a file over one
+        blob is described in pieces (v_97); otherwise — or past 200 MiB — it
+        is not described and *author* is told."""
         origin = self._federation.own_instance_id if self._federation else ""
         if not origin or not item_id:
             return []
@@ -507,6 +631,24 @@ class SpaceMediaGfsUploader:
                 refs.append(cached)
                 continue
             if cached_only:
+                continue
+            if stamp[0] > MAX_SPACE_MEDIA_BYTES:
+                ref = await self._describe_pieced(
+                    space_id,
+                    name,
+                    item_id,
+                    epoch,
+                    key,
+                    scope,
+                    scope_id,
+                    pieces=pieces,
+                    author=author,
+                )
+                if ref is not None:
+                    self._described[cache_key] = ref
+                    while len(self._described) > MAX_DESCRIBED:
+                        self._described.popitem(last=False)
+                    refs.append(ref)
                 continue
             data = await self._read(name)
             if data is None:
@@ -540,6 +682,160 @@ class SpaceMediaGfsUploader:
                 self._described.popitem(last=False)
             refs.append(ref)
         return refs
+
+    async def _describe_pieced(
+        self,
+        space_id: str,
+        name: str,
+        item_id: str,
+        epoch: int,
+        key: bytes,
+        scope: str,
+        scope_id: str,
+        *,
+        pieces: bool,
+        author: str,
+    ) -> SpaceMediaRef | None:
+        """The ``sm1p`` entry of a file over one blob — ``None``, and its
+        author told, when no GFS of the plan keeps pieces or it is past
+        200 MiB (never sent through a GFS then)."""
+        path = media_file_path(self._dir, name)
+        stamp = await self._stamp(name)
+        if path is None or stamp is None:
+            return None
+        if not pieces or stamp[0] > MAX_PIECED_FILE_BYTES:
+            log.info(
+                "space media %s (%d bytes) of space %s: %s — not sent through a GFS",
+                name,
+                stamp[0],
+                space_id,
+                "over 200 MiB" if pieces else "no GFS of the space keeps pieces",
+            )
+            await self._tell_too_large(space_id, author)
+            return None
+        pieced = await asyncio.to_thread(
+            describe_pieced_sync,
+            key,
+            space_id,
+            epoch,
+            item_id,
+            self._origin(),
+            name,
+            str(path),
+            scope,
+            scope_id,
+        )
+        if pieced is None:
+            return None
+        self._remember_manifest(pieced.address, pieced.manifest)
+        return SpaceMediaRef(
+            filename=name,
+            space_id=space_id,
+            blob_id=pieced.address,
+            suite=SPACE_MEDIA_SUITE_AESGCM256_PADDED,
+            epoch=epoch,
+            size=pieced.size,
+            scope=scope,
+            addr_suite=ADDR_SUITE_SM1P,
+            item_id=item_id,
+            origin=self._origin(),
+            sha256=pieced.sha256,
+        )
+
+    def _origin(self) -> str:
+        return self._federation.own_instance_id if self._federation else ""
+
+    def _remember_manifest(self, address: str, manifest: tuple[str, ...]) -> None:
+        self._manifests[address] = manifest
+        self._manifests.move_to_end(address)
+        while len(self._manifests) > MAX_MANIFESTS:
+            self._manifests.popitem(last=False)
+
+    async def manifest_of(
+        self,
+        space_id: str,
+        name: str,
+        *,
+        epoch: int,
+        item_id: str,
+        origin: str,
+        scope: str,
+        scope_id: str,
+    ) -> PiecedFile | None:
+        """The local file *name* described in pieces as sealed by *origin*
+        for *item_id* (a holder answering a piece on demand) — remembered,
+        else sealed once more. ``None`` without the epoch's key or a pieced
+        size."""
+        path = media_file_path(self._dir, name)
+        stamp = await self._stamp(name)
+        current = await self._crypto.media_key(space_id, epoch=epoch)
+        if path is None or stamp is None or current is None:
+            return None
+        key = (space_id, name, epoch, item_id, origin, scope, scope_id, *stamp)
+        hit = self._pieced.get(key)
+        if hit is not None:
+            self._pieced.move_to_end(key)
+            return hit
+        pieced = await asyncio.to_thread(
+            describe_pieced_sync,
+            current[1],
+            space_id,
+            epoch,
+            item_id,
+            origin,
+            name,
+            str(path),
+            scope,
+            scope_id,
+        )
+        if pieced is not None:
+            self._remember_manifest(pieced.address, pieced.manifest)
+            self._pieced[key] = pieced
+            while len(self._pieced) > MAX_MANIFESTS:
+                self._pieced.popitem(last=False)
+        return pieced
+
+    async def seal_piece(
+        self,
+        space_id: str,
+        name: str,
+        *,
+        epoch: int,
+        item_id: str,
+        origin: str,
+        index: int,
+        count: int,
+    ) -> bytes | None:
+        """Piece *index* of the local file *name*, sealed again."""
+        path = media_file_path(self._dir, name)
+        current = await self._crypto.media_key(space_id, epoch=epoch)
+        if path is None or current is None or not await aiofiles.os.path.isfile(path):
+            return None
+        return await asyncio.to_thread(
+            seal_piece_sync,
+            current[1],
+            space_id,
+            epoch,
+            item_id,
+            origin,
+            name,
+            str(path),
+            index,
+            count,
+        )
+
+    async def _tell_too_large(self, space_id: str, author: str) -> None:
+        if self._outbox is None:
+            return
+        try:
+            await self._outbox.fail(
+                space_id=space_id,
+                event_type=MEDIA_UPLOAD_ROW,
+                author_user_id=author,
+                error=UNSENT_TOO_LARGE,
+            )
+        except Exception:
+            log.warning("space media: an unsent file was not recorded", exc_info=True)
 
     async def _space_file(self, space_id: str, name: str) -> bool:
         """Whether *name* may be sealed under *space_id*'s key: never a
@@ -576,148 +872,183 @@ class SpaceMediaGfsUploader:
         async with aiofiles.open(path, "rb") as fh:
             return await fh.read()
 
-    # ── Uploading ────────────────────────────────────────────────────────
+    # ── Uploading (v_97: through the durable queue) ─────────────────────
 
-    def upload(self, plan: SpaceMediaPlan | None) -> None:
-        """Queue *plan*'s blobs for upload (never blocks, never raises)."""
-        if plan is None:
+    async def upload(
+        self, plan: SpaceMediaPlan | None, *, author_user_id: str = ""
+    ) -> None:
+        """Queue *plan*'s blobs — one row per blob (or piece) per target GFS
+        in the durable queue; a file another upload already stored on a GFS
+        is skipped there. Never raises (a row that can't be stored is shown
+        to *author_user_id* by the queue)."""
+        if plan is None or self._outbox is None:
             return
         for ref in plan.refs:
-            if self._queue.qsize() >= MAX_QUEUED:
+            try:
+                await self._queue_ref(plan, ref, author_user_id)
+            except Exception:
                 log.warning(
-                    "space media upload queue is full — %s of space %s not "
-                    "uploaded to its GFS",
+                    "space media %s of space %s: upload not queued",
                     ref.filename,
                     plan.space_id,
+                    exc_info=True,
                 )
-                continue
-            self._pending += 1
-            self._queue.put_nowait(_Job(ref=ref, conns=plan.targets))
 
-    async def drain(self) -> None:
-        """Wait until every queued upload (and retry) finished — tests and
-        the federation demo."""
-        while self._pending > 0:
-            await asyncio.sleep(0.01)
-
-    async def start(self) -> None:
-        if self._task is not None and not self._task.done():
-            return
-        self._stop.clear()
-        self._task = asyncio.create_task(self._loop())
-
-    async def stop(self) -> None:
-        self._stop.set()
-        for task in list(self._retries):
-            task.cancel()  # only sleeping before a re-queue: safe to cancel
-        self._retries.clear()
-        if self._task is not None:
-            try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except TimeoutError, asyncio.CancelledError:
-                self._task.cancel()
-            self._task = None
-
-    async def _next_job(self) -> _Job | None:
-        """The next queued job, or ``None`` once :meth:`stop` was called —
-        whichever comes first (an upload in progress always finishes)."""
-        get = asyncio.ensure_future(self._queue.get())
-        stopped = asyncio.ensure_future(self._stop.wait())
-        await asyncio.wait({get, stopped}, return_when=asyncio.FIRST_COMPLETED)
-        stopped.cancel()
-        if get.done():
-            return get.result()
-        get.cancel()
-        return None
-
-    async def _loop(self) -> None:
-        while not self._stop.is_set():
-            job = await self._next_job()
-            if job is None:
-                break
-            try:
-                await self._run(job)
-            except Exception:  # pragma: no cover - defensive
-                log.exception("space media upload of %s failed", job.ref.filename)
-            finally:
-                self._pending -= 1
-
-    async def _run(self, job: _Job) -> None:
-        ref = job.ref
+    async def _queue_ref(
+        self, plan: SpaceMediaPlan, ref: SpaceMediaRef, author: str
+    ) -> None:
+        assert self._outbox is not None
         now = _monotonic()
-        todo = [
-            c for c in job.conns if self._stored.get((c.id, ref.blob_id), 0.0) <= now
-        ]
-        if not todo:
-            return
-        scoped = await self.scope_of(ref.space_id)
-        if scoped is None:
-            return
-        scope, scope_id = scoped
-        blob = await self._reseal(ref, scope, scope_id)
-        if blob is None:
-            return
-        retry: list[GfsConnection] = []
-        for conn in todo:
-            limit = await self._gfs.space_media_max_blob(conn, scope=scope)
-            if limit is None or len(blob) > limit:
-                log.info(
-                    "space media %s (%d bytes) is over what GFS %s keeps — not sent",
-                    ref.filename,
-                    len(blob),
-                    conn.id,
-                )
+        conns = list(plan.targets)
+        if ref.pieced:
+            conns = [c for c in conns if await self._gfs.space_media_pieces(c)]
+            manifest = self._manifests.get(ref.blob_id)
+            if manifest is None:
+                log.warning("space media %s: its pieces are not known", ref.filename)
+                return
+            parts = [(i, piece_address(ref.blob_id, i)) for i in range(len(manifest))]
+        else:
+            manifest = ()
+            parts = [(-1, ref.blob_id)]
+        for index, address in parts:
+            gfs_ids = [
+                c.id for c in conns if self._stored.get((c.id, address), 0.0) <= now
+            ]
+            if not gfs_ids:
                 continue
-            status = await self._put(conn, ref, blob, scope, scope_id)
-            if status == _NO_AUTHORIZATION:
-                return  # nothing to send anywhere; warned once per space
-            if status in _STATUS_STORED:
-                await self._remember(conn, ref.blob_id, filename=ref.filename)
-                log.info(
-                    "space media %s: uploaded blob %s (%d bytes) to GFS %s (HTTP %d)",
-                    ref.filename,
-                    ref.blob_id[:12],
-                    len(blob),
-                    conn.id,
-                    status,
-                )
-            elif status is None or status in _STATUS_RETRY or status >= 500:
-                retry.append(conn)
-            else:
-                log.warning(
-                    "GFS %s refused space media %s of space %s — HTTP %d",
-                    conn.id,
-                    ref.filename,
-                    ref.space_id,
-                    status,
-                )
-        if retry:
-            self._retry(job, tuple(retry))
-
-    def _retry(self, job: _Job, conns: tuple[GfsConnection, ...]) -> None:
-        if job.attempt >= MAX_ATTEMPTS:
-            log.warning(
-                "space media %s of space %s: gave up on GFS %s after %d attempts",
-                job.ref.filename,
-                job.ref.space_id,
-                ", ".join(c.id for c in conns),
-                job.attempt,
+            await self._outbox.queue(
+                space_id=plan.space_id,
+                epoch=ref.epoch,
+                payload=_locator(ref, index, manifest),
+                event_type=MEDIA_UPLOAD_ROW,
+                ring_class="durable",
+                author_user_id=author,
+                gfs_ids=gfs_ids,
             )
-            return
-        delay = RETRY_BASE_S * (2 ** (job.attempt - 1))
-        nxt = _Job(ref=job.ref, conns=conns, attempt=job.attempt + 1)
-        self._pending += 1
-        task = asyncio.create_task(self._requeue(nxt, delay))
-        self._retries.add(task)
-        task.add_done_callback(self._retries.discard)
 
-    async def _requeue(self, job: _Job, delay: float) -> None:
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            self._pending -= 1
-            raise
-        self._queue.put_nowait(job)
+    async def deliver(self, row: QueuedSpaceItem) -> PublishOutcome:
+        """One attempt of one queued blob (or piece) on ``row.gfs_id``."""
+        parsed = _from_locator(row)
+        if parsed is None:
+            log.warning("space media: an unreadable upload row — dropped")
+            return PublishOutcome.permanent()
+        ref, index, manifest = parsed
+        scoped = await self.scope_of(row.space_id)
+        if scoped is None:
+            return PublishOutcome.gone()
+        scope, scope_id = scoped
+        conn = await self._target(row.space_id, row.gfs_id)
+        if conn is None:
+            return PublishOutcome.gone()
+        limit = await self._gfs.space_media_max_blob(conn, scope=scope)
+        if limit is None or (
+            ref.pieced and not await self._gfs.space_media_pieces(conn)
+        ):
+            return PublishOutcome.gone()
+        if ref.pieced:
+            blob_id = piece_address(ref.blob_id, index)
+            blob = await self._reseal_piece(ref, index, manifest)
+            proof: str | None = PieceProof(manifest=manifest, index=index).to_header()
+        else:
+            blob_id = ref.blob_id
+            blob = await self._reseal(ref, scope, scope_id)
+            proof = None
+        if blob is None:
+            # The file is gone or changed (the item no longer shows it):
+            # nothing to send — the row is done.
+            return PublishOutcome.delivered()
+        if len(blob) > limit:
+            log.info(
+                "space media %s (%d bytes) is over what GFS %s keeps — not sent",
+                ref.filename,
+                len(blob),
+                conn.id,
+            )
+            return PublishOutcome.permanent()
+        status = await self._put(
+            conn,
+            space_id=ref.space_id,
+            blob_id=blob_id,
+            blob=blob,
+            scope=scope,
+            scope_id=scope_id,
+            addr_suite=ref.addr_suite,
+            proof=proof,
+        )
+        if status == _NO_AUTHORIZATION:
+            return PublishOutcome.transient()  # a grant may come; warned once
+        if status in _STATUS_STORED:
+            await self._remember(conn, blob_id, filename=ref.filename)
+            log.info(
+                "space media %s: uploaded blob %s (%d bytes) to GFS %s (HTTP %d)",
+                ref.filename,
+                blob_id[:12],
+                len(blob),
+                conn.id,
+                status,
+            )
+            return PublishOutcome.delivered()
+        if status is None or status in _STATUS_RETRY or status >= 500:
+            return PublishOutcome.transient()
+        log.warning(
+            "GFS %s refused space media %s of space %s — HTTP %d",
+            conn.id,
+            ref.filename,
+            ref.space_id,
+            status,
+        )
+        return PublishOutcome.permanent()
+
+    async def _target(self, space_id: str, gfs_id: str) -> GfsConnection | None:
+        """The GFS *gfs_id* if it still reads this space's media."""
+        conns = await self._media_targets(space_id, followers=True)
+        return next((c for c in conns if c.id == gfs_id), None)
+
+    async def _media_targets(
+        self, space_id: str, *, followers: bool
+    ) -> list[GfsConnection]:
+        """Where a space's files go: v_97 — every GFS the space's channel
+        lives on (each household of a GFS space reads the space there, so
+        each takes the files there: owner 2026-11-27), plus the GFS of each
+        link-joined member and, for *followers*, the GFSs the channel is
+        relayed on."""
+        conns = await self._relay_reader_conns(space_id)
+        if self._channels is not None:
+            conns.extend(await self._channels.plan(space_id))
+        if followers:
+            conns.extend(await self._gfs.space_media_follower_targets(space_id))
+        return conns
+
+    async def _reseal_piece(
+        self, ref: SpaceMediaRef, index: int, manifest: tuple[str, ...]
+    ) -> bytes | None:
+        """Piece *index* sealed again — ``None`` (WARNING) when the file is
+        no longer only the space's, or its bytes no longer give the piece
+        the manifest names (the file changed)."""
+        if not await self._space_file(ref.space_id, ref.filename):
+            log.warning(
+                "space media %s is no longer only space %s's — not uploaded",
+                ref.filename,
+                ref.space_id,
+            )
+            return None
+        blob = await self.seal_piece(
+            ref.space_id,
+            ref.filename,
+            epoch=ref.epoch,
+            item_id=ref.item_id,
+            origin=ref.origin,
+            index=index,
+            count=len(manifest),
+        )
+        if blob is None or hashlib.sha256(blob).hexdigest() != manifest[index]:
+            log.warning(
+                "space media %s piece %d changed since it was described — not uploaded",
+                ref.filename,
+                index,
+            )
+            return None
+        return blob
 
     async def remember_stored(self, conn: GfsConnection, blob_id: str) -> None:
         """Note that *conn*'s GFS holds *blob_id* now (a re-upload on demand
@@ -854,35 +1185,41 @@ class SpaceMediaGfsUploader:
     async def _put(
         self,
         conn: GfsConnection,
-        ref: SpaceMediaRef,
+        *,
+        space_id: str,
+        blob_id: str,
         blob: bytes,
         scope: str,
         scope_id: str,
+        addr_suite: str = ADDR_SUITE_SM1,
+        proof: str | None = None,
     ) -> int | None:
         now = int(time.time())
         claim = SpaceMediaClaim(
             scope=scope,
             scope_id=scope_id,
-            blob_id=ref.blob_id,
+            blob_id=blob_id,
             size=len(blob),
             expires_at=now + KEEP_S,
             ts=now,
+            addr_suite=addr_suite,
         )
-        auth = await self.authorize(claim, ref.space_id)
+        auth = await self.authorize(claim, space_id)
         if auth is None:
-            if ref.space_id not in self._unauthorized:
-                self._unauthorized.add(ref.space_id)
+            if space_id not in self._unauthorized:
+                self._unauthorized.add(space_id)
                 log.warning(
                     "space media of space %s: this household holds no upload "
                     "authorization — its files are not uploaded",
-                    ref.space_id,
+                    space_id,
                 )
             return _NO_AUTHORIZATION
         return await self._gfs.put_space_media(
             conn,
-            blob_id=ref.blob_id,
+            blob_id=blob_id,
             blob=blob,
             auth_header=auth.to_header(),
+            piece_proof=proof,
         )
 
     async def _authorize_channel(
@@ -933,3 +1270,64 @@ class SpaceMediaGfsUploader:
                 epoch=epoch,
             )
         return None
+
+
+def _locator(ref: SpaceMediaRef, index: int, manifest: tuple[str, ...]) -> str:
+    """The queue row's payload for one blob (``index`` -1) or one piece of
+    *ref*: what :meth:`SpaceMediaGfsUploader.deliver` seals it again from —
+    never the bytes."""
+    return orjson.dumps(
+        {
+            "f": ref.filename,
+            "i": ref.item_id,
+            "o": ref.origin,
+            "e": ref.epoch,
+            "b": ref.blob_id,
+            "a": ref.addr_suite,
+            "s": ref.size,
+            "c": ref.scope,
+            "p": index,
+            "m": list(manifest),
+        }
+    ).decode()
+
+
+def _from_locator(
+    row: QueuedSpaceItem,
+) -> tuple[SpaceMediaRef, int, tuple[str, ...]] | None:
+    """``(ref, piece index, manifest)`` of a queue row, or ``None``."""
+    try:
+        body = orjson.loads(row.payload or "")
+    except orjson.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    manifest = body.get("m")
+    index = body.get("p")
+    if (
+        not isinstance(manifest, list)
+        or not all(is_blob_id(h) for h in manifest)
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+    ):
+        return None
+    suite = body.get("a")
+    pieced = suite == ADDR_SUITE_SM1P
+    if pieced != (0 <= index < len(manifest)) or (not pieced and index != -1):
+        return None
+    try:
+        ref = SpaceMediaRef(
+            filename=str(body["f"]),
+            space_id=row.space_id,
+            blob_id=str(body["b"]),
+            suite=SPACE_MEDIA_SUITE_AESGCM256_PADDED,
+            epoch=int(body["e"]),
+            size=int(body["s"]),
+            scope=str(body["c"]),
+            addr_suite=str(suite),
+            item_id=str(body["i"]),
+            origin=str(body["o"]),
+        )
+    except KeyError, TypeError, ValueError:
+        return None
+    return ref, index, tuple(manifest)

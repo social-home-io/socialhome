@@ -57,7 +57,16 @@ the file name — nothing about this household). The GFS has a holder
 re-upload or stream the same ciphertext, which is checked and stored exactly
 like a fetched blob; a miss there is a miss (the view's miss cache applies).
 A prefetch never asks — only a person looking at the item makes a holder
-send anything. Since v_92 a household holding a member seat asks its host or
+send anything.
+
+**Files in pieces (v_97, ``sm1p``).** A file over one blob is fetched piece
+by piece — each piece's address derived from the file's, opened under its
+piece name (a piece another key holder sealed for another place does not
+open) and kept in a part directory, so a fetch cut short resumes with the
+pieces still missing (a piece no GFS holds is asked for on demand, per
+piece). Once every piece is here, the whole file must hash to the checksum
+its descriptor carries — its content name (``sc-``) — or every piece is
+dropped and nothing is written. A file in pieces is never prefetched. Since v_92 a household holding a member seat asks its host or
 a trusted helper with ``SPACE_MEDIA_WANTED`` for an ``sc-`` content-named
 file instead; it keeps this ask for a file it holds under any other name
 (an ``sg-`` name from the public GFS copy — that request carries content
@@ -68,7 +77,9 @@ answers no ``SPACE_MEDIA_WANTED``).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import pathlib
 import time
 import uuid
@@ -89,7 +100,13 @@ from ..domain.file_hashes import (
     sha256_hex,
     space_content_media_name,
 )
-from ..domain.gfs_space_media import SCOPE_CHANNEL, space_media_address
+from ..domain.gfs_space_media import (
+    PIECE_BYTES,
+    SCOPE_CHANNEL,
+    piece_address,
+    piece_count,
+    space_media_address,
+)
 from ..domain.media_constraints import is_gfs_space_media_name, is_reserved_media_name
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
@@ -100,18 +117,27 @@ from ..domain.space_media_ref import (
     parse_media_refs,
     space_page_media_name,
 )
+from ..moment_public_media import MAX_BLOB_BYTES
 from ..space_media_hint import SpaceMediaLocator, seal_space_media_hint
 from ..space_media_seal import (
     UnsupportedSpaceMediaSuite,
     open_space_media,
+    piece_aad_name,
     require_space_media_suite,
 )
 from ..task_drain import wait_tasks_done
+from .gfs_channel_service import channel_on
 from .inbound_media_store import (
+    content_name_binds,
+    drop_parts,
     gfs_space_media_name,
     is_space_direct_media_name,
     is_space_page_media_name,
     media_file_path,
+    part_name,
+    present_parts,
+    publish_once,
+    remove_quietly,
     space_direct_media_name,
     write_once,
 )
@@ -313,11 +339,25 @@ class SpaceMediaGfsFetcher:
                 origin=origin,
             ):
                 fh = hashes.get(ref.filename) if hashes else None
-                local = (
-                    space_content_media_name(space_id, fh.h, ref.filename)
-                    if fh is not None
-                    else gfs_space_media_name(space_id, origin, item_id, ref.filename)
-                )
+                if ref.pieced:
+                    # v_97 — a file in pieces is always kept under its
+                    # content name: the whole file's checksum. A hash map
+                    # saying otherwise is a contradiction — refused.
+                    if fh is not None and fh.h != ref.sha256:
+                        log.warning(
+                            "space media %s of %s: its checksum and hash map"
+                            " differ — refused",
+                            ref.filename,
+                            item_id,
+                        )
+                        continue
+                    local = space_content_media_name(space_id, ref.sha256, ref.filename)
+                elif fh is not None:
+                    local = space_content_media_name(space_id, fh.h, ref.filename)
+                else:
+                    local = gfs_space_media_name(
+                        space_id, origin, item_id, ref.filename
+                    )
                 first = held.get(ref.filename)
                 if (
                     first is not None
@@ -488,7 +528,7 @@ class SpaceMediaGfsFetcher:
         for ref in loc.refs:
             # A newer epoch may have moved the row: ask the GFS again.
             self._misses.pop(ref.local_name, None)
-            if prefetch and _is_picture(ref.local_name):
+            if prefetch and not ref.pieced and _is_picture(ref.local_name):
                 self._prefetch(ref.local_name, ref.space_id)
         return list(loc.refs)
 
@@ -660,8 +700,12 @@ class SpaceMediaGfsFetcher:
                 ref.space_id,
             )
             return _REFUSED
-        outcome = _MISS
         sources = await self._sources(ref.space_id)
+        if ref.pieced:
+            return await self._fetch_pieced(
+                ref, scope_id, current[1], path, sources, want
+            )
+        outcome = _MISS
         for conn in sources:
             blob = await self._gfs.fetch_space_media(
                 conn, ref.blob_id, max_bytes=ref.size, timeout_s=REQUEST_TIMEOUT_S
@@ -695,11 +739,16 @@ class SpaceMediaGfsFetcher:
         if not is_space_content_media_name(ref.local_name):
             return True
         space_id = ref.space_id
+        space = await self._spaces.get(space_id)
+        if space is not None and channel_on(space):
+            # v_97 (owner 2026-11-27) — every household of a GFS space takes
+            # its files from the GFS cache, a miss there through on demand;
+            # no host / helper push for a GFS space.
+            return True
         if not await holds_seat(self._spaces, space_id):
             return True
         if not await self._federation.reaches_host_directly(space_id):
             return True
-        space = await self._spaces.get(space_id)
         host = space.owner_instance_id if space is not None else ""
         if not host:
             return False
@@ -717,6 +766,36 @@ class SpaceMediaGfsFetcher:
     ) -> str:
         """Ask the first source that proves ``on_demand`` for the blob (a
         holder re-uploads or streams it); checked like a fetch."""
+        asked = await self._want_blob(
+            ref, ref.blob_id, ref.filename, ref.size, scope_id, key, sources
+        )
+        if asked is None:
+            log.info(
+                "space media %s: no GFS holds blob %s (yet)",
+                ref.local_name,
+                ref.blob_id[:12],
+            )
+            return _MISS
+        blob, conn = asked
+        if blob is None:
+            return _MISS
+        got = await self._accept(blob, ref, scope_id, key, path, conn)
+        return _REFUSED if got == _MISS else got
+
+    async def _want_blob(
+        self,
+        ref: SpaceMediaRef,
+        blob_id: str,
+        filename: str,
+        max_bytes: int,
+        scope_id: str,
+        key: bytes,
+        sources: list[GfsConnection],
+    ) -> tuple[bytes | None, GfsConnection] | None:
+        """``POST /gfs/media/{blob_id}/wanted`` to the first source proving
+        ``on_demand`` — the hint names *filename* (a piece's name for a
+        piece). ``(blob or None on a miss, the source)``; ``None`` when no
+        source asks."""
         for conn in sources:
             wait = await self._gfs.space_media_on_demand_wait(conn)
             if wait is None:
@@ -725,17 +804,17 @@ class SpaceMediaGfsFetcher:
                 media_key=key,
                 scope=ref.scope,
                 scope_id=scope_id,
-                blob_id=ref.blob_id,
+                blob_id=blob_id,
                 epoch=ref.epoch,
                 locator=SpaceMediaLocator(
-                    item_id=ref.item_id, origin=ref.origin, filename=ref.filename
+                    item_id=ref.item_id, origin=ref.origin, filename=filename
                 ),
             )
             blob = await self._gfs.want_space_media(
                 conn,
-                ref.blob_id,
+                blob_id,
                 {"scope": ref.scope, "scope_id": scope_id, "hint": hint},
-                max_bytes=ref.size,
+                max_bytes=max_bytes,
                 timeout_s=wait + REQUEST_TIMEOUT_S,
             )
             if blob is None:
@@ -743,17 +822,159 @@ class SpaceMediaGfsFetcher:
                     "space media %s: GFS %s found no holder for blob %s",
                     ref.local_name,
                     conn.inbox_url,
-                    ref.blob_id[:12],
+                    blob_id[:12],
                 )
-                return _MISS
-            got = await self._accept(blob, ref, scope_id, key, path, conn)
-            return _REFUSED if got == _MISS else got
-        log.info(
-            "space media %s: no GFS holds blob %s (yet)",
-            ref.local_name,
-            ref.blob_id[:12],
+            return blob, conn
+        return None
+
+    # ── Files in pieces (v_97) ───────────────────────────────────────────
+
+    async def _fetch_pieced(
+        self,
+        ref: SpaceMediaRef,
+        scope_id: str,
+        key: bytes,
+        path: pathlib.Path,
+        sources: list[GfsConnection],
+        want: bool,
+    ) -> str:
+        """Every piece still missing (the ones already here are kept, so a
+        fetch cut short resumes), then the whole file checked against its
+        checksum and written once."""
+        try:
+            count = piece_count(ref.size)
+        except ValueError:
+            return _REFUSED
+        part_dir = self._dir / _PARTIAL_DIR / f"pieces-{ref.local_name}"
+        have = await present_parts(part_dir)
+        for index in range(count):
+            if part_name(index) in have:
+                continue
+            got = await self._fetch_piece(
+                ref, index, count, scope_id, key, part_dir, sources, want
+            )
+            if got != _STORED:
+                return got
+        return await self._assemble(ref, count, part_dir, path)
+
+    async def _fetch_piece(
+        self,
+        ref: SpaceMediaRef,
+        index: int,
+        count: int,
+        scope_id: str,
+        key: bytes,
+        part_dir: pathlib.Path,
+        sources: list[GfsConnection],
+        want: bool,
+    ) -> str:
+        """One piece: from a source that holds it, else (a view) on demand.
+        ``stored`` once its bytes open under its piece name and have the
+        piece's length."""
+        address = piece_address(ref.blob_id, index)
+        name = piece_aad_name(ref.filename, index, count)
+        expected = (
+            PIECE_BYTES if index < count - 1 else ref.size - PIECE_BYTES * (count - 1)
         )
-        return _MISS
+        outcome = _MISS
+        for conn in sources:
+            blob = await self._gfs.fetch_space_media(
+                conn, address, max_bytes=MAX_BLOB_BYTES, timeout_s=REQUEST_TIMEOUT_S
+            )
+            if blob is None:
+                continue
+            if await self._keep_piece(blob, ref, name, index, expected, key, part_dir):
+                return _STORED
+            outcome = _REFUSED
+        if outcome == _MISS and want:
+            asked = await self._want_blob(
+                ref, address, name, MAX_BLOB_BYTES, scope_id, key, sources
+            )
+            if asked is not None and asked[0] is not None:
+                if await self._keep_piece(
+                    asked[0], ref, name, index, expected, key, part_dir
+                ):
+                    return _STORED
+                return _REFUSED
+        if outcome == _MISS:
+            log.info(
+                "space media %s: no GFS holds piece %d of %d (yet)",
+                ref.local_name,
+                index,
+                count,
+            )
+        return outcome
+
+    async def _keep_piece(
+        self,
+        blob: bytes,
+        ref: SpaceMediaRef,
+        name: str,
+        index: int,
+        expected: int,
+        key: bytes,
+        part_dir: pathlib.Path,
+    ) -> bool:
+        """Open *blob* as piece *name* and keep its bytes as part *index*;
+        ``False`` (WARNING) when it does not open there or has another
+        length."""
+        try:
+            data = await asyncio.to_thread(
+                _open_blob, blob, key, replace(ref, filename=name)
+            )
+        except ValueError, InvalidTag:
+            log.warning(
+                "space media %s: piece %d does not open — refused",
+                ref.local_name,
+                index,
+            )
+            return False
+        if len(data) != expected:
+            log.warning(
+                "space media %s: piece %d has the wrong length — refused",
+                ref.local_name,
+                index,
+            )
+            return False
+        await aiofiles.os.makedirs(part_dir, exist_ok=True)
+        tmp = part_dir / f".{part_name(index)}.{uuid.uuid4().hex}"
+        try:
+            async with aiofiles.open(tmp, "wb") as fh:
+                await fh.write(data)
+            await aiofiles.os.replace(tmp, part_dir / part_name(index))
+        finally:
+            await remove_quietly(tmp)
+        return True
+
+    async def _assemble(
+        self, ref: SpaceMediaRef, count: int, part_dir: pathlib.Path, path: pathlib.Path
+    ) -> str:
+        """Join the pieces into the file, write-once — only when the whole
+        hashes to the content name its checksum gave. A mismatch drops
+        every piece (which one is wrong can't be told) and writes nothing."""
+        tmp = self._dir / _PARTIAL_DIR / f"gfs-{uuid.uuid4().hex}"
+        try:
+            digest = await asyncio.to_thread(_join_parts_sync, part_dir, count, tmp)
+            if not content_name_binds(path.name, ref.space_id, digest):
+                log.warning(
+                    "space media %s: the joined file does not match its"
+                    " checksum — every piece dropped, refused",
+                    ref.local_name,
+                )
+                await drop_parts(part_dir)
+                return _REFUSED
+            await publish_once(tmp, path)
+        finally:
+            await remove_quietly(tmp)
+        await drop_parts(part_dir)
+        log.info(
+            "space media %s (%s of %s): joined %d pieces from the GFS",
+            ref.local_name,
+            ref.filename,
+            ref.item_id,
+            count,
+        )
+        return _STORED
 
     async def _accept(
         self,
@@ -858,6 +1079,20 @@ class SpaceMediaGfsFetcher:
             space_id=space_id,
             sha256=sha256,
         )
+
+
+def _join_parts_sync(part_dir: pathlib.Path, count: int, tmp: pathlib.Path) -> str:
+    """Write parts ``0 … count-1`` of *part_dir* into *tmp*, in order;
+    the SHA-256 of the whole. The worker-thread body."""
+    os.makedirs(tmp.parent, exist_ok=True)
+    whole = hashlib.sha256()
+    with open(tmp, "wb") as out:
+        for index in range(count):
+            with open(part_dir / part_name(index), "rb") as fh:
+                data = fh.read()
+            whole.update(data)
+            out.write(data)
+    return whole.hexdigest()
 
 
 def _bound_to_its_origin(ref: SpaceMediaRef) -> bool:

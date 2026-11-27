@@ -370,7 +370,7 @@ from .services.gallery_search_service import GallerySearchService
 from .services.gallery_service import GalleryService
 from .services.gallery_share_service import GalleryShareService
 from .services.gallery_upload_batcher import GalleryUploadBatcher
-from .services.gfs_channel_service import GfsChannelService
+from .services.gfs_channel_service import GfsChannelService, channel_on
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_mailbox_service import GfsMailboxService
@@ -3786,6 +3786,14 @@ def create_app(config: Config | None = None) -> web.Application:
         media_dir=pathlib.Path(config.media_path),
         federation_repo=federation_repo,
     )
+
+    async def _is_gfs_space(space_id: str) -> bool:
+        space = await space_repo.get(space_id)
+        return space is not None and channel_on(space)
+
+    # v_97 — a GFS space's files reach its v_97 households through the GFS
+    # space media cache, never this push (owner 2026-11-27).
+    space_media_sync_service.attach_gfs_spaces(_is_gfs_space)
     # DmService starts without ``audio_transcription`` — the platform
     # adapter is built much later in ``create_app``, so the service is
     # attached via :meth:`DmService.attach_audio_transcription` (same
@@ -5937,7 +5945,11 @@ def create_app(config: Config | None = None) -> web.Application:
         # ``media_refs`` (sync line 80); the receiving side keeps them.
         app[K.space_sync_service_key].attach_media_gfs(space_media_uploader)
         app[K.space_sync_receiver_key].attach_gfs_media(space_media_fetcher)
-        await space_media_uploader.start()
+        if (item_outbox := app.get(K.space_item_outbox_key)) is not None:
+            # v_97 — every space file upload waits in the durable item queue
+            # (one row per blob or piece per GFS) and goes from there.
+            space_media_uploader.attach_outbox(item_outbox)
+            item_outbox.attach_media(space_media_uploader.deliver)
         # Late-bind realtime into the federation inbound — the
         # DM_MEDIA_BLOB handler uses it to fan ``dm.media_ready``
         # frames to local participants when the full bytes for a
@@ -6875,8 +6887,6 @@ def create_app(config: Config | None = None) -> web.Application:
         if (wanted := app.get(K.space_media_wanted_key)) is not None:
             await wanted.stop()
         await space_media_sync_service.stop()
-        if (uploader := app.get(K.space_media_gfs_uploader_key)) is not None:
-            await uploader.stop()
         if (fetcher := app.get(K.space_media_gfs_fetcher_key)) is not None:
             await fetcher.stop()
         if (responder := app.get(K.space_media_gfs_responder_key)) is not None:

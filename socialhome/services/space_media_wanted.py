@@ -111,6 +111,7 @@ from ..federation.sync.space.file_gate import (
     local_file_size,
 )
 from ..federation.sync.space.trusted_helpers import helper_offset, trusted_helpers
+from .gfs_channel_service import channel_on
 from .inbound_media_store import (
     is_space_direct_media_name,
     media_file_path,
@@ -506,7 +507,12 @@ class SpaceMediaWanted:
 
     async def _asks_the_host(self, space_id: str) -> bool:
         """A seat here AND a paired / mesh path to the host (P10: by path,
-        never by role); else the household fetches through its GFS."""
+        never by role); else the household fetches through its GFS. Never
+        for a GFS space (v_97, owner 2026-11-27): every household of one
+        takes its files from the GFS cache, a miss there on demand."""
+        space = await self._spaces.get(space_id)
+        if space is not None and channel_on(space):
+            return False
         return await holds_seat(
             self._spaces, space_id
         ) and await self._federation.reaches_host_directly(space_id)

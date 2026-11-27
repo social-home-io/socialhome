@@ -310,14 +310,14 @@ class _Gfs:
         self.plans: list[tuple[str, list[str], str]] = []
         self.uploaded: list = []
 
-    async def plan(self, space_id, urls, *, item_id, followers):
+    async def plan(self, space_id, urls, *, item_id, followers, author_user_id=""):
         self.plans.append((space_id, list(urls), item_id))
         return _Plan()
 
     async def is_relay_reader(self, iid):
         return iid in ("reader", "old-reader")
 
-    def upload(self, plan):
+    async def upload(self, plan, *, author_user_id=""):
         self.uploaded.append(plan)
 
 
@@ -408,7 +408,9 @@ async def test_a_host_edit_ships_only_the_files_it_adds(media_env):
     assert media.calls == []
 
 
-async def test_only_a_v81_link_joined_member_gets_the_page_descriptor(media_env):
+async def test_every_household_gets_the_page_descriptor_on_the_shared_copy(
+    media_env,
+):
     bus, fed, _media, _gfs = media_env
     fed.versions["old-reader"] = 80
     await bus.publish(
@@ -420,12 +422,10 @@ async def test_only_a_v81_link_joined_member_gets_the_page_descriptor(media_env)
             canonical={**_CANON, "seq": 1},
         )
     )
-    per_peer = fed.kwargs[0]["per_peer"]
-    shared = fed.broadcasts[0][2]
-    assert (await per_peer("reader", shared))["media_refs"] == _Plan().wire()
-    assert "media_refs" not in await per_peer("old-reader", shared)
-    assert "media_refs" not in await per_peer("peer-new", shared)
-    assert "media_refs" not in shared
+    # v_97 — a GFS space's page files come from the GFS cache for every
+    # household: one shared copy carries the descriptor.
+    assert "per_peer" not in fed.kwargs[0]
+    assert fed.broadcasts[0][2]["media_refs"] == _Plan().wire()
 
 
 async def test_no_files_and_member_drafts_ship_nothing(media_env):

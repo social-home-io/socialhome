@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
+import hashlib
 import os
 import pathlib
 from dataclasses import dataclass
@@ -27,10 +27,14 @@ from socialhome.domain.gfs_space_media import (
     AUTH_CHANNEL,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_PUT_PREFIX,
+    PIECE_BYTES,
+    PieceProof,
     SpaceMediaUploadAuth,
+    check_piece,
     space_media_address,
 )
 from socialhome.domain.space import SpaceType
+from socialhome.domain.space_item_outbox import MEDIA_UPLOAD_ROW, QueuedSpaceItem
 from socialhome.gfs_channel import channel_pk_of, derive_channel_seed
 from socialhome.moment_public_media import blob_id_of
 from socialhome.services import space_media_gfs_uploader as up_mod
@@ -75,7 +79,9 @@ class _Gfs:
         status=201,
         scopes=("channel",),
         ttl_s=259_200,
+        pieces=True,
     ):
+        self.pieces = pieces
         self.conns = {c.inbox_url: c for c in conns}
         self.max_blob = max_blob
         self.follower = list(follower)
@@ -87,6 +93,9 @@ class _Gfs:
 
     async def space_media_ttl_s(self, conn):
         return self.ttl_s
+
+    async def space_media_pieces(self, conn):
+        return self.pieces
 
     def space_media_cache_off(self, conn) -> bool:
         return False
@@ -104,18 +113,30 @@ class _Gfs:
     async def space_media_follower_targets(self, space_id):
         return self.follower
 
-    async def put_space_media(self, conn, *, blob_id, blob, auth_header):
+    async def put_space_media(
+        self, conn, *, blob_id, blob, auth_header, piece_proof=None
+    ):
         # The claim as the GFS reads it (decoded here without validating a
-        # stub cert); the address must be the scope-bound one.
+        # stub cert); the address must be the scope-bound one — or, for a
+        # piece, the one its proof places it at (the GFS's own check).
         claim = orjson.loads(
             base64.urlsafe_b64decode(auth_header + "=" * (-len(auth_header) % 4))
         )
-        assert (
-            blob_id
-            == claim["blob_id"]
-            == space_media_address(claim["scope"], claim["scope_id"], blob)
-        )
-        assert claim["addr_suite"] == "sm1"
+        assert blob_id == claim["blob_id"]
+        if piece_proof is not None:
+            assert claim["addr_suite"] == "sm1p"
+            assert check_piece(
+                claim["scope"],
+                claim["scope_id"],
+                blob_id,
+                blob,
+                PieceProof.from_header(piece_proof),
+            )
+        else:
+            assert blob_id == space_media_address(
+                claim["scope"], claim["scope_id"], blob
+            )
+            assert claim["addr_suite"] == "sm1"
         self.put_scopes.append(claim["scope"])
         self.puts.append((conn.id, claim["scope_id"], blob_id, blob, auth_header))
         status = self.status
@@ -451,13 +472,64 @@ async def test_plan_for_one_reader_targets_only_its_gfs(tmp_path):
 # ── Uploading ────────────────────────────────────────────────────────────
 
 
-async def _upload(u, plan):
-    await u.start()
-    try:
-        u.upload(plan)
-        await asyncio.wait_for(u.drain(), timeout=5)
-    finally:
-        await u.stop()
+class _Outbox:
+    """The durable queue as the uploader sees it: rows it queues, failures
+    it records."""
+
+    def __init__(self) -> None:
+        self.rows: list[QueuedSpaceItem] = []
+        self.failed: list[tuple[str, str, str]] = []
+
+    async def queue(
+        self,
+        *,
+        space_id,
+        epoch,
+        payload,
+        event_type,
+        ring_class,
+        author_user_id,
+        gfs_ids,
+        delay_s=0.0,
+        supersede_key=None,
+    ):
+        assert event_type == MEDIA_UPLOAD_ROW
+        for gfs_id in gfs_ids:
+            self.rows.append(
+                QueuedSpaceItem(
+                    item_id=f"r{len(self.rows)}",
+                    gfs_id=gfs_id,
+                    space_id=space_id,
+                    epoch=epoch,
+                    ring_class=ring_class,
+                    event_type=event_type,
+                    author_user_id=author_user_id,
+                    payload=payload,
+                    next_attempt_at="",
+                    created_at="",
+                )
+            )
+        return True
+
+    async def fail(self, *, space_id, event_type, author_user_id, error):
+        self.failed.append((space_id, author_user_id, error))
+
+
+async def _upload(u, plan, *, tries=6, author=""):
+    """Queue *plan* and run its rows the way the durable queue does (a
+    transient answer is tried again); the outcome of each row."""
+    box = u._outbox if isinstance(u._outbox, _Outbox) else _Outbox()
+    u.attach_outbox(box)
+    start = len(box.rows)
+    await u.upload(plan, author_user_id=author)
+    outcomes = []
+    for row in box.rows[start:]:
+        for _ in range(tries):
+            out = await u.deliver(row)
+            if out.kind != "transient":
+                break
+        outcomes.append(out.kind)
+    return outcomes
 
 
 async def test_the_owner_uploads_with_the_channel_key(tmp_path):
@@ -568,14 +640,8 @@ async def test_already_stored_is_success_and_a_repeat_is_not_resent(tmp_path):
         tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
     )
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    await u.start()
-    try:
-        u.upload(plan)
-        await asyncio.wait_for(u.drain(), timeout=5)
-        u.upload(plan)
-        await asyncio.wait_for(u.drain(), timeout=5)
-    finally:
-        await u.stop()
+    await _upload(u, plan)
+    await _upload(u, plan)
     assert len(gfs.puts) == 1
 
 
@@ -613,30 +679,20 @@ async def test_a_blob_over_a_gfs_limit_is_not_sent_there(tmp_path):
     assert [p[0] for p in gfs.puts] == ["g1"]
 
 
-async def test_transient_failures_retry_a_bounded_number_of_times(
-    tmp_path, monkeypatch, caplog
-):
-    monkeypatch.setattr(up_mod, "RETRY_BASE_S", 0.0)
+async def test_transient_failures_wait_in_the_durable_queue(tmp_path):
+    """A transport error, 408 / 429 or 5xx is ``transient`` — the durable
+    queue tries the row again (no attempt limit; a restart loses nothing)."""
     _write(tmp_path, "a.webp", 10)
     g1 = _Conn("g1", "https://g1.example")
-    gfs = _Gfs([g1], status=[None, 503, 201])
+    gfs = _Gfs([g1], status=[None, 503, 429, 201])
     u = _uploader(
         tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
     )
-    await _upload(
+    outcomes = await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     )
-    assert len(gfs.puts) == 3
-
-    gfs = _Gfs([g1], status=503)
-    u = _uploader(
-        tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    )
-    assert len(gfs.puts) == up_mod.MAX_ATTEMPTS
-    assert "gave up" in caplog.text
+    assert outcomes == ["delivered"]
+    assert len(gfs.puts) == 4
 
 
 async def test_a_refusal_is_not_retried(tmp_path, caplog):
@@ -647,9 +703,10 @@ async def test_a_refusal_is_not_retried(tmp_path, caplog):
         u = _uploader(
             tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
         )
-        await _upload(
+        outcomes = await _upload(
             u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
         )
+        assert outcomes == ["permanent"]
         assert len(gfs.puts) == 1
     assert "refused" in caplog.text
 
@@ -665,32 +722,6 @@ async def test_a_file_changed_since_planning_is_not_sent(tmp_path, caplog):
     _write(tmp_path, "a.webp", 10)
     await _upload(u, plan)
     assert gfs.puts == []
-
-
-async def test_a_full_queue_drops_with_a_warning(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(up_mod, "MAX_QUEUED", 1)
-    _write(tmp_path, "a.webp", 10)
-    _write(tmp_path, "b.webp", 10)
-    g1 = _Conn("g1", "https://g1.example")
-    u = _uploader(tmp_path, gfs=_Gfs([g1]), instances=[RELAY], versions={"e": V})
-    plan = await u.plan(
-        SPACE, ["api/media/a.webp", "api/media/b.webp"], item_id=ITEM, followers=False
-    )
-    u.upload(plan)
-    assert "queue is full" in caplog.text
-
-
-async def test_start_and_stop_are_idempotent(tmp_path):
-    u = _uploader(tmp_path, gfs=_Gfs([]))
-    await u.start()
-    await u.start()
-    await u.stop()
-    await u.stop()
-
-
-@pytest.fixture(autouse=True)
-def _fast(monkeypatch):
-    monkeypatch.setattr(up_mod, "RETRY_BASE_S", 0.0)
 
 
 async def test_a_described_file_is_not_sealed_again(tmp_path, monkeypatch):
@@ -748,11 +779,16 @@ class _Grant:
 
 
 class _Channels:
-    def __init__(self, grant):
+    def __init__(self, grant, targets=()):
         self.grant = grant
+        #: v_97 — the GFSs the space's channel lives on.
+        self.targets = list(targets)
 
     async def current_grant(self, space_id):
         return self.grant
+
+    async def plan(self, space_id):
+        return self.targets
 
 
 def _channel_uploader(tmp_path, gfs, *, seed=None, grant=None):
@@ -1124,12 +1160,7 @@ async def test_a_reader_reads_a_file_from_its_gfs_only_once_it_is_stored_there(
     )
     assert await u.reads_from_gfs("e", "a.webp") is False  # not stored yet
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    await u.start()
-    try:
-        u.upload(plan)
-        await asyncio.wait_for(u.drain(), timeout=5)
-    finally:
-        await u.stop()
+    await _upload(u, plan)
     assert await u.reads_from_gfs("e", "a.webp") is True
     assert await u.reads_from_gfs("e", "b.webp") is False
     assert await u.reads_from_gfs("b", "a.webp") is False  # no reader
@@ -1158,12 +1189,7 @@ async def test_stored_on_gfs_keeps_only_blobs_the_gfs_holds(tmp_path):
     plan = await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM)
     assert u.stored_on_gfs(plan) is None  # nothing uploaded yet
     stored = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    await u.start()
-    try:
-        u.upload(stored)
-        await asyncio.wait_for(u.drain(), timeout=5)
-    finally:
-        await u.stop()
+    await _upload(u, stored)
     narrowed = u.stored_on_gfs(await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM))
     assert set(narrowed.wire()) == {"a.webp"}
 
@@ -1196,12 +1222,7 @@ async def test_stored_plan_for_reader_seals_nothing(tmp_path):
     assert await u.stored_plan_for_reader(SPACE, urls, "e", item_id=ITEM) is None
     assert len(u._described) == 0  # nothing sealed
     stored = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    await u.start()
-    try:
-        u.upload(stored)
-        await asyncio.wait_for(u.drain(), timeout=5)
-    finally:
-        await u.stop()
+    await _upload(u, stored)
     sealed = len(u._described)
     plan = await u.stored_plan_for_reader(SPACE, urls, "e", item_id=ITEM)
     assert set(plan.wire()) == {"a.webp"}
@@ -1236,3 +1257,116 @@ async def test_a_plan_reads_the_space_scope_once(tmp_path, monkeypatch):
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     assert plan is not None
     assert calls == 1
+
+
+# ── v_97: every household of a GFS space, and files in pieces ───────────
+
+
+async def test_a_gfs_spaces_channel_servers_get_the_files_without_any_reader(
+    tmp_path,
+):
+    """Owner 2026-11-27: every household of a GFS space (paired, mesh,
+    link-joined, member or follower) takes its files from the GFS cache, so
+    the channel's servers get them even with no link-joined member."""
+    _write(tmp_path, "a.webp", 10)
+    seed = b"\3" * 32
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        spaces=_Spaces(
+            seed,
+            channel=(
+                CHANNEL_ID,
+                channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)),
+            ),
+            private_gfs=True,
+        ),
+    )
+    u.attach_channels(_Channels(None, targets=[g1]))
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    assert [t.id for t in plan.targets] == ["g1"]
+    assert await _upload(u, plan) == ["delivered"]
+
+
+BIG = 2 * PIECE_BYTES + 12_345
+
+
+def _pieced_uploader(tmp_path, gfs, seed=b"\3" * 32):
+    g1 = next(iter(gfs.conns.values()))
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        spaces=_Spaces(
+            seed,
+            channel=(
+                CHANNEL_ID,
+                channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)),
+            ),
+            private_gfs=True,
+        ),
+    )
+    u.attach_channels(_Channels(None, targets=[g1]))
+    return u
+
+
+async def test_a_file_over_one_blob_goes_in_pieces_with_one_descriptor(tmp_path):
+    data = _write(tmp_path, "v.webm", BIG)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _pieced_uploader(tmp_path, gfs)
+    plan = await u.plan(SPACE, ["api/media/v.webm"], item_id=ITEM, followers=False)
+    [entry] = plan.wire().values()
+    # One entry: the file's address, its size and checksum — no piece list.
+    assert entry["addr_suite"] == "sm1p"
+    assert entry["size"] == BIG
+    assert entry["sha256"] == hashlib.sha256(data).hexdigest()
+    assert "pieces" not in entry and "manifest" not in entry
+    # One durable row per piece per GFS; each PUT proves its piece (the
+    # fake GFS runs the GFS's own check).
+    assert await _upload(u, plan) == ["delivered"] * 3
+    assert len(gfs.puts) == 3
+    joined = b""
+    for index, (_c, _sid, _bid, blob, _hdr) in enumerate(gfs.puts):
+        joined += open_space_media(
+            blob=blob,
+            media_key=MEDIA_KEY,
+            space_id=SPACE,
+            epoch=4,
+            item_id=ITEM,
+            origin=OWN,
+            filename=f"v.webm#{index}/3",
+        )
+    assert joined == data
+
+
+async def test_a_big_file_with_no_gfs_keeping_pieces_is_told_to_its_author(
+    tmp_path,
+):
+    _write(tmp_path, "v.webm", BIG)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], pieces=False)
+    u = _pieced_uploader(tmp_path, gfs)
+    box = _Outbox()
+    u.attach_outbox(box)
+    plan = await u.plan(
+        SPACE,
+        ["api/media/v.webm"],
+        item_id=ITEM,
+        followers=False,
+        author_user_id="anna",
+    )
+    assert plan is None
+    assert box.failed == [(SPACE, "anna", "too_large")]
+
+
+async def test_a_piece_whose_file_changed_is_not_sent(tmp_path):
+    _write(tmp_path, "v.webm", BIG)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _pieced_uploader(tmp_path, gfs)
+    plan = await u.plan(SPACE, ["api/media/v.webm"], item_id=ITEM, followers=False)
+    _write(tmp_path, "v.webm", BIG)
+    assert await _upload(u, plan) == ["delivered"] * 3  # done: nothing to send
+    assert gfs.puts == []

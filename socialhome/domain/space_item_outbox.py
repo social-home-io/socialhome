@@ -35,6 +35,12 @@ UNSENT_ERRORS: frozenset[str] = frozenset(
     }
 )
 
+#: v_97 — the kind (``event_type``) of a row that uploads one space file
+#: blob (or one piece of a larger file) to one GFS's media cache: the same
+#: durable queue as the items, so a file waits, retries and is shown to its
+#: author exactly like content. Its payload is a locator, never the bytes.
+MEDIA_UPLOAD_ROW: str = "space_media_upload"
+
 #: ``gfs_id`` of an item whose GFS list was empty when it was sealed: it is
 #: planned when it is due.
 UNPLANNED_GFS: str = ""

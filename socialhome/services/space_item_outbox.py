@@ -42,6 +42,7 @@ from ..domain.gfs_channel import (
     RING_EPHEMERAL_TTL_S,
 )
 from ..domain.space_item_outbox import (
+    MEDIA_UPLOAD_ROW,
     UNPLANNED_GFS,
     UNSENT_QUEUE_FULL,
     UNSENT_REFUSED,
@@ -94,6 +95,10 @@ Planner = Callable[[str], Awaitable[list[str] | None]]
 Notify = Callable[[str, str], Awaitable[None]]
 
 
+def _is_media(row: QueuedSpaceItem) -> bool:
+    return row.event_type == MEDIA_UPLOAD_ROW
+
+
 def _iso(at: datetime) -> str:
     return at.astimezone(UTC).isoformat(timespec="microseconds")
 
@@ -109,6 +114,7 @@ class SpaceItemOutbox:
     __slots__ = (
         "_changed",
         "_clock",
+        "_media_sender",
         "_notify",
         "_planner",
         "_repo",
@@ -128,6 +134,8 @@ class SpaceItemOutbox:
         self._repo = repo
         self._clock = clock
         self._sender: Sender | None = None
+        #: v_97 — one attempt of a space file upload row (the uploader).
+        self._media_sender: Sender | None = None
         self._planner: Planner | None = None
         self._notify: Notify | None = None
         self._changed: Callable[[str], None] | None = None
@@ -140,6 +148,13 @@ class SpaceItemOutbox:
         """The channel service's one-attempt send and its planner."""
         self._sender = sender
         self._planner = planner
+
+    def attach_media(self, sender: Sender) -> None:
+        """v_97 — the uploader's one-attempt send of a space file blob or
+        piece (rows of kind :data:`~socialhome.domain.space_item_outbox
+        .MEDIA_UPLOAD_ROW`): the same queue, retries and author notice as
+        the items."""
+        self._media_sender = sender
 
     def attach_notify(self, notify: Notify) -> None:
         """Tell the author their unsent items changed (a WS frame)."""
@@ -284,9 +299,13 @@ class SpaceItemOutbox:
             return 0
         await self._expire_failed()
         rows = await self._repo.list_due(self._now(), limit=BATCH)
-        groups: dict[tuple[str, str], list[QueuedSpaceItem]] = {}
+        # A file upload (up to 8 MiB a row) never holds the space's items
+        # back on the same GFS: uploads and items go in separate lines.
+        groups: dict[tuple[str, str, bool], list[QueuedSpaceItem]] = {}
         for row in rows:
-            groups.setdefault((row.gfs_id, row.space_id), []).append(row)
+            groups.setdefault((row.gfs_id, row.space_id, _is_media(row)), []).append(
+                row
+            )
         await asyncio.gather(*(self._run_group(batch) for batch in groups.values()))
         return len(rows)
 
@@ -353,7 +372,11 @@ class SpaceItemOutbox:
             )
             await self._fail(row, UNSENT_TOO_OLD, drop_payload=True)
             return True
-        outcome = await self._sender(row)
+        sender = self._media_sender if _is_media(row) else self._sender
+        if sender is None:
+            await self._backoff(row, None, whole_gfs=False)
+            return False
+        outcome = await sender(row)
         if outcome.kind == "delivered":
             await self._repo.delivered(row.item_id, row.gfs_id)
             self._space_changed(row.space_id)
@@ -371,7 +394,10 @@ class SpaceItemOutbox:
             await self._fail(row, UNSENT_SEAL_FAILED, drop_payload=True)
             return True
         if outcome.kind == "transient":
-            await self._backoff(row, outcome.retry_after_s)
+            # An upload's busy answer never parks the space's items.
+            await self._backoff(
+                row, outcome.retry_after_s, whole_gfs=not _is_media(row)
+            )
             return False
         log.warning(
             "space items: GFS %s refused a %s of space %s for good — the author"

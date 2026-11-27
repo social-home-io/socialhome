@@ -393,7 +393,7 @@ class _GfsUploader:
         self.planned.append((space_id, list(urls), iid, item_id))
         return _Plan(list(urls))
 
-    def upload(self, plan):
+    async def upload(self, plan, *, author_user_id=""):
         self.uploaded.append(plan)
 
 

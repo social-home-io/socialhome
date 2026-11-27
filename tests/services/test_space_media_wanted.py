@@ -104,16 +104,23 @@ class _Seat:
 class _Space:
     id: str
     owner_instance_id: str
+    space_type: SpaceType = SpaceType.PRIVATE
+    features: SpaceFeatures = field(default_factory=SpaceFeatures)
 
 
 class _Spaces:
-    def __init__(self, *, role=SpaceRole.MEMBER, host=HOST, members=()):
+    def __init__(self, *, role=SpaceRole.MEMBER, host=HOST, members=(), gfs=False):
         self.role = role
         self.host = host
         self.members = set(members)
+        #: v_97 — a GFS space (global): its files come from the GFS cache.
+        self.gfs = gfs
 
     async def get(self, space_id):
-        return _Space(space_id, self.host) if space_id.startswith("sp-") else None
+        if not space_id.startswith("sp-"):
+            return None
+        kind = SpaceType.GLOBAL if self.gfs else SpaceType.PRIVATE
+        return _Space(space_id, self.host, space_type=kind)
 
     async def list_local_member_user_ids(self, space_id):
         return ["u-me"]
@@ -1459,3 +1466,17 @@ async def test_a_young_row_whose_file_arrived_ends_the_checks(tmp_path, monkeypa
     now[0] = 600.0
     await w.drain()
     assert fed.sent == [] and len(refs.recent_asked) == 2
+
+
+async def test_a_gfs_space_never_asks_by_space_media_wanted(tmp_path):
+    """v_97 (owner 2026-11-27): every household of a GFS space takes its
+    files from the GFS cache (a miss there on demand) — never a host or
+    helper push, so no SPACE_MEDIA_WANTED, on a check or a view."""
+    a = _sc("a")
+    refs = _Refs()
+    refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-x", [a])]}
+    fed = _Fed({HOST: V92})
+    w = _wanted(refs=refs, fed=fed, media_dir=tmp_path, spaces=_Spaces(gfs=True))
+    w.applied(SPACE)
+    await w.drain()
+    assert fed.sent == []

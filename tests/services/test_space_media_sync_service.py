@@ -1087,3 +1087,36 @@ async def test_a_gfs_reached_follower_is_queued_media_like_a_member(
     )
     rows = await outbox.list_for_correlation("p-1")
     assert {r.target_instance_id for r in rows} == {"peer-a", "peer-b"}
+
+
+async def test_a_gfs_space_never_pushes_to_a_v97_household(db, outbox, tmp_path):
+    """v_97 (owner 2026-11-27): every household of a GFS space takes its
+    files from the GFS space media cache — no push to a v_97 household,
+    paired or not, even for a file it asked for; an older household keeps
+    the push (it still gets the legacy events)."""
+    await _seed_space(db)
+    (tmp_path / "img-1.webp").write_bytes(b"x" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+
+    async def supports(iid, *, min_version):
+        return iid == "peer-new"
+
+    fed.space_member_supports = supports
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+
+    async def is_gfs_space(space_id):
+        return space_id == "sp-1"
+
+    svc.attach_gfs_spaces(is_gfs_space)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-new", "peer-a"],
+        media_urls=["api/media/img-1.webp"],
+        push=True,
+    )
+    await svc.flush_once()
+    sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
+    assert sent_to == {"peer-a"}
+    assert await outbox.list_for_correlation("p-1") == []

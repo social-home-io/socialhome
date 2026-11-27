@@ -1175,9 +1175,10 @@ async def test_a_scheduling_failure_is_swallowed():
 
 
 @pytest.mark.parametrize("channel", [False, True])
-async def test_a_private_space_post_is_scheduled_only_with_a_channel(channel):
-    """v_51: a private space's post goes to the member publisher only when
-    the space uses an opaque channel (which then decides by the grant)."""
+async def test_a_private_space_post_never_takes_the_v1_channel_publish(channel):
+    """v_97 (owner 2026-11-27): a GFS space's post is ONE space item in the
+    durable queue (the broadcast's item sealer) — never the in-memory v1
+    channel publish; a mesh space has no channel at all."""
     member = _MemberGfs(channel=channel)
     bus = EventBus()
     federation = AsyncMock()
@@ -1203,11 +1204,10 @@ async def test_a_private_space_post_is_scheduled_only_with_a_channel(channel):
             space_id="sp-1",
         )
     )
-    assert [m[0] for m in member.scheduled] == (["sp-1"] if channel else [])
-    if channel:
-        # Never a public relay hint for a private space.
-        payload = federation.broadcast_to_space_members.call_args.args[2]
-        assert "public_relay" not in payload
+    assert member.scheduled == []
+    # Never a public relay hint for a private space.
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert "public_relay" not in payload
 
 
 # ─── v_49 PR 3: comments, reactions and own edits / deletes ─────────────
@@ -1403,9 +1403,9 @@ async def test_items_are_not_scheduled_where_they_must_not_be(setup):
     assert member.scheduled == []
 
 
-async def test_items_in_a_private_channel_space_are_scheduled():
-    """v_51: comments and reactions in a private space with an opaque
-    channel go to the member publisher too."""
+async def test_items_in_a_private_channel_space_take_the_item_path():
+    """v_97: comments and reactions in a GFS space go as space items in
+    the durable queue — no v1 channel publish."""
     from socialhome.domain.events import CommentAdded, PostReactionChanged
 
     bus, member, uid = _items_setup(
@@ -1419,7 +1419,7 @@ async def test_items_in_a_private_channel_space_are_scheduled():
             post=_post_obj(uid), space_id="sp-1", reactor_user_id=uid, emoji="👍"
         )
     )
-    assert [m[2] for m in member.scheduled] == ["comment", "reaction_add"]
+    assert member.scheduled == []
 
 
 async def test_an_own_post_edit_carries_one_stamp_on_both_paths():
@@ -1485,7 +1485,9 @@ class _FakeMediaGfs:
         self.items: list = []
         self.uploaded: list = []
 
-    async def plan(self, space_id, media_urls, *, item_id, followers):
+    async def plan(
+        self, space_id, media_urls, *, item_id, followers, author_user_id=""
+    ):
         self.planned.append((space_id, list(media_urls), followers))
         self.items.append(item_id)
         return self._plan
@@ -1493,7 +1495,7 @@ class _FakeMediaGfs:
     async def is_relay_reader(self, instance_id):
         return instance_id in self.readers
 
-    def upload(self, plan):
+    async def upload(self, plan, *, author_user_id=""):
         self.uploaded.append(plan)
 
 
@@ -1511,7 +1513,7 @@ def _picture_post(author: str = "uid-alice") -> Post:
     )
 
 
-async def test_media_refs_go_only_to_link_joined_readers():
+async def test_media_refs_ride_the_shared_payload_for_every_household():
     bus = EventBus()
     federation = AsyncMock()
     federation.broadcast_to_space_members = AsyncMock()
@@ -1525,13 +1527,10 @@ async def test_media_refs_go_only_to_link_joined_readers():
     assert media_gfs.items == [_picture_post().id]  # sealed for the post
     call = federation.broadcast_to_space_members.call_args
     payload = call.args[2]
-    assert "media_refs" not in payload  # never on the shared payload
-    per_peer = call.kwargs["per_peer"]
-    to_e = await per_peer("inst-e", payload)
-    assert to_e["media_refs"] == _REFS
-    to_b = await per_peer("inst-b", payload)
-    assert "media_refs" not in to_b
-    assert "media_refs" not in payload  # a new dict, never mutated
+    # v_97 — every household of a GFS space reads the pictures from the
+    # GFS cache: the one shared payload (so ONE space item) carries them.
+    assert payload["media_refs"] == _REFS
+    assert call.kwargs.get("per_peer") is None
     assert len(media_gfs.uploaded) == 1
 
 
@@ -1900,14 +1899,15 @@ async def test_relay_hint_carries_the_posts_signed_file_hashes(tmp_path):
 @pytest.mark.security
 @pytest.mark.parametrize(
     ("channel", "targets", "marked"),
-    [(True, ["conn-1"], True), (True, [], False), (False, ["conn-1"], False)],
+    [(True, ["conn-1"], True), (True, [], True), (False, ["conn-1"], False)],
 )
 async def test_the_hint_says_when_we_put_the_post_on_the_channel(
     channel, targets, marked
 ):
     """v_96 — ``channel_sent`` in the hint (outside the author signature,
-    inside the encrypted payload) exactly when our member publisher puts
-    the post on the space's channel: the host then adds no copy there."""
+    inside the encrypted payload) exactly when we put the post on the
+    space's channel ourselves — v_97: in every GFS space (the durable queue
+    holds it until a GFS takes it): the host then adds no copy there."""
     member = _MemberGfs(channel=channel)
     member.targets = targets
     bus, federation, post = _member_setup(member)

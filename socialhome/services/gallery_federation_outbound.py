@@ -169,19 +169,23 @@ class GalleryFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # pushed below, and the receiver's row must name the full one (its
         # SPACE_MEDIA_BLOB scope check and the zoom view both read it).
         payload = item.to_federation_dict()
-        # v_80 — a link-joined member gets the files as ``media_refs``.
+        # v_80 / v_97 — in a GFS space every household gets the files as
+        # ``media_refs`` (from the GFS cache).
         files = list(dict.fromkeys(item_media_urls("gallery", item)))
         media_plan = await self._plan_media_refs(
-            space_id, files, item_id=item.id, followers=False
+            space_id,
+            files,
+            item_id=item.id,
+            followers=False,
+            author_user_id=item.uploaded_by or "",
         )
         payload = await self._with_file_hashes(payload, files)
         await self._fan_out(
             space_id,
             FederationEventType.SPACE_GALLERY_ITEM_CREATED,
-            payload,
-            per_peer=self._media_refs_per_peer(media_plan),
+            self._with_media_refs(payload, media_plan),
         )
-        self._upload_media(media_plan)
+        await self._upload_media(media_plan, author_user_id=item.uploaded_by or "")
         # Ship the actual bytes via the shared media outbox so
         # remote members can render the thumbnail + full image. The
         # gallery item carries TWO URLs (thumbnail + full); both get

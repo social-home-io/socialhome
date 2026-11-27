@@ -51,7 +51,6 @@ from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
-    MEDIA_REFS_FIELD,
     distinct_media_files,
     page_media_urls,
 )
@@ -65,7 +64,6 @@ if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.space_repo import AbstractSpaceRepo
-    from .space_media_gfs_uploader import SpaceMediaPlan
     from .space_media_sync_service import SpaceMediaSyncService
 
 log = logging.getLogger(__name__)
@@ -219,35 +217,14 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         await self._fan_out(
             space_id,
             event_type,
-            {**base, **canonical},
+            # v_97 — in a GFS space every household reads the version's
+            # files from the GFS cache: the descriptor rides the shared copy.
+            self._with_media_refs({**base, **canonical}, plan),
             legacy_payload=payload(),
             legacy_below=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
-            per_peer=self._page_refs_per_peer(plan),
         )
-        self._upload_media(plan)
+        await self._upload_media(plan)
         await self._ship_files(space_id, page_id, new_files)
-
-    def _page_refs_per_peer(
-        self, plan: SpaceMediaPlan | None
-    ) -> Callable[[str, dict], Awaitable[dict]] | None:
-        """The descriptor for a link-joined member at v_82 only — an older
-        one would keep it under a reader name the page never shows."""
-        if plan is None or self._media_gfs is None:
-            return None
-        media_gfs = self._media_gfs
-        fed = self._federation
-        wire = plan.wire()
-
-        async def _per_peer(instance_id: str, payload: dict) -> dict:
-            if await media_gfs.is_relay_reader(
-                instance_id
-            ) and await fed.space_member_supports(
-                instance_id, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
-            ):
-                return {**payload, MEDIA_REFS_FIELD: wire}
-            return payload
-
-        return _per_peer
 
     async def _ship_files(
         self, space_id: str, page_id: str, media_urls: list[str]

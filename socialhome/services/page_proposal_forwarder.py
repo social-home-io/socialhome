@@ -280,7 +280,7 @@ class PageProposalForwarder:
         await self._conflicts.mark_sent(space_id, page_id, proposal.hash)
         if plan is not None:
             assert self._media_gfs is not None
-            self._media_gfs.upload(plan)
+            await self._media_gfs.upload(plan)
         else:
             await self._ship_files(space_id, page_id, proposal, host)
         return True

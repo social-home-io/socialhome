@@ -993,14 +993,34 @@ async def test_an_edit_never_mentions_anew(world):
     assert sealed is not None and sealed.notes == ()
 
 
-async def test_a_v1_carried_type_or_a_narrowed_audience_keeps_its_old_path(world):
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_POST_CREATED,
+        FederationEventType.SPACE_POST_UPDATED,
+        FederationEventType.SPACE_POST_DELETED,
+        FederationEventType.SPACE_POST_REACTION,
+        FederationEventType.SPACE_COMMENT_CREATED,
+        FederationEventType.SPACE_COMMENT_UPDATED,
+        FederationEventType.SPACE_COMMENT_DELETED,
+    ],
+)
+async def test_posts_and_comments_ride_the_durable_queue_too(world, event_type):
+    """Owner 2026-11-27: one delivery path for ALL content of a GFS space —
+    posts and comments are space items in the durable queue (no in-memory
+    v1 publish, no legacy event to everyone outside the window)."""
     svc = await _gfs_space(world)
-    assert (
-        await svc.seal_event_item(
-            SPACE_ID, FederationEventType.SPACE_POST_CREATED, {"space_id": SPACE_ID}
-        )
-        is None
+    sealed = await svc.seal_event_item(
+        SPACE_ID, event_type, {"space_id": SPACE_ID, "author": "x"}
     )
+    assert sealed is not None and sealed.via_channel and sealed.item
+    [queued] = world["outbox"].queued
+    assert queued["event_type"] == event_type.value
+    assert world["outbox"].failed == []
+
+
+async def test_a_narrowed_audience_keeps_its_old_path(world):
+    svc = await _gfs_space(world)
     assert (
         await svc.seal_event_item(
             SPACE_ID,
