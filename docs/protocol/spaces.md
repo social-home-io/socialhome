@@ -1895,7 +1895,9 @@ receives and syncs everything a member seat does, on the same paths: posts
 and comments, the chat (read-only, `can_post: false`), zones, the map pins
 and live location shares, proposals, game-table cards, the roster with the
 same fields (presence included), sync pages (pushed like a member's, one
-checksum), the sync status, "Sync now", and media. Every read audience is
+checksum), the sync status, "Sync now", and media (pushed like a member's;
+a picture it missed it fetches through its GFS's v_83 on-demand path, #1317
+— a transport choice, the same bytes). Every read audience is
 `SpaceWriterHouseholds(roles=SEAT_ROLES)` and the receiving half
 `holds_seat` (any seat); there is no follower-specific delivery rule.
 The only differences are writes: no chat send, no proposal create / vote,
