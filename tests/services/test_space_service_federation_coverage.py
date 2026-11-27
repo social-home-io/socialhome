@@ -1904,7 +1904,10 @@ async def test_owner_approval_gate_end_to_end_real_services(stack):
     assert proposal["status"] == ProposalStatus.PENDING.value
     assert proposal["owner_only"] is True
     assert proposal["fwd_action"] == "ban"
-    assert proposal["fwd_params"] == {"user_id": victim.user_id, "reason": "spam"}
+    # The reason never rides the view; the owner reading its own row
+    # sees it apart (owner 2026-11-27: ban reasons to owner / admins only).
+    assert proposal["fwd_params"] == {"user_id": victim.user_id}
+    assert proposal["fwd_reason"] == "spam"
     assert await stack.space_repo.get_member(space.id, victim.user_id) is not None
 
     # 5. NEGATIVE leg: a non-owner admin's vote must NOT execute; the

@@ -340,10 +340,16 @@ async def test_d5_household_feed_post_is_an_in_app_row_without_push(s):
     assert s.push.sent == []
 
 
-@pytest.mark.parametrize("space_type", ["household", "private"])
-async def test_d5_household_and_private_spaces_default_to_everything(s, space_type):
+@pytest.mark.parametrize(
+    ("space_type", "role"),
+    [("household", "member"), ("private", "member"), ("private", "subscriber")],
+)
+async def test_d5_household_and_private_spaces_default_to_everything(
+    s, space_type, role
+):
+    """P10 (owner 2026-11-27): a follower's default is a member's."""
     anna, bob = await s.user("anna"), await s.user("bob")
-    sid = await _space(s, "fam", space_type, {anna: "owner", bob: "member"})
+    sid = await _space(s, "fam", space_type, {anna: "owner", bob: role})
     await s.bus.publish(SpacePostCreated(post=_post(anna), space_id=sid))
     assert [t for t, _ in await _rows(s, bob)] == ["space_post_created"]
     assert s.push.sent == []  # Everything is in the app, never a buzz
@@ -351,7 +357,7 @@ async def test_d5_household_and_private_spaces_default_to_everything(s, space_ty
 
 @pytest.mark.parametrize(
     ("space_type", "role"),
-    [("public", "member"), ("global", "member"), ("private", "subscriber")],
+    [("public", "member"), ("global", "member"), ("public", "subscriber")],
 )
 async def test_d5_public_global_and_followed_default_to_replies_and_mentions(
     s, space_type, role
@@ -524,12 +530,12 @@ async def test_d6_comments_on_your_post_buzz_once_until_read(s):
 # ── @here never reaches a follower ────────────────────────────────────
 
 
-async def test_here_never_reaches_a_follower(s):
+async def test_here_reaches_a_follower_like_a_member(s):
+    """P10 (owner 2026-11-27): ``@here`` pages every seat alike."""
     anna, bob, fern = await s.user("anna"), await s.user("bob"), await s.user("fern")
     sid = await _space(
         s, "pub", "public", {anna: "owner", bob: "member", fern: "subscriber"}
     )
-    # Even a follower who chose "Everything" gets the post, never the page.
     await s.notifs.set_space_notif_level(
         user_id=fern.user_id, space_id=sid, level="all"
     )
@@ -541,8 +547,7 @@ async def test_here_never_reaches_a_follower(s):
         )
     )
     assert [t for t, _ in await _rows(s, bob)] == ["space_here"]
-    assert [t for t, _ in await _rows(s, fern)] == ["space_post_created"]
-    assert s.push.to(fern) == []
+    assert [t for t, _ in await _rows(s, fern)] == ["space_here"]
 
 
 # ── D13: reactions ────────────────────────────────────────────────────

@@ -720,16 +720,15 @@ async def test_a_non_member_household_gets_nothing(tmp_path):
     assert outbox.queued == []
 
 
-async def test_a_follower_only_household_gets_nothing(tmp_path):
-    """Only a household holding a writer seat asks with SPACE_MEDIA_WANTED
-    (the same predicate as the §25.6 member-only data): a follower-only
-    household keeps its GFS's v_83 on-demand path."""
+async def test_a_follower_only_household_is_served_like_a_member(tmp_path):
+    """P10: a follower household fetches media like a member household
+    (``SPACE_MEDIA_WANTED``, the seat gate), so it is answered alike."""
     a = _sc("a")
     (tmp_path / a).write_bytes(b"x")
     roster = _Roster({"req": "subscriber"})
     p, outbox = _provider(tmp_path, {(SPACE, "p1"): [(a, "u1")]}, roster=roster)
-    assert await p.handle(_event([{"item": "p1", "name": a}])) == 0
-    assert outbox.queued == []
+    assert await p.handle(_event([{"item": "p1", "name": a}])) == 1
+    assert outbox.queued != []
     for role in ("member", "moderator", "admin", "owner"):
         roster.seats["req"] = role
         p._budget = SpaceFileBudget()

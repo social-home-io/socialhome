@@ -3910,10 +3910,10 @@ async def test_a_space_admin_turns_the_chat_off_and_on(client):
     assert on["enabled"] is True and on["conversation_id"] == cid
 
 
-async def test_space_chat_roster_names_writers_on_other_households(client):
+async def test_space_chat_roster_names_seats_on_other_households(client):
     """The chat keeps no remote seats: its roster (names + @-tokens for the
-    composer) folds in the space's writers on other households, never a
-    follower household."""
+    composer) folds in the space's seats on other households — a follower's
+    too (P10: it reads the chat and may be mentioned)."""
     sid = await _chat_space(client)
     db = client.app[_db_key]
     await db.enqueue(
@@ -3956,7 +3956,7 @@ async def test_space_chat_roster_names_writers_on_other_households(client):
     )
     assert r.status == 200, await r.text()
     rows = {m["user_id"]: m for m in await r.json()}
-    assert "uid-fan" not in rows
+    assert "uid-fan" in rows
     jack = rows["uid-jack"]
     assert jack["display_name"] == "Jack Remote"
     assert jack["instance_id"] == "peer-b"
@@ -4098,7 +4098,7 @@ async def test_space_chat_unread_counts_per_space_by_level_and_mute(client):
     assert (await _chat_unread(client, client._bob_token))[band]["unread"] == 0
 
 
-async def test_space_chat_unread_leaves_out_chat_off_and_followers(client):
+async def test_space_chat_unread_leaves_out_chat_off_not_followers(client):
     sid = await _chat_space(client)
     await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
     cid = (await _space_chat(client, sid, client._bob_token))[1]["conversation_id"]
@@ -4118,7 +4118,9 @@ async def test_space_chat_unread_leaves_out_chat_off_and_followers(client):
     )
     assert r.status in (200, 201), await r.text()
     await _space_chat(client, broadcast, client._admin_token)
-    assert broadcast not in await _chat_unread(client, client._bob_token)
+    # P10: a follower reads the chat, so its unread counts like a member's.
+    await _space_chat(client, broadcast, client._bob_token)
+    assert broadcast in await _chat_unread(client, client._bob_token)
 
 
 async def test_archived_space_chat_reads_and_deletes_but_refuses_writes(client):
