@@ -2305,8 +2305,7 @@ class SyncPageService:
 
     async def _fetch_round(self, space_id: str) -> None:
         """One round of asks: the member households at v_95 (never a host,
-        never us, never a follower: a deliverer serves others; a follower
-        household fetches like a member, P10), sorted and rotated from a stable
+        never us; a follower household serves like a member, P10), sorted and rotated from a stable
         per-household offset plus one step per round, at most
         :data:`MAX_FETCH_ASKS`, one at a time while no host answers and a
         bucket is still to fetch. One ask in flight per space."""

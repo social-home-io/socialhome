@@ -1888,9 +1888,9 @@ checksum), the sync status, "Sync now", and media. Every read audience is
 `holds_seat` (any seat); there is no follower-specific delivery rule.
 The only differences are writes: no chat send, no proposal create / vote,
 no location share of its own, no game table open / join / announce, and
-the existing comment / react switches. A follower household is not asked
-to deliver verified-fetch rows (it fetches from member households like a
-member). People's live location shared in a space reaches its followers
+the existing comment / react switches. A follower household also
+delivers verified-fetch rows like a member's (no trust needed: every row
+is checked against the signed page). People's live location shared in a space reaches its followers
 too — a principle change, owner-approved 2026-11-27
 ([principles](../principles.md#peoples-locations-are-never-shared-by-design)).
 

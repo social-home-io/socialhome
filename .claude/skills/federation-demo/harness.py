@@ -17538,6 +17538,96 @@ def _chat_row_by_id(label: str, msg_id: str) -> dict | None:
     return dict(rows[0]) if rows else None
 
 
+def _follower_reads_like_a_member(state: dict, space_id: str, nonce: str, wait) -> None:
+    """P10 (owner 2026-11-26/27) — follower household d of Beta's space gets
+    what a member gets: b's zone, a's shared live location (4 dp), and a
+    signed sync page; its own location sharing is refused."""
+    inst = state["instances"]
+    a, b, d = inst["a"], inst["b"], inst["d"]
+    base = f"/api/spaces/{space_id}"
+
+    def call(info: dict, method: str, path: str, body: dict | None = None):
+        return _request(
+            f"http://127.0.0.1:{info['port']}{path}",
+            token=info["token"],
+            method=method,
+            body=body,
+        )
+
+    s, patched = call(b, "PATCH", base, {"features": {"location": True}})
+    _must("follower-parity: b turns the map on", s, patched, ok=(200,))
+    lat, lon = 47.3769, 8.5417
+    zone_name = f"Salon zone {nonce}"
+    s, zone = call(
+        b,
+        "POST",
+        f"{base}/zones",
+        {"name": zone_name, "latitude": lat, "longitude": lon, "radius_m": 300},
+    )
+    _must("follower-parity: b creates a zone", s, zone, ok=(200, 201))
+
+    def d_zone_names() -> set[str]:
+        s, body = call(d, "GET", f"{base}/zones")
+        if s != 200:
+            return set()
+        rows = body.get("zones", body) if isinstance(body, dict) else body
+        return {z.get("name") for z in rows or []}
+
+    wait("follower d to hold b's zone", lambda: zone_name in d_zone_names(), 90.0)
+    print("  b's zone reaches follower d ✓")
+
+    s, on = call(a, "PATCH", f"{base}/members/me/location-sharing", {"enabled": True})
+    _must("follower-parity: a shares its location", s, on, ok=(200,))
+    s, _ = call(
+        a,
+        "POST",
+        "/api/presence/location",
+        {
+            "username": a["username"],
+            "latitude": lat,
+            "longitude": lon,
+            "accuracy_m": 10,
+            "zone_name": None,
+        },
+    )
+    if s not in (200, 204):
+        raise SystemExit(f"follower-parity: a's presence fix answered {s}")
+
+    def d_sees_a() -> bool:
+        s, body = call(d, "GET", f"{base}/presence")
+        if s != 200:
+            return False
+        return any(e.get("user_id") == a["user_id"] for e in body.get("entries", []))
+
+    wait("follower d to see a's shared location", d_sees_a, 90.0)
+    print("  a's shared location reaches follower d's map ✓")
+
+    s, refused = call(
+        d, "PATCH", f"{base}/members/me/location-sharing", {"enabled": True}
+    )
+    if s != 403:
+        raise SystemExit(f"follower-parity: d's own sharing answered {s} {refused!r}")
+    print("  d's own location sharing is refused (403) ✓")
+
+    def d_holds_page() -> bool:
+        return bool(
+            _rows("d", "SELECT 1 FROM space_sync_pages WHERE space_id=?", (space_id,))
+        )
+
+    deadline = time.monotonic() + 150.0
+    asked = 0
+    next_ask = 0.0
+    while not d_holds_page() and time.monotonic() < deadline:
+        if asked < 3 and time.monotonic() >= next_ask:
+            call(d, "POST", f"{base}/sync")  # a follower may ask too (P10)
+            asked += 1
+            next_ask = time.monotonic() + 20.0
+        time.sleep(1.0)
+    if not d_holds_page():
+        raise SystemExit("follower-parity: follower d never held a sync page")
+    print("  follower d holds a signed sync page of the space ✓")
+
+
 def cmd_space_chat() -> None:
     """Every space's members' chat across households (v_55).
 
@@ -17547,7 +17637,8 @@ def cmd_space_chat() -> None:
     1. **Follower household.** Beta mints a ``subscriber`` (Follower)
        invite link (``via: internal``) and Delta — paired with Beta only —
        redeems it over federation, so d sits in the space as a read-only
-       follower household. Its chat summary must say ``enabled: false``.
+       follower household. P10: its chat summary says ``enabled: true``,
+       ``can_post: false``, and a send from d is refused (403).
     2. a / b / c read their own chat summary (each household maps the
        space to its own conversation — no conversation id rides the wire).
     3. **Create.** a posts; b and c hold it (``SPACE_CHAT_MESSAGE_CREATED``).
@@ -17560,9 +17651,10 @@ def cmd_space_chat() -> None:
     7. **Moderator delete.** b — the space's owner — deletes c's reply;
        it is deleted (content gone) on a, b and c
        (``SPACE_CHAT_MESSAGE_DELETED``).
-    8. **Follower household gets nothing.** d holds no chat message of
-       this run (``only_instances`` limits fan-out to households with a
-       writer seat).
+    8. **Follower household reads like a member (P10).** d holds a's
+       message; b's zone reaches d; a's shared location reaches d's map;
+       d's own location sharing is refused (403); d holds a signed sync
+       page of the space (pushed or sent on its "Sync now").
     9. **v_55.** ``OURS`` is at least ``MIN_FOR_SPACE_CHAT`` and a, b and c
        see each other at it.
     """
@@ -17631,10 +17723,20 @@ def cmd_space_chat() -> None:
         lambda: all(d_is_follower_on(x) for x in ("a", "c")),
     )
     print("  b, a and c hold d's follower seat ✓")
+    # P10: a follower reads the chat, never posts.
     d_chat = _space_chat_conv("d", d, space_id)
-    if d_chat.get("enabled") is not False or d_chat.get("conversation_id"):
-        raise SystemExit(f"space-chat: follower d got a chat: {d_chat!r}")
-    print("  d (follower) sees no chat ✓")
+    if d_chat.get("enabled") is not True or d_chat.get("can_post") is not False:
+        raise SystemExit(f"space-chat: follower d's chat summary: {d_chat!r}")
+    s, refused = _request(
+        f"http://127.0.0.1:{d['port']}/api/conversations/"
+        f"{d_chat['conversation_id']}/messages",
+        token=d["token"],
+        method="POST",
+        body={"content": f"a follower must not post {nonce}"},
+    )
+    if s != 403:
+        raise SystemExit(f"space-chat: d's chat send answered {s} {refused!r}")
+    print("  d (follower) reads the chat, its send is refused (403) ✓")
 
     # 2. Every member household's own chat.
     convs: dict[str, str] = {}
@@ -17758,30 +17860,13 @@ def cmd_space_chat() -> None:
         wait(f"{x} to drop c's reply", gone)
     print("  b (owner) deletes c's reply; deleted on a, b and c ✓")
 
-    # 8. The follower household received nothing of the chat.
-    leaked = _rows(
-        "d",
-        "SELECT id, content FROM conversation_messages WHERE content LIKE ?",
-        (f"%{nonce}%",),
+    # 8. P10 — the follower household reads like a member.
+    wait(
+        "follower d to hold a's chat message",
+        lambda: _chat_row("d", d_chat["conversation_id"], hello) is not None,
     )
-    d_space_convs = _rows(
-        "d", "SELECT id FROM conversations WHERE space_id=?", (space_id,)
-    )
-    d_msgs = (
-        _rows(
-            "d",
-            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id=?",
-            (d_space_convs[0][0],),
-        )[0][0]
-        if d_space_convs
-        else 0
-    )
-    if leaked or d_msgs:
-        raise SystemExit(
-            f"space-chat: follower household d holds chat messages: "
-            f"{leaked!r} / {d_msgs} in its space chat"
-        )
-    print("  d (follower household) holds no chat message ✓")
+    print("  d (follower household) holds a's chat message ✓")
+    _follower_reads_like_a_member(state, space_id, nonce, wait)
 
     # 9. v_55.
     if _OURS < _Cap.MIN_FOR_SPACE_CHAT:

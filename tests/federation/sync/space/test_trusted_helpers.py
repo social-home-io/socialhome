@@ -72,16 +72,10 @@ def test_the_offset_is_stable_and_differs_per_household() -> None:
     assert helper_offset("member-a", "sp") != helper_offset("member-b", "sp")
 
 
-def test_deliverers_hold_any_member_seat_never_a_followers() -> None:
-    assert DELIVERER_ROLES == frozenset(
-        {
-            SpaceRole.OWNER.value,
-            SpaceRole.ADMIN.value,
-            SpaceRole.MODERATOR.value,
-            SpaceRole.MEMBER.value,
-        }
-    )
-    assert SpaceRole.SUBSCRIBER.value not in DELIVERER_ROLES
+def test_deliverers_hold_any_seat_a_followers_included() -> None:
+    """P10: a follower household delivers like a member's — the rows are
+    verified against the signed page, so no trust is needed."""
+    assert DELIVERER_ROLES == frozenset(r.value for r in SpaceRole)
 
 
 async def test_deliverers_are_v95_member_households_rotated() -> None:

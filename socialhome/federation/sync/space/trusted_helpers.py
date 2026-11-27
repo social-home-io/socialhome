@@ -29,7 +29,7 @@ from collections.abc import Iterable
 from typing import Protocol
 
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.space import WRITER_ROLES, SpaceRole
+from ....domain.space import SpaceRole
 
 #: The seats a trusted helper holds.
 HELPER_ROLES: frozenset[str] = frozenset(
@@ -37,8 +37,9 @@ HELPER_ROLES: frozenset[str] = frozenset(
 )
 
 #: The seats a v_95 verified-fetch deliverer holds (sync pages Phase 3): any
-#: member seat — owner, admin, moderator, member — never a follower's.
-DELIVERER_ROLES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
+#: seat — a follower's included (P10: it holds the same rows, and every row
+#: is checked against the signed page, so no trust is needed).
+DELIVERER_ROLES: frozenset[str] = frozenset(r.value for r in SpaceRole)
 
 
 class _Seats(Protocol):
@@ -97,8 +98,8 @@ async def member_deliverers(
     offset: int = 0,
 ) -> list[str]:
     """Who a member asks for verified rows while the space's hosts are
-    silent (sync pages Phase 3, v_95): every member household — any member
-    seat, never a follower-only one — at ``MIN_FOR_SYNC_PAGES``, other than
+    silent (sync pages Phase 3, v_95): every seated household — a
+    follower-only one included (P10) — at ``MIN_FOR_SYNC_PAGES``, other than
     *exclude*; sorted and rotated like :func:`trusted_helpers`. No trust in
     the deliverer is needed (every row is checked against the signed page),
     so admins and moderators get no priority (owner decision 2)."""

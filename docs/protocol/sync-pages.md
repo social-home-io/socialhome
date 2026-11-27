@@ -1019,10 +1019,9 @@ long absence" below).
 
 **Picking deliverers** (`trusted_helpers.member_deliverers`, the helper
 picker with other roles): every household with a live **member seat**
-(owner, admin, moderator, member) in our roster mirror at v_95 — a
-follower household fetches from them like a member does (P10), and is not
-asked itself (a deliverer serves others; reads are what parity covers) —
-never us, never a household acting as host;
+(owner, admin, moderator, member, follower — P10: a follower holds the
+same rows, and every row is checked against the signed page) in our
+roster mirror at v_95, never us, never a household acting as host;
 sorted, rotated from the stable per-household offset (`helper_offset`, never
 random) plus one step per round, at most `MAX_FETCH_ASKS` = 3 asked one
 after another per round — the next one only when an answer leaves

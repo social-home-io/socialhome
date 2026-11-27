@@ -198,7 +198,10 @@ async def trio(homes, tmp_dir):  # noqa: F811
     wire.deliverers[MEMBER] = member_pages
     versions = _Versions()
     # The requester's roster mirror: the host's person, the deliverer's
-    # (a plain member) and a follower-only household.
+    # (a plain member) and a follower-only household — before v_95 here, so
+    # only the member is asked (a v_95 follower is asked too, P10: see
+    # ``test_a_v95_follower_household_is_asked_like_a_member``).
+    versions.version[FOLLOWER] = 94
     await _seat(requester, HOST, ANNA, "owner")
     await _seat(requester, MEMBER, BOB, "member")
     await _seat(requester, FOLLOWER, "u-fiona", "subscriber")
@@ -495,7 +498,7 @@ async def test_the_scheduler_silence_starts_a_member_fetch(trio):
     assert (await _position(requester, r_pages)).match is True
 
 
-async def test_followers_and_older_members_are_never_asked(trio):
+async def test_older_households_are_never_asked(trio):
     host, member, requester, host_pages, member_pages, r_pages, wire, versions = trio
     await _missed_content(host, member, requester)
     await host_pages.seal_if_due(SPACE)
@@ -503,8 +506,22 @@ async def test_followers_and_older_members_are_never_asked(trio):
     versions.version[MEMBER] = 94  # an older member household degrades
     assert await _round(host_pages, r_pages, "s-r")
     await wire.settle()
-    assert wire.asks == []  # the follower is never asked either
+    assert wire.asks == []  # the older follower is never asked either
     assert await requester.repos.space_post.get("post-2") is None
+
+
+async def test_a_v95_follower_household_is_asked_like_a_member(trio):
+    """P10 (owner 2026-11-27): a follower household holds the same rows, so
+    it is a deliverer like a member's — asked once the member is too old."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, versions = trio
+    await _missed_content(host, member, requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+    versions.version[MEMBER] = 94
+    versions.version[FOLLOWER] = 95
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert FOLLOWER in {ask[0] for ask in wire.asks}
 
 
 @pytest.mark.parametrize(
