@@ -83,7 +83,11 @@ from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
 from ....domain.post import PostType, poll_to_wire_dict, post_to_wire_dict
 from ....domain.space_media_fields import item_media_urls
-from ....domain.space_media_ref import page_media_urls
+from ....domain.space_media_ref import (
+    MEDIA_REFS_FIELD,
+    described_record_urls,
+    page_media_urls,
+)
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
@@ -116,6 +120,14 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger(__name__)
+
+
+class _CacheDescriber(Protocol):
+    async def cache_only(self, space_id: str, instance_id: str) -> bool: ...
+
+    async def plan_for_reader(
+        self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
+    ) -> Any: ...
 
 
 class _MediaOutbox(Protocol):
@@ -210,6 +222,7 @@ class SpaceSyncResumeProvider(FileHashesMixin):
         "_gallery_repo",
         "_last_resume",
         "_media_dir",
+        "_media_gfs",
         "_media_refs",
         "_media_sync",
         "_member_gate",
@@ -274,6 +287,16 @@ class SpaceSyncResumeProvider(FileHashesMixin):
         self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
         self._own_members: Callable[[str], Awaitable[set[str]]] | None = None
         self._member_gate: Callable[[str, str], Awaitable[bool]] | None = None
+        #: v_97 — describes the replayed rows' files for a household that
+        #: reads a GFS space from the cache only (:meth:`attach_media_gfs`).
+        self._media_gfs: _CacheDescriber | None = None
+
+    def attach_media_gfs(self, media_gfs: _CacheDescriber) -> None:
+        """Wire the GFS space media uploader (v_97, owner rule B): a
+        household that reads a GFS space from the cache only gets no push
+        and asks for no file, so each replayed row describes its files
+        (``media_refs``, lazy — described from our copy, never uploaded)."""
+        self._media_gfs = media_gfs
 
     def attach_row_scope(
         self,
@@ -909,6 +932,8 @@ class SpaceSyncResumeProvider(FileHashesMixin):
             space_id=space_id,
             to=to,
             own=own,
+            # v_97 — the version's files and its open sides'.
+            described_of=lambda page: described_record_urls("pages", payloads[page.id]),
         )
         if ships_files and media is not None:
             for page in pages:
@@ -1085,6 +1110,7 @@ class SpaceSyncResumeProvider(FileHashesMixin):
         owner_of: Callable[[Any], str | None] | None = None,
         media_of: Callable[[Any], list[str]] | None = None,
         media: _Media | None = None,
+        described_of: Callable[[Any], list[str]] | None = None,
     ) -> int:
         """Send each row as ``event_type``, collecting its files for
         :meth:`_ship_media`. With *own* (a household that is not the roster
@@ -1094,8 +1120,20 @@ class SpaceSyncResumeProvider(FileHashesMixin):
 
         A row with files (*media_of*) names their hashes (v_85 ``files``),
         like its live event — only to a household that reads the map, as
-        ``broadcast_to_space_members`` sends it."""
+        ``broadcast_to_space_members`` sends it.
+
+        v_97 — to a household that reads a GFS space from the cache only,
+        each row describes its files (*described_of*, default *media_of*);
+        a row whose file is still on its way here is not replayed without
+        its descriptor (it would ask for the file): the §25.6 catch-up
+        brings it."""
         sent = 0
+        described_of = described_of or media_of
+        lazy = (
+            described_of is not None
+            and self._media_gfs is not None
+            and await self._media_gfs.cache_only(space_id, to)
+        )
         hashed = bool(
             rows and media_of is not None
         ) and await self._federation.space_member_supports(
@@ -1111,6 +1149,38 @@ class SpaceSyncResumeProvider(FileHashesMixin):
                     media.append((row.id, list(urls)))
                 if urls and hashed:
                     payload = await self._with_file_hashes(payload, urls)
+            if lazy:
+                assert described_of is not None and self._media_gfs is not None
+                described = described_of(row)
+                try:
+                    plan = (
+                        await self._media_gfs.plan_for_reader(
+                            space_id, described, to, item_id=row.id
+                        )
+                        if described
+                        else None
+                    )
+                except Exception:
+                    # Never undescribed to it: the catch-up brings the row.
+                    log.warning(
+                        "SPACE_SYNC_RESUME %s %s to %s: files not described",
+                        event_type,
+                        row.id,
+                        to,
+                        exc_info=True,
+                    )
+                    continue
+                if plan is not None and plan.pending:
+                    log.info(
+                        "SPACE_SYNC_RESUME %s %s to %s: a file is still on its"
+                        " way here — left to the catch-up",
+                        event_type,
+                        row.id,
+                        to,
+                    )
+                    continue
+                if plan is not None and plan.refs:
+                    payload = {**payload, MEDIA_REFS_FIELD: plan.wire()}
             try:
                 # The way the request came: direct to a paired household,
                 # over the mesh or to its GFS mailbox otherwise — a member

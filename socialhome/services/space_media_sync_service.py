@@ -177,12 +177,9 @@ class SpaceMediaSyncService:
     def attach_cache_readers(
         self, readers: Callable[[str, str, list[str]], Awaitable[list[str]]]
     ) -> None:
-        """v_97 (owner 2026-11-27) — a GFS space's files reach its
-        households through the GFS space media cache: a LIVE item's file the
-        item described for the cache is pushed only to the households that
-        cannot read it there (``SpaceMediaGfsUploader.push_targets``).
-        Catch-up rows, asked-for rows and files no descriptor covers (a
-        comment's picture, a file no GFS takes) keep the push."""
+        """v_97 (owner 2026-11-27) — a GFS space's files reach its v_97
+        households only through the GFS space media cache: they get no
+        push (``SpaceMediaGfsUploader.push_targets``)."""
         self._cache_readers = readers
 
     def attach_federation(self, federation: FederationService) -> None:
@@ -204,13 +201,17 @@ class SpaceMediaSyncService:
         media_urls: list[str],
         push: bool = False,
         wire_names: Mapping[str, str] | None = None,
-        live: bool = False,
+        asked: bool = False,
     ) -> None:
         """One outbox row per (media_url, peer) tuple.
 
-        ``live`` (v_97): the files of an item going out now, whose
-        descriptor rides the item — in a GFS space a file it described for
-        the GFS cache is not pushed to a household that reads it there.
+        v_97 (owner 2026-11-27): a GFS space's files reach its v_97
+        households only through the GFS space media cache — no row is
+        queued for them (``SpaceMediaGfsUploader.push_targets``), live or
+        catch-up. A row a household asked for by ``SPACE_MEDIA_WANTED``
+        (*asked*) is queued: a household asks only for a file it holds no
+        descriptor for (an item from a v_96 author, which carries none), so
+        the cache can't give it.
 
         ``push`` (v_92): the targets asked for these files
         (``SPACE_MEDIA_WANTED``) — they already missed their GFS cache, so
@@ -247,7 +248,7 @@ class SpaceMediaSyncService:
                 )
                 continue
             targets = list(target_instance_ids)
-            if live and self._cache_readers is not None:
+            if self._cache_readers is not None and not asked:
                 try:
                     targets = await self._cache_readers(space_id, filename, targets)
                 except Exception:
@@ -361,14 +362,12 @@ class SpaceMediaSyncService:
         target_instance_ids: list[str],
         media_urls: list[str],
         space_id: str = "",
-        live: bool = False,
     ) -> None:
         await self.enqueue_for_blob(
             space_id=space_id,
             correlation_id=post_id,
             target_instance_ids=target_instance_ids,
             media_urls=media_urls,
-            live=live,
         )
 
     # ── Scheduler loop ────────────────────────────────────────────────

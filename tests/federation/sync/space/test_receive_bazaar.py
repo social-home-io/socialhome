@@ -12,6 +12,7 @@ from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.receive_bazaar import _apply_bazaar_faq
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from tests.federation.sync.space.receiver_fakes import (
+    _SYNC_REFS,
     _CalendarRepoStub,
     _FakeCrypto,
     _FakeFedRepo,
@@ -19,6 +20,7 @@ from tests.federation.sync.space.receiver_fakes import (
     _FakeSpacePostRepo,
     _FakeSpaceRepo,
     _GalleryRepoStub,
+    _GfsMediaSink,
     _here,
     _PageRepoStub,
     _PostRepoStub,
@@ -314,3 +316,36 @@ async def test_bazaar_listings_skipped_when_repo_not_wired(bus, peer):
         ],
     )
     assert collector.bazaar_listings == []
+
+
+async def test_a_streamed_listings_descriptor_names_its_photos_from_the_gfs(setup):
+    """v_97 (owner B-3): a GFS space's bazaar photos reach a v_97
+    household only through the GFS cache — the §25.6 record's descriptor
+    (sealed for the wrapper post's id) names them here and is kept."""
+    r, c, kp = setup
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "bazaar",
+        [
+            {
+                "post_id": "bzr-1",
+                "space_id": "sp-1",
+                "seller_user_id": "u-seller",
+                "mode": "fixed",
+                "title": "Vintage chair",
+                "image_urls": ["api/media/a.webp"],
+                "end_time": "2026-06-01T00:00:00+00:00",
+                "currency": "USD",
+                "status": "active",
+                "price": 4500,
+                "created_at": "2026-05-23T10:00:00+00:00",
+                "media_refs": _SYNC_REFS,
+            },
+        ],
+    )
+    assert [(x[3], x[4]) for x in sink.received] == [("bzr-1", "peer-a")]
+    assert c.bazaar_listings[0].image_urls == ("api/media/sg-a.webp",)
+    assert sink.kept == [{"a.webp": "sg-a.webp"}]

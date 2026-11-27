@@ -2450,7 +2450,7 @@ def _wire_federation_stack(
     # service ships the full BazaarListing payload + image bytes so
     # remote members see price / mode / photos / status, not just the
     # caption. See ``socialhome/services/bazaar_outbound.py``.
-    BazaarOutbound(
+    bazaar_outbound = BazaarOutbound(
         bus=bus,
         federation_service=federation_service,
         bazaar_repo=bazaar_repo,
@@ -2533,6 +2533,7 @@ def _wire_federation_stack(
 
     # A household the host's roster snapshot adds gets our recent rows.
     private_invite_handler.attach_space_resume(space_sync_resume_provider)
+    app[K.space_sync_resume_key] = space_sync_resume_provider
 
     # v_86 — which files of a row we ship: on a catch-up, as a non-host
     # household, our own people's files only; on a SPACE_MEDIA_WANTED,
@@ -2688,6 +2689,7 @@ def _wire_federation_stack(
         moment_reaction_counts=moment_reaction_counts,
         content_inbound=content_inbound,
         gallery_federation_outbound=gallery_federation_outbound,
+        bazaar_outbound=bazaar_outbound,
         page_federation_outbound=page_federation_outbound,
     )
 
@@ -2904,11 +2906,16 @@ def _build_page_files_reach_host(
     also over the GFS relay when the host takes binary relay frames (v_87).
     Only a household whose host's relay cannot carry the push (a v_80–86
     seat, a GFS without ``envelope_media``) hands them over through its GFS
-    media cache, which it needs an upload authorization for."""
+    media cache, which it needs an upload authorization for. v_97: a host
+    that takes a GFS space's files only from the cache gets them described
+    and queued in the durable outbox — sent once this household's grant
+    lands (the queue tells the author if it never does)."""
 
     async def _reach(space_id: str) -> bool:
         mode, host = await page_conflicts.mode(space_id)
         if mode is not PageMode.MEMBER or not host:
+            return True
+        if await uploader.cache_only(space_id, host):
             return True
         if not await uploader.is_relay_reader(host):
             return True
@@ -2973,6 +2980,9 @@ def _build_space_media_gfs(
         # A file this household reads from a GFS media cache is fetched
         # there (prefetch / on view), never asked for by the file check.
         wanted.attach_gfs_refs(repos.space_media_ref.get)
+    # v_97 — a file held here only as a descriptor is fetched before it is
+    # described again (no loss for a cache-only household).
+    uploader.attach_fetcher(fetcher)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
     app[K.space_media_gfs_responder_key] = responder
@@ -4821,7 +4831,9 @@ def create_app(config: Config | None = None) -> web.Application:
     # Who may name a stored file in a write (private albums D7, other
     # people's chat attachments, a space's photos): one guard for every
     # local write sink (``services/media_ref_guard.py``).
-    media_ref_guard = MediaRefGuard(repos.media_reference)
+    media_ref_guard = MediaRefGuard(
+        repos.media_reference, media_dir=pathlib.Path(config.media_path)
+    )
     app[K.media_ref_guard_key] = media_ref_guard
     for guarded in (
         feed_service,
@@ -5911,13 +5923,19 @@ def create_app(config: Config | None = None) -> web.Application:
             # A private space with an opaque channel uploads under its
             # channel scope (the GFS never learns the space).
             space_media_uploader.attach_channels(gfs_channels)
+            space_media_fetcher.attach_channels(gfs_channels)
             # v_83 — a holder answers a channel request only for a seat it
             # holds on the asking GFS.
             app[K.space_media_gfs_responder_key].attach_channels(gfs_channels)
         space_post_outbound.attach_media_gfs(space_media_uploader)
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
+        fed.bazaar_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
+        # v_97 — a submission's files for a reviewer household that reads a
+        # GFS space from the cache only: described, uploaded, kept.
+        moderation_federation.attach_media_gfs(space_media_uploader)
+        moderation_federation.attach_gfs_media(space_media_fetcher)
         # …and the outbox skips a SPACE_MEDIA_BLOB push to one of them only
         # while its GFS is known to hold the file (every member is pushed
         # the rest, through the relay like any envelope).
@@ -5939,6 +5957,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # §25.6: a stream to a link-joined member carries the records'
         # ``media_refs`` (sync line 80); the receiving side keeps them.
         app[K.space_sync_service_key].attach_media_gfs(space_media_uploader)
+        # v_97 — a replay to a cache-only household describes its files.
+        app[K.space_sync_resume_key].attach_media_gfs(space_media_uploader)
         app[K.space_sync_receiver_key].attach_gfs_media(space_media_fetcher)
         if (item_outbox := app.get(K.space_item_outbox_key)) is not None:
             # v_97 — every space file upload waits in the durable item queue

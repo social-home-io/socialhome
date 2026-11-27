@@ -186,7 +186,7 @@ SPACE_MEDIA_ITEMS: Mapping[str, SpaceMediaItem] = MappingProxyType(
             resource="comments",
             table="space_post_comments",
             fields=(MediaField(("media_url",), _ONE, "media_url"),),
-            media_refs=False,
+            media_refs=True,
             file_hashes=True,
         ),
         "calendar": SpaceMediaItem(
@@ -218,7 +218,7 @@ SPACE_MEDIA_ITEMS: Mapping[str, SpaceMediaItem] = MappingProxyType(
                     ("image_urls",), _LIST, "image_urls_json", limit=BAZAAR_MAX_IMAGES
                 ),
             ),
-            media_refs=False,
+            media_refs=True,
             file_hashes=True,
         ),
         # Never ``file_hashes``: a page's files keep their page-scoped

@@ -2024,6 +2024,8 @@ async def test_a_member_household_streams_only_its_own_peoples_content(
 
 
 class _ReaderPlan:
+    pending: tuple[str, ...] = ()
+
     def __init__(self, urls):
         self.urls = list(urls)
 
@@ -2051,6 +2053,10 @@ class _ReaderUploader:
 
     async def is_relay_reader(self, iid):
         return iid in self.readers
+
+    async def reads_space_from_cache(self, space_id, iid):
+        # v_97 — a v_97 household of a GFS space (any path).
+        return iid in getattr(self, "cache_readers", set())
 
     async def takes_relay_frames(self, iid):
         return self.frames and iid in self.readers
@@ -2359,6 +2365,44 @@ async def test_a_link_joined_v81_requesters_page_records_carry_media_refs(encode
     assert all("media_refs" not in r for r in _streamed_records(old, "pages"))
 
 
+async def test_a_page_records_open_sides_are_described_too(encoder):
+    """v_97 (coordinator 1A) — a page record carries its open conflict
+    sides, which its members see: their files are described with the
+    version's, so a cache-only reader fetches them from the GFS cache
+    (never pushed, never asked for)."""
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+    exporters = {
+        "pages": _FakeExporter(
+            "pages",
+            [
+                {
+                    "id": "pg-1",
+                    "title": "T",
+                    "content": "![a](api/media/a.webp)",
+                    "conflict": [
+                        {
+                            "side_id": "h",
+                            "title": "T",
+                            "content": "![s](api/media/side.webp)",
+                            "cover": "api/media/sidecover.webp",
+                        }
+                    ],
+                }
+            ],
+        )
+    }
+    svc, _media = _page_provider(
+        encoder, versions={"peer-b": OURS}, exporters=exporters
+    )
+    svc.attach_media_gfs(uploader)
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    (page,) = _streamed_records(session, "pages")
+    assert set(page["media_refs"]) == {"a.webp", "side.webp", "sidecover.webp"}
+
+
 async def test_a_page_file_named_outside_the_space_is_not_in_the_catchup(
     encoder, monkeypatch
 ):
@@ -2643,3 +2687,133 @@ async def test_the_ban_reason_reaches_admin_households_only(encoder, admin):
     (got,) = _records(session)["bans"]
     assert got["banned_by"] == "u-a" and got["user_id"] == "u-x"
     assert got.get("reason") == ("spam" if admin else None)
+
+
+async def test_a_paired_v97_requester_of_a_gfs_space_gets_every_descriptor(encoder):
+    """v_97 — a paired household catching a GFS space up is no link-joined
+    reader, yet it reads the space's files from the GFS cache: its records
+    carry the descriptor (the uploader's plan — lazy for a cache-only
+    household, owner B-8), never only the stored blobs."""
+    uploader = _ReaderUploader(stored={"c.webp"})
+    uploader.cache_readers = {"peer-b"}
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert "media_refs" in posts["p-1"]
+    assert uploader.stored_asks == []
+    assert len(uploader.uploaded) >= 1
+
+
+async def test_a_record_whose_file_is_still_on_its_way_waits_for_the_next_stream(
+    encoder,
+):
+    """v_97 (owner: no loss) — a file the provider holds only as a GFS
+    descriptor is fetched before it is described; while that fetch runs, a
+    cache-only reader never gets the record without a descriptor (it would
+    ask for the file): the record is held back and the stream is not clean,
+    so the watermark stays and the next stream sends it, described."""
+
+    class _Pending(_ReaderPlan):
+        lazy = True
+        pending = ("a.webp",)
+
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        return _Pending(urls) if item_id == "p-1" else _ReaderPlan(urls)
+
+    uploader.plan_for_reader = plan_for_reader
+    svc = _media_provider(encoder, uploader)
+    svc._exporters["posts"] = _FakeExporter(
+        "posts",
+        [
+            {"id": "p-1", "author": "u-1", "image_urls": ["api/media/a.webp"]},
+            {"id": "p-2", "author": "u-1", "image_urls": ["api/media/b.webp"]},
+        ],
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    assert [r["id"] for r in _streamed_records(session, "posts")] == ["p-2"]
+    assert session.stream_clean is False
+
+
+async def test_a_record_that_could_not_be_described_waits_for_the_next_stream(
+    encoder,
+):
+    """Review H3c: a planning error toward a cache-only reader holds the
+    record back (the stream is not clean) — never sent undescribed."""
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        raise RuntimeError("no key")
+
+    uploader.plan_for_reader = plan_for_reader
+    svc = _media_provider(encoder, uploader)
+    svc._exporters["posts"] = _FakeExporter(
+        "posts",
+        [{"id": "p-1", "author": "u-1", "image_urls": ["api/media/a.webp"]}],
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    assert _streamed_records(session, "posts") == []
+    assert session.stream_clean is False
+
+
+async def test_a_bazaar_record_is_described_for_its_wrapper_post(encoder):
+    """v_97 (owner B-3) — a bazaar record carries no ``id``: its files are
+    described for the wrapper post's id, the one the listing's reader keeps
+    them under."""
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+    svc = _media_provider(encoder, uploader)
+    svc._exporters["bazaar"] = _FakeExporter(
+        "bazaar", [{"post_id": "bzr-1", "image_urls": ["api/media/a.webp"]}]
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    (listing,) = _streamed_records(session, "bazaar")
+    assert "media_refs" in listing
+    assert "bzr-1" in uploader.items
+
+
+async def test_a_cache_only_requester_gets_a_descriptor_for_every_record(encoder):
+    """v_97 (owner 2026-11-27) — a household that reads a GFS space from
+    the cache only never asks for a file (no ``SPACE_MEDIA_WANTED``) and
+    gets none pushed: EVERY record that shows files carries its lazy
+    descriptor — past the 500-record budget a link-joined reader keeps and
+    past any byte count — and nothing is uploaded for it."""
+
+    class _Lazy(_ReaderPlan):
+        lazy = True
+
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        uploader.items.append(item_id)
+        return _Lazy(urls)
+
+    uploader.plan_for_reader = plan_for_reader
+    svc = _media_provider(encoder, uploader)
+    count = provider_mod.MAX_CATCHUP_MEDIA_RECORDS + 20
+    svc._exporters["posts"] = _FakeExporter(
+        "posts",
+        [
+            {"id": f"p-{i}", "author": "u-1", "image_urls": ["api/media/a.webp"]}
+            for i in range(count)
+        ],
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    posts = _streamed_records(session, "posts")
+    assert len(posts) == count
+    assert all("media_refs" in r for r in posts)
+    assert uploader.stored_asks == []

@@ -254,7 +254,6 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
                     correlation_id=page_id,
                     target_instance_ids=targets,
                     media_urls=media_urls,
-                    live=True,
                 )
         except Exception:
             log.exception(

@@ -19,12 +19,17 @@ from socialhome.crypto import (
     derive_user_id,
     generate_identity_keypair,
 )
-from socialhome.domain.federation import DeliveryResult, FederationEventType
+from socialhome.domain.federation import (
+    DeliveryResult,
+    FederationEvent,
+    FederationEventType,
+)
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import (
     ContentAction,
     HostTooOldError,
     ModerationStatus,
+    SpaceFeatureAccess,
     SpaceModerationItem,
     SpaceType,
 )
@@ -32,7 +37,9 @@ from socialhome.domain.space_media_fields import (
     SPACE_MEDIA_ITEMS,
     moderation_item,
 )
+from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_moderation_federation import (
     SpaceModerationFederation,
@@ -241,6 +248,183 @@ async def test_a_posts_media_goes_to_the_targets_only():
     ]
     await out.send_submitted(SPACE, _item(), ["host"])
     assert len(media.calls) == 1  # a sticky has no media
+
+
+class _CacheUploader:
+    """A GFS space where ``cache`` households take files from the GFS
+    cache only (v_97, owner rule B)."""
+
+    def __init__(self, cache=()) -> None:
+        self.cache = set(cache)
+        self.plans: list[dict] = []
+        self.uploaded: list = []
+
+    async def cache_only(self, space_id, instance_id):
+        return instance_id in self.cache
+
+    async def plan(self, space_id, urls, *, item_id, followers, author_user_id=""):
+        self.plans.append(
+            {"urls": list(urls), "item_id": item_id, "author": author_user_id}
+        )
+        return SimpleNamespace(
+            wire=lambda: {u.rsplit("/", 1)[-1]: {"blob_id": "b"} for u in urls}
+        )
+
+    async def upload(self, plan, *, author_user_id=""):
+        self.uploaded.append(plan)
+
+
+async def test_a_submissions_files_reach_a_cache_only_reviewer_through_the_gfs():
+    """v_97 (owner rule B, coordinator 1A) — a reviewer household that
+    reads a GFS space from the cache only gets no push: the submission it
+    is sent describes its files (``media_refs``), uploaded at once through
+    the durable queue. A household that still takes the push gets no
+    descriptor (its files keep the submitter-bound names the push fills)."""
+    media = _Media()
+    out, fed = _fed(media=media)
+    uploader = _CacheUploader(cache={"host"})
+    out.attach_media_gfs(uploader)
+    post = _item(
+        "posts",
+        {"entity": "post", "target_id": "p-1", "image_urls": ["api/media/a.webp"]},
+    )
+    await out.send_submitted(SPACE, post, ["host", "house-mod"])
+    by_target = {to: payload for to, _et, payload in fed.sent}
+    assert by_target["host"]["media_refs"] == {"a.webp": {"blob_id": "b"}}
+    assert "media_refs" not in by_target["house-mod"]
+    assert uploader.plans == [
+        {"urls": ["api/media/a.webp"], "item_id": "item-1", "author": "u-a"}
+    ]
+    assert len(uploader.uploaded) == 1
+    # A sticky has no files: nothing planned.
+    await out.send_submitted(SPACE, _item(), ["host"])
+    assert len(uploader.plans) == 1
+
+
+class _GfsFetcher:
+    """Names the described files ``sg-<name>`` and records what is kept."""
+
+    def __init__(self) -> None:
+        self.localized: list[dict] = []
+        self.kept: list = []
+
+    async def localize(self, space_id, raw, urls, *, item_id, origin, hashes=None):
+        self.localized.append({"raw": raw, "item_id": item_id, "origin": origin})
+        described = set(raw or {})
+        return SpaceMediaLocalization(
+            names={
+                n: f"sg-{n}"
+                for n in (u.rsplit("/", 1)[-1] for u in urls)
+                if n in described
+            },
+            refs=("ref",) if described else (),
+        )
+
+    def localize_proposal(self, space_id, raw, added, *, item_id, origin):
+        self.localized.append({"raw": raw, "item_id": item_id, "origin": origin})
+        described = set(raw or {})
+        return SpaceMediaLocalization(
+            refs=tuple(local for name, local in added.items() if name in described)
+        )
+
+    async def keep(self, loc, *, prefetch_all=False):
+        self.kept.append((loc, prefetch_all))
+
+
+async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
+    monkeypatch,
+):
+    """v_97 — the reviewer side: a described file is fetched from the GFS
+    cache (bound to the sending household, sealed for the item) and its
+    descriptor row is kept once the item is stored; every file keeps the
+    pushed, submitter-bound name."""
+    out, _ = _fed(own="host")
+    fetcher = _GfsFetcher()
+    out.attach_gfs_media(fetcher)
+    stored: list = []
+    space = SimpleNamespace(
+        id="sp",
+        owner_instance_id="host",
+        dissolved=False,
+        archived=False,
+        features=SimpleNamespace(
+            access_level=lambda _f: SpaceFeatureAccess.MODERATED,
+            allows=lambda _t: True,
+            bazaar=True,
+        ),
+    )
+
+    async def _get(_sid):
+        return space
+
+    async def _zero(*_a, **_k):
+        return 0
+
+    async def _false(*_a, **_k):
+        return False
+
+    async def _true(*_a, **_k):
+        return True
+
+    out._spaces = SimpleNamespace(
+        get=_get,
+        is_banned=_false,
+        count_pending=_zero,
+        count_pending_from_instance=_zero,
+    )
+    out._authorship = SimpleNamespace(acts_for=_true)
+
+    async def _store(item, *, from_host):
+        stored.append(item)
+        return True
+
+    async def _snapshot(*_a):
+        return None
+
+    out._moderation = SimpleNamespace(
+        validate_payload=lambda _s, _f, _a, body: body,
+        local_snapshot=_snapshot,
+        store_received=_store,
+    )
+    monkeypatch.setattr(SpaceModerationFederation, "_reviews_here", _true)
+    event = FederationEvent(
+        msg_id="m-1",
+        event_type=FET.SPACE_MODERATION_SUBMITTED,
+        from_instance="house-a",
+        to_instance="host",
+        timestamp=NOW.isoformat(),
+        space_id="sp",
+        payload={
+            "space_id": "sp",
+            "item_id": "item-9",
+            "feature": "posts",
+            "action": "edit",
+            "target_id": "p-1",
+            "submitted_by": "u-a",
+            "payload": {
+                "entity": "post",
+                "target_id": "p-1",
+                "image_urls": ["api/media/a.webp", "api/media/b.webp"],
+            },
+            "media_refs": {"a.webp": {"blob_id": "x"}},
+        },
+    )
+    await out._on_submitted(event)
+    (item,) = stored
+    a_here = space_direct_media_name("sp", "house-a", "a.webp")
+    # Review H1: a described file keeps the very name the push would give
+    # it (bound to the sender), so the host's release and its follower copy
+    # match it as before; only its bytes come from the GFS cache.
+    assert item.payload["image_urls"] == [
+        f"api/media/{a_here}",
+        f"api/media/{space_direct_media_name('sp', 'house-a', 'b.webp')}",
+    ]
+    assert fetcher.localized[0]["item_id"] == "item-9"
+    assert fetcher.localized[0]["origin"] == "house-a"
+    # Kept once stored — every file fetched on the space's host, which
+    # releases the item once approved.
+    ((loc, everything),) = fetcher.kept
+    assert loc.refs == (a_here,) and everything is True
 
 
 async def test_a_held_calendar_events_cover_goes_to_the_reviewers():

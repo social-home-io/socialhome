@@ -3447,16 +3447,17 @@ class SpaceContentInboundHandlers:
                 user_id=seller_user_id,
             )
             return
-        # The seller's household ships the photos: they take its names here.
-        names = self._media_names.localize(
-            space_id,
-            event.from_instance,
-            item_media_urls("bazaar", listing),
-            hashes=parse_file_hashes(event.payload),
+        # The seller's household ships the photos: they take its names
+        # here — or (v_97, a GFS space) this household's names for the
+        # copies in the GFS cache its descriptor names.
+        names = await self._localize_media(
+            event, space_id, post_id, item_media_urls("bazaar", listing)
         )
         listing = names.item("bazaar", listing)
         try:
-            if not await self._bazaar_repo.save_listing(listing, space_id=space_id):
+            if await self._bazaar_repo.save_listing(listing, space_id=space_id):
+                await self._keep_media(names)
+            else:
                 # The wrapper post is not in this space (or has not landed
                 # yet), or the listing id belongs to another space.
                 log_cross_space_refusal(

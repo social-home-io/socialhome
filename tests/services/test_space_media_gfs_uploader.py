@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import os
 import pathlib
+import threading
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -34,7 +37,11 @@ from socialhome.domain.gfs_space_media import (
     space_media_address,
 )
 from socialhome.domain.space import SpaceType
-from socialhome.domain.space_item_outbox import MEDIA_UPLOAD_ROW, QueuedSpaceItem
+from socialhome.domain.space_item_outbox import (
+    MEDIA_UPLOAD_ROW,
+    UNPLANNED_GFS,
+    QueuedSpaceItem,
+)
 from socialhome.gfs_channel import channel_pk_of, derive_channel_seed
 from socialhome.moment_public_media import blob_id_of
 from socialhome.services import space_media_gfs_uploader as up_mod
@@ -97,8 +104,14 @@ class _Gfs:
     async def space_media_pieces(self, conn):
         return self.pieces
 
+    async def space_media_file_max(self, conn):
+        return 128 * 1024 * 1024 if self.pieces else 0
+
     def space_media_cache_off(self, conn) -> bool:
         return False
+
+    def capability_unknown(self, conn) -> bool:
+        return getattr(self, "unknown", False)
 
     async def space_media_max_blob(self, conn, *, scope="channel"):
         if scope not in self.scopes:
@@ -225,7 +238,9 @@ class _Spaces:
                 owner_instance_id=self.owner,
             )
         return SimpleNamespace(
-            space_type=SpaceType.PRIVATE, features=SimpleNamespace(private_gfs=True)
+            space_type=SpaceType.PRIVATE,
+            features=SimpleNamespace(private_gfs=True),
+            owner_instance_id=self.owner,
         )
 
     async def get_gfs_channel(self, space_id):
@@ -338,12 +353,21 @@ async def test_takes_relay_frames_asks_the_federation_for_the_seat_row(tmp_path)
 # ── Planning ─────────────────────────────────────────────────────────────
 
 
-async def test_no_gfs_reader_means_no_plan_and_no_sealing(tmp_path):
+async def test_no_gfs_planned_yet_still_describes_and_queues_unplanned(tmp_path):
+    """Review F finding 4 / owner B-7: a space with a channel but no GFS
+    connection right now still describes its files; the upload waits in the
+    durable queue as one unplanned row per blob (planned when due) — never
+    filtered and lost."""
     _write(tmp_path, "a.webp", 1000)
     u = _uploader(tmp_path, gfs=_Gfs([]), instances=[PAIRED], versions={"b": V})
-    assert (
-        await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False) is None
-    )
+    box = _Outbox()
+    u.attach_outbox(box)
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    assert plan is not None and plan.targets == ()
+    assert set(plan.wire()) == {"a.webp"}
+    await u.upload(plan, author_user_id="anna")
+    assert [r.gfs_id for r in box.rows] == [UNPLANNED_GFS]
+    assert box.failed == []
 
 
 async def test_plan_for_a_relay_seat_describes_each_file(tmp_path):
@@ -390,9 +414,8 @@ async def test_followers_target_the_channel_gfs_set(tmp_path):
         gfs=_Gfs([], follower=[g2]),
         spaces=_Spaces(OWNER_SEED, channel=(cid, pk)),
     )
-    assert (
-        await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False) is None
-    )
+    unplanned = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    assert unplanned is not None and unplanned.targets == ()
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=True)
     assert [t.id for t in plan.targets] == ["g2"]
 
@@ -1388,25 +1411,273 @@ async def test_a_piece_whose_file_changed_is_not_sent(tmp_path):
     assert gfs.puts == []
 
 
-async def test_push_targets_keep_the_push_unless_the_cache_has_the_file(tmp_path):
-    """v_97 — a live item's file it described AND queued for the GFS cache
-    is pushed only to households below v_97 (and to everyone while the
-    space's legacy window is open); any other file to everyone."""
-    _write(tmp_path, "a.webp", 10)
+async def test_a_gfs_spaces_files_are_pushed_only_below_v97(tmp_path):
+    """v_97 (owner 2026-11-27) — a GFS space's files reach a v_97
+    household only through the GFS cache: whatever the file, only older
+    households keep the push (everyone while the legacy window is open); a
+    mesh space's files go to everyone."""
     g1 = _Conn("g1", "https://g1.example")
-    gfs = _Gfs([g1])
-    u = _pieced_uploader(tmp_path, gfs)
+    u = _pieced_uploader(tmp_path, _Gfs([g1]))
     u.attach_federation(_Fed({"new": OURS, "old": 90}))
     targets = ["new", "old"]
-    # Nothing described yet: everyone keeps the push.
-    assert await u.push_targets(SPACE, "a.webp", targets) == targets
-    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    await _upload(u, plan)
     assert await u.push_targets(SPACE, "a.webp", targets) == ["old"]
-    assert await u.push_targets(SPACE, "b.webp", targets) == targets
+    assert await u.push_targets(SPACE, "any.webp", targets) == ["old"]
+    mesh = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(b"\1" * 32, channel=None))
+    mesh.attach_federation(_Fed({"new": OURS}))
+    assert await mesh.push_targets(SPACE, "a.webp", targets) == targets
 
     async def window_open(space_id):
         return True
 
     u.attach_legacy_window(window_open)
     assert await u.push_targets(SPACE, "a.webp", targets) == targets
+
+
+async def test_a_v96_host_or_no_stored_channel_keeps_the_push(tmp_path):
+    """v_97 (owner B-6) — the cache-only rule is a version and channel
+    condition: a space whose host is below v_97 (its own files carry no
+    descriptor), or one with no stored channel here yet, keeps the push for
+    every household; with a v_97 host a v_97 household gets none."""
+    g1 = _Conn("g1", "https://g1.example")
+    seed = b"\3" * 32
+    channel = (CHANNEL_ID, channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)))
+    for host, expected in (("host96", ["new"]), ("host97", [])):
+        u = _uploader(
+            tmp_path,
+            gfs=_Gfs([g1]),
+            spaces=_Spaces(seed, channel=channel, private_gfs=True, owner=host),
+        )
+        u.attach_federation(_Fed({"new": OURS, "host96": 96, "host97": OURS}))
+        assert await u.push_targets(SPACE, "a.webp", ["new"]) == expected
+        assert await u.cache_only(SPACE, "new") is (not expected)
+    no_channel = _uploader(
+        tmp_path,
+        gfs=_Gfs([g1]),
+        spaces=_Spaces(seed, channel=None, private_gfs=True, owner="host97"),
+    )
+    no_channel.attach_federation(_Fed({"new": OURS, "host97": OURS}))
+    assert await no_channel.push_targets(SPACE, "a.webp", ["new"]) == ["new"]
+
+
+async def test_a_catch_up_reader_of_a_gfs_space_is_described_for_the_cache(
+    tmp_path,
+):
+    """v_97 (owner B-8) — a paired (or mesh) v_97 household catching a GFS
+    space up gets a LAZY descriptor: every file described by its address
+    from our copy, nothing uploaded (no bulk re-upload on a join) — it
+    fetches on view, a miss on demand from a holder (v_83)."""
+    a = _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS, "old": 90}))
+    box = _Outbox()
+    u.attach_outbox(box)
+    assert await u.reads_space_from_cache(SPACE, "paired") is True
+    assert await u.reads_space_from_cache(SPACE, "old") is False
+    plan = await u.plan_for_reader(SPACE, ["api/media/a.webp"], "paired", item_id=ITEM)
+    assert plan is not None and plan.lazy and plan.targets == ()
+    blob = up_mod.seal_file_sync(MEDIA_KEY, SPACE, 4, ITEM, OWN, "a.webp", a)
+    assert plan.refs[0].size == len(blob)
+    await u.upload(plan)
+    assert box.rows == [] and gfs.puts == []
+    assert (
+        await u.plan_for_reader(SPACE, ["api/media/a.webp"], "old", item_id=ITEM)
+        is None
+    )
+
+
+async def test_a_file_no_gfs_of_the_space_takes_is_told_to_its_author(tmp_path):
+    """v_97 — with no GFS of the space keeping its media, a GFS space's
+    file has no way to its households: the author is told (no push)."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _pieced_uploader(tmp_path, _Gfs([g1], scopes=()))
+    box = _Outbox()
+    u.attach_outbox(box)
+    plan = await u.plan(
+        SPACE,
+        ["api/media/a.webp"],
+        item_id=ITEM,
+        followers=False,
+        author_user_id="anna",
+    )
+    assert plan is None
+    assert box.failed == [(SPACE, "anna", "refused")]
+
+
+async def test_a_file_over_half_a_channels_share_is_never_split(tmp_path):
+    """v_97 — a GFS keeps one file in pieces up to half its signed channel
+    share: a larger one is not described (its author is told), never half
+    uploaded."""
+    _write(tmp_path, "v.webm", BIG)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _pieced_uploader(tmp_path, gfs)
+
+    async def small_share(conn):
+        return BIG - 1
+
+    gfs.space_media_file_max = small_share
+    box = _Outbox()
+    u.attach_outbox(box)
+    plan = await u.plan(
+        SPACE,
+        ["api/media/v.webm"],
+        item_id=ITEM,
+        followers=False,
+        author_user_id="anna",
+    )
+    assert plan is None
+    assert box.failed == [(SPACE, "anna", "too_large")]
+
+
+async def test_an_unreachable_gfs_is_no_verdict_and_tells_nobody(tmp_path):
+    """Review F (findings 4/8): a GFS whose capability is merely unknown
+    right now, or a catch-up plan (no author), never shows "Couldn't
+    send". The unreachable GFS's file is still described and its row waits
+    in the durable queue (owner B-7); the attempt is transient, not gone."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], scopes=())
+    gfs.unknown = True
+    u = _pieced_uploader(tmp_path, gfs)
+    box = _Outbox()
+    u.attach_outbox(box)
+    plan = await u.plan(
+        SPACE,
+        ["api/media/a.webp"],
+        item_id=ITEM,
+        followers=False,
+        author_user_id="anna",
+    )
+    assert plan is not None and [t.id for t in plan.targets] == ["g1"]
+    await u.upload(plan, author_user_id="anna")
+    assert [r.gfs_id for r in box.rows] == ["g1"]
+    assert (await u.deliver(box.rows[0])).kind == "transient"
+    gfs.unknown = False
+    assert (
+        await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False) is None
+    )
+    assert box.failed == []
+
+
+async def test_lazy_describing_is_capped_per_household(tmp_path, monkeypatch):
+    """v_97 — at most ``MAX_DESCRIBING_STREAMS`` lazy catch-up describes
+    seal at once on a household; the rest wait their turn."""
+    _write(tmp_path, "a.webp", 10)
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS}))
+    running = 0
+    peak = 0
+    lock = threading.Lock()
+    real = up_mod.seal_and_address_sync
+
+    def slow(*args):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.02)
+        with lock:
+            running -= 1
+        return real(*args)
+
+    # Only the sealing (in a worker thread) takes a slot.
+    monkeypatch.setattr(up_mod, "seal_and_address_sync", slow)
+    plans = await asyncio.gather(
+        *(
+            u.plan_for_reader(SPACE, ["api/media/a.webp"], "paired", item_id=f"i-{i}")
+            for i in range(6)
+        )
+    )
+    assert all(p is not None and p.lazy for p in plans)
+    assert peak == up_mod.MAX_DESCRIBING_STREAMS
+
+
+async def test_a_page_version_with_open_sides_is_described_whole(tmp_path):
+    """v_97 — one item describes up to the largest descriptor any item
+    carries (a page version and its open sides), not only 16 files."""
+    names = [f"f{i}.webp" for i in range(40)]
+    for name in names:
+        _write(tmp_path, name, 10)
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS}))
+    plan = await u.plan_for_reader(
+        SPACE, [f"api/media/{n}" for n in names], "paired", item_id=ITEM
+    )
+    assert plan is not None and len(plan.refs) == 40
+
+
+class _DescribeFetcher:
+    """Fetches a file held only as a GFS descriptor: ``arrive`` lands it,
+    anything else stays on its way (``running``)."""
+
+    def __init__(self, media_dir, arrive=(), running=()):
+        self.dir = media_dir
+        self.arrive = set(arrive)
+        self.running = set(running)
+        self.asked: list[str] = []
+        self.at_once = 0
+        self.peak = 0
+
+    async def ensure_local(self, filename, *, timeout_s):
+        self.asked.append(filename)
+        self.at_once += 1
+        self.peak = max(self.peak, self.at_once)
+        await asyncio.sleep(0.01)
+        self.at_once -= 1
+        if filename in self.arrive:
+            (self.dir / filename).write_bytes(b"x" * 10)
+            return True
+        return False
+
+    def fetching(self, filename):
+        return filename in self.running
+
+
+async def test_a_file_held_only_as_a_descriptor_is_fetched_before_it_is_described(
+    tmp_path,
+):
+    """v_97 (owner: no loss) — a household republishing a file it holds only
+    as a GFS descriptor (a video nobody viewed here) fetches it first, then
+    describes it; a file whose fetch is still running is ``pending`` in a
+    lazy plan (a catch-up holds its record back), one no GFS holds is
+    neither."""
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS}))
+    fetcher = _DescribeFetcher(tmp_path, arrive={"v.webm"}, running={"slow.webm"})
+    u.attach_fetcher(fetcher)
+    plan = await u.plan(SPACE, ["api/media/v.webm"], item_id=ITEM, followers=False)
+    assert plan is not None and [r.filename for r in plan.refs] == ["v.webm"]
+    lazy = await u.plan_for_reader(
+        SPACE,
+        ["api/media/slow.webm", "api/media/gone.webm"],
+        "paired",
+        item_id=ITEM,
+    )
+    assert lazy is not None and lazy.refs == () and lazy.pending == ("slow.webm",)
+    gone = await u.plan_for_reader(
+        SPACE, ["api/media/gone.webm"], "paired", item_id=ITEM
+    )
+    assert gone is None
+
+
+async def test_fetches_to_describe_are_capped_per_space(tmp_path):
+    """One republish can't start unbounded downloads: at most
+    MAX_DESCRIBE_FETCHES_PER_SPACE fetch-to-describe at once per space."""
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    fetcher = _DescribeFetcher(tmp_path)
+    u.attach_fetcher(fetcher)
+    await asyncio.gather(
+        *(
+            u.plan(SPACE, [f"api/media/m{i}.webm"], item_id=f"i-{i}", followers=False)
+            for i in range(6)
+        )
+    )
+    assert len(fetcher.asked) == 6
+    assert fetcher.peak == up_mod.MAX_DESCRIBE_FETCHES_PER_SPACE

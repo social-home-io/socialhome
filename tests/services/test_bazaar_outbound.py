@@ -1095,3 +1095,54 @@ async def test_a_listing_ships_every_registered_field(
     )
     call = media_sync.enqueue_for_blob.call_args
     assert call.kwargs["media_urls"] == expected_urls("bazaar", stored_only=True)
+
+
+class _Plan:
+    def wire(self):
+        return {"chair-1.webp": {"blob_id": "a" * 64}}
+
+
+class _MediaGfs:
+    def __init__(self):
+        self.planned: list = []
+        self.uploaded: list = []
+
+    async def plan(self, space_id, urls, *, item_id, followers, author_user_id=""):
+        self.planned.append((space_id, list(urls), item_id, author_user_id))
+        return _Plan()
+
+    async def upload(self, plan, *, author_user_id=""):
+        self.uploaded.append((plan, author_user_id))
+
+
+async def test_a_gfs_space_listing_photos_ride_the_gfs_cache(
+    federation_service, media_sync, federation_repo
+):
+    """v_97 — a GFS space's listing photos are described on the listing
+    and uploaded to the GFS cache, sealed for the listing."""
+    bus = EventBus()
+    bazaar_repo = MagicMock()
+    bazaar_repo.get_listing = AsyncMock(return_value=_make_listing())
+    out = BazaarOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        bazaar_repo=bazaar_repo,
+        media_sync=media_sync,
+        federation_repo=federation_repo,
+    )
+    gfs = _MediaGfs()
+    out.attach_media_gfs(gfs)
+    await bus.publish(
+        BazaarListingCreated(
+            listing_post_id="bzr-1",
+            space_id="sp-1",
+            seller_user_id="u-seller",
+            mode="fixed",
+            title="Vintage chair",
+            occurred_at=datetime.fromisoformat("2026-05-23T10:00:00+00:00"),
+        ),
+    )
+    assert gfs.planned[0][2:] == ("bzr-1", "u-seller")
+    payload = federation_service.broadcast_to_space_members.await_args.args[2]
+    assert payload["media_refs"] == _Plan().wire()
+    assert len(gfs.uploaded) == 1

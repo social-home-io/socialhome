@@ -2388,7 +2388,10 @@ is always checked as a content address, whatever header rides along. An
 unknown address suite is refused (`UnsupportedSpaceMediaAddrSuite`); `sm1p`
 is never a content address (`space_media_address` refuses it). A GFS
 advertises `"pieces": true` in its signed `space_media` block only when a
-whole piece fits its blob cap; a household sends pieces only there. The GFS recomputes it on upload from
+whole piece fits its blob cap; a household sends pieces only there. One
+file takes at most half of a scope's `space_max_bytes`: the GFS adds up
+the stored pieces its manifest names and refuses a piece past it
+(`413 file_over_share`). The GFS recomputes it on upload from
 the claim's scope and refuses a mismatch (`422 blob_id_mismatch`); a reader
 checks it with the scope id it knows. **Why:** with a bare content hash, a
 follower who saw a blob's address (it rides in the item, before the
@@ -2740,8 +2743,10 @@ for another node's re-upload share one poll of the shared cache, which ends
 as soon as that node's claim ends. And a hint sealed more than 600 s ago is refused (`bad_hint`), which
 bounds replay. It sends only a file that a **live** row of the space shows
 (`MediaReferenceRepo.live_in_space`: a post, comment, listing, event, page
-or album item not deleted — never one only a moderation queue or an edit history
-still names), so a deleted item's picture never comes back.
+or album item not deleted — a live page with its version history and open
+conflict sides (v_97: its members see them) — never one only a moderation
+queue or a closed snapshot still names, never a deleted page's), so a
+deleted item's picture never comes back.
 
 **Hints.** A session keeps up to 4 distinct reader hints (the opener's
 first, then those of readers who joined). On `bad_hint` the GFS retries the

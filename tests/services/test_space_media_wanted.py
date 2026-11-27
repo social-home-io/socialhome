@@ -713,6 +713,7 @@ async def test_the_provider_ships_a_held_content_named_file(tmp_path):
             "target_instance_ids": ["req"],
             "media_urls": [a],
             "push": True,
+            "asked": True,
             "wire_names": {a: a},
         }
     ]
@@ -1466,3 +1467,29 @@ async def test_a_young_row_whose_file_arrived_ends_the_checks(tmp_path, monkeypa
     now[0] = 600.0
     await w.drain()
     assert fed.sent == [] and len(refs.recent_asked) == 2
+
+
+async def test_a_gfs_space_asks_only_for_a_file_without_a_descriptor(tmp_path):
+    """v_97 (owner 2026-11-27): a GFS space's files come through the GFS
+    cache (a miss there on demand) — a described file is never asked for,
+    on a check or a view. Only a file it holds no descriptor for (an item
+    from a v_96 author, which carries none) is asked for."""
+    a, b = _sc("a"), _sc("b")
+    refs = _Refs()
+    refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-x", [a, b])]}
+    refs.rows = {a: [(SPACE, "p1", "2026-01-01 10:00:00")]}
+    fed = _Fed({HOST: V92})
+    w = _wanted(refs=refs, fed=fed, media_dir=tmp_path, spaces=_Spaces(gfs=True))
+
+    async def _ref(name):
+        return object() if name == a else None
+
+    w.attach_gfs_refs(_ref)
+    w.applied(SPACE)
+    await w.drain()
+    assert [_names(s) for s in fed.sent] == [[b]]
+    # A view of the described file asks nothing either.
+    fed.sent.clear()
+    w.schedule(a)
+    await w.drain()
+    assert fed.sent == []

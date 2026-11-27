@@ -271,6 +271,9 @@ class _PostRepoStub:
         self._c.comments.append(comment)
         return True
 
+    async def get_comment(self, comment_id):
+        return next((c for c in self._c.comments if c.id == comment_id), None)
+
 
 class _TaskRepoStub:
     def __init__(self, collector):

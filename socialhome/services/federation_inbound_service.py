@@ -19,6 +19,7 @@ import binascii
 import functools
 import logging
 import pathlib
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -70,6 +71,7 @@ from ..domain.events import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.file_hashes import (
+    FileHash,
     blob_hash,
     is_space_content_media_name,
     parse_file_hashes,
@@ -714,6 +716,29 @@ class FederationInboundService(ProtectionGateMixin):
     def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
         """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
         self._moment_reaction_router = router
+
+    async def _comment_gfs_media(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        comment_id: str,
+        hashes: Mapping[str, FileHash] | None,
+    ) -> SpaceMediaLocalization | None:
+        """v_97 — the GFS-cache names of a comment's picture its
+        ``media_refs`` describes (``None``: no descriptor, no fetcher)."""
+        raw = event.payload.get(MEDIA_REFS_FIELD)
+        url = space_media_ref(event.payload.get("media_url"))
+        if self._gfs_media is None or raw is None or url is None:
+            return None
+        loc = await self._gfs_media.localize(
+            space_id,
+            raw,
+            [url],
+            item_id=comment_id,
+            origin=event.from_instance,
+            hashes=hashes,
+        )
+        return loc if loc.names else None
 
     async def _localize_space_media(
         self,
@@ -3121,6 +3146,14 @@ class FederationInboundService(ProtectionGateMixin):
             comment_type = CommentType(comment_type_str)
         except ValueError:
             comment_type = CommentType.TEXT
+        hashes = parse_file_hashes(p)
+        media_url = comment_media_ref(space_id, p.get("media_url"), hashes)
+        # v_97 — a GFS space's comment picture is read from the GFS cache:
+        # its descriptor, bound to the envelope's sender (the item's origin),
+        # names this household's copy.
+        media = await self._comment_gfs_media(event, space_id, comment_id, hashes)
+        if media is not None:
+            media_url = media.url(space_media_ref(p.get("media_url"))) or media_url
         comment = Comment(
             id=comment_id,
             post_id=post_id,
@@ -3130,9 +3163,7 @@ class FederationInboundService(ProtectionGateMixin):
             parent_id=p.get("parent_id"),
             content=p.get("content") or "",
             # v_85 — a hashed picture takes its content name.
-            media_url=comment_media_ref(
-                space_id, p.get("media_url"), parse_file_hashes(p)
-            ),
+            media_url=media_url,
         )
         if not await self._space_post_repo.add_comment(comment, space_id=space_id):
             log_cross_space_refusal(
@@ -3142,6 +3173,8 @@ class FederationInboundService(ProtectionGateMixin):
                 row_id=post_id,
             )
             return
+        if media is not None and self._gfs_media is not None:
+            await self._gfs_media.keep(media)
         await self._space_post_repo.increment_comment_count(
             post_id,
             space_id=space_id,

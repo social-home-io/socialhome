@@ -1915,3 +1915,31 @@ async def test_the_hint_says_when_we_put_the_post_on_the_channel(
     relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
     assert (relay.get(CHANNEL_SENT_FIELD) is True) is marked
     assert verify_signed_author_inner(relay)
+
+
+async def test_a_gfs_space_comment_picture_rides_the_gfs_cache():
+    """v_97 — a comment's picture in a GFS space is described on the shared
+    payload and uploaded to the GFS cache, like a post's (owner 2026-11-27:
+    a GFS space's files come only from the GFS)."""
+    from socialhome.domain.post import Comment, CommentType
+
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    media_gfs = _FakeMediaGfs(plan=_FakePlan(_REFS))
+    outbound = _make_outbound(bus=bus, federation=federation)
+    outbound.attach_media_gfs(media_gfs)
+    comment = Comment(
+        id="c-9",
+        post_id="p-1",
+        author="uid-alice",
+        type=CommentType.IMAGE,
+        content="",
+        media_url="api/media/a.webp",
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
+    )
+    await bus.publish(CommentAdded(post_id="p-1", comment=comment, space_id="sp-1"))
+    assert media_gfs.items == ["c-9"]  # sealed for the comment itself
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert payload["media_refs"] == _REFS
+    assert len(media_gfs.uploaded) == 1

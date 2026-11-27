@@ -21,28 +21,105 @@ nothing out). A refusal answers exactly like a malformed reference (422
 it through :class:`MediaRefGuardedMixin` (``attach_media_guard``, wired in
 ``app.py``) and call :meth:`MediaRefGuardedMixin._require_openable_media`
 at every local write sink.
+
+A file one write of a space names that another place references too
+(another space, the household feed, a DM) gets a copy of its own for that
+space (v_97, coordinator 2A): :meth:`MediaRefGuard.space_copies` — a new
+name, the same bytes (a hard link where the file system allows), so the
+space's GFS cache may seal it under the space's key
+(``confined_to_space``) and every path treats it like any of the space's
+files. The cache holds it once per space it is named in, as it would two
+uploads.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import logging
+import pathlib
+import uuid
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
+
+import aiofiles
+import aiofiles.os
 
 from ..domain.errors import InvalidMediaRefError
 from ..domain.media_constraints import SPACE_PAGE_MEDIA_PREFIX
 from ..media.cleanup import media_basename
+from .inbound_media_store import media_file_path
 
 if TYPE_CHECKING:
     from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 
 
+log = logging.getLogger(__name__)
+
+#: Bytes copied at a time when a hard link is not possible.
+_COPY_CHUNK = 1024 * 1024
+
+
 class MediaRefGuard:
     """The one check every local write of a media reference passes."""
 
-    __slots__ = ("_refs",)
+    __slots__ = ("_dir", "_refs")
 
-    def __init__(self, refs: AbstractMediaReferenceRepo) -> None:
+    def __init__(
+        self,
+        refs: AbstractMediaReferenceRepo,
+        *,
+        media_dir: pathlib.Path | None = None,
+    ) -> None:
         self._refs = refs
+        self._dir = pathlib.Path(media_dir) if media_dir is not None else None
+
+    async def space_copies(
+        self, refs: Iterable[str | None], *, space_id: str
+    ) -> Callable[[str | None], str | None]:
+        """A rename for a write of space *space_id* naming *refs*: each file
+        another place references too — any row names it, yet not only this
+        space's — becomes a copy local to the space (new name, same bytes);
+        a fresh upload, a file only this space names and a missing file
+        keep their names. Call it after :meth:`require_openable`."""
+        names: dict[str, str] = {}
+        if self._dir is not None:
+            for ref in refs:
+                name = media_basename(ref) if ref else None
+                if not name or name in names:
+                    continue
+                if await self._refs.is_referenced(
+                    name
+                ) and not await self._refs.confined_to_space(name, space_id):
+                    copy = await self._copy(name)
+                    if copy is not None:
+                        names[name] = copy
+
+        def rename(value: str | None) -> str | None:
+            if not value:
+                return value
+            path, sep, query = value.partition("?")
+            head, slash, base = path.rpartition("/")
+            local = names.get(base)
+            return value if local is None else f"{head}{slash}{local}{sep}{query}"
+
+        return rename
+
+    async def _copy(self, name: str) -> str | None:
+        """A new name holding *name*'s bytes, or ``None`` (no such file)."""
+        assert self._dir is not None
+        src = media_file_path(self._dir, name)
+        if src is None or not await aiofiles.os.path.isfile(src):
+            return None
+        dot = name.rfind(".")
+        copy = f"{uuid.uuid4().hex}{name[dot:] if dot > 0 else ''}"
+        dst = self._dir / copy
+        try:
+            await aiofiles.os.link(src, dst)
+        except OSError:
+            async with aiofiles.open(src, "rb") as fin, aiofiles.open(dst, "wb") as out:
+                while chunk := await fin.read(_COPY_CHUNK):
+                    await out.write(chunk)
+        log.info("media %s: a copy %s local to its new space", name, copy)
+        return copy
 
     async def require_openable(
         self, refs: Iterable[str | None], *, user_id: str, field: str = "media_url"
@@ -90,3 +167,13 @@ class MediaRefGuardedMixin:
         guard: MediaRefGuard | None = getattr(self, "_media_guard", None)
         if guard is not None:
             await guard.require_openable(refs, user_id=user_id, field=field)
+
+    async def _space_media_copies(
+        self, refs: Iterable[str | None], *, space_id: str
+    ) -> Callable[[str | None], str | None]:
+        """:meth:`MediaRefGuard.space_copies` — unchanged references
+        without a guard attached."""
+        guard: MediaRefGuard | None = getattr(self, "_media_guard", None)
+        if guard is None:
+            return lambda value: value
+        return await guard.space_copies(refs, space_id=space_id)

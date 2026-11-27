@@ -1089,13 +1089,12 @@ async def test_a_gfs_reached_follower_is_queued_media_like_a_member(
     assert {r.target_instance_id for r in rows} == {"peer-a", "peer-b"}
 
 
-async def test_a_live_file_read_from_the_gfs_cache_is_not_pushed_there(
+async def test_a_gfs_spaces_file_is_never_pushed_to_a_cache_reader(
     db, outbox, tmp_path
 ):
-    """v_97 (owner 2026-11-27): a live item's file it described for the GFS
-    cache is pushed only to the households that can't read it there (the
-    uploader's ``push_targets``); a catch-up or asked-for row is never
-    filtered."""
+    """v_97 (owner 2026-11-27): a GFS space's files reach a v_97
+    household only through the GFS cache — live, catch-up or asked-for rows
+    alike (the uploader's ``push_targets`` decides)."""
     await _seed_space(db)
     (tmp_path / "img-1.webp").write_bytes(b"x" * 64)
     fed = _fed()
@@ -1113,19 +1112,32 @@ async def test_a_live_file_read_from_the_gfs_cache_is_not_pushed_there(
         correlation_id="p-1",
         target_instance_ids=["peer-b", "peer-a"],
         media_urls=["api/media/img-1.webp"],
-        live=True,
     )
     assert asked == [("sp-1", "img-1.webp", ["peer-b", "peer-a"])]
     await svc.flush_once()
     sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
     assert sent_to == {"peer-a"}
-    # Not live (a catch-up): every target keeps its push.
+    # A catch-up row (``push``) is filtered the same way.
     await svc.enqueue_for_blob(
         space_id="sp-1",
         correlation_id="p-2",
         target_instance_ids=["peer-b"],
         media_urls=["api/media/img-1.webp"],
+        push=True,
     )
-    assert len(asked) == 1
-    rows = await outbox.list_for_correlation("p-2")
-    assert [r.target_instance_id for r in rows] == ["peer-b"]
+    assert len(asked) == 2
+    assert await outbox.list_for_correlation("p-2") == []
+    # A row the household asked for by SPACE_MEDIA_WANTED (``asked``) is
+    # queued: it asks only for a file it holds no descriptor for.
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-3",
+        target_instance_ids=["peer-b"],
+        media_urls=["api/media/img-1.webp"],
+        push=True,
+        asked=True,
+    )
+    assert len(asked) == 2
+    assert [r.target_instance_id for r in await outbox.list_for_correlation("p-3")] == [
+        "peer-b"
+    ]

@@ -214,7 +214,6 @@ class GalleryFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                             correlation_id=item.id,
                             target_instance_ids=targets,
                             media_urls=media_urls,
-                            live=True,
                         )
                     except Exception:
                         log.exception(

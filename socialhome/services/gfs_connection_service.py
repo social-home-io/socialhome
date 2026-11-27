@@ -83,6 +83,7 @@ from ..domain.gfs_mailbox import (
 )
 from ..domain.gfs_server import GfsServer
 from ..domain.gfs_space_media import (
+    MAX_PIECED_FILE_BYTES,
     MEDIA_SCOPES,
     PIECE_PROOF_HEADER,
     SCOPE_CHANNEL,
@@ -165,7 +166,7 @@ def _envelope_multi_cap(entry: object) -> int:
 
 def _space_media_limit(
     caps: dict,
-) -> tuple[int, frozenset[str], int | None, int | None, bool] | None:
+) -> tuple[int, frozenset[str], int | None, int | None, int] | None:
     """``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s, pieces)`` of a
     verified ``space_media`` capability entry (``ttl_s`` /
     ``on_demand_wait_s`` ``None`` when absent or malformed; ``pieces``: it
@@ -194,7 +195,16 @@ def _space_media_limit(
         else None
     )
     pieces = entry.get("pieces") is True
-    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s, pieces
+    share = entry.get("space_max_bytes")
+    # v_97 — a file in pieces may take at most half of a channel's share.
+    if not pieces:
+        file_max = 0
+    elif isinstance(share, int) and not isinstance(share, bool) and share > 0:
+        file_max = share // 2
+    else:
+        file_max = MAX_PIECED_FILE_BYTES
+
+    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s, file_max
 
 
 #: Characters of a *remote-authored* error body that may be interpolated
@@ -678,7 +688,7 @@ class GfsConnectionService:
         # server that proved it; absent = not proven (re-probed, never a
         # sticky no).
         self._space_media: dict[
-            str, tuple[int, frozenset[str], int | None, int | None, bool]
+            str, tuple[int, frozenset[str], int | None, int | None, int]
         ] = {}
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
@@ -4083,10 +4093,15 @@ class GfsConnectionService:
         """Whether *conn*'s GFS proved (signed ``space_media.pieces``, v_97)
         that it keeps the 8 MiB pieces of a file larger than one blob — a
         pieced file is uploaded only there."""
+        return await self.space_media_file_max(conn) > 0
+
+    async def space_media_file_max(self, conn: GfsConnection) -> int:
+        """The largest file in pieces *conn*'s GFS keeps (v_97: half its
+        signed ``space_max_bytes``), ``0`` when it keeps no pieces."""
         if conn.id not in self._space_media:
             await self.space_media_max_blob(conn)  # one probe on a cold miss
         cached = self._space_media.get(conn.id)
-        return cached is not None and cached[4]
+        return cached[4] if cached is not None else 0
 
     async def space_media_on_demand_wait(self, conn: GfsConnection) -> int | None:
         """How long *conn*'s GFS lets a ``wanted`` request wait (its signed

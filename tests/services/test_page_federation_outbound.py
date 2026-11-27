@@ -370,8 +370,6 @@ async def test_a_host_version_ships_its_files_to_every_v81_member(media_env):
                 "api/media/a.webp",
                 "/api/media/b.webp",
             ],
-            # v_97 — a live version's files: the GFS-cache filter applies.
-            "live": True,
         }
     ]
     assert gfs.plans == [("sp-A", media.calls[0]["media_urls"], "p1")]

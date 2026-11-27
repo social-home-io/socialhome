@@ -46,6 +46,7 @@ from ..infrastructure.event_bus import EventBus
 from .file_hashes_sender import FileHashesMixin
 from .media_file_hasher import MediaFileHasher
 from .moderation_release import with_release
+from .space_media_refs import SpaceMediaRefsMixin
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class BazaarOutbound(FileHashesMixin):
+class BazaarOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     """Bus-event → federation broadcaster for bazaar listings."""
 
     __slots__ = (
@@ -68,6 +69,7 @@ class BazaarOutbound(FileHashesMixin):
         "_federation",
         "_federation_repo",
         "_file_hasher",
+        "_media_gfs",
         "_media_sync",
         "_seats",
         "_users",
@@ -100,6 +102,8 @@ class BazaarOutbound(FileHashesMixin):
         self._federation = federation_service
         self._bazaar_repo = bazaar_repo
         self._media_sync = media_sync
+        #: v_97 — a GFS space's photos go to the GFS cache (descriptor).
+        self._media_gfs = None
         self._federation_repo = federation_repo
         self._bus.subscribe(BazaarListingCreated, self._on_listing_created)
         self._bus.subscribe(BazaarListingExpired, self._on_listing_expired)
@@ -149,6 +153,16 @@ class BazaarOutbound(FileHashesMixin):
         with_release(payload)
         files = item_media_urls("bazaar", listing)
         payload = await self._with_file_hashes(payload, files)
+        # v_97 — in a GFS space the photos go to the GFS cache like a
+        # post's: the descriptor rides the listing.
+        media_plan = await self._plan_media_refs(
+            listing.space_id,
+            files,
+            item_id=listing.post_id,
+            followers=False,
+            author_user_id=listing.seller_user_id,
+        )
+        payload = self._with_media_refs(payload, media_plan)
         try:
             await self._federation.broadcast_to_space_members(
                 listing.space_id,
@@ -162,6 +176,7 @@ class BazaarOutbound(FileHashesMixin):
                 listing.space_id,
                 listing.post_id,
             )
+        await self._upload_media(media_plan, author_user_id=listing.seller_user_id)
         # Hand off image bytes to the shared media outbox. Same pattern
         # as SpacePostOutbound: enqueue per-peer rows so the scheduler
         # can chunk + retry independently of the metadata broadcast.

@@ -9860,6 +9860,13 @@ class SpaceService(
         await self._require_openable_media(
             (media_url, *image_urls_tuple), user_id=author_user_id, field="image_urls"
         )
+        # v_97 (2A) — a file another place names too gets a copy of its own
+        # for this space, so every path carries it like the space's own.
+        own = await self._space_media_copies(
+            (media_url, *image_urls_tuple), space_id=space_id
+        )
+        media_url = own(media_url)
+        image_urls_tuple = tuple(own(u) or u for u in image_urls_tuple)
         clean_attachments = self._post_attachments.validate(post_type, attachments)
         # ``posts_access`` is enforced on EVERY household from its own copy
         # of the features — the host and each member household's stub
@@ -10295,6 +10302,10 @@ class SpaceService(
             raise ValueError("image comment requires media_url")
         media_url = optional_local_media_ref(media_url)
         await self._require_openable_media((media_url,), user_id=author_user_id)
+        # v_97 (2A) — a file named elsewhere too: a copy of its own here.
+        media_url = (await self._space_media_copies((media_url,), space_id=space_id))(
+            media_url
+        )
         if parent_id is not None:
             parent = await self._posts.get_comment(parent_id)
             if parent is None or parent.post_id != post_id:

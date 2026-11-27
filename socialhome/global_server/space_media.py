@@ -104,6 +104,8 @@ from ..domain.gfs_space_media import (
     MEDIA_SCOPES,
     PieceProof,
     check_piece,
+    piece_address,
+    pieced_file_address,
     space_media_address,
 )
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
@@ -396,6 +398,35 @@ class GfsSpaceMediaStore:
         if size > self._limits.max_blob_bytes:
             self._counters.refused_too_large += 1
             raise MediaRefused(413, "too_large_for_cache")
+
+    async def check_file_share(
+        self, *, scope_id: str, scope_kind: str, proof: PieceProof, size: int
+    ) -> None:
+        """v_97 — one file in pieces may hold at most half of a scope's
+        share (``space_max_bytes``): the piece's file is known from its
+        proof (every piece address derives from the manifest), so the
+        pieces of that file already kept here are added up — no new state.
+        A file past it is refused (``413 file_over_share``) rather than
+        evicting most of the space's pictures. Never charges anything."""
+        cap = self._limits.space_max_bytes // 2
+        # Every piece but the last is a full blob: a file whose pieces can't
+        # fit is refused at its FIRST piece, never half kept (evicting the
+        # space's pictures for a file that can't complete).
+        if (len(proof.manifest) - 1) * MAX_BLOB_BYTES > cap:
+            raise MediaRefused(413, "file_over_share")
+        try:
+            file_addr = pieced_file_address(scope_kind, scope_id, proof.manifest)
+        except ValueError as exc:
+            raise MediaRefused(422, "bad_scope") from exc
+        held = 0
+        for index in range(len(proof.manifest)):
+            if index == proof.index:
+                continue
+            blob = await self._repo.get_blob(piece_address(file_addr, index))
+            if blob is not None:
+                held += blob.size
+        if held + size > cap:
+            raise MediaRefused(413, "file_over_share")
 
     async def admit_upload(
         self,

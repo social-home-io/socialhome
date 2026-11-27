@@ -183,6 +183,11 @@ REQUEST_TIMEOUT_S: float = 30.0
 #: One 8 MiB piece's GET (v_97): a full piece over a ~1 Mbit/s link.
 PIECE_TIMEOUT_S: float = 120.0
 
+#: Bytes the part directories of files in pieces may hold together (v_97):
+#: past it the least recently written ones go first (a fetch that never
+#: completed), never the file being fetched.
+MAX_PARTIAL_PIECE_BYTES: int = 512 * 1024 * 1024
+
 #: GFSs tried per fetch.
 MAX_SOURCES: int = 4
 
@@ -218,10 +223,18 @@ class _MemberVersions(Protocol):
     ) -> bool: ...
 
 
+class _ChannelRing(Protocol):
+    async def ring_connections(
+        self, space_id: str
+    ) -> tuple[str, list[GfsConnection]] | None: ...
+
+
 class SpaceMediaGfsFetcher:
     """Keep ``media_refs`` and turn them into local files."""
 
     __slots__ = (
+        "_active_parts",
+        "_channels",
         "_crypto",
         "_dir",
         "_federation",
@@ -279,6 +292,16 @@ class SpaceMediaGfsFetcher:
         self._space_misses: OrderedDict[str, int] = OrderedDict()
         #: v_82 — a page's files, kept under page-scoped ``sp-`` names.
         self._pages: AbstractPageRepo | None = None
+        #: v_97 — the space's channel connections (tried first).
+        self._channels: _ChannelRing | None = None
+        #: v_97 — part directories of the pieced fetches running now (never
+        #: trimmed by the part cap).
+        self._active_parts: set[pathlib.Path] = set()
+
+    def attach_channels(self, channels: _ChannelRing) -> None:
+        """v_97 — a GFS space's files come only from the GFS cache: the
+        GFSs the space's channel lives on are asked first."""
+        self._channels = channels
 
     def attach_pages(self, page_repo: AbstractPageRepo) -> None:
         """Wire the space pages (v_82): a page's file is kept under its
@@ -517,10 +540,16 @@ class SpaceMediaGfsFetcher:
             return True
 
     async def keep(
-        self, loc: SpaceMediaLocalization, *, prefetch: bool = True
+        self,
+        loc: SpaceMediaLocalization,
+        *,
+        prefetch: bool = True,
+        prefetch_all: bool = False,
     ) -> list[SpaceMediaRef]:
         """Keep *loc*'s new rows — call it once the item is stored — and
-        prefetch their pictures. Never raises."""
+        prefetch their pictures (*prefetch_all*: every file, a file in
+        pieces too — the space's host holding a submission it will
+        release, v_97). Never raises."""
         if not loc.refs:
             return []
         try:
@@ -531,7 +560,9 @@ class SpaceMediaGfsFetcher:
         for ref in loc.refs:
             # A newer epoch may have moved the row: ask the GFS again.
             self._misses.pop(ref.local_name, None)
-            if prefetch and not ref.pieced and _is_picture(ref.local_name):
+            if prefetch_all or (
+                prefetch and not ref.pieced and _is_picture(ref.local_name)
+            ):
                 self._prefetch(ref.local_name, ref.space_id)
         return list(loc.refs)
 
@@ -579,6 +610,11 @@ class SpaceMediaGfsFetcher:
             while len(self._misses) > MAX_MISSES_REMEMBERED:
                 self._misses.popitem(last=False)
         return outcome == _STORED
+
+    def fetching(self, filename: str) -> bool:
+        """Whether a fetch of *filename* is running now (v_97: a catch-up
+        holds a record back for its next stream while it is)."""
+        return any(name == filename for name, _want in self._inflight)
 
     def _fetch_task(self, filename: str, *, want: bool = False) -> asyncio.Task[str]:
         key = (filename, want)
@@ -852,16 +888,20 @@ class SpaceMediaGfsFetcher:
         except ValueError:
             return _REFUSED
         part_dir = self._dir / _PARTIAL_DIR / f"pieces-{ref.local_name}"
-        have = await present_parts(part_dir)
-        for index in range(count):
-            if part_name(index) in have:
-                continue
-            got = await self._fetch_piece(
-                ref, index, count, scope_id, key, part_dir, sources, want
-            )
-            if got != _STORED:
-                return got
-        return await self._assemble(ref, count, part_dir, path)
+        self._active_parts.add(part_dir)
+        try:
+            have = await present_parts(part_dir)
+            for index in range(count):
+                if part_name(index) in have:
+                    continue
+                got = await self._fetch_piece(
+                    ref, index, count, scope_id, key, part_dir, sources, want
+                )
+                if got != _STORED:
+                    return got
+            return await self._assemble(ref, count, part_dir, path)
+        finally:
+            self._active_parts.discard(part_dir)
 
     async def _fetch_piece(
         self,
@@ -943,6 +983,14 @@ class SpaceMediaGfsFetcher:
             )
             return False
         await aiofiles.os.makedirs(part_dir, exist_ok=True)
+        stale = await asyncio.to_thread(
+            _over_cap_part_dirs,
+            self._dir / _PARTIAL_DIR,
+            frozenset(self._active_parts | {part_dir}),
+            len(data),
+        )
+        for old in stale:
+            await drop_parts(old)
         tmp = part_dir / f".{part_name(index)}.{uuid.uuid4().hex}"
         try:
             async with aiofiles.open(tmp, "wb") as fh:
@@ -1057,6 +1105,13 @@ class SpaceMediaGfsFetcher:
         household holds no connection to is never fetched (review E)."""
         conns: list[GfsConnection] = []
         seen: set[str] = set()
+        if self._channels is not None:
+            # v_97 — the GFSs the space's channel lives on hold its files.
+            ring = await self._channels.ring_connections(space_id)
+            for held in ring[1] if ring is not None else []:
+                if held.inbox_url and held.id not in seen:
+                    seen.add(held.id)
+                    conns.append(held)
         for iid in await self._federation_repo.list_member_instance_ids(space_id):
             inst = await self._federation_repo.get_instance(iid)
             if (
@@ -1085,6 +1140,47 @@ class SpaceMediaGfsFetcher:
             space_id=space_id,
             sha256=sha256,
         )
+
+
+def _over_cap_part_dirs(
+    root: pathlib.Path, keep: frozenset[pathlib.Path], adding: int
+) -> list[pathlib.Path]:
+    """The ``pieces-*`` part directories under *root* to drop, least
+    recently written first, so that all of them plus *adding* bytes stay
+    within :data:`MAX_PARTIAL_PIECE_BYTES` — never one in *keep* (a fetch
+    running now). An entry that vanishes meanwhile (another fetch joined or
+    dropped it) is skipped. The worker-thread body (a directory walk)."""
+    dirs: list[tuple[float, int, pathlib.Path]] = []
+    total = 0
+    try:
+        entries = list(os.scandir(root))
+    except FileNotFoundError:
+        return []
+    for entry in entries:
+        if not entry.name.startswith("pieces-") or not entry.is_dir(
+            follow_symlinks=False
+        ):
+            continue
+        size = 0
+        newest = 0.0
+        try:
+            for part in os.scandir(entry.path):
+                if part.is_file(follow_symlinks=False):
+                    st = part.stat(follow_symlinks=False)
+                    size += st.st_size
+                    newest = max(newest, st.st_mtime)
+        except OSError:
+            continue  # gone meanwhile
+        total += size
+        if pathlib.Path(entry.path) not in keep:
+            dirs.append((newest, size, pathlib.Path(entry.path)))
+    out: list[pathlib.Path] = []
+    for _newest, size, path in sorted(dirs):
+        if total + adding <= MAX_PARTIAL_PIECE_BYTES:
+            break
+        out.append(path)
+        total -= size
+    return out
 
 
 def _join_parts_sync(part_dir: pathlib.Path, count: int, tmp: pathlib.Path) -> str:

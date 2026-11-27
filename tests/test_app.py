@@ -1138,8 +1138,12 @@ async def test_page_files_reach_the_host_unless_a_link_seat_lacks_upload_rights(
             return self.mode_, "host"
 
     class _Uploader:
-        def __init__(self, reader, can, frames):
+        def __init__(self, reader, can, frames, cache_only=False):
             self.reader, self.can, self.frames = reader, can, frames
+            self.only = cache_only
+
+        async def cache_only(self, space_id, iid):
+            return self.only
 
         async def is_relay_reader(self, iid):
             return self.reader
@@ -1150,11 +1154,14 @@ async def test_page_files_reach_the_host_unless_a_link_seat_lacks_upload_rights(
         async def can_upload(self, space_id):
             return self.can
 
-    async def _check(mode, reader, can, frames=False):
+    async def _check(mode, reader, can, frames=False, cache_only=False):
         reach = _build_page_files_reach_host(
-            _Conflicts(mode), _Uploader(reader, can, frames)
+            _Conflicts(mode), _Uploader(reader, can, frames, cache_only)
         )
         return await reach("sp")
+
+    # v_97 — a cache-only host: described and queued (waits for a grant).
+    assert await _check(PageMode.MEMBER, True, False, cache_only=True)
 
     assert await _check(PageMode.HOST, True, False)
     assert await _check(PageMode.MEMBER, False, False)

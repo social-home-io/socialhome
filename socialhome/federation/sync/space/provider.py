@@ -40,10 +40,10 @@ from ....domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     PAGE_HISTORY_FILES,
     STREAM_HISTORY_FILES,
+    described_record_urls,
     page_media_urls,
     recent_history_files,
     record_file_urls,
-    record_media_urls,
 )
 from ....services.space_media_names import space_own_files
 from .exporter import (
@@ -219,6 +219,8 @@ MAX_CATCHUP_MEDIA_RECORDS: int = 500
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
 
+    async def reads_space_from_cache(self, space_id: str, instance_id: str) -> bool: ...
+
     async def takes_relay_frames(self, instance_id: str) -> bool: ...
 
     async def stored_plan_for_reader(
@@ -245,14 +247,25 @@ class _WithMediaRefs:
     push and ``SPACE_MEDIA_WANTED``):
     only the files its GFS is already known to hold are described, and
     nothing is uploaded. Otherwise (a v_80 requester, which can ask for
-    nothing) every file is described and queued for upload to its GFS."""
+    nothing) every file is described and queued for upload to its GFS.
+
+    ``lazy`` (v_97, owner 2026-11-27 — a household that reads a GFS space
+    from the cache only, which never asks for a file nor gets one pushed):
+    EVERY record is described, from our copy, never uploaded — no record
+    or byte budget, since a record without a descriptor would leave its
+    files unreachable. The cost is CPU only: each file is sealed once per
+    stream in a worker thread (the uploader caps the household's sealing
+    workers and remembers each address, so the next requester of the same
+    epoch costs a lookup); the stream yields between records."""
 
     __slots__ = (
         "_budget",
         "_inner",
+        "_lazy",
         "_media",
         "_requester",
         "_stored_only",
+        "deferred",
         "resource",
     )
 
@@ -263,22 +276,33 @@ class _WithMediaRefs:
         requester: str,
         *,
         stored_only: bool = False,
+        lazy: bool = False,
     ) -> None:
         self._inner = inner
         self._media = media
         self._requester = requester
         self._stored_only = stored_only
+        self._lazy = lazy and not stored_only
         self._budget = MAX_CATCHUP_MEDIA_RECORDS
         self.resource = inner.resource
+        #: v_97 — a record held back: a file it shows is still on its way
+        #: here from the GFS. The stream then keeps the requester's
+        #: watermark, so the next one sends the record, described.
+        self.deferred = False
 
     async def _add(
         self, space_id: str, rows: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for row in rows:
-            urls = record_media_urls(self.resource, row)
-            if urls and self._budget > 0:
-                item_id = str(row.get("id") or "")
+            urls = described_record_urls(self.resource, row)
+            if urls and (self._lazy or self._budget > 0):
+                # The item the descriptor is sealed for — the id the reader
+                # keeps it under: a bazaar listing is its wrapper post's.
+                item_id = str(
+                    (row.get("post_id") if self.resource == "bazaar" else row.get("id"))
+                    or ""
+                )
                 try:
                     if self._stored_only:
                         # Only blobs its GFS is known to hold, address for
@@ -301,10 +325,24 @@ class _WithMediaRefs:
                         self._requester,
                         exc_info=True,
                     )
+                    if self._lazy:
+                        # Never undescribed to a cache-only reader: the
+                        # next stream sends it (review H3c).
+                        self.deferred = True
+                        continue
                     plan = None
-                if not self._stored_only:
+                if self._lazy:
+                    # Sealing ran in a worker thread; let other work in
+                    # between records of a long stream.
+                    await asyncio.sleep(0)
+                elif not self._stored_only:
                     # Every described record costs a seal and an upload.
                     self._budget -= 1
+                if self._lazy and plan is not None and plan.pending:
+                    # Never without a descriptor to a cache-only reader (it
+                    # would ask for the file): the next stream sends it.
+                    self.deferred = True
+                    continue
                 if plan is not None:
                     if self._stored_only:
                         # Only a descriptor that goes out spends the budget.
@@ -849,7 +887,7 @@ class SpaceSyncService:
             exporter is not None
             and resource in MEDIA_REF_RESOURCES
             and self._media_gfs is not None
-            and await self._media_gfs.is_relay_reader(session.requester_instance_id)
+            and await self._reads_from_cache(session)
             and (
                 resource != "pages"
                 or await self._takes_page_media(
@@ -862,8 +900,21 @@ class SpaceSyncService:
                 self._media_gfs,
                 session.requester_instance_id,
                 stored_only=await self._narrow_gfs_catchup(session),
+                lazy=await self._media_gfs.reads_space_from_cache(
+                    session.space_id, session.requester_instance_id
+                ),
             )
         return exporter
+
+    async def _reads_from_cache(self, session: SyncSessionRecord) -> bool:
+        """Whether the requester takes the stream's files from a GFS
+        media cache: a link-joined reader, or (v_97) any v_97 household of
+        a GFS space — its records then carry the descriptor."""
+        assert self._media_gfs is not None
+        requester = session.requester_instance_id
+        return await self._media_gfs.is_relay_reader(
+            requester
+        ) or await self._media_gfs.reads_space_from_cache(session.space_id, requester)
 
     async def _narrow_gfs_catchup(self, session: SyncSessionRecord) -> bool:
         """Whether this requester — a member reading a GFS media cache — is
@@ -877,6 +928,11 @@ class SpaceSyncService:
             >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
             and await self._media_gfs.is_relay_reader(session.requester_instance_id)
             and await self._media_gfs.takes_relay_frames(session.requester_instance_id)
+            # v_97 — a GFS space's v_97 household takes every file from the
+            # cache (no catch-up push): every record is described.
+            and not await self._media_gfs.reads_space_from_cache(
+                session.space_id, session.requester_instance_id
+            )
         )
 
     async def _shaped_exporter(
@@ -1044,6 +1100,10 @@ class SpaceSyncService:
                         # discovery window warms the cache right after this.
                         self._close_session(sync_id)
                         return
+                if getattr(exporter, "deferred", False):
+                    # v_97 — a record held back (a file still on its way
+                    # here): the watermark stays, the next stream sends it.
+                    any_failure = True
             # v_95: the bucket listings the BEGIN asked for, right before
             # the sentinel (the requester classifies on it, after this
             # stream's rows are applied).
