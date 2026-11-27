@@ -6913,6 +6913,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # that would only fail its send against a torn-down channel.
         # The deferred mesh re-sends of space broadcasts go first: they ride
         # the routed handler, so stopping it underneath them would fail them.
+        # Pushes to the households a roster snapshot added: ended while the
+        # federation stack and the database are still up.
+        if (invites := app.get(K.private_invite_handler_key)) is not None:
+            await invites.stop()
         fed_svc = app.get(K.federation_service_key)
         if fed_svc is not None:
             await fed_svc.stop()

@@ -2405,6 +2405,15 @@ class PrivateSpaceInviteHandler:
         while self._pushes:
             await asyncio.gather(*self._pushes, return_exceptions=True)
 
+    async def stop(self) -> None:
+        """App cleanup: end the pushes under way (the next snapshot, or the
+        catch-up, brings what they did not send)."""
+        tasks = list(self._pushes)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _restatable_removals(
         self, space: Space
     ) -> tuple[bytes, dict[tuple[str, str], SpaceRemoteMember]] | None:

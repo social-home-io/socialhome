@@ -664,6 +664,23 @@ async def test_a_push_never_holds_up_the_snapshot_and_is_capped(tmp_dir, monkeyp
     await db.shutdown()
 
 
+async def test_stop_ends_the_pushes_under_way(tmp_dir):
+    """App cleanup cancels a push still waiting, before the database goes."""
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    replays = _Replays()
+    replays.gate = asyncio.Event()
+    h.attach_space_resume(replays)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_roster_snapshot(
+        _snapshot([_entry(j, _signed_payload(j, seed=seed, member_version=4))])
+    )
+    assert h._pushes
+    await h.stop()
+    assert not h._pushes and replays.calls == []
+    await h.stop()  # nothing under way: a no-op
+    await db.shutdown()
+
+
 async def test_a_snapshot_with_a_refused_entry_or_not_from_the_host_is_not_noted(
     tmp_dir,
 ):
