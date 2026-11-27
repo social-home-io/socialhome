@@ -757,7 +757,7 @@ export default function SpaceFeedPage() {
       />
       {/* Only when this household is not up to date with the space (or
        *  our own items still wait to go out) — on every section. */}
-      {s && !s.archived && <SpaceSyncChip spaceId={spaceId} sync={s.sync} hostedHere={hostedHere} />}
+      {s && !s.archived && !s.gfs_connect_needed && <SpaceSyncChip spaceId={spaceId} sync={s.sync} hostedHere={hostedHere} />}
       {/* v_97 — the viewer's own changes a GFS would not take: Try again /
        *  Discard. Nothing when there is nothing to say. */}
       {s && <SpaceUnsentBanner spaceId={spaceId} spaceName={s.name} />}

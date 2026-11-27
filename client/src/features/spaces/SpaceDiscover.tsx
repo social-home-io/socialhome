@@ -195,12 +195,20 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
   /** A GFS space another household hosts (v_97): the household connects
    *  to a GFS first — an admin with the person's yes, anyone else asks an
    *  admin. Cancel or a failed check sends nothing. */
-  const gfsOk = async (e: DirectoryEntry) =>
-    isLocal(e) || await askGfsConsent(e.space_id, e.name)
+  const gfsOk = async (e: DirectoryEntry, a: 'join' | 'follow' | 'request') => {
+    if (isLocal(e)) return true
+    // Busy while asking: a connect and its re-checks take a few seconds.
+    setBusy(e.space_id)
+    const ok = await askGfsConsent(e.space_id, e.name, a)
+    if (!ok) setBusy(null)
+    return ok
+  }
 
   const act = async (e: DirectoryEntry, a: DiscoverAction) => {
     if (a === 'request') {
-      if (await gfsOk(e)) setAsking(e)
+      const ok = await gfsOk(e, 'request')
+      setBusy(null)
+      if (ok) setAsking(e)
       return
     }
     if (a !== 'join' && a !== 'follow') return
@@ -208,7 +216,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
     // approximate location — ask first, send nothing without a yes.
     const carries = !isLocal(e) && joinCarriesLocation(e)
     if (carries && !await askLocationConsent(hostLabel(e))) return
-    if (!await gfsOk(e)) return
+    if (!await gfsOk(e, a)) return
     setBusy(e.space_id)
     try {
       if (a === 'follow') {

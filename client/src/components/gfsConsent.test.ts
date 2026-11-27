@@ -16,9 +16,9 @@ import { askGfsConsent, RECHECK_TRIES } from './gfsConsent'
 beforeEach(() => {
   get.mockReset(); post.mockReset(); confirm.mockReset(); toast.mockReset()
 })
-afterEach(() => { vi.useRealTimers() })
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
-const NEEDS = { gfs_space: true, connected: false, may_connect: true }
+const NEEDS = { gfs_space: true, connected: false, may_connect: true, default_gfs: 'gfs.example' }
 
 describe('askGfsConsent', () => {
   it('asks nothing for a mesh space or a connected household', async () => {
@@ -56,12 +56,37 @@ describe('askGfsConsent', () => {
     expect(confirm.mock.calls[1][1]).toMatchObject({ notice: true })
   })
 
+  it('names the GFS it connects and words the dialog for a follow', async () => {
+    get.mockResolvedValueOnce(NEEDS)
+    confirm.mockResolvedValueOnce(false)
+    expect(await askGfsConsent('sp', 'Choir', 'follow')).toBe(false)
+    const [body, opts] = confirm.mock.calls[0]
+    expect(body).toContain('gfs.example')
+    expect(opts.confirmLabel).not.toBe(confirm.mock.calls[0][1].cancelLabel)
+    get.mockResolvedValueOnce(NEEDS)
+    confirm.mockResolvedValueOnce(false)
+    await askGfsConsent('sp', 'Choir', 'join')
+    // Follow and join say different things.
+    expect(confirm.mock.calls[1][1].confirmLabel).not.toBe(opts.confirmLabel)
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('with no default GFS to connect, an admin is sent to Connections; nothing is sent', async () => {
+    const assign = vi.fn()
+    vi.stubGlobal('location', { ...window.location, assign })
+    get.mockResolvedValueOnce({ ...NEEDS, default_gfs: null })
+    confirm.mockResolvedValueOnce(true)
+    expect(await askGfsConsent('sp', 'Choir')).toBe(false)
+    expect(post).not.toHaveBeenCalled()
+    expect(assign).toHaveBeenCalledWith(expect.stringMatching(/\/connections$/))
+  })
+
   it('a failed connect says why and does not join', async () => {
     get.mockResolvedValue(NEEDS)
     confirm.mockResolvedValueOnce(true)
     post.mockRejectedValueOnce(new Error('down'))
     expect(await askGfsConsent('sp', 'Choir')).toBe(false)
-    expect(toast).toHaveBeenCalledWith(expect.any(String), 'error')
+    expect(toast).toHaveBeenLastCalledWith(expect.any(String), 'error')
   })
 
   it('anyone else is told to ask an admin, and nothing is sent', async () => {

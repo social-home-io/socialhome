@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+
+from socialhome.app_keys import config_key
 from socialhome.auth import sha256_token_hash
 from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
@@ -524,11 +528,31 @@ async def test_join_preflight_says_a_global_space_needs_a_gfs(client, monkeypatc
         "/api/public_spaces/sp-g/join-preflight", headers=_auth(client._tok)
     )
     assert r.status == 200
-    assert await r.json() == {
-        "gfs_space": True,
-        "connected": False,
-        "may_connect": True,
-    }
+    body = await r.json()
+    assert (body["gfs_space"], body["connected"], body["may_connect"]) == (
+        True,
+        False,
+        True,
+    )
+    # What "Connect and join" would connect: the household's default GFS,
+    # by its host — or null when none is configured / already connected.
+    url = client.app[config_key].gfs_default_url
+    assert body["default_gfs"] == (urlsplit(url).hostname if url else None)
+
+
+async def test_join_preflight_names_no_default_already_connected(client, monkeypatch):
+    await _no_ring(monkeypatch)
+    await _global_listing(client)
+    url = client.app[config_key].gfs_default_url or "https://gfs.example"
+
+    async def connected(self):
+        return [SimpleNamespace(inbox_url=url + "/")]
+
+    monkeypatch.setattr(GfsConnectionService, "list_connections", connected)
+    r = await client.get(
+        "/api/public_spaces/sp-g/join-preflight", headers=_auth(client._tok)
+    )
+    assert (await r.json())["default_gfs"] is None
 
 
 async def test_join_preflight_ignores_the_clients_space_type(client, monkeypatch):

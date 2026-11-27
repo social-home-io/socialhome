@@ -231,7 +231,9 @@ describe('SpaceGfsNotice — required (v_97, the household must connect)', () =>
     })} />)
     expect(r.getByTestId('space-gfs-notice-required').textContent)
       .toContain('space.gfs_notice.required_any:')
-    expect(r.getByTestId('space-gfs-notice-connect').getAttribute('href'))
-      .toBe('/api/hassio_ingress/tok/connections')
+    const link = r.getByTestId('space-gfs-notice-connect')
+    expect(link.getAttribute('href')).toBe('/api/hassio_ingress/tok/connections')
+    // Honest: it opens Connections, it does not connect by itself.
+    expect(link.textContent).toBe('space.gfs_notice.open_connections')
   })
 })

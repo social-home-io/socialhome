@@ -6,6 +6,8 @@ Returns the cached directory of public spaces (populated by the
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from aiohttp import web
 
 from .. import app_keys as K
@@ -177,13 +179,32 @@ class PublicSpaceJoinPreflightView(BaseView):
         ready = await self.svc(K.space_service_key).gfs_join_readiness(
             self.match("space_id")
         )
+        default_gfs: str | None = None
+        if ctx.is_admin and ready.gfs_space and not ready.connected:
+            default_gfs = await self._default_gfs()
         return web.json_response(
             {
                 "gfs_space": ready.gfs_space,
                 "connected": ready.connected,
                 "may_connect": bool(ctx.is_admin),
+                # What "Connect and join" connects: the household's default
+                # GFS, by its host — ``null`` when none is configured or the
+                # household is already connected to it (then the admin picks
+                # one that lists the space under Connections).
+                "default_gfs": default_gfs,
             }
         )
+
+    async def _default_gfs(self) -> str | None:
+        url = str(self.request.app[K.config_key].gfs_default_url or "").rstrip("/")
+        if not url:
+            return None
+        gfs = self.request.app.get(K.gfs_connection_service_key)
+        if gfs is not None:
+            for conn in await gfs.list_connections():
+                if conn.inbox_url.rstrip("/") == url:
+                    return None
+        return urlsplit(url).hostname or None
 
 
 class PublicSpaceHideView(BaseView):

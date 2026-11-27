@@ -123,7 +123,7 @@ function RequiredGfsNotice({ space }: { space: GfsNoticeSpace }): JSX.Element {
                    ? t('space.gfs_notice.connect_aria', { name: r.name })
                    : t('space.gfs_notice.connect_any_aria')}
                  data-testid="space-gfs-notice-connect">
-                {t('space.gfs_notice.connect')}
+                {r.name ? t('space.gfs_notice.connect') : t('space.gfs_notice.open_connections')}
               </a>
             )}
           </div>
