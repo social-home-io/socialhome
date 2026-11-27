@@ -63,7 +63,7 @@ class GfsWebSocketSupervisor:
         instance_id: str,
         signing_key: bytes,
         session_factory: Callable[[], aiohttp.ClientSession],
-        on_relay: Callable[[dict], Awaitable[None]],
+        on_relay: Callable[[dict], Awaitable[bool | None]],
         on_highlight_signal: Callable[[dict], Awaitable[None]] | None = None,
         on_moment_public: Callable[..., Awaitable[None]] | None = None,
         on_follow_changed: Callable[..., Awaitable[object]] | None = None,

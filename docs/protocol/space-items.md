@@ -245,18 +245,40 @@ per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
 
 - **Watching.** The SPA sends `space.viewing {space_id}` over its WebSocket
   while a person has the space open (every 60 s); the household watches the
-  space's channel on each GFS it is seated on, and unwatches 2 min after the
-  last view. The **host always watches** its spaces' channels (owner F5).
-- **Cursors** per `(gfs_id, channel_id)`: `(ring_id, seq)`. A new seat
-  starts at the head; history comes from the join catch-up (owner F8).
-- **Badge.** A heads ping above the cursor raises the space's unread badge
-  and one contentless notification, "New activity in {space}" (owner F6).
-- **Fetch on open** (and on every heads ping for the host): pull since the
-  cursor; `channel_gap`, more than 2 000 items or 8 MiB behind → move the
-  cursor to the head, fetch current pins, and run the §25.6 catch-up.
-- **Several GFSs.** Each GFS has its own ring, seq and ring_id; on failover
-  the household fetches the other ring from `max(oldest, head − 2 000)`;
-  `item_id` dedupes.
+  space's channel on each ring-capable GFS it reads it on, and unwatches 2
+  min after the last view. The **host always watches** its spaces' channels
+  (owner F5; effective once the owner holds a seat). The GFS forgets a
+  socket's watches when it drops, so they go again on every connect.
+- **Cursors** per `(gfs_id, channel_id)`: `(ring_id, seq)`, kept in
+  `instance_config` (coalesced, every 10 s). A new seat starts at the head;
+  history comes from the join catch-up (owner F8).
+- **Only channels it reads there.** Ring frames for a channel that is not a
+  space's channel on that very GFS connection are ignored: no GFS can grow
+  the household's state, raise badges or force catch-ups for a channel it
+  does not serve it. Answers (`channel_fetch_done`, `channel_gap`, fetched
+  items — tagged `fetch: <req>` by the GFS) count only for the household's
+  own outstanding request.
+- **Badge.** A head above the cursor raises the space's badge
+  (`space.activity`, only on the change to "something new") and at most
+  once an hour per space one contentless notification row, "New activity in
+  {space}" (owner F6). The host and a space being viewed fetch instead.
+- **Fetching.** A fetched page moves the cursor over its holes (expired
+  location pins; a missing durable item is a `channel_gap`). A live item
+  moves it only in order; a hole before one is a badge for a non-viewer
+  (a `push_all` item never pulls a backlog by itself) and a fetch for a
+  viewer. An item the inbound path dropped (over its budget) keeps the
+  cursor before it and ends that page. Pages follow each other at most
+  every 35 s, so a backlog never outruns the 960 / min per-channel inbound
+  budget.
+- **Gaps.** `channel_gap`, a new `ring_id`, or more than 2 000 items behind
+  → the cursor moves to the recent window (the last 200 items, fetched
+  where someone looks: current pins, the last chat) and the household runs
+  the §25.6 catch-up (`SpaceSyncScheduler.sync_now`: the acting hosts,
+  incremental) — at most once per 10 minutes per space, a later one
+  deferred, never dropped.
+- **Several GFSs.** Each GFS has its own ring, seq and ring_id; a GFS where
+  the household has no cursor while another GFS of the channel has one
+  starts 2 000 back (failover); `item_id` dedupes.
 - **Mentions.** An item that @-mentions people in other households also
   goes, as `SPACE_MENTION_NOTE {space_id, epoch, item}`, to each mentioned
   household (≤ 20 per item) through its normal path (direct, mesh or GFS
@@ -332,8 +354,9 @@ See [principles](../principles.md#sign-off-space-items-on-the-channel-ring-v_97-
 - `socialhome/domain/space_item.py` — `ITEM_SPECS`, buckets.
 - `socialhome/services/space_item_author.py` — v2 sign / verify.
 - `socialhome/federation/space_item_dispatch.py` — `SpaceItemDispatch`.
-- `socialhome/services/space_item_publisher.py` — sealing, budgets,
-  routing (channel / `SPACE_ITEM` / legacy).
+- `socialhome/services/gfs_member_publish_service.py`
+  (`seal_event_item`) and `FederationService.broadcast_to_space_members`
+  (`_broadcast_as_item`) — sealing and routing (`SPACE_ITEM` / legacy).
 - `socialhome/services/channel_ring_client.py` — watch, cursors, fetch.
 - `socialhome/global_server/channel_ring.py` — the GFS ring.
 

@@ -62,6 +62,11 @@ MEDIA_REFUSED_WARN_INTERVAL_S: float = 60.0
 
 RECONNECT_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 30.0)
 
+#: v_97 — the in-process key ``on_ring`` reads on a relay item: whether
+#: ``on_relay`` took it (``False``: dropped over a budget, or it raised).
+#: Never on a wire.
+RING_TAKEN_FIELD: str = "_taken"
+
 #: v_97 — the in-process frame ``on_ring`` gets when a session (re)opens:
 #: the GFS forgot this socket's watches. Never on a wire.
 RING_CONNECTED_FRAME: str = "ring_connected"
@@ -142,7 +147,7 @@ class GfsWebSocketClient:
         instance_id: str,
         signing_key: bytes,
         session_factory: Callable[[], aiohttp.ClientSession],
-        on_relay: Callable[[dict], Awaitable[None]],
+        on_relay: Callable[[dict], Awaitable[bool | None]],
         on_highlight_signal: Callable[[dict], Awaitable[None]] | None = None,
         on_moment_public: Callable[[dict], Awaitable[None]] | None = None,
         on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
@@ -652,7 +657,7 @@ class GfsWebSocketClient:
             )
             return
         try:
-            await self._on_relay(frame)
+            taken = await self._on_relay(frame)
         except Exception as exc:  # defensive
             log.warning(
                 "gfs.ws.client: on_relay handler raised for %s: %s",
@@ -660,9 +665,11 @@ class GfsWebSocketClient:
                 exc,
                 exc_info=True,
             )
+            taken = False
         if "seq" in frame:
-            # v_97 — after the item was handled: its place in the ring.
-            await self._ring(frame)
+            # v_97 — after the item was handled: its place in the ring, with
+            # whether it was taken (a dropped item keeps the cursor before it).
+            await self._ring({**frame, RING_TAKEN_FIELD: taken is not False})
 
     async def _ring(self, frame: dict) -> None:
         if self._on_ring is None:

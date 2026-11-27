@@ -147,6 +147,7 @@ class AbstractSpaceRepo(Protocol):
     ) -> bool: ...
     async def spaces_for_gfs_channel(self, channel_id: str) -> list[str]: ...
     async def hosted_channel_spaces(self, owner_instance_id: str) -> list[str]: ...
+    async def list_channel_spaces(self) -> list[str]: ...
     async def get_gfs_channel_healed_at(self, space_id: str) -> str | None: ...
     async def set_gfs_channel_healed_at(self, space_id: str, at: str) -> None: ...
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
@@ -1288,6 +1289,15 @@ class SqliteSpaceRepo:
         """Every space that names ``channel_id`` (normally exactly one)."""
         rows = await self._db.fetchall(
             "SELECT id FROM spaces WHERE gfs_channel_id=? ORDER BY id", (channel_id,)
+        )
+        return [str(r["id"]) for r in rows]
+
+    async def list_channel_spaces(self) -> list[str]:
+        """v_97 — every space here that uses a channel (the ring client
+        takes ring frames only for their channels)."""
+        rows = await self._db.fetchall(
+            "SELECT id FROM spaces WHERE gfs_channel_id IS NOT NULL AND dissolved=0"
+            " ORDER BY id"
         )
         return [str(r["id"]) for r in rows]
 

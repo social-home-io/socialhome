@@ -273,8 +273,10 @@ class GfsChannelRing:
                 push_all=False,
             )
             # Straight to the socket: a fetch answer is never watch-filtered.
+            # ``fetch`` names the request it answers: the household moves its
+            # cursor over a page's holes (expired items) only for those.
             if not await self._ws.send_direct(
-                instance_id, {"type": RELAY_FRAME_TYPE, **frame}
+                instance_id, {"type": RELAY_FRAME_TYPE, **frame, "fetch": req.req}
             ):
                 return
         # ``more`` only when the page was cut: an empty page under a head
