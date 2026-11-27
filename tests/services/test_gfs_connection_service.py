@@ -4822,6 +4822,30 @@ async def test_subscriber_seats_needs_the_signed_flag(env):
     assert not await svc.subscriber_seats_supported(unsigned)
 
 
+@pytest.mark.parametrize(
+    ("value", "proved"),
+    [
+        ({"max_bytes": 1, "max_items": 2}, True),
+        ({}, False),
+        ("yes", False),
+    ],
+)
+async def test_channel_ring_proves_with_its_signed_limits_block(env, value, proved):
+    """v_97 — the signed ``channel_ring`` block names the server's ring
+    bounds; a non-empty block proves it, anything else does not."""
+    _db, repo = env
+    conn = _make_conn("cr-blk", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"channel_ring": value},
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert await svc.channel_ring_supported(conn) is proved
+
+
 async def test_channel_ring_needs_the_signed_flag(env):
     """v_97: the ring's watch / fetch and the signed publish fields only on
     a server whose SIGNED block proves ``channel_ring``."""

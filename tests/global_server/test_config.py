@@ -1021,3 +1021,79 @@ def test_envelope_mailbox_leftover_server_cap_key_is_ignored(tmp_dir, monkeypatc
     m = GfsConfig.load(p).envelope_mailbox
     assert not hasattr(m, "mailbox_max_new_per_day")
     assert m.mailbox_tickets_per_day == 50
+
+
+# ── [channel_ring] (v_97, sized for an active 10 000-seat space) ─────────
+
+
+def test_channel_ring_defaults_are_the_active_10k_sizing():
+    r = GfsConfig().channel_ring
+    assert (r.max_bytes, r.max_items) == (256 * 1024**2, 131_072)
+    assert (r.durable_ttl_seconds, r.ephemeral_ttl_seconds) == (86_400, 900)
+    assert r.server_max_bytes == 8 * 1024**3
+    assert r.capability() == {
+        "max_bytes": 256 * 1024**2,
+        "max_items": 131_072,
+        "durable_ttl_seconds": 86_400,
+        "ephemeral_ttl_seconds": 900,
+        "server_max_bytes": 8 * 1024**3,
+    }
+
+
+def test_channel_ring_loads_from_toml_and_env_wins(tmp_dir, monkeypatch):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\n'
+        "[channel_ring]\nmax_bytes = 67108864\nmax_items = 32768\n"
+        "durable_ttl_seconds = 43200\nephemeral_ttl_seconds = 600\n"
+        "server_max_bytes = 1073741824\n"
+    )
+    r = GfsConfig.from_toml(p).channel_ring
+    assert (r.max_bytes, r.max_items) == (64 * 1024**2, 32_768)
+    assert (r.durable_ttl_seconds, r.ephemeral_ttl_seconds) == (43_200, 600)
+    assert r.server_max_bytes == 1024**3
+    monkeypatch.setenv("GFS_CHANNEL_RING_MAX_ITEMS", "4096")
+    r = GfsConfig.load(p).channel_ring
+    assert (r.max_items, r.max_bytes) == (4096, 64 * 1024**2)
+
+
+@pytest.mark.parametrize(
+    ("lines", "match"),
+    [
+        ("max_bytes = 0", "max_bytes"),
+        ("max_items = -5", "max_items"),
+        ('max_items = "many"', "max_items"),
+        ("durable_ttl_seconds = 172800", "durable_ttl_seconds"),
+        ("ephemeral_ttl_seconds = 3600", "ephemeral_ttl_seconds"),
+        (
+            "durable_ttl_seconds = 300\nephemeral_ttl_seconds = 600",
+            "must not exceed",
+        ),
+        (
+            "max_bytes = 268435456\nserver_max_bytes = 1048576",
+            "at least max_bytes",
+        ),
+    ],
+)
+def test_channel_ring_bad_values_refuse_to_start(tmp_dir, lines, match):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(f'[server]\nbase_url = "https://g.example"\n[channel_ring]\n{lines}\n')
+    with pytest.raises(ValueError, match=match):
+        GfsConfig.from_toml(p)
+
+
+def test_channel_ring_env_refuses_a_bad_value(tmp_dir, monkeypatch):
+    p = tmp_dir / "global_server.toml"
+    p.write_text('[server]\nbase_url = "https://g.example"\n')
+    monkeypatch.setenv("GFS_CHANNEL_RING_EPHEMERAL_TTL_SECONDS", "5")
+    with pytest.raises(ValueError, match="channel_ring"):
+        GfsConfig.load(p)
+
+
+def test_the_example_config_carries_the_channel_ring_defaults(tmp_dir):
+    p = tmp_dir / "example.toml"
+    write_example_config(p)
+    text = p.read_text()
+    assert "[channel_ring]" in text
+    p.write_text(text.replace('base_url = ""', 'base_url = "https://g.example"'))
+    assert GfsConfig.from_toml(p).channel_ring == GfsConfig().channel_ring

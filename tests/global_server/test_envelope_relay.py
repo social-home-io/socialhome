@@ -73,6 +73,9 @@ class _FakeRegistry:
     def is_connected(self, instance_id: str) -> bool:
         return instance_id in self.online
 
+    def skips_live(self, instance_id: str, payload: dict) -> bool:
+        return False
+
     def takes_media(self, instance_id: str) -> bool:
         # v_87 media frames: none of these sockets listed ``envelope_media``.
         return False
@@ -797,6 +800,12 @@ async def test_live_pushes_run_concurrently_but_bounded(wiring, monkeypatch):
     peak = 0
 
     class _Slow:
+        def is_connected(self, instance_id):
+            return True
+
+        def skips_live(self, instance_id, payload):
+            return False
+
         async def send(self, instance_id, payload):
             nonlocal in_flight, peak
             in_flight += 1
@@ -1329,3 +1338,19 @@ async def test_without_an_audience_nothing_is_forwarded(wiring):
 async def test_queue_relay_many_with_no_targets_writes_nothing(wiring):
     _fed, _queue_repo, _registry, relay = wiring
     assert await relay.queue_relay_many([], _item()) == 0
+
+
+async def test_a_ring_seat_that_does_not_watch_costs_no_send(wiring, monkeypatch):
+    """v_97 — a 10 000-seat fan-out sorts its seats before scheduling any
+    push: an unwatched ring socket counts as reached (the ring holds the
+    item), a seat with no socket here goes offline, only the rest is sent."""
+    _fed, _queue_repo, registry, relay = wiring
+    registry.online.update({"ring-idle", "watcher"})
+    monkeypatch.setattr(
+        registry, "skips_live", lambda iid, payload: iid == "ring-idle", raising=False
+    )
+    reached = await relay.fan_out_relay(
+        ["ring-idle", "watcher", "elsewhere"], queue_ok=set(), frame=_item()
+    )
+    assert reached == 2
+    assert [t for t, _p in registry.sent] == ["watcher"]

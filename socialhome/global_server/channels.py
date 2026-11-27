@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -120,17 +121,20 @@ CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP: int = 10
 MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE: int = 500
 
 #: Accepted publishes per CHANNEL per minute, across every writer — bounds
-#: the fan-out work (and queue writes) one channel can cause.
-CHANNEL_PUBLISH_MAX_PER_MINUTE: int = 120
+#: the fan-out work (and queue writes) one channel can cause. v_97: sized
+#: for an ACTIVE 10 000-seat space (owner 2026-11-27) — 20 items a second;
+#: the push goes only to watching sockets, so the work per item is the
+#: watchers, not the seats (``docs/protocol/space-items.md`` › Limits).
+CHANNEL_PUBLISH_MAX_PER_MINUTE: int = 1_200
 
 #: Accepted publishes per channel WRITER KEY (one epoch) per minute. The key
 #: is shared by every writer of the epoch, so this bounds the channel as a
 #: whole, not any one household.
-CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY: int = 120
+CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY: int = 1_200
 
 #: Per-IP/minute cap on every ``/gfs/channels/*`` route, applied BEFORE any
 #: signature work.
-CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP: int = 120
+CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP: int = 600
 
 
 #: Highest epoch a channel's FIRST notice may set. Channel epochs carry a
@@ -143,23 +147,39 @@ MAX_FIRST_CHANNEL_EPOCH: int = 2**62
 #: cluster-wide. The writer key is shared by every writer of an epoch and
 #: the publish names nobody, so the address is the only thing that tells one
 #: key holder apart from the others: an eighth of the channel's
-#: :data:`CHANNEL_PUBLISH_MAX_PER_MINUTE` (120), so
-#: one holder needs EIGHT addresses (IPv6 counted per /64) to spend the whole
-#: channel budget, where 30 a minute let four do it. Honest use is far below
-#: it — a household's posts, comments and reactions, one every 4 s sustained;
-#: a burst past it gets ``429`` and the household's retry queue lands it.
-CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS: int = CHANNEL_PUBLISH_MAX_PER_MINUTE // 8
+#: :data:`CHANNEL_PUBLISH_MAX_PER_MINUTE` — 240 of 1 200 — so one holder
+#: needs FIVE addresses (IPv6 counted per /64) to spend the whole channel
+#: budget. Honest use stays below it: four people of one household chatting
+#: at their sender budget (1 a second each) sustained; a burst past it gets
+#: ``429`` and the household's durable item queue lands it.
+CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS: int = CHANNEL_PUBLISH_MAX_PER_MINUTE // 5
 
 #: v_97 (owner Q5 B) — the per-address limit never drops below this per
-#: node: on a 4-node cluster ``node_share(15, 4)`` is 4/min per node, which
-#: refused a busy household's chat; the floor makes it ~32/min cluster-wide.
-CHANNEL_ANON_PER_NODE_FLOOR: int = 8
+#: node, so a cluster of many nodes never squeezes a busy household's chat
+#: (4 nodes: ``node_share(240, 4)`` = 60 = the floor).
+CHANNEL_ANON_PER_NODE_FLOOR: int = 60
 
 #: v_97 — payload bytes one channel may publish per minute (cluster-wide,
-#: each node its share): the 64 MiB ring then spans at least an hour, four
+#: each node its share): the 256 MiB ring then spans at least an hour, four
 #: heads intervals, so no writer can roll it past a household between two
-#: pings. A busy space (56 items/min of ~2.7 KiB) uses ~150 KiB/min.
-CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE: int = 1024 * 1024
+#: pings. 1 200 chat items of ~2.8 KiB are ~3.3 MiB.
+CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE: int = 4 * 1024 * 1024
+
+#: v_97 — payload bytes one client address may publish per channel per
+#: minute: a quarter of the channel's, so one household uploading large
+#: items can't spend the byte budget everyone shares (240 chat items are
+#: ~0.7 MiB; a 64 KiB post is ~87 KiB of ciphertext — 12 a minute).
+CHANNEL_ANON_MAX_BYTES_PER_MINUTE_PER_ADDRESS: int = (
+    CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE // 4
+)
+
+#: v_97 — how long one channel's resolved seats are reused by the fan-out
+#: (seconds): at 20 items a second a 10 000-seat channel would otherwise
+#: read 10 000 rows twice per item. A seat taken or dropped on this node
+#: refreshes at once; one changed on another node shows within this.
+FAN_OUT_TARGETS_TTL_S: float = 5.0
+#: Channels whose seats are kept resolved at once (least recent dropped).
+FAN_OUT_TARGETS_MAX: int = 1024
 
 
 class ByteBudget:
@@ -227,6 +247,7 @@ class GfsChannelService:
 
     __slots__ = (
         "_addressee",
+        "_anon_ip_bytes",
         "_anon_ip_limiter",
         "_anon_seen",
         "_byte_budget",
@@ -239,6 +260,7 @@ class GfsChannelService:
         "_nodes",
         "_register_limiter",
         "_ring",
+        "_targets",
         "_writer_key_limiter",
     )
 
@@ -281,6 +303,11 @@ class GfsChannelService:
         #: v_97 — the channel rings; ``None`` keeps the v_96 behaviour.
         self._ring: GfsChannelRing | None = None
         self._byte_budget = ByteBudget(CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE)
+        self._anon_ip_bytes = ByteBudget(CHANNEL_ANON_MAX_BYTES_PER_MINUTE_PER_ADDRESS)
+        #: channel id → (valid until, seats, recently-seen seats).
+        self._targets: OrderedDict[str, tuple[float, list[str], set[str]]] = (
+            OrderedDict()
+        )
 
     def attach_ring(self, ring: GfsChannelRing) -> None:
         """Wire the v_97 channel ring (capability ``channel_ring``)."""
@@ -583,6 +610,7 @@ class GfsChannelService:
             pass_epoch=req.channel_pass.epoch,
             now=now,
         )
+        self._targets.pop(req.channel_id, None)
 
     async def unsubscribe(self, req: ChannelUnsubscribeRequest) -> None:
         await self._federation.verify_signed_request(
@@ -590,6 +618,7 @@ class GfsChannelService:
         )
         self._addressed(req.gfs_instance_id, req.gfs_key)
         await self._channels.remove_subscriber(req.channel_id, req.instance_id)
+        self._targets.pop(req.channel_id, None)
 
     # ── Publish ──────────────────────────────────────────────────────────
 
@@ -597,29 +626,39 @@ class GfsChannelService:
         """The seats a forwarded channel item reaches (the cluster audience
         resolver, :mod:`.cluster_relay`): the same open-epoch seats as a
         local fan-out."""
+        return (await self._seats(channel_id))[0]
+
+    async def _seats(self, channel_id: str) -> tuple[list[str], set[str]]:
+        """The channel's open-epoch seats and the ones that may get an
+        offline copy, reused for :data:`FAN_OUT_TARGETS_TTL_S`."""
+        now = float(self._clock())
+        hit = self._targets.get(channel_id)
+        if hit is not None and hit[0] > now:
+            self._targets.move_to_end(channel_id)
+            return hit[1], hit[2]
         ch = await self._channels.get(channel_id)
         if ch is None:
-            return []
-        return await self._channels.list_targets(
-            channel_id, ch.open_epochs(now=self._now())
+            self._targets.pop(channel_id, None)
+            return [], set()
+        epochs = ch.open_epochs(now=self._now())
+        targets = await self._channels.list_targets(channel_id, epochs)
+        # v_97 — a household that reads the ring gets no offline copy
+        # (it pulls).
+        recent = await self._channels.list_recently_seen(
+            channel_id,
+            epochs,
+            within_s=ENVELOPE_QUEUE_TTL_SECONDS,
+            include_ring=self._ring is None,
         )
+        self._targets[channel_id] = (now + FAN_OUT_TARGETS_TTL_S, targets, recent)
+        self._targets.move_to_end(channel_id)
+        while len(self._targets) > FAN_OUT_TARGETS_MAX:
+            self._targets.popitem(last=False)
+        return targets, recent
 
     def _resolver(self, channel_id: str):
         async def _resolve() -> tuple[list[str], set[str]]:
-            ch = await self._channels.get(channel_id)
-            if ch is None:
-                return [], set()
-            epochs = ch.open_epochs(now=self._now())
-            targets = await self._channels.list_targets(channel_id, epochs)
-            # v_97 — a household that reads the ring gets no offline copy
-            # (it pulls).
-            recent = await self._channels.list_recently_seen(
-                channel_id,
-                epochs,
-                within_s=ENVELOPE_QUEUE_TTL_SECONDS,
-                include_ring=self._ring is None,
-            )
-            return targets, recent
+            return await self._seats(channel_id)
 
         return _resolve
 
@@ -671,6 +710,11 @@ class GfsChannelService:
         ):
             # The ring must span several heads intervals: one writer
             # uploading large items must not roll it for everyone.
+            raise ChannelRateLimited()
+        if not self._anon_ip_bytes.allow(
+            f"{req.channel_id}\x00{client_ip}", len(req.payload), self._node_count()
+        ):
+            # Nor may one address spend the bytes everyone shares.
             raise ChannelRateLimited()
         if not self._fan_out.has_room(f"ch:{req.channel_id}"):
             # Refused before the append: no item stored that never goes out.

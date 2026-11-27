@@ -2722,11 +2722,11 @@ async def test_the_durable_queue_hears_gone_for_an_unnamed_listing_target(env):
     assert (await env.other.svc.deliver_item(_queued_row(stranger.id))).kind == "gone"
 
 
-async def test_the_durable_queue_hears_permanent_without_a_grant_for_the_epoch(env):
+async def test_the_durable_queue_hears_stale_without_a_grant_for_the_epoch(env):
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     outcome = await env.other.svc.deliver_item(_queued_row("conn-1", epoch=99))
-    assert outcome.kind == "permanent"
+    assert outcome.kind == "stale"
 
 
 async def test_the_durable_queue_waits_for_a_connection_not_active(env):
@@ -2735,3 +2735,17 @@ async def test_the_durable_queue_waits_for_a_connection_not_active(env):
     conn = env.other.svc._conn_repo.conn
     env.other.svc._conn_repo.conn = replace(conn, status="pending")
     assert (await env.other.svc.deliver_item(_queued_row("conn-1"))).kind == "transient"
+
+
+@pytest.mark.security
+async def test_the_durable_queue_waits_while_the_capability_is_unknown(env):
+    """A restart while the GFS is down: a cold capability cache is no
+    verdict — the item waits, never dropped as "gone"."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    conn = env.other.svc._conn_repo.conn
+    env.other.gfs.incapable = {conn.id}
+    env.other.gfs.unknown = {conn.id}
+    assert (await env.other.svc.deliver_item(_queued_row(conn.id))).kind == "transient"
+    env.other.gfs.unknown = set()
+    assert (await env.other.svc.deliver_item(_queued_row(conn.id))).kind == "gone"

@@ -2622,7 +2622,7 @@ class GfsConnectionService:
         GFS refuses unknown publish keys) and the ring client's watch /
         fetch frames (``docs/protocol/space-items.md``)."""
         return await self._signed_capability_supported(
-            conn, "channel_ring", self._channel_ring
+            conn, "channel_ring", self._channel_ring, block=True
         )
 
     async def sealed_highlight_stream_supported(self, conn: GfsConnection) -> bool:
@@ -2644,8 +2644,12 @@ class GfsConnectionService:
         conn: GfsConnection,
         name: str,
         cache: dict[str, bool],
+        *,
+        block: bool = False,
     ) -> bool:
         """Whether *conn*'s GFS proved capability *name* under a VALID signature.
+        *block*: the capability may be a non-empty object naming its limits
+        (v_97 ``channel_ring``) as well as ``true``.
 
         Answered from the RAM cache when warm, probed once on a cold miss, and suppressed for
         :data:`GFS_INFO_NEGATIVE_TTL_S` after an unreachable probe. Only a
@@ -2670,7 +2674,8 @@ class GfsConnectionService:
         if info is None:
             return False
         caps = self._verified_capabilities(conn, info)
-        if caps is None or caps.get(name) is not True:
+        value = None if caps is None else caps.get(name)
+        if value is not True and not (block and isinstance(value, dict) and value):
             return False
         cache[conn.id] = True
         return True

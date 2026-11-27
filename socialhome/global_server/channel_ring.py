@@ -20,10 +20,10 @@ only if it was a member then, and the join catch-up gives it the history
 anyway. Nothing here learns a space: the ring is keyed by the random
 channel id. Heads name only channels whose ring has an item.
 
-Bounds (owner F1): :data:`RING_MAX_ITEMS` / :data:`RING_MAX_BYTES` per
-channel at insert, :data:`~socialhome.domain.gfs_channel.RING_DURABLE_TTL_S`
-/ :data:`~socialhome.domain.gfs_channel.RING_EPHEMERAL_TTL_S` by age, and
-:data:`SERVER_MAX_BYTES` for the whole server (fair eviction: the biggest
+Bounds (owner F1; the operator's ``[channel_ring]``,
+:class:`~.config.ChannelRingConfig`): ``max_items`` / ``max_bytes`` per
+channel at insert, ``durable_ttl_seconds`` / ``ephemeral_ttl_seconds`` by
+age, and ``server_max_bytes`` for the whole server (fair eviction: the biggest
 ring loses its oldest first). The sequence number is allocated in one
 transaction with its row on the shared database (gap-free across nodes).
 
@@ -48,8 +48,6 @@ from ..domain.gfs_channel import (
     FETCH_PAGE_MAX_BYTES,
     FETCH_PAGE_MAX_ITEMS,
     RING_CLASS_DURABLE,
-    RING_DURABLE_TTL_S,
-    RING_EPHEMERAL_TTL_S,
     ChannelFetch,
     ChannelHead,
     ChannelWatch,
@@ -57,6 +55,7 @@ from ..domain.gfs_channel import (
     channel_frame,
     ring_frame,
 )
+from .config import ChannelRingConfig
 from .envelope_relay import RELAY_FRAME_TYPE
 from .public import SlidingWindowCounter
 
@@ -69,10 +68,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 #: Per-channel bounds at insert (owner F1, 2026-11-27).
-RING_MAX_ITEMS: int = 32_768
-RING_MAX_BYTES: int = 64 * 1024 * 1024
-#: The whole server's rings (owner F1).
-SERVER_MAX_BYTES: int = 8 * 1024 * 1024 * 1024
 
 #: How often a ring socket hears which of its channels moved (owner F2).
 HEADS_PING_INTERVAL_S: float = 15 * 60.0
@@ -98,6 +93,7 @@ class GfsChannelRing:
         "_clock",
         "_fetch_limiter",
         "_last_heads",
+        "_limits",
         "_ring",
         "_stop",
         "_task",
@@ -111,8 +107,11 @@ class GfsChannelRing:
         ring_repo: AbstractGfsChannelRingRepo,
         channel_repo: AbstractGfsChannelRepo,
         ws_registry: GfsWebSocketRegistry,
+        limits: ChannelRingConfig | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        #: The operator's ``[channel_ring]`` bounds (sizes, ages, server cap).
+        self._limits = limits or ChannelRingConfig()
         self._ring = ring_repo
         self._channels = channel_repo
         self._ws = ws_registry
@@ -140,8 +139,8 @@ class GfsChannelRing:
             ring_class=req.ring_class or RING_CLASS_DURABLE,
             payload=req.payload,
             now=self._now(),
-            max_items=RING_MAX_ITEMS,
-            max_bytes=RING_MAX_BYTES,
+            max_items=self._limits.max_items,
+            max_bytes=self._limits.max_bytes,
         )
         if pos is None:
             return frame
@@ -334,13 +333,13 @@ class GfsChannelRing:
 
     async def sweep(self) -> int:
         """Drop items past their age, then trim the biggest rings while the
-        server is over :data:`SERVER_MAX_BYTES`. Returns items expired."""
+        server is over its ``server_max_bytes``. Returns items expired."""
         now = self._now()
         expired = 0
         for _ in range(64):  # bounded batches, each its own transaction
             n = await self._ring.expire(
-                durable_before=now - RING_DURABLE_TTL_S,
-                ephemeral_before=now - RING_EPHEMERAL_TTL_S,
+                durable_before=now - self._limits.durable_ttl_seconds,
+                ephemeral_before=now - self._limits.ephemeral_ttl_seconds,
             )
             expired += n
             if n == 0:
@@ -348,7 +347,7 @@ class GfsChannelRing:
         # Until the server is under its cap (each pass cuts the biggest rings
         # to one level; bounded so a sweep always ends).
         for _ in range(64):
-            if await self._ring.trim_to_cap(cap=SERVER_MAX_BYTES) <= 0:
+            if await self._ring.trim_to_cap(cap=self._limits.server_max_bytes) <= 0:
                 break
         return expired
 

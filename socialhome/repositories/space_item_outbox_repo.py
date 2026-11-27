@@ -9,7 +9,6 @@ module only reads and writes rows.
 from __future__ import annotations
 
 import sqlite3
-import uuid
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -17,7 +16,6 @@ from ..domain.space_item_outbox import (
     SPACE_QUEUE_MAX_BYTES,
     SPACE_QUEUE_MAX_ITEMS,
     UNPLANNED_GFS,
-    UNSENT_QUEUE_FULL,
     QueuedSpaceItem,
     UnsentItem,
 )
@@ -100,7 +98,7 @@ class AbstractSpaceItemOutboxRepo(Protocol):
         self, item_id: str, gfs_id: str, *, attempts: int, next_attempt_at: str
     ) -> None: ...
 
-    async def defer_gfs(self, gfs_id: str, *, until: str) -> None: ...
+    async def defer_gfs(self, gfs_id: str, space_id: str, *, until: str) -> None: ...
 
     async def expedite(self, gfs_id: str, *, now: str) -> None: ...
 
@@ -108,7 +106,17 @@ class AbstractSpaceItemOutboxRepo(Protocol):
         self, row: QueuedSpaceItem, gfs_ids: list[str], *, now: str
     ) -> None: ...
 
-    async def mark_failed(self, item_id: str, gfs_id: str, error: str) -> None: ...
+    async def mark_failed(
+        self, item_id: str, gfs_id: str, error: str, *, drop_payload: bool = False
+    ) -> None: ...
+
+    async def count_rows(self, item_id: str) -> int: ...
+
+    async def replan(
+        self, item_id: str, gfs_id: str, *, attempts: int, next_attempt_at: str
+    ) -> None: ...
+
+    async def expire_failed(self, before: str) -> int: ...
 
     async def record_failure(
         self,
@@ -118,7 +126,6 @@ class AbstractSpaceItemOutboxRepo(Protocol):
         author_user_id: str,
         error: str,
         now: str,
-        item_id: str | None = None,
     ) -> None: ...
 
     async def list_failed(
@@ -151,9 +158,11 @@ class SqliteSpaceItemOutboxRepo:
     ) -> bool:
         """Insert *rows* (one item, one row per GFS) — first dropping the
         waiting rows a latest-only key replaces — unless the space would
-        then hold more than *max_items* rows or *max_bytes*: then nothing
-        changes and ``False``. One transaction, so two writers can't both
-        squeeze past the bound."""
+        then hold more than *max_items* waiting rows or *max_bytes*: then
+        nothing changes and ``False``. Failed rows don't count (they are
+        their authors' to retry or discard, and expire): one author's
+        refused items never block the others. One transaction, so two
+        writers can't both squeeze past the bound."""
         if not rows:
             return True
         space_id = rows[0].space_id
@@ -168,7 +177,7 @@ class SqliteSpaceItemOutboxRepo:
                 )
             count, size = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM space_item_outbox"
-                " WHERE space_id=?",
+                " WHERE space_id=? AND status='pending'",
                 (space_id,),
             ).fetchone()
             if (
@@ -185,9 +194,10 @@ class SqliteSpaceItemOutboxRepo:
             return False
 
     async def usage(self, space_id: str) -> tuple[int, int]:
+        """``(rows, bytes)`` waiting in *space_id*'s queue."""
         row = await self._db.fetchone(
             "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM space_item_outbox"
-            " WHERE space_id=?",
+            " WHERE space_id=? AND status='pending'",
             (space_id,),
         )
         return (int(row[0]), int(row[1])) if row else (0, 0)
@@ -221,22 +231,28 @@ class SqliteSpaceItemOutboxRepo:
             (int(attempts), next_attempt_at, item_id, gfs_id),
         )
 
-    async def defer_gfs(self, gfs_id: str, *, until: str) -> None:
-        """Every waiting row of *gfs_id* due before *until* waits till then
-        (a GFS that is down or asked us to slow down answers them all the
-        same)."""
+    async def defer_gfs(self, gfs_id: str, space_id: str, *, until: str) -> None:
+        """Every waiting row of *space_id* for *gfs_id* due before *until*
+        waits till then (that GFS answers them the same) and counts as
+        tried, so a reconnect releases it; another space's rows on the same
+        GFS are not held behind it."""
         await self._db.enqueue(
-            "UPDATE space_item_outbox SET next_attempt_at=?"
-            " WHERE gfs_id=? AND status='pending' AND next_attempt_at<?",
-            (until, gfs_id, until),
+            "UPDATE space_item_outbox SET next_attempt_at=?,"
+            " attempts=MAX(attempts, 1)"
+            " WHERE gfs_id=? AND space_id=? AND status='pending'"
+            " AND next_attempt_at<?",
+            (until, gfs_id, space_id, until),
         )
 
     async def expedite(self, gfs_id: str, *, now: str) -> None:
-        """*gfs_id* is back: what waits for it is due now (and what waits
-        for a plan — the reconnect may have brought the grant)."""
+        """*gfs_id* is back: what was backing off for it is due now (and
+        what waits for a plan — the reconnect may have brought the grant).
+        A row never tried yet keeps its time: that is its sender-budget
+        slot, which a reconnect must not release."""
         await self._db.enqueue(
             "UPDATE space_item_outbox SET next_attempt_at=?"
-            " WHERE gfs_id IN (?, ?) AND status='pending' AND next_attempt_at>?",
+            " WHERE gfs_id IN (?, ?) AND status='pending' AND attempts>0"
+            " AND next_attempt_at>?",
             (now, gfs_id, UNPLANNED_GFS, now),
         )
 
@@ -269,6 +285,9 @@ class SqliteSpaceItemOutboxRepo:
                             payload=row.payload,
                             next_attempt_at=now,
                             created_at=row.created_at,
+                            # A replanned item keeps its count: the replans
+                            # end in "Couldn't send", never a loop.
+                            attempts=row.attempts,
                         )
                     )
                     for g in dict.fromkeys(gfs_ids)
@@ -277,11 +296,46 @@ class SqliteSpaceItemOutboxRepo:
 
         await self._db.transact(_run)
 
-    async def mark_failed(self, item_id: str, gfs_id: str, error: str) -> None:
+    async def mark_failed(
+        self, item_id: str, gfs_id: str, error: str, *, drop_payload: bool = False
+    ) -> None:
+        """The author's now. *drop_payload*: it can never be sent as it is
+        (Discard only)."""
         await self._db.enqueue(
-            "UPDATE space_item_outbox SET status='failed', error=?"
+            "UPDATE space_item_outbox SET status='failed', error=?,"
+            " payload=CASE WHEN ? THEN NULL ELSE payload END,"
+            " bytes=CASE WHEN ? THEN 0 ELSE bytes END"
             " WHERE item_id=? AND gfs_id=?",
-            (error, item_id, gfs_id),
+            (error, int(drop_payload), int(drop_payload), item_id, gfs_id),
+        )
+
+    async def count_rows(self, item_id: str) -> int:
+        """Rows of one item still held (waiting or failed)."""
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(*) FROM space_item_outbox WHERE item_id=?",
+                (item_id,),
+                default=0,
+            )
+        )
+
+    async def replan(
+        self, item_id: str, gfs_id: str, *, attempts: int, next_attempt_at: str
+    ) -> None:
+        """The item's last GFS no longer serves the space: plan it afresh
+        when due (the owner's list may name another by then)."""
+        await self._db.enqueue(
+            "UPDATE OR IGNORE space_item_outbox SET gfs_id=?, attempts=?,"
+            " next_attempt_at=? WHERE item_id=? AND gfs_id=? AND status='pending'",
+            (UNPLANNED_GFS, int(attempts), next_attempt_at, item_id, gfs_id),
+        )
+
+    async def expire_failed(self, before: str) -> int:
+        """Failed rows older than *before* go (nobody retried or discarded
+        them — their author left, or never looked)."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM space_item_outbox WHERE status='failed' AND created_at<?",
+            (before,),
         )
 
     async def record_failure(
@@ -292,15 +346,11 @@ class SqliteSpaceItemOutboxRepo:
         author_user_id: str,
         error: str,
         now: str,
-        item_id: str | None = None,
     ) -> None:
-        """A failed item that kept no bytes. A full queue counts its
-        refusals on ONE row per (space, author), so the record of a full
-        queue can never grow without bound itself."""
-        if error == UNSENT_QUEUE_FULL:
-            rid = f"full:{author_user_id}"
-        else:
-            rid = item_id or f"{error}:{uuid.uuid4().hex}"
+        """A failed item that kept no bytes. Counted on ONE row per (space,
+        author, error), so the record of failures can never grow without
+        bound itself."""
+        rid = f"{error}:{space_id}:{author_user_id}"
         await self._db.enqueue(
             "INSERT INTO space_item_outbox(item_id, gfs_id, space_id, epoch,"
             " ring_class, event_type, author_user_id, payload, bytes, attempts,"
@@ -328,7 +378,8 @@ class SqliteSpaceItemOutboxRepo:
                 error=r["error"] or "",
                 created_at=r["created_at"],
                 retryable=bool(r["retryable"]),
-                count=int(r["attempts"]) if r["error"] == UNSENT_QUEUE_FULL else 1,
+                # A bare row stands for every failure of its kind.
+                count=int(r["attempts"]) if r["bare"] else 1,
             )
             for r in rows_to_dicts(rows)
         ]

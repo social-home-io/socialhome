@@ -1245,8 +1245,21 @@ class GfsEnvelopeRelay:
             offline.append(target)
             return False
 
-        results = await asyncio.gather(*(_push(t) for t in targets))
-        reached = sum(1 for ok in results if ok)
+        # Sorted before any push is scheduled (v_97): a seat with no socket
+        # here goes straight to the offline list, and a ring socket that
+        # does not watch the channel counts as reached (the ring holds the
+        # item) — only the sockets that take it live cost a send.
+        live: list[str] = []
+        skipped = 0
+        for target in targets:
+            if not self._ws_registry.is_connected(target):
+                offline.append(target)
+            elif self._ws_registry.skips_live(target, push):
+                skipped += 1
+            else:
+                live.append(target)
+        results = await asyncio.gather(*(_push(t) for t in live))
+        reached = skipped + sum(1 for ok in results if ok)
         to_queue = [t for t in offline if t in queue_ok]
         if (
             audience is not None

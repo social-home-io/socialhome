@@ -81,15 +81,69 @@ async def test_a_newer_latest_only_row_replaces_a_waiting_one(repo):
 
 async def test_backoff_defer_and_expedite(repo):
     await repo.add(
-        [_row("a", gfs_id="g1"), _row("b", gfs_id="g1"), _row("c", gfs_id="g2")]
+        [
+            _row("a", gfs_id="g1"),
+            _row("b", gfs_id="g1"),
+            _row("c", gfs_id="g2"),
+            _row("x", gfs_id="g1", space="other"),
+        ]
     )
     await repo.reschedule("a", "g1", attempts=1, next_attempt_at=T2)
-    await repo.defer_gfs("g1", until=T2)
-    assert [r.item_id for r in await repo.list_due(T1)] == ["c"]
-    [a] = [r for r in await repo.list_due(T2) if r.item_id == "a"]
-    assert a.attempts == 1
+    await repo.defer_gfs("g1", "sp", until=T2)
+    # Another space on the same GFS is not held behind it.
+    assert sorted(r.item_id for r in await repo.list_due(T1)) == ["c", "x"]
+    [b] = [r for r in await repo.list_due(T2) if r.item_id == "b"]
+    assert b.attempts == 1  # held for its GFS: counts as tried
     await repo.expedite("g1", now=T0)
-    assert sorted(r.item_id for r in await repo.list_due(T0)) == ["a", "b", "c"]
+    assert sorted(r.item_id for r in await repo.list_due(T0)) == ["a", "b", "c", "x"]
+
+
+async def test_a_reconnect_never_releases_a_budget_slot(repo):
+    """An untried row due later waits for its sender-budget slot."""
+    await repo.add([_row("slot", gfs_id="g1", due=T2)])
+    await repo.expedite("g1", now=T0)
+    assert await repo.list_due(T1) == []
+
+
+async def test_failed_rows_never_fill_the_queue_and_expire(repo):
+    await repo.add([_row("a")], max_items=1, max_bytes=100)
+    await repo.mark_failed("a", "g1", UNSENT_REFUSED)
+    assert await repo.usage("sp") == (0, 0)
+    assert await repo.add([_row("b")], max_items=1, max_bytes=100)
+    assert await repo.expire_failed("2026-11-27T09:00:00+00:00") == 0
+    assert await repo.expire_failed("2026-11-28T00:00:00+00:00") == 1
+    assert await repo.list_failed("sp", "anna") == []
+
+
+async def test_a_stale_item_keeps_no_bytes(repo):
+    await repo.add([_row("a")])
+    await repo.mark_failed("a", "g1", "seal_failed", drop_payload=True)
+    [item] = await repo.list_failed("sp", "anna")
+    assert not item.retryable
+    assert await repo.retry_failed("sp", "anna", now=T0) == 0
+
+
+async def test_the_last_row_of_an_item_is_planned_afresh(repo):
+    await repo.add([_row("a", gfs_id="g1"), _row("a", gfs_id="g2")])
+    assert await repo.count_rows("a") == 2
+    await repo.delete("a", "g2")
+    await repo.replan("a", "g1", attempts=1, next_attempt_at=T1)
+    [row] = await repo.list_due(T1)
+    assert (row.gfs_id, row.attempts) == (UNPLANNED_GFS, 1)
+
+
+async def test_failures_count_on_one_row_per_space_author_and_error(repo):
+    for space in ("sp", "sp", "other"):
+        await repo.record_failure(
+            space_id=space,
+            event_type="space_chat_message_created",
+            author_user_id="anna",
+            error=UNSENT_QUEUE_FULL,
+            now=T0,
+        )
+    [here] = await repo.list_failed("sp", "anna")
+    [there] = await repo.list_failed("other", "anna")
+    assert (here.count, there.count) == (2, 1)
 
 
 async def test_an_unplanned_row_expands_into_one_row_per_gfs(repo):

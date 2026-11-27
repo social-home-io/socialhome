@@ -38,6 +38,8 @@ class _Registry:
     def __init__(self, online=(), *, failing=(), media_serve=None) -> None:
         self.online = set(online)
         self.failing = set(failing)
+        #: Ring sockets that do not watch the channel (no live push).
+        self.unwatched: set[str] = set()
         #: Sockets that listed ``space_media_serve`` (default: all online).
         self.media_serve = set(online) if media_serve is None else set(media_serve)
         self.sent: list[tuple[str, dict]] = []
@@ -52,6 +54,9 @@ class _Registry:
 
     def connected_instances(self) -> set[str]:
         return set(self.online)
+
+    def skips_live(self, instance_id: str, frame: dict) -> bool:
+        return instance_id in self.unwatched
 
     async def send(self, instance_id: str, frame: dict) -> bool:
         if instance_id in self.failing or instance_id not in self.online:
@@ -770,3 +775,13 @@ async def test_a_media_request_is_held_only_by_a_socket_that_serves_media():
     await _settle(fan)
     assert [iid for iid, _ in reg.sent] == [_B]
     assert reg.sent[0][1]["type"] == "space_media_request"
+
+
+async def test_a_forwarded_item_skips_ring_sockets_that_do_not_watch():
+    """v_97 — only watching ring sockets on this node are pushed."""
+    svc, registry, _relay, _l = _receiver(online={_A, _B})
+    registry.unwatched.add(_B)
+    held = await svc.apply([_item(queue=True)])
+    await _settle(svc)
+    assert held == {"channel:sp": [_A, _B]}
+    assert [t for t, _f in registry.sent] == [_A]

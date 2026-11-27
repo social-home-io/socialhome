@@ -49,7 +49,6 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.file_hashes import space_content_media_name
-from socialhome.domain.gfs_server import MAX_GFS_SERVERS
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -583,7 +582,9 @@ async def test_gfs_channel_frames_over_the_per_channel_budget_are_dropped(caplog
             inbound_limiter=limiter,
         )
     assert len(channels.frames) == GFS_CHANNEL_FRAMES_PER_MINUTE
-    assert GFS_CHANNEL_FRAMES_PER_MINUTE == 120 * MAX_GFS_SERVERS
+    # v_97 — a GFS admits 1 200 a minute into a channel; a ring fetch
+    # pages 1 500 a minute.
+    assert GFS_CHANNEL_FRAMES_PER_MINUTE == 1_500
     warned = [r for r in caplog.records if "over budget" in r.getMessage()]
     assert len(warned) == 1 and warned[0].levelno == logging.WARNING
     await dispatch_gfs_relay_frame(

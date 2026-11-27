@@ -68,7 +68,6 @@ from .domain.federation import (
     PairingStatus,
 )
 from .domain.gfs_channel import InvalidChannelWire, valid_channel_id
-from .domain.gfs_server import MAX_GFS_SERVERS
 from .domain.space import ContentAction, SpaceRole
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
@@ -1354,25 +1353,26 @@ def _wire_space_authority_rotation(
 
 
 #: Channel frames one channel may bring this household per minute, before
-#: any decrypt / verify. A GFS admits at most 120 items a minute into a
-#: channel (cluster-wide, ``CHANNEL_PUBLISH_MAX_PER_MINUTE`` — this
-#: package does not import the server's), and a household may be seated on
-#: the same channel at every server on the space's list (at most
-#: :data:`MAX_GFS_SERVERS`), each pushing its own copy: 8 × 120. A returning
-#: household's queued backlog drains in a burst too — at most 250 relay rows
-#: per server, across every channel — so only four or more servers draining
-#: a full backlog of ONE channel in the same minute could reach it; a frame
-#: dropped here is caught up by space sync.
-GFS_CHANNEL_FRAMES_PER_MINUTE: int = 120 * MAX_GFS_SERVERS
+#: any decrypt / verify. v_97, sized for an ACTIVE 10 000-seat space (owner
+#: 2026-11-27): a GFS admits at most 1 200 items a minute into a channel
+#: (cluster-wide, ``CHANNEL_PUBLISH_MAX_PER_MINUTE`` — this package does not
+#: import the server's); the household reads a channel on one GFS (owner
+#: Q8 A: one seat, failover), and a ring fetch pages 500 items every 20 s —
+#: 1 500 a minute. A frame dropped here keeps the ring cursor before it: it
+#: comes again on the next fetch (a copy from a second GFS is a duplicate
+#: anyway). Space sync heals the rest.
+GFS_CHANNEL_FRAMES_PER_MINUTE: int = 1_500
 
 #: Channel frames per minute across EVERY channel — the household-wide
 #: ceiling, as for every other relayed frame (``RELAY_ENVELOPE_INBOUND_LIMIT``).
 #: Charged only for a well-formed channel id with room left in its own
 #: budget, so a GFS inventing channel ids mints at most this many 32-hex
-#: per-channel keys a minute. Residual: ONE misbehaving GFS can spend this
-#: ceiling and so delay the channel frames of the household's other GFSs
-#: (it could already withhold its own); space sync heals.
-GFS_CHANNEL_FRAMES_PER_MINUTE_ALL: int = 3000
+#: per-channel keys a minute. Four active channels at their full rate; at
+#: 100 a second the decrypt + Ed25519 verify stays far below one core.
+#: Residual: ONE misbehaving GFS can spend this ceiling and so delay the
+#: channel frames of the household's other GFSs (it could already withhold
+#: its own); the ring fetch and space sync heal.
+GFS_CHANNEL_FRAMES_PER_MINUTE_ALL: int = 6_000
 
 #: The limiter keys: ``gfs_channel:<channel_id>`` and the household-wide one.
 GFS_CHANNEL_BUDGET_PREFIX: str = "gfs_channel:"

@@ -90,7 +90,9 @@ class PublishOutcome:
     #: ``gone`` (v_97 space items only): the target no longer serves the
     #: item (not a channel server of the space any more) — nothing to retry
     #: and nothing to tell the author.
-    kind: Literal["delivered", "transient", "permanent", "gone"]
+    #: ``stale`` (v_97 space items only): it can never be sent as it is —
+    #: sealed at an epoch whose writer grant we no longer hold.
+    kind: Literal["delivered", "transient", "permanent", "gone", "stale"]
     #: Seconds the server asked us to wait (a 429's ``Retry-After``).
     retry_after_s: float | None = None
 
@@ -109,6 +111,10 @@ class PublishOutcome:
     @classmethod
     def gone(cls) -> PublishOutcome:
         return cls("gone")
+
+    @classmethod
+    def stale(cls) -> PublishOutcome:
+        return cls("stale")
 
 
 def parse_retry_after_s(value: str | None) -> float | None:

@@ -85,8 +85,8 @@ RECENT_AFTER_GAP: int = 200
 #: A fetch with no answer is forgotten after this long (another may go).
 FETCH_TIMEOUT_S: float = 30.0
 #: Between two pages of one fetch (500 items each — the per-channel
-#: inbound budget is 960 a minute).
-PAGE_INTERVAL_S: float = 35.0
+#: inbound budget is 1 500 a minute: three pages).
+PAGE_INTERVAL_S: float = 20.0
 #: A gap runs the §25.6 catch-up for a space at most once per this long.
 GAP_CATCH_UP_INTERVAL_S: float = 600.0
 #: "New activity" is announced at most once per space per this long.

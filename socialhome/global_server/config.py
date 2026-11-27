@@ -338,6 +338,88 @@ _ENVELOPE_MAILBOX_BOUNDS: dict[str, tuple[int, int]] = {
 }
 
 
+@dataclass(slots=True, frozen=True)
+class ChannelRingConfig:
+    """``[channel_ring]`` (v_97, :mod:`.channel_ring`): the ring of recent
+    items each opaque channel keeps here. Defaults are sized for an ACTIVE
+    10 000-seat space (owner 2026-11-27): at the channel's 4 MiB a minute
+    the ring spans ≥ 64 min (four heads pings), at 1 200 small items a
+    minute ≥ 109 min. Advertised in the signed ``/gfs/info``
+    ``channel_ring`` block, so households see the real numbers.
+
+    * ``max_bytes`` / ``max_items`` — one channel's ring (oldest dropped
+      first past either).
+    * ``durable_ttl_seconds`` — how long a durable item stays (≤ 24 h: a
+      household refuses an older item anyway).
+    * ``ephemeral_ttl_seconds`` — how long an ephemeral item (a live
+      location pin) stays (≤ 15 min, the households' keepalive; never more
+      than the durable age).
+    * ``server_max_bytes`` — every ring on this server together; past it the
+      biggest rings lose their oldest items first (never below one ring's
+      ``max_bytes``)."""
+
+    max_bytes: int = 256 * 1024**2
+    max_items: int = 131_072
+    durable_ttl_seconds: int = 24 * 3600
+    ephemeral_ttl_seconds: int = 15 * 60
+    server_max_bytes: int = 8 * 1024**3
+
+    @classmethod
+    def parse(
+        cls, table: dict, env: dict[str, str] | None = None, *, base=None
+    ) -> ChannelRingConfig:
+        """From a ``[channel_ring]`` table (absent keys keep *base*'s values,
+        else the defaults), then the ``GFS_CHANNEL_RING_<KEY>`` env vars.
+        :class:`ValueError` names the bad key or the broken rule."""
+        out = base if base is not None else cls()
+        values: dict[str, object] = {}
+        for key, (lo, hi) in _CHANNEL_RING_BOUNDS.items():
+            env_key = f"GFS_CHANNEL_RING_{key.upper()}"
+            if env is not None and env_key in env:
+                raw: object = env[env_key]
+            elif env is None and key in table:
+                raw = table[key]
+            else:
+                continue
+            values[key] = _bounded_int("channel_ring", key, raw, lo, hi)
+        cfg = replace(out, **values)
+        if cfg.ephemeral_ttl_seconds > cfg.durable_ttl_seconds:
+            raise ValueError(
+                "[channel_ring] ephemeral_ttl_seconds must not exceed"
+                f" durable_ttl_seconds ({cfg.ephemeral_ttl_seconds} >"
+                f" {cfg.durable_ttl_seconds})"
+            )
+        if cfg.server_max_bytes < cfg.max_bytes:
+            raise ValueError(
+                "[channel_ring] server_max_bytes must be at least max_bytes"
+                f" ({cfg.server_max_bytes} < {cfg.max_bytes})"
+            )
+        return cfg
+
+    def capability(self) -> dict[str, int]:
+        """The signed ``/gfs/info`` ``channel_ring`` block."""
+        return {
+            "max_bytes": self.max_bytes,
+            "max_items": self.max_items,
+            "durable_ttl_seconds": self.durable_ttl_seconds,
+            "ephemeral_ttl_seconds": self.ephemeral_ttl_seconds,
+            "server_max_bytes": self.server_max_bytes,
+        }
+
+
+#: The ``[channel_ring]`` keys and their inclusive bounds. The ages stop at
+#: what a household still takes from a ring (24 h durable, 15 min
+#: ephemeral — ``space_item_dispatch``); a ring holds at least one largest
+#: item (MEMBER_PUBLISH_MAX_PAYLOAD_CHARS, 200 KiB) and some history.
+_CHANNEL_RING_BOUNDS: dict[str, tuple[int, int]] = {
+    "max_bytes": (1024**2, 4 * 1024**3),
+    "max_items": (1_024, 10_000_000),
+    "durable_ttl_seconds": (300, 24 * 3600),
+    "ephemeral_ttl_seconds": (60, 15 * 60),
+    "server_max_bytes": (1024**2, 1 << 44),
+}
+
+
 #: The integer ``[envelope_relay]`` media keys and their inclusive bounds. The
 #: per-recipient queue holds at least one frame (528 KiB) and at most 1 GiB.
 _ENVELOPE_MEDIA_BOUNDS: dict[str, tuple[int, int]] = {
@@ -516,6 +598,9 @@ class GfsConfig:
     #: Anonymous per-space mailboxes (``GFS_ENVELOPE_RELAY_MAILBOX*``).
     envelope_mailbox: EnvelopeMailboxConfig = EnvelopeMailboxConfig()
 
+    # [channel_ring] — the per-channel ring (``GFS_CHANNEL_RING_*``, v_97).
+    channel_ring: ChannelRingConfig = ChannelRingConfig()
+
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
 
@@ -549,6 +634,7 @@ class GfsConfig:
         cluster = data.get("cluster", {})
         space_media = data.get("space_media", {})
         envelope_relay = data.get("envelope_relay", {})
+        channel_ring = data.get("channel_ring", {})
         default_stun = ("stun:stun.l.google.com:19302",)
         cfg = cls(
             host=str(server.get("host") or "0.0.0.0"),
@@ -625,6 +711,7 @@ class GfsConfig:
             space_media_on_demand=SpaceMediaOnDemandConfig.parse(space_media),
             envelope_media=EnvelopeMediaConfig.parse(envelope_relay),
             envelope_mailbox=EnvelopeMailboxConfig.parse(envelope_relay),
+            channel_ring=ChannelRingConfig.parse(channel_ring),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -843,6 +930,7 @@ class GfsConfig:
             envelope_mailbox=EnvelopeMailboxConfig.parse(
                 {}, dict(env), base=self.envelope_mailbox
             ),
+            channel_ring=ChannelRingConfig.parse({}, dict(env), base=self.channel_ring),
         )._with_clean_aliases()
 
     @classmethod
@@ -1194,6 +1282,23 @@ max_streams                 = 16
 scope_max_streams           = 4
 scope_stream_bytes_per_hour = 536870912   # 512 MiB
 prefix_wanted_per_hour      = 240
+
+[channel_ring]
+# v_97 — every opaque channel keeps ONE ring of its recent (encrypted)
+# items here: watching households get them live, the rest fetch on open.
+# Sized for an active 10 000-seat space; advertised in the signed
+# /gfs/info channel_ring block. A channel's ring drops its oldest items
+# past max_bytes or max_items; durable items stay durable_ttl_seconds
+# (300 – 86400), ephemeral ones (live location pins) ephemeral_ttl_seconds
+# (60 – 900, never more than the durable age). All rings together stay
+# under server_max_bytes (at least max_bytes): the biggest rings lose their
+# oldest items first. Env overrides: GFS_CHANNEL_RING_MAX_BYTES, … (the key
+# in upper case after GFS_CHANNEL_RING_).
+max_bytes             = 268435456     # 256 MiB
+max_items             = 131072
+durable_ttl_seconds   = 86400         # 24 h
+ephemeral_ttl_seconds = 900           # 15 min
+server_max_bytes      = 8589934592    # 8 GiB
 """
 
 

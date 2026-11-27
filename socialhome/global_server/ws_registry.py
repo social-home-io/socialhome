@@ -313,6 +313,14 @@ class GfsWebSocketRegistry:
     def watching(self, instance_id: str) -> frozenset[str]:
         return frozenset(self._watching.get(instance_id, ()))
 
+    def skips_live(self, instance_id: str, payload: dict[str, Any]) -> bool:
+        """Whether *payload* — a channel item — is not pushed to
+        *instance_id*'s ring socket because it does not watch the channel
+        (the ring holds it). A fan-out checks this BEFORE scheduling a push,
+        so a 10 000-seat channel costs a set lookup per non-watching seat,
+        not a coroutine (v_97)."""
+        return self._ring_skips(instance_id, payload)
+
     def _ring_skips(self, instance_id: str, payload: dict[str, Any]) -> bool:
         """A channel item a ring socket does not take live: it does not
         watch the channel — the ring holds

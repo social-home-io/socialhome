@@ -116,15 +116,30 @@ def _cert_lets(
     )
 
 
+#: The payload fields that name the acting local person, in order (a chat
+#: message's ``author``, a sticky's ``actor_user_id``, a vote's
+#: ``voter_user_id`` …). An item naming nobody (a task delete) has no
+#: author to tell: its failure expires unseen after a week.
+_AUTHOR_KEYS: tuple[str, ...] = (
+    "user_id",
+    "author_user_id",
+    "author",
+    "actor_user_id",
+    "voter_user_id",
+    "created_by",
+    "updated_by",
+    "deleted_by",
+)
+
+
 def _author_of(payload: dict) -> str:
     """The local person a change's payload names (the budget and the
     "Couldn't send" notice are theirs); ``""`` when none."""
-    return str(
-        payload.get("user_id")
-        or payload.get("author_user_id")
-        or payload.get("author")
-        or ""
-    )
+    for key in _AUTHOR_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 #: v_97 (owner Q6 A) — how long the legacy event still goes to every
@@ -523,13 +538,17 @@ class GfsMemberPublishService:
                     exc_info=True,
                 )
                 return await self._unsent(space_id, event_type, author)
-        if supersede_key(event_type, space_id=space_id, payload=payload) is not None:
-            # Latest-only state (a pin, a poll selection) keeps its event on
-            # the mesh: the outbox holds one row per (peer, key) for it, and
-            # a queued SPACE_ITEM would not (no movement trail for an
-            # offline household, an opt-out still replaces a queued pin).
-            return None
         try:
+            if (
+                supersede_key(event_type, space_id=space_id, payload=payload)
+                is not None
+            ):
+                # Latest-only state (a pin, a poll selection) keeps its event
+                # on the mesh: the outbox holds one row per (peer, key) for
+                # it, and a queued SPACE_ITEM would not (no movement trail
+                # for an offline household, an opt-out still replaces a
+                # queued pin).
+                return None
             sealed = await self._seal_event(space_id, event_type, payload)
         except Exception:
             # A mesh space: the legacy event is the durable per-household

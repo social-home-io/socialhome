@@ -679,7 +679,14 @@ class ClusterRelayFanOut:
                 observe = self._observers.get(item.kind)
                 if observe is not None:
                     observe(item.frame)
-            push = [t for t in local if t != item.skip]
+            # v_97 — a ring socket that does not watch the channel takes
+            # no live push (the ring holds it): no coroutine for it.
+            frame = item.push_frame()
+            push = [
+                t
+                for t in local
+                if t != item.skip and not self._ws_registry.skips_live(t, frame)
+            ]
             if push:
                 jobs.append((push, item))
         if jobs:

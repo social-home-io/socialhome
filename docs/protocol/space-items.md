@@ -205,13 +205,20 @@ signature instead of the envelope signature (tested both ways in
 A GFS proving `channel_ring` in its signed `/gfs/info` block keeps, per
 channel, ONE ring of recent items (`gfs_channel_ring`, GFS migration 0034):
 
-| bound (owner F1) | value |
+| bound (`[channel_ring]` key) | default (active 10 000-seat sizing) |
 |---|---|
-| bytes per channel | 64 MiB |
-| items per channel | 32 768 |
-| age, durable | 24 h |
-| age, ephemeral | 15 min |
-| whole server | 8 GiB (fair eviction: the biggest ring loses its oldest first) |
+| bytes per channel (`max_bytes`) | 256 MiB |
+| items per channel (`max_items`) | 131 072 |
+| age, durable (`durable_ttl_seconds`) | 24 h (300 s – 24 h) |
+| age, ephemeral (`ephemeral_ttl_seconds`) | 15 min (60 s – 15 min, ≤ durable) |
+| whole server (`server_max_bytes`) | 8 GiB (fair eviction: the biggest ring loses its oldest first) |
+
+The operator sets them in the GFS's TOML (`[channel_ring]`, env
+`GFS_CHANNEL_RING_<KEY>`; out-of-bounds values refuse to start), and the
+signed `/gfs/info` block carries the effective values:
+`"channel_ring": {max_bytes, max_items, durable_ttl_seconds,
+ephemeral_ttl_seconds, server_max_bytes}` (a non-empty block proves the
+capability). The ages stop at what a household still takes from a ring.
 
 `seq` is per channel, gap-free across cluster nodes (one SQLite transaction
 increments `gfs_channels.head_seq` and inserts the row); `ring_id` (64
@@ -253,7 +260,8 @@ said `channel_ring` in a hello gets no offline copies (it pulls).
 GFS proving `channel_ring`: `ring_class` (`durable` | `ephemeral`), inside
 the writer-key signature. Any other key (a `push_all` asking to reach every
 seat included) is refused. The publish
-per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
+per-address limit gets a per-node floor of 60/min (Q5 B); see the limits
+table below.
 
 ## The household side
 
@@ -282,8 +290,8 @@ per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
   (a live item never pulls a backlog by itself) and a fetch for a
   viewer. An item the inbound path dropped (over its budget) keeps the
   cursor before it and ends that page. Pages follow each other at most
-  every 35 s, so a backlog never outruns the 960 / min per-channel inbound
-  budget.
+  every 20 s (500 items each), so a backlog never outruns the 1 500 / min
+  per-channel inbound budget.
 - **Gaps.** `channel_gap`, a new `ring_id`, or more than 2 000 items behind
   → the cursor moves to the recent window (the last 200 items, fetched
   where someone looks: current pins, the last chat) and the household runs
@@ -398,11 +406,68 @@ Busy global space: 200 member + 10 000 follower households, 2 % watching,
   to every member household on its own path).
 - Fetch on open: one page of what was missed per open.
 - Ring storage: ≈ 56 × 60 × 24 × 2.6 KiB ≈ 210 MB per busy channel
-  (bounded at 64 MiB / 32 768 items, so the ring holds ≈ 10 h of a busy
-  channel); ≈ 2.8 GB per server.
+  (bounded at 256 MiB / 131 072 items, so the ring holds the whole day of
+  this channel); ≈ 2.8 GB per server.
 - Quiet space (50 seats, 20 items/day): ≈ 0.3 GB/day across the server.
 
 v1 (push every item to every seat): ≈ 0.7 TB/day busy.
+
+## Limits for an ACTIVE 10 000-seat space
+
+Owner 2026-11-27: "channels should be able to manage a group of 10 000
+without an issue — even if they are active". Assumptions: 10 000 seat
+households, 5 % watching at peak (500 sockets), a busy 300 items/min and
+the cap 1 200/min, ~2.9 KB per item on the wire (2 KiB bucket, base64,
+frame).
+
+| limit | value | where |
+|---|---|---|
+| publishes per channel | 1 200 / min (20 / s) | GFS `CHANNEL_PUBLISH_MAX_PER_MINUTE` |
+| publishes per writer key (epoch) | 1 200 / min | GFS |
+| publishes per client address, per channel | 240 / min (a fifth), per-node floor 60 | GFS |
+| bytes per channel | 4 MiB / min | GFS |
+| bytes per client address, per channel | 1 MiB / min (a quarter) | GFS |
+| any `/gfs/channels/*` route per IP | 600 / min | GFS, before signature work |
+| ring per channel | 256 MiB / 131 072 items (configurable) | GFS `[channel_ring]` |
+| rings per server | 8 GiB, fair eviction (configurable) | GFS `[channel_ring]` |
+| fan-out backlog | 64 items per channel, 256 per worker | GFS |
+| seats resolved per channel | once per 5 s (not per item) | GFS |
+| channel frames in, per channel | 1 500 / min | household, before decrypt |
+| channel frames in, all channels | 6 000 / min | household |
+| fetch page / interval | 500 items / 20 s | household |
+| chat per person | burst 10, then 1 / s | household sender budget |
+| location per person | 1 / 10 s, latest only | household sender budget |
+| durable item queue per space | 2 000 rows / 32 MiB | household |
+
+The math:
+
+- **Watcher push.** Busy: 500 × 300 × 2.9 KB ≈ 435 MB/min (≈ 58 Mbit/s
+  of GFS egress); at the cap 500 × 1 200 × 2.9 KB ≈ 1.7 GB/min
+  (≈ 230 Mbit/s); the 4 MiB/min byte cap bounds large items to the same
+  order. One watching household takes at most 1 200 × 2.9 KB ≈ 3.5 MB/min
+  (≈ 0.5 Mbit/s).
+- **GFS work per item** does not grow with the seats any more: the seats
+  are read once per 5 s per channel, each node sorts the 10 000 seats with
+  set lookups (≈ 2 ms) and schedules a send only for the sockets it holds
+  that watch (≈ 125 per node of 4). At 20 items/s that is a few % of a
+  core per node.
+- **Heads pings**: 10 000 × 4 / h × ~120 B ≈ 115 MB/day.
+- **Ring**: busy, 300 × 2.9 KB ≈ 0.9 MB/min → ~4.9 h in 256 MiB; at the
+  caps ≥ 64 min (bytes) / ≥ 109 min (items) — always more than four heads
+  intervals, so no writer can roll the ring past a household between two
+  pings. 8 GiB holds 32 full rings; quiet rings are never evicted for a
+  busy one.
+- **Fetch on open**: ≤ 2 000 items behind ≈ 5.8 MB in four pages
+  (≈ 60 s); further behind → the last 200 items + the §25.6 catch-up.
+- **Abuse bounds.** One household (one address) gets ≤ 20 % of a
+  channel's items and ≤ 25 % of its bytes: filling a channel takes five
+  addresses (IPv6 per /64), and even then the channel cap bounds the GFS
+  work and every watcher's bandwidth. A GFS can push at most 1 500 frames
+  / min per channel and 6 000 in all into one household before any
+  decrypt (≈ 100 / s of AES-GCM + Ed25519 — far below one core).
+- **Sender side**: a person sends ≤ 70 chat items in their first minute,
+  60 / min after; four people of a household chatting at that pace stay
+  inside the per-address 240. What waits sits in the durable queue.
 
 Mesh space: one `SPACE_ITEM` per v_97 member household per change — the
 same count of envelopes the legacy event took (members × changes), each

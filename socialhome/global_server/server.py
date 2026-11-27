@@ -545,6 +545,7 @@ class GfsApp:
             ring_repo=repos.channel_ring,
             channel_repo=repos.channels,
             ws_registry=ws_registry,
+            limits=config.channel_ring,
         )
         channels.attach_ring(channel_ring)
         # Periodic retention sweep — purges expired admin sessions, expired

@@ -2210,8 +2210,6 @@ class GfsChannelService:
         epoch: int,
         ciphertext: str,
         targets: list[GfsConnection],
-        *,
-        ring_class: str | None = None,
     ) -> list[GfsConnection]:
         """Publish an item already sealed at ``epoch`` (the member publisher
         sealed it with our space writer cert inside) to ``targets``,
@@ -2226,13 +2224,10 @@ class GfsChannelService:
             or not channel_on(space)
         ):
             return []
-        ring: dict = {}
-        if ring_class is not None:
-            ring["ring_class"] = ring_class
         item = GfsPublish(
             space_id=space_id,
             event_type=_KIND_ANON,
-            payload={"epoch": epoch, "payload": ciphertext, **ring},
+            payload={"epoch": epoch, "payload": ciphertext},
         )
         accepted: list[GfsConnection] = []
         allowed = {t.id for t in await self._anon_targets(space_id, grant)}
@@ -2268,7 +2263,7 @@ class GfsChannelService:
             return PublishOutcome.gone()
         grant = await self._publisher_grant(row.space_id, row.epoch)
         if grant is None or grant.writer_key is None:
-            return PublishOutcome.permanent()
+            return PublishOutcome.stale()
         item = GfsPublish(
             space_id=row.space_id,
             event_type=_KIND_ANON,
@@ -2279,7 +2274,10 @@ class GfsChannelService:
             },
         )
         if is_listing_target_id(row.gfs_id):
-            candidates = await self._anon_candidates(row.space_id, grant) or []
+            candidates = await self._anon_candidates(row.space_id, grant)
+            if candidates is None:
+                # The owner's list is not known right now: wait for it.
+                return PublishOutcome.transient()
             conn = next((t for t in candidates if t.id == row.gfs_id), None)
             if conn is None:
                 return PublishOutcome.gone()
@@ -2293,6 +2291,12 @@ class GfsChannelService:
             return PublishOutcome.gone()
         if stored.status != "active":
             return PublishOutcome.transient()
+        if not await self._gfs.private_channels_supported(stored):
+            # A cold capability cache (a restart while the GFS is down) is
+            # no verdict: wait. Only a known "no" drops the copy.
+            if self._gfs.capability_unknown(stored):
+                return PublishOutcome.transient()
+            return PublishOutcome.gone()
         if stored.id not in {
             t.id for t in await self._anon_targets(row.space_id, grant)
         }:

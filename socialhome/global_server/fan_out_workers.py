@@ -36,8 +36,8 @@ FAN_OUT_WORKERS: int = 2
 #: Accepted items one worker may hold, and the share of that one KEY (one
 #: channel) may take. Past either the publish answers 503 (the household's
 #: retry queue backs off) — so one busy channel can't refuse every other.
-FAN_OUT_BACKLOG: int = 128
-FAN_OUT_BACKLOG_PER_KEY: int = 16
+FAN_OUT_BACKLOG: int = 256
+FAN_OUT_BACKLOG_PER_KEY: int = 64
 
 #: How long :meth:`GfsFanOutWorkers.stop` waits for accepted items to go out
 #: before giving up on the rest (seconds).

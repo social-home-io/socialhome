@@ -231,6 +231,33 @@ signalling POSTs above), so the stock config is fine; nginx defaults to
 (Free / Pro) is far above it. A front end set below 528 KiB answers 413, and a
 household then cannot send media frames through that server.
 
+## Channel rings (v_97)
+
+Every opaque channel keeps ONE ring of its recent encrypted items in the
+shared database (`gfs_channel_ring`, GFS migration 0034): watching
+households get items live, the others fetch on open (see
+[space items](../protocol/space-items.md#the-channel-ring-gfs-capability-channel_ring)).
+The bounds live in `[channel_ring]`, each with a `GFS_CHANNEL_RING_<KEY>`
+env override. The defaults are sized for an ACTIVE space of 10 000 seats;
+the effective values are advertised in the signed `/gfs/info`
+`channel_ring` block, so households see the real numbers:
+
+```toml
+[channel_ring]
+max_bytes = 268435456           # 256 MiB per channel (oldest dropped past it)
+max_items = 131072              # items per channel
+durable_ttl_seconds = 86400     # 24 h (300 – 86400; households refuse older items)
+ephemeral_ttl_seconds = 900     # 15 min, live location pins (60 – 900, ≤ the durable age)
+server_max_bytes = 8589934592   # 8 GiB for every ring together (≥ max_bytes; biggest rings trimmed first)
+```
+
+A value out of bounds, an ephemeral age above the durable one, or a server
+cap below one ring refuses to start, naming the key. The ring is shared
+by every node (one SQLite file), so these bounds hold cluster-wide; size
+`server_max_bytes` to the disk under `data_dir`. A smaller ring is safe:
+a household whose cursor fell off it hears `channel_gap` and catches up
+from the space's hosts — it only costs that catch-up.
+
 ## Anonymous mailboxes (GFS redesign PR 1)
 
 A GFS with mailboxes on (the default) advertises `envelope_mailbox` in its

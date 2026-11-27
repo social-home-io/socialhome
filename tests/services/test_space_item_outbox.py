@@ -237,15 +237,84 @@ async def test_a_space_that_left_its_gfs_drops_what_waits(db, caplog):
     await box.run_once()
     assert await box.waiting("sp") == 0
     assert "no longer has a channel" in caplog.text
+    # Never silently: its author sees it.
+    [unsent] = await box.unsent("sp", "anna")
+    assert unsent.error == "refused"
 
 
 async def test_a_gfs_no_longer_serving_the_space_drops_its_copy_quietly(db):
+    """Another GFS still takes the item: this copy just drops."""
     clock, gfs, told = _Clock(), _Gfs(), []
-    gfs.answers["g1"] = [PublishOutcome.gone()]
+    gfs.answers["g2"] = [PublishOutcome.gone()]
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m", gfs_ids=("g1", "g2"))
+    await box.run_once()
+    assert await box.waiting("sp") == 0 and told == []
+    assert gfs.accepted == [("g1", "m")]
+
+
+@pytest.mark.security
+async def test_an_items_last_gfs_going_away_is_replanned_then_told(db):
+    """Never a change that silently reaches nobody: the last row is planned
+    afresh a few times, then its author is told."""
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.gone()] * 10
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m")
+    for _ in range(12):
+        await box.run_once()
+        clock.advance(601)
+    assert told == [("sp", "anna")]
+    [unsent] = await box.unsent("sp", "anna")
+    assert unsent.retryable
+    # A replan found another server meanwhile: it goes there.
+    gfs.plan = ["g9"]
+    await box.retry("sp", "anna")
+    for _ in range(4):
+        await box.run_once()
+        clock.advance(601)
+    assert gfs.accepted == [("g9", "m")]
+
+
+async def test_an_item_sealed_at_a_lost_epoch_is_discard_only(db):
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.stale()]
     box = _outbox(db, clock, gfs, told)
     await _queue(box, "m")
     await box.run_once()
-    assert await box.waiting("sp") == 0 and told == []
+    [unsent] = await box.unsent("sp", "anna")
+    assert (unsent.error, unsent.retryable) == ("seal_failed", False)
+    assert told == [("sp", "anna")]
+
+
+async def test_one_spaces_failing_head_never_holds_another_space_back(db):
+    clock, gfs = _Clock(), _Gfs()
+    gfs.answers["g1"] = [PublishOutcome.transient()]
+    box = _outbox(db, clock, gfs)
+    await _queue(box, "a1")
+    await _queue(box, "b1", space_id="other")
+    await box.run_once()
+    assert ("g1", "b1") in gfs.accepted
+
+
+async def test_a_reconnect_keeps_paced_items_in_their_slots(db):
+    clock, gfs = _Clock(), _Gfs()
+    box = _outbox(db, clock, gfs)
+    await _queue(box, "later", delay_s=30)
+    await box.expedite("g1")
+    await box.run_once()
+    assert gfs.tries == []
+
+
+async def test_failed_items_nobody_retried_expire_after_a_week(db):
+    clock, gfs = _Clock(), _Gfs()
+    gfs.answers["g1"] = [PublishOutcome.permanent()]
+    box = _outbox(db, clock, gfs)
+    await _queue(box, "m")
+    await box.run_once()
+    assert await box.unsent("sp", "anna")
+    clock.advance(8 * 86_400)
+    await box.run_once()
     assert await box.unsent("sp", "anna") == []
 
 

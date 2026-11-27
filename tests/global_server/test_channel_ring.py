@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -50,6 +51,12 @@ from tests.global_server.test_channels import (  # noqa: F401 — the fixture
 )
 
 pytestmark = pytest.mark.security
+
+
+def _ring_limits(gfs, **kw) -> None:
+    """Shrink this server's ``[channel_ring]`` bounds for a test."""
+    ring = gfs.app_[gfs_channel_ring_key]
+    ring._limits = replace(ring._limits, **kw)
 
 
 def _publish_body(ch: _Channel, epoch: int = 3, *, ring_class=None, payload=CT) -> dict:
@@ -296,7 +303,7 @@ async def test_fetch_pages(gfs, monkeypatch) -> None:
 
 @pytest.mark.parametrize("case", ["ring_id", "ahead", "behind"])
 async def test_a_cursor_outside_the_ring_is_a_gap(gfs, monkeypatch, case) -> None:
-    monkeypatch.setattr(ring_mod, "RING_MAX_ITEMS", 2)
+    _ring_limits(gfs, max_items=2)
     await _ready(gfs)
     await _seat(gfs, gfs.member)
     for _ in range(4):  # seq 1, 2 evicted by count
@@ -322,7 +329,7 @@ async def test_a_cursor_outside_the_ring_is_a_gap(gfs, monkeypatch, case) -> Non
 
 
 async def test_a_cursor_right_before_the_oldest_is_no_gap(gfs, monkeypatch) -> None:
-    monkeypatch.setattr(ring_mod, "RING_MAX_ITEMS", 2)
+    _ring_limits(gfs, max_items=2)
     await _ready(gfs)
     await _seat(gfs, gfs.member)
     for _ in range(4):
@@ -391,7 +398,7 @@ async def test_a_new_registration_starts_a_new_ring(gfs) -> None:
 
 
 async def test_the_ring_is_bounded_by_bytes(gfs, monkeypatch) -> None:
-    monkeypatch.setattr(ring_mod, "RING_MAX_BYTES", 3 * len(CT))
+    _ring_limits(gfs, max_bytes=3 * len(CT))
     await _ready(gfs)
     for _ in range(5):
         await _publish(gfs)
@@ -424,7 +431,7 @@ async def test_the_server_cap_trims_the_biggest_ring_first(gfs, monkeypatch) -> 
     gfs.ch = small
     await _ready(gfs)
     await _publish(gfs)
-    monkeypatch.setattr(ring_mod, "SERVER_MAX_BYTES", 4 * len(CT))
+    _ring_limits(gfs, server_max_bytes=4 * len(CT))
     await gfs.app_[gfs_channel_ring_key].sweep()
     repo = gfs.app_[gfs_channel_ring_repo_key]
     assert (await repo.state(big.id)).oldest_seq == 2
@@ -492,7 +499,7 @@ async def test_a_channel_has_a_byte_budget(gfs, monkeypatch) -> None:
 async def test_expired_pins_never_push_durable_items_out(gfs, monkeypatch) -> None:
     """The count bound is on rows held: many short-lived pins that expired
     leave the durable item (and no gap)."""
-    monkeypatch.setattr(ring_mod, "RING_MAX_ITEMS", 3)
+    _ring_limits(gfs, max_items=3)
     await _ready(gfs)
     await _publish(gfs)
     ring = gfs.app_[gfs_channel_ring_key]
@@ -520,7 +527,7 @@ async def test_watch_changes_are_rate_limited(gfs) -> None:
 
 
 async def test_the_ring_is_bounded_by_count(gfs, monkeypatch) -> None:
-    monkeypatch.setattr(ring_mod, "RING_MAX_ITEMS", 3)
+    _ring_limits(gfs, max_items=3)
     await _ready(gfs)
     for _ in range(5):
         await _publish(gfs)

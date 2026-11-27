@@ -245,7 +245,10 @@ class GfsInfoView(GfsBaseView):
             # pings, and a publish may carry the signed ``ring_class``. A
             # household sends it only to a server that proved this (an
             # older one refuses the unknown publish key).
-            "channel_ring": True,
+            # The block names this server's ring bounds (``[channel_ring]``):
+            # sizes, ages and the server cap, so households see the real
+            # numbers.
+            "channel_ring": cfg.channel_ring.capability(),
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         # The encrypted, short-lived space media cache

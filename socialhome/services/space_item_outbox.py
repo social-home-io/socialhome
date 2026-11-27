@@ -40,6 +40,7 @@ from ..domain.space_item_outbox import (
     UNPLANNED_GFS,
     UNSENT_QUEUE_FULL,
     UNSENT_REFUSED,
+    UNSENT_SEAL_FAILED,
     UNSENT_TOO_LARGE,
     QueuedSpaceItem,
     UnsentItem,
@@ -54,6 +55,13 @@ log = logging.getLogger(__name__)
 BATCH: int = 100
 #: Longest sleep between passes when nothing is due sooner.
 IDLE_WAKE_S: float = 60.0
+#: How often an item whose last GFS stopped serving the space is planned
+#: afresh before its author is told.
+MAX_REPLANS: int = 3
+#: Failed items nobody retried or discarded go after this long, checked
+#: at most this often.
+FAILED_RETENTION: timedelta = timedelta(days=7)
+FAILED_SWEEP_INTERVAL: timedelta = timedelta(hours=1)
 
 #: One attempt to put ``row`` on ``row.gfs_id``.
 Sender = Callable[[QueuedSpaceItem], Awaitable[PublishOutcome]]
@@ -84,6 +92,7 @@ class SpaceItemOutbox:
         "_repo",
         "_sender",
         "_stop",
+        "_swept_at",
         "_task",
         "_wake",
     )
@@ -103,6 +112,7 @@ class SpaceItemOutbox:
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._swept_at: datetime | None = None
 
     def attach(self, *, sender: Sender, planner: Planner) -> None:
         """The channel service's one-attempt send and its planner."""
@@ -230,19 +240,28 @@ class SpaceItemOutbox:
 
     async def run_once(self) -> int:
         """One pass over the due rows; returns how many were due. Rows of
-        one GFS go in order, GFSs in parallel."""
+        one (GFS, space) go in order; the pairs in parallel, so one space's
+        failing head never holds another space back on the same GFS."""
         if self._sender is None or self._planner is None:
             return 0
+        await self._expire_failed()
         rows = await self._repo.list_due(self._now(), limit=BATCH)
-        by_gfs: dict[str, list[QueuedSpaceItem]] = {}
+        groups: dict[tuple[str, str], list[QueuedSpaceItem]] = {}
         for row in rows:
-            by_gfs.setdefault(row.gfs_id, []).append(row)
-        await asyncio.gather(
-            *(self._run_gfs(gfs_id, batch) for gfs_id, batch in by_gfs.items())
-        )
+            groups.setdefault((row.gfs_id, row.space_id), []).append(row)
+        await asyncio.gather(*(self._run_group(batch) for batch in groups.values()))
         return len(rows)
 
-    async def _run_gfs(self, gfs_id: str, rows: list[QueuedSpaceItem]) -> None:
+    async def _expire_failed(self) -> None:
+        now = self._clock()
+        if self._swept_at is not None and now - self._swept_at < FAILED_SWEEP_INTERVAL:
+            return
+        self._swept_at = now
+        n = await self._repo.expire_failed(_iso(now - FAILED_RETENTION))
+        if n:
+            log.info("space items: %d unsent item(s) nobody retried expired", n)
+
+    async def _run_group(self, rows: list[QueuedSpaceItem]) -> None:
         for row in rows:
             try:
                 if not await self._attempt(row):
@@ -265,12 +284,11 @@ class SpaceItemOutbox:
             if planned is None:
                 log.warning(
                     "space items: space %s no longer has a channel here — a"
-                    " waiting %s is dropped",
+                    " waiting %s was not sent; its author is told",
                     row.space_id,
                     row.event_type,
                 )
-                await self._repo.delete(row.item_id, row.gfs_id)
-                self._space_changed(row.space_id)
+                await self._fail(row, UNSENT_REFUSED)
             elif planned:
                 await self._repo.expand(row, planned, now=self._now())
                 self._wake.set()
@@ -283,15 +301,16 @@ class SpaceItemOutbox:
             self._space_changed(row.space_id)
             return True
         if outcome.kind == "gone":
-            log.info(
-                "space items: GFS %s no longer serves space %s — its copy of a"
-                " %s is dropped",
-                row.gfs_id,
-                row.space_id,
+            await self._gone(row)
+            return True
+        if outcome.kind == "stale":
+            log.warning(
+                "space items: a %s of space %s was sealed at an epoch we can no"
+                " longer publish at — not sent; its author is told",
                 row.event_type,
+                row.space_id,
             )
-            await self._repo.delete(row.item_id, row.gfs_id)
-            self._space_changed(row.space_id)
+            await self._fail(row, UNSENT_SEAL_FAILED, drop_payload=True)
             return True
         if outcome.kind == "transient":
             await self._backoff(row, outcome.retry_after_s)
@@ -303,10 +322,53 @@ class SpaceItemOutbox:
             row.event_type,
             row.space_id,
         )
-        await self._repo.mark_failed(row.item_id, row.gfs_id, UNSENT_REFUSED)
+        await self._fail(row, UNSENT_REFUSED)
+        return True
+
+    async def _fail(
+        self, row: QueuedSpaceItem, error: str, *, drop_payload: bool = False
+    ) -> None:
+        await self._repo.mark_failed(
+            row.item_id, row.gfs_id, error, drop_payload=drop_payload
+        )
         self._space_changed(row.space_id)
         await self._tell(row.space_id, row.author_user_id)
-        return True
+
+    async def _gone(self, row: QueuedSpaceItem) -> None:
+        """*row*'s GFS no longer serves the space. Another row of the item
+        still goes elsewhere: this copy just drops. Its LAST row is planned
+        afresh (the owner's list may name another server by then) — a few
+        times, then its author is told: never a change that silently
+        reaches nobody."""
+        if await self._repo.count_rows(row.item_id) > 1:
+            log.info(
+                "space items: GFS %s no longer serves space %s — its copy of a"
+                " %s is dropped",
+                row.gfs_id,
+                row.space_id,
+                row.event_type,
+            )
+            await self._repo.delete(row.item_id, row.gfs_id)
+            self._space_changed(row.space_id)
+            return
+        attempts = row.attempts + 1
+        if attempts > MAX_REPLANS:
+            log.warning(
+                "space items: no GFS of space %s takes a %s any more — its"
+                " author is told",
+                row.space_id,
+                row.event_type,
+            )
+            await self._fail(row, UNSENT_REFUSED)
+            return
+        await self._repo.replan(
+            row.item_id,
+            row.gfs_id,
+            attempts=attempts,
+            next_attempt_at=_iso(
+                self._clock() + timedelta(seconds=backoff_s(attempts))
+            ),
+        )
 
     async def _backoff(
         self,
@@ -323,7 +385,7 @@ class SpaceItemOutbox:
             row.item_id, row.gfs_id, attempts=attempts, next_attempt_at=until
         )
         if whole_gfs:
-            await self._repo.defer_gfs(row.gfs_id, until=until)
+            await self._repo.defer_gfs(row.gfs_id, row.space_id, until=until)
 
     # ── Notifications ────────────────────────────────────────────────────
 

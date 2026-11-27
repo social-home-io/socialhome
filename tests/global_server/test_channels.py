@@ -54,13 +54,17 @@ from socialhome.global_server.app_keys import (
     gfs_ws_registry_key,
 )
 from socialhome.global_server.channels import (
+    CHANNEL_ANON_MAX_BYTES_PER_MINUTE_PER_ADDRESS,
     CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS,
     CHANNEL_ANON_PER_NODE_FLOOR,
+    CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE,
     CHANNEL_PUBLISH_MAX_PER_MINUTE,
     CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
     CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP,
     CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP,
+    FAN_OUT_TARGETS_TTL_S,
     SUBSCRIBE_NOT_YET_RETRY_S,
+    ByteBudget,
     ChannelRateLimited,
     _is_channel_path,
 )
@@ -794,17 +798,18 @@ async def test_one_key_holder_spreading_over_addresses_cannot_exceed_the_channel
 
 
 @pytest.mark.security
-async def test_one_key_holder_needs_eight_addresses_to_fill_the_channel(gfs) -> None:
-    """F5-b: one writer-key holder spreading over addresses can no longer
-    spend the channel's whole minute from four of them — each address takes
-    an eighth, so seven leave an honest writer at least one address's share,
-    and only eight (IPv6: eight /64s) fill the channel."""
+async def test_one_key_holder_needs_five_addresses_to_fill_the_channel(gfs) -> None:
+    """F5-b, resized for an active 10 000-seat space (v_97): each address
+    takes a fifth of the channel's minute, so four leave an honest writer
+    at least one address's share, and only five (IPv6: five /64s) fill
+    the channel."""
     await _ready(gfs, epoch=3)
     svc = gfs.app_[gfs_channel_service_key]
     per_addr = CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
     cap = CHANNEL_PUBLISH_MAX_PER_MINUTE
-    assert per_addr * 8 == cap
-    for a in range(7):
+    assert (per_addr, cap) == (240, 1_200)
+    assert per_addr * 5 == cap
+    for a in range(4):
         for _ in range(per_addr):
             await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.0.0.{a}")
         with pytest.raises(ChannelRateLimited):
@@ -1094,3 +1099,48 @@ async def test_ten_thousand_offline_seats_at_a_full_relay_queue(gfs, monkeypatch
     assert max(queued.values()) <= 2
     assert len(queued) >= _SCALE_SEATS - 1
     assert elapsed < 10, elapsed
+
+
+# ── v_97: sized for an active 10 000-seat space ──────────────────────────
+
+
+@pytest.mark.security
+async def test_one_address_cannot_spend_the_channels_shared_bytes(gfs) -> None:
+    """A quarter of the channel's byte budget per address: one household
+    uploading large items can't roll the ring for everyone."""
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    assert CHANNEL_ANON_MAX_BYTES_PER_MINUTE_PER_ADDRESS * 4 == (
+        CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE
+    )
+    svc._anon_ip_bytes = ByteBudget(2 * len(CT))
+    for _ in range(2):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.9")
+
+
+async def test_a_busy_channel_resolves_its_seats_once_per_few_seconds(gfs) -> None:
+    """At 20 items a second a 10 000-seat channel must not read every seat
+    per item: the seats are reused for FAN_OUT_TARGETS_TTL_S, refreshed at
+    once by a seat taken here."""
+    await _ready(gfs)
+    svc = gfs.app_[gfs_channel_service_key]
+    await _seat_many(gfs, 2)
+    assert len(await svc.audience_targets(gfs.ch.id)) == 2
+    db = gfs.app_[gfs_db_key]
+    await db.enqueue(
+        "INSERT INTO client_instances(instance_id, public_key, status,"
+        " relay_seen_at) VALUES(?, ?, 'active', ?)",
+        ("f" * 32, "00" * 32, int(time.time())),
+    )
+    await db.enqueue(
+        "INSERT INTO gfs_channel_subscribers(channel_id, instance_id,"
+        " pass_epoch, joined_at) VALUES(?, ?, 3, ?)",
+        (gfs.ch.id, "f" * 32, int(time.time())),
+    )
+    assert len(await svc.audience_targets(gfs.ch.id)) == 2
+    real = svc._clock
+    svc._clock = lambda: real() + FAN_OUT_TARGETS_TTL_S + 1
+    assert len(await svc.audience_targets(gfs.ch.id)) == 3

@@ -319,7 +319,13 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "subscriber_seats": True,
         # The owner's signed publish may declare member / follower counts.
         "listing_counts": True,
-        "channel_ring": True,
+        "channel_ring": {
+            "max_bytes": 256 * 1024**2,
+            "max_items": 131_072,
+            "durable_ttl_seconds": 86_400,
+            "ephemeral_ttl_seconds": 900,
+            "server_max_bytes": 8 * 1024**3,
+        },
         # The encrypted, short-lived space media cache and the limits a
         # household needs (largest blob, how long one is kept).
         "space_media": {
