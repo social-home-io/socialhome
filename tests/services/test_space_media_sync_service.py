@@ -1117,7 +1117,7 @@ async def test_a_gfs_spaces_file_is_never_pushed_to_a_cache_reader(
     await svc.flush_once()
     sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
     assert sent_to == {"peer-a"}
-    # An asked-for row (a catch-up, ``push``) is filtered the same way.
+    # A catch-up row (``push``) is filtered the same way.
     await svc.enqueue_for_blob(
         space_id="sp-1",
         correlation_id="p-2",
@@ -1127,3 +1127,17 @@ async def test_a_gfs_spaces_file_is_never_pushed_to_a_cache_reader(
     )
     assert len(asked) == 2
     assert await outbox.list_for_correlation("p-2") == []
+    # A row the household asked for by SPACE_MEDIA_WANTED (``asked``) is
+    # queued: it asks only for a file it holds no descriptor for.
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-3",
+        target_instance_ids=["peer-b"],
+        media_urls=["api/media/img-1.webp"],
+        push=True,
+        asked=True,
+    )
+    assert len(asked) == 2
+    assert [r.target_instance_id for r in await outbox.list_for_correlation("p-3")] == [
+        "peer-b"
+    ]

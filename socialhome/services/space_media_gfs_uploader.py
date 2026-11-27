@@ -398,22 +398,37 @@ class SpaceMediaGfsUploader:
         self, space_id: str, filename: str, targets: list[str]
     ) -> list[str]:
         """Who still gets the household push of *filename* (v_97, owner
-        2026-11-27): in a GFS space every file reaches a v_97 household
-        only through the GFS cache (the item describes it; a file no GFS
-        takes is shown to its author instead) — only households below
-        v_97, and everyone while the space's 14-day legacy window is open,
-        keep the push. A mesh space's files go to everyone."""
+        2026-11-27): the *targets* that do not read the space from the GFS
+        cache only (:meth:`cache_only`). A mesh space's files go to
+        everyone."""
+        return [t for t in targets if not await self.cache_only(space_id, t)]
+
+    async def cache_only(self, space_id: str, instance_id: str) -> bool:
+        """v_97 (owner 2026-11-27) — whether *instance_id* takes
+        *space_id*'s files ONLY from the GFS space media cache: no
+        ``SPACE_MEDIA_BLOB`` push and no ``SPACE_MEDIA_WANTED`` for it. True
+        for a space whose channel is stored here, once its 14-day legacy
+        window closed, when both the household and the space's host are at
+        v_97 — a version and channel condition, never the space type alone:
+        a v_96 host (whose own files carry no descriptor) or a space with
+        no stored channel yet keeps the push. Every path that sends such a
+        household an item with files describes them (``media_refs``)."""
         if self._federation is None or await self.scope_of(space_id) is None:
-            return list(targets)
+            return False
         if self._legacy_window is not None and await self._legacy_window(space_id):
-            return list(targets)
-        out: list[str] = []
-        for target in targets:
+            return False
+        space = await self._spaces.get(space_id)
+        host = str(getattr(space, "owner_instance_id", "") or "")
+        for iid in (instance_id, host):
+            if not iid:
+                return False
+            if iid == self._origin():
+                continue
             if not await self._federation.space_member_supports(
-                target, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
+                iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
             ):
-                out.append(target)
-        return out
+                return False
+        return True
 
     def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the v_51 channel service: a private space with an opaque
@@ -569,14 +584,9 @@ class SpaceMediaGfsUploader:
 
     async def reads_space_from_cache(self, space_id: str, instance_id: str) -> bool:
         """v_97 — whether *instance_id* takes *space_id*'s files from the
-        GFS space media cache: a GFS space (one with a channel here) and a
-        v_97 household — paired, mesh or link-joined alike (owner
-        2026-11-27: a GFS space's files come only through the GFS)."""
-        if self._federation is None or await self.scope_of(space_id) is None:
-            return False
-        return await self._federation.space_member_supports(
-            instance_id, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
-        )
+        GFS space media cache only (:meth:`cache_only`): its items and
+        catch-up records then carry the descriptor."""
+        return await self.cache_only(space_id, instance_id)
 
     async def plan_for_reader(
         self,

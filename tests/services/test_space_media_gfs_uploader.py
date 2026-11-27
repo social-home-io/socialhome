@@ -231,7 +231,9 @@ class _Spaces:
                 owner_instance_id=self.owner,
             )
         return SimpleNamespace(
-            space_type=SpaceType.PRIVATE, features=SimpleNamespace(private_gfs=True)
+            space_type=SpaceType.PRIVATE,
+            features=SimpleNamespace(private_gfs=True),
+            owner_instance_id=self.owner,
         )
 
     async def get_gfs_channel(self, space_id):
@@ -1414,6 +1416,32 @@ async def test_a_gfs_spaces_files_are_pushed_only_below_v97(tmp_path):
 
     u.attach_legacy_window(window_open)
     assert await u.push_targets(SPACE, "a.webp", targets) == targets
+
+
+async def test_a_v96_host_or_no_stored_channel_keeps_the_push(tmp_path):
+    """v_97 (owner B-6) — the cache-only rule is a version and channel
+    condition: a space whose host is below v_97 (its own files carry no
+    descriptor), or one with no stored channel here yet, keeps the push for
+    every household; with a v_97 host a v_97 household gets none."""
+    g1 = _Conn("g1", "https://g1.example")
+    seed = b"\3" * 32
+    channel = (CHANNEL_ID, channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)))
+    for host, expected in (("host96", ["new"]), ("host97", [])):
+        u = _uploader(
+            tmp_path,
+            gfs=_Gfs([g1]),
+            spaces=_Spaces(seed, channel=channel, private_gfs=True, owner=host),
+        )
+        u.attach_federation(_Fed({"new": OURS, "host96": 96, "host97": OURS}))
+        assert await u.push_targets(SPACE, "a.webp", ["new"]) == expected
+        assert await u.cache_only(SPACE, "new") is (not expected)
+    no_channel = _uploader(
+        tmp_path,
+        gfs=_Gfs([g1]),
+        spaces=_Spaces(seed, channel=None, private_gfs=True, owner="host97"),
+    )
+    no_channel.attach_federation(_Fed({"new": OURS, "host97": OURS}))
+    assert await no_channel.push_targets(SPACE, "a.webp", ["new"]) == ["new"]
 
 
 async def test_a_catch_up_reader_of_a_gfs_space_is_described_for_the_cache(

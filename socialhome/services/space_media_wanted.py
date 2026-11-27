@@ -111,7 +111,6 @@ from ..federation.sync.space.file_gate import (
     local_file_size,
 )
 from ..federation.sync.space.trusted_helpers import helper_offset, trusted_helpers
-from .gfs_channel_service import channel_on
 from .inbound_media_store import (
     is_space_direct_media_name,
     media_file_path,
@@ -218,6 +217,7 @@ class _MediaOutbox(Protocol):
         media_urls: list[str],
         push: bool = False,
         wire_names: dict[str, str] | None = None,
+        asked: bool = False,
     ) -> None: ...
 
 
@@ -507,16 +507,19 @@ class SpaceMediaWanted:
 
     async def _asks_the_host(self, space_id: str) -> bool:
         """A seat here AND a paired / mesh path to the host (P10: by path,
-        never by role); else the household fetches through its GFS. A
-        GFS space's file is never asked for here (v_97, owner 2026-11-27:
-        its files come only through the GFS cache; a miss there goes on
-        demand)."""
-        space = await self._spaces.get(space_id)
-        if space is not None and channel_on(space):
-            return False
+        never by role); else the household fetches through its GFS. A file
+        this household holds a GFS descriptor for is never asked for (v_97,
+        owner 2026-11-27: it comes from the GFS cache, a miss there on
+        demand — :meth:`_described`); in a GFS space that is every file but
+        one from a v_96 author, whose items carry none."""
         return await holds_seat(
             self._spaces, space_id
         ) and await self._federation.reaches_host_directly(space_id)
+
+    async def _described(self, name: str) -> bool:
+        """Whether this household holds a GFS descriptor for *name*: it
+        reads the file from the GFS cache (on demand when evicted)."""
+        return self._gfs_ref is not None and await self._gfs_ref(name) is not None
 
     async def _lookup(self, name: str, per_space: dict[str, dict[str, str]]) -> bool:
         """Add *name* to ``per_space`` for every space this household holds a
@@ -527,7 +530,9 @@ class SpaceMediaWanted:
             for space_id, item_id, _created in rows:
                 if name in per_space.get(space_id, {}):
                     continue
-                if not await self._asks_the_host(space_id):
+                if await self._described(name) or not await self._asks_the_host(
+                    space_id
+                ):
                     continue  # it fetches through its GFS (v_83)
                 per_space.setdefault(space_id, {})[name] = item_id
                 added = True
@@ -805,6 +810,9 @@ class SpaceMediaWantedProvider:
                     target_instance_ids=[requester],
                     media_urls=[url],
                     push=True,
+                    # Asked for: a file it holds no GFS descriptor for, so
+                    # the cache can't give it (v_97 ``push_targets``).
+                    asked=True,
                     # A content name is sent as asked (a helper may store it
                     # under its own reader name, ``sg-``, which the requester
                     # refuses by name); a sender-bound one under the file's

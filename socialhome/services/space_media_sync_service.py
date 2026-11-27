@@ -201,13 +201,17 @@ class SpaceMediaSyncService:
         media_urls: list[str],
         push: bool = False,
         wire_names: Mapping[str, str] | None = None,
+        asked: bool = False,
     ) -> None:
         """One outbox row per (media_url, peer) tuple.
 
         v_97 (owner 2026-11-27): a GFS space's files reach its v_97
         households only through the GFS space media cache — no row is
-        queued for them (``SpaceMediaGfsUploader.push_targets``), whatever
-        the row is (live, catch-up, asked for).
+        queued for them (``SpaceMediaGfsUploader.push_targets``), live or
+        catch-up. A row a household asked for by ``SPACE_MEDIA_WANTED``
+        (*asked*) is queued: a household asks only for a file it holds no
+        descriptor for (an item from a v_96 author, which carries none), so
+        the cache can't give it.
 
         ``push`` (v_92): the targets asked for these files
         (``SPACE_MEDIA_WANTED``) — they already missed their GFS cache, so
@@ -244,7 +248,7 @@ class SpaceMediaSyncService:
                 )
                 continue
             targets = list(target_instance_ids)
-            if self._cache_readers is not None:
+            if self._cache_readers is not None and not asked:
                 try:
                     targets = await self._cache_readers(space_id, filename, targets)
                 except Exception:
