@@ -36,7 +36,11 @@ from socialhome.crypto import (
     ed25519_public_key,
 )
 from socialhome.domain.federation import GfsConnection, InstanceSource
-from socialhome.domain.gfs_channel import CHANNEL_FRAME_KEYS, CHANNEL_ROUTES
+from socialhome.domain.gfs_channel import (
+    CHANNEL_FRAME_KEYS,
+    CHANNEL_ROUTES,
+    RING_POSITION_KEYS,
+)
 from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.writer_cert import WriterEntitlement
@@ -448,7 +452,7 @@ async def test_the_gfs_never_learns_the_private_space(world):
         world.b.h.instance_id,
     }
     for row in queued:
-        assert set(row.sealed) == CHANNEL_FRAME_KEYS
+        assert set(row.sealed) == CHANNEL_FRAME_KEYS | RING_POSITION_KEYS
         assert row.sealed["channel_id"] == channel_id
         # The ciphertext really holds the item (and its space-scoped cert).
         raw = b64url_decode(row.sealed["payload"])

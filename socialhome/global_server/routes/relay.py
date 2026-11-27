@@ -239,6 +239,13 @@ class GfsInfoView(GfsBaseView):
             # one folds only the fields it knows, so they would break the
             # signature.
             "listing_counts": True,
+            # v_97 — every channel keeps one ring of recent items here: a
+            # socket that says ``channel_ring`` in its hello watches /
+            # fetches (``channel_watch`` / ``channel_fetch``), gets heads
+            # pings, and a publish may carry the signed ``ring_class`` /
+            # ``push_all``. A household sends those only to a server that
+            # proved this (an older one refuses the unknown publish keys).
+            "channel_ring": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         # The encrypted, short-lived space media cache

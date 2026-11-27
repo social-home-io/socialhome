@@ -86,7 +86,7 @@ from ..gfs_channel import (
 from ..writer_key import verify_writer_sig
 from .addressee import GfsAddressee
 from .cluster_relay import AUDIENCE_CHANNEL
-from .domain import CHANNEL_EPOCH_GRACE_S, GfsChannel
+from .domain import GfsChannel
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import SeenPayloadCache
 from .public import (
@@ -97,6 +97,7 @@ from .public import (
 )
 
 if TYPE_CHECKING:
+    from .channel_ring import GfsChannelRing
     from .fan_out_workers import GfsFanOutWorkers
     from .federation import GfsFederationService
     from .repositories import AbstractGfsChannelRepo
@@ -149,6 +150,11 @@ MAX_FIRST_CHANNEL_EPOCH: int = 2**62
 #: a burst past it gets ``429`` and the household's retry queue lands it.
 CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS: int = CHANNEL_PUBLISH_MAX_PER_MINUTE // 8
 
+#: v_97 (owner Q5 B) — the per-address limit never drops below this per
+#: node: on a 4-node cluster ``node_share(15, 4)`` is 4/min per node, which
+#: refused a busy household's chat; the floor makes it ~32/min cluster-wide.
+CHANNEL_ANON_PER_NODE_FLOOR: int = 8
+
 
 #: Live channel rows this server keeps at most — anonymous registration's
 #: server-wide bound (with the per-address limit and the unused-row TTL).
@@ -184,15 +190,7 @@ class ChannelEpochTooSoon(Exception):
 
 def _open_epochs(ch: GfsChannel, *, now: int) -> set[int]:
     """The epochs a pass / seat may carry right now."""
-    if ch.epoch is None:
-        return set()
-    epochs = {ch.epoch, ch.epoch + 1}
-    if (
-        ch.epoch_prev is not None
-        and now - (ch.epoch_raised_at or 0) <= CHANNEL_EPOCH_GRACE_S
-    ):
-        epochs.add(ch.epoch_prev)
-    return epochs
+    return ch.open_epochs(now=now)
 
 
 class GfsChannelService:
@@ -210,6 +208,7 @@ class GfsChannelService:
         "_max_channels",
         "_nodes",
         "_register_limiter",
+        "_ring",
         "_writer_key_limiter",
     )
 
@@ -249,13 +248,21 @@ class GfsChannelService:
             CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS
         )
         self._anon_seen = SeenPayloadCache(ttl_s=float(2 * CHANNEL_TS_SKEW_S))
+        #: v_97 — the channel rings; ``None`` keeps the v_96 behaviour.
+        self._ring: GfsChannelRing | None = None
+
+    def attach_ring(self, ring: GfsChannelRing) -> None:
+        """Wire the v_97 channel ring (capability ``channel_ring``)."""
+        self._ring = ring
 
     # ── Shared checks ────────────────────────────────────────────────────
 
     def _now(self) -> int:
         return int(self._clock())
 
-    def _allow(self, counter: SlidingWindowCounter, key: str) -> bool:
+    def _allow(
+        self, counter: SlidingWindowCounter, key: str, *, floor: int = 1
+    ) -> bool:
         """One hit on *counter* under this node's share of its limit.
 
         The counters live in this process; behind the round-robin balancer a
@@ -266,7 +273,8 @@ class GfsChannelService:
         cluster at about L; a balancer that pins a client to one node makes
         it stricter, never looser (:func:`~.public.node_share`)."""
         nodes = self._nodes() if self._nodes is not None else 1
-        return counter.allow(key, limit=node_share(counter.limit, nodes))
+        share = max(floor, node_share(counter.limit, nodes))
+        return counter.allow(key, limit=min(share, counter.limit))
 
     def _addressed(self, gfs_instance_id: str, gfs_key: str | None = None) -> None:
         if not self._addressee.accepts(gfs_instance_id, gfs_key):
@@ -559,15 +567,20 @@ class GfsChannelService:
             channel_id, _open_epochs(ch, now=self._now())
         )
 
-    def _resolver(self, channel_id: str):
+    def _resolver(self, channel_id: str, *, push_all: bool = False):
         async def _resolve() -> tuple[list[str], set[str]]:
             ch = await self._channels.get(channel_id)
             if ch is None:
                 return [], set()
             epochs = _open_epochs(ch, now=self._now())
             targets = await self._channels.list_targets(channel_id, epochs)
+            # v_97 — a household that reads the ring gets no offline copy
+            # (it pulls), except of a ``push_all`` item every seat gets.
             recent = await self._channels.list_recently_seen(
-                channel_id, epochs, within_s=ENVELOPE_QUEUE_TTL_SECONDS
+                channel_id,
+                epochs,
+                within_s=ENVELOPE_QUEUE_TTL_SECONDS,
+                include_ring=push_all or self._ring is None,
             )
             return targets, recent
 
@@ -578,7 +591,7 @@ class GfsChannelService:
             f"ch:{channel_id}",
             publisher_id=publisher_id,
             frame=frame,
-            resolve=self._resolver(channel_id),
+            resolve=self._resolver(channel_id, push_all=frame.get("push_all") is True),
             audience=(AUDIENCE_CHANNEL, channel_id),
         ):
             raise ChannelBusy()
@@ -598,7 +611,11 @@ class GfsChannelService:
             UnsupportedWriterKeySuite,
         ) as exc:
             raise PermissionError(f"writer signature refused: {exc}") from exc
-        if not self._allow(self._anon_ip_limiter, f"{req.channel_id}\x00{client_ip}"):
+        if not self._allow(
+            self._anon_ip_limiter,
+            f"{req.channel_id}\x00{client_ip}",
+            floor=CHANNEL_ANON_PER_NODE_FLOOR,
+        ):
             raise ChannelRateLimited()
         if not self._allow(self._channel_limiter, req.channel_id):
             raise ChannelRateLimited()
@@ -612,8 +629,16 @@ class GfsChannelService:
         digest = SeenPayloadCache.digest(req.to_wire())
         if self._anon_seen.seen(digest):
             raise PermissionError("replayed request")
+        # v_97 — into the channel's ring first: the frame carries its place
+        # (``seq`` / ``ring_id``). Without a ring the v_96 frame; a ring
+        # field from a household is never honoured by a server without one.
+        frame = (
+            await self._ring.append(req)
+            if self._ring is not None
+            else req.fan_out_frame()
+        )
         # No publisher to exclude: its own echo is dropped by the household.
-        self._submit(req.channel_id, "", req.fan_out_frame())
+        self._submit(req.channel_id, "", frame)
         self._anon_seen.record(digest)
         await self._channels.touch(req.channel_id, now=now)
 

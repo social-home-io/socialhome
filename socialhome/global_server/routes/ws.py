@@ -5,8 +5,10 @@ this endpoint so the GFS can push relay events to it. It is the ONLY
 delivery path — the GFS holds no household address, so a frame for a
 household whose socket is down waits for it to reconnect (queued where the
 feature queues, dropped where it does not). The WS is **one-way (GFS →
-SH)**: after the
-signed hello frame the SH never sends application frames. Heartbeat is
+SH)** for a household that did not opt into the channel ring: after the
+signed hello frame it sends no application frames. A household whose hello
+listed ``channel_ring`` (v_97) sends ``channel_watch`` / ``channel_fetch``
+frames (:mod:`..channel_ring`); anything else is ignored. Heartbeat is
 WebSocket-protocol-level via aiohttp's ``heartbeat=30.0``.
 
 SH → GFS calls (pair, the space directory, channels, report, appeal) keep
@@ -68,6 +70,7 @@ from aiohttp import WSMsgType, web
 
 from ... import crypto
 from ...domain.gfs_hello_accepts import (
+    ACCEPTS_CHANNEL_RING,
     ACCEPTS_ENVELOPE_MEDIA,
     ACCEPTS_SPACE_MEDIA_SERVE,
     ACCEPTS_WS_BINARY1,
@@ -132,6 +135,7 @@ class GfsWebSocketView(web.View):
         if hello is None:
             return ws
         instance_id, accepts = hello
+        ring = ACCEPTS_CHANNEL_RING in accepts
 
         registry = self.request.app[K.gfs_ws_registry_key]
         fed_repo = self.request.app[K.gfs_fed_repo_key]
@@ -146,8 +150,16 @@ class GfsWebSocketView(web.View):
             media_serve=ACCEPTS_SPACE_MEDIA_SERVE in accepts,
             # v_87 — it opens binary relay media frames (``\x00SHR``).
             envelope_media=ACCEPTS_ENVELOPE_MEDIA in accepts,
+            # v_97 — it reads its channels from the ring (watch / fetch).
+            ring=ring,
         )
         await fed_repo.upsert_rtc_connection(instance_id, transport="websocket")
+        # Remembered past this socket: an offline ring household gets no
+        # offline copy of a channel item (it pulls from the ring).
+        channel_ring = self.request.app[K.gfs_channel_ring_key]
+        await self.request.app[K.gfs_channel_ring_repo_key].set_channel_ring(
+            instance_id, ring
+        )
 
         # v_62 — sealed moment keys that went out while this household was
         # offline (the latest per followed author, only the undelivered).
@@ -177,13 +189,26 @@ class GfsWebSocketView(web.View):
             _mark_seen_while_open(fed_repo, instance_id, ws),
             name=f"gfs-ws-seen-{instance_id}",
         )
+        if ring:
+            # Every seated channel's head, so the household can badge and
+            # fetch what it missed while away.
+            try:
+                await channel_ring.send_heads(instance_id, initial=True)
+            except Exception:
+                log.warning("gfs.ws: initial channel heads failed", exc_info=True)
 
         try:
             async for msg in ws:
                 # The SH does not send application frames; aiohttp handles
                 # ping/pong control frames natively. Anything else is
                 # logged and ignored — a polite client shouldn't send it.
-                if msg.type == WSMsgType.TEXT:
+                if msg.type == WSMsgType.TEXT and ring:
+                    try:
+                        frame = orjson.loads(msg.data)
+                    except orjson.JSONDecodeError:
+                        continue
+                    await channel_ring.on_frame(instance_id, frame)
+                elif msg.type == WSMsgType.TEXT:
                     log.debug(
                         "gfs.ws: ignored unexpected TEXT frame from %s (len=%d)",
                         instance_id,
@@ -207,6 +232,8 @@ class GfsWebSocketView(web.View):
             )
         finally:
             seen_timer.cancel()
+            if ring and registry.is_current(instance_id, ws):
+                channel_ring.forget(instance_id)
             await registry.unregister(instance_id, ws)
             await fed_repo.upsert_rtc_connection(instance_id, transport="https")
 

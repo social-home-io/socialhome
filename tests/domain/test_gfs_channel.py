@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from socialhome.crypto import ed25519_public_key
+from socialhome.domain import gfs_channel as _gc
 from socialhome.domain.gfs_channel import (
     CHANNEL_FRAME_KEYS,
     CHANNEL_ROUTES,
@@ -195,3 +196,84 @@ def test_channel_requests_carry_an_optional_signed_gfs_key():
     assert ChannelUnsubscribeRequest.from_wire(bound.to_wire()) == bound
     with pytest.raises(InvalidChannelWire):
         ChannelUnsubscribeRequest.from_wire({**req.to_wire(), "gfs_key": "zz"})
+
+
+# ── v_97: the channel ring wire ──────────────────────────────────────────
+
+
+_RING_CH = "b" * 32
+
+
+def _publish(**kw) -> _gc.ChannelPublishAnonRequest:
+    return _gc.ChannelPublishAnonRequest(
+        gfs_instance_id="gfs",
+        channel_id=_RING_CH,
+        ts="2026-11-27T12:00:00+00:00",
+        nonce="n" * 22,
+        epoch=3,
+        payload="p",
+        writer_sig="s",
+        writer_sig_suite="ed25519",
+        **kw,
+    )
+
+
+def test_a_publish_without_ring_fields_signs_the_v96_bytes():
+    body = _publish().signing_body()
+    assert "ring_class" not in body and "push_all" not in body
+
+
+def test_ring_fields_round_trip_inside_the_signed_body():
+    req = _publish(ring_class=_gc.RING_CLASS_EPHEMERAL, push_all=True)
+    body = req.signing_body()
+    assert body["ring_class"] == "ephemeral" and body["push_all"] is True
+    assert _gc.ChannelPublishAnonRequest.from_wire(req.to_wire()) == req
+
+
+def test_watch_and_fetch_parse_and_bound():
+    w = _gc.ChannelWatch.from_wire(
+        {"type": "channel_watch", "watch": [_RING_CH, _RING_CH], "unwatch": []}
+    )
+    assert w.watch == (_RING_CH,)
+    assert _gc.ChannelWatch.from_wire(w.to_wire()) == w
+    with pytest.raises(_gc.InvalidChannelWire):
+        _gc.ChannelWatch.from_wire(
+            {
+                "type": "channel_watch",
+                "watch": ["c" * 32] * 0
+                + [f"{n:032x}" for n in range(_gc.MAX_WATCHED_CHANNELS + 1)],
+            }
+        )
+    with pytest.raises(_gc.InvalidChannelWire):
+        _gc.ChannelWatch.from_wire({"type": "channel_watch", "x": 1})
+    f = _gc.ChannelFetch.from_wire(
+        {"type": "channel_fetch", "channel_id": _RING_CH, "since_seq": 4, "req": "r"}
+    )
+    assert f.ring_id is None
+    f2 = _gc.ChannelFetch(_RING_CH, 4, "r", ring_id="0123456789abcdef")
+    assert _gc.ChannelFetch.from_wire(f2.to_wire()) == f2
+    for bad in (
+        {"since_seq": -1},
+        {"since_seq": True},
+        {"ring_id": "XYZ"},
+        {"req": "x" * 65},
+        {"type": "channel_watch"},
+    ):
+        raw = {**f2.to_wire(), **bad}
+        with pytest.raises(_gc.InvalidChannelWire):
+            _gc.ChannelFetch.from_wire(raw)
+
+
+def test_ring_frame_and_position():
+    frame = _gc.channel_frame(_RING_CH, 3, "p")
+    ring = _gc.ring_frame(frame, seq=7, ring_id="0123456789abcdef", push_all=False)
+    assert _gc.ring_position(ring) == (7, "0123456789abcdef")
+    assert "push_all" not in ring
+    assert _gc.ring_frame(frame, seq=1, ring_id="0" * 16, push_all=True)["push_all"]
+    assert _gc.ring_position(frame) is None
+    # A v_96 household still parses the frame (extra keys ignored).
+    assert _gc.ChannelItemFrame.from_wire({"type": "relay", **ring}).epoch == 3
+    head = _gc.ChannelHead(_RING_CH, 9, "0" * 16)
+    assert _gc.ChannelHead.from_wire(head.to_wire()) == head
+    with pytest.raises(_gc.InvalidChannelWire):
+        _gc.ChannelHead.from_wire("x")

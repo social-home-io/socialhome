@@ -838,9 +838,15 @@ class ChannelPublishAnonRequest:
     #: additive bind beyond the id (``None`` = omitted, older
     #: households). The server refuses a mismatch.
     gfs_key: str | None = None
+    #: v_97 (GFS capability ``channel_ring``) — how long the ring keeps the
+    #: item (:data:`RING_CLASSES`); ``None`` = omitted (durable). Signed.
+    ring_class: str | None = None
+    #: v_97 — push the item to EVERY seat, watching or not (a host
+    #: statement, owner F4). ``False`` is omitted from the wire. Signed.
+    push_all: bool = False
 
     def signing_body(self) -> dict:
-        return _with_gfs_key(
+        body = _with_gfs_key(
             self.gfs_key,
             {
                 "gfs_instance_id": self.gfs_instance_id,
@@ -853,6 +859,12 @@ class ChannelPublishAnonRequest:
                 "writer_sig_suite": self.writer_sig_suite,
             },
         )
+        # Present only when set: the exact bytes an older household signs.
+        if self.ring_class is not None:
+            body["ring_class"] = self.ring_class
+        if self.push_all:
+            body["push_all"] = True
+        return body
 
     def to_wire(self) -> dict:
         return {**self.signing_body(), "writer_sig": self.writer_sig}
@@ -862,8 +874,17 @@ class ChannelPublishAnonRequest:
 
     @classmethod
     def from_wire(cls, raw: object) -> ChannelPublishAnonRequest:
-        body = _exact_optional(raw, PUBLISH_ANON_KEYS, GFS_KEY_FIELD, "publish-anon")
+        body = _exact_optional(
+            raw, PUBLISH_ANON_KEYS, PUBLISH_ANON_OPTIONAL_KEYS, "publish-anon"
+        )
         _event_type(body)
+        ring_class = body.get("ring_class")
+        if ring_class is not None and ring_class not in RING_CLASSES:
+            raise InvalidChannelWire("invalid field: ring_class")
+        push_all = body.get("push_all", False)
+        if not isinstance(push_all, bool) or ("push_all" in body and not push_all):
+            # ``false`` is never sent (omitted), so it never verifies either.
+            raise InvalidChannelWire("invalid field: push_all")
         return cls(
             gfs_key=_gfs_key(body),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
@@ -874,7 +895,15 @@ class ChannelPublishAnonRequest:
             payload=_payload(body),
             writer_sig=_str(body, "writer_sig"),
             writer_sig_suite=_str(body, "writer_sig_suite", _MAX_ID_CHARS),
+            ring_class=ring_class,
+            push_all=bool(push_all),
         )
+
+
+#: The optional, signed fields of a publish (v_97 adds the ring ones).
+PUBLISH_ANON_OPTIONAL_KEYS: frozenset[str] = GFS_KEY_FIELD | frozenset(
+    {"ring_class", "push_all"}
+)
 
 
 # ─── Fan-out frame ───────────────────────────────────────────────────────
@@ -917,3 +946,169 @@ class ChannelItemFrame:
             epoch=_epoch(raw),
             payload=_payload(raw),
         )
+
+
+# ─── v_97: the channel ring (GFS capability ``channel_ring``) ────────────
+#
+# Household → GFS frames on ``/gfs/ws`` (a socket whose hello listed
+# ``channel_ring``), and the GFS's answers. Nothing here names a space or a
+# household: the socket is the household, the channel id is random.
+
+CHANNEL_WATCH_FRAME: str = "channel_watch"
+CHANNEL_FETCH_FRAME: str = "channel_fetch"
+CHANNEL_FETCH_DONE_FRAME: str = "channel_fetch_done"
+CHANNEL_GAP_FRAME: str = "channel_gap"
+CHANNEL_HEADS_FRAME: str = "channel_heads"
+
+#: Channels one socket may watch at once.
+MAX_WATCHED_CHANNELS: int = 256
+#: Per fetch page.
+FETCH_PAGE_MAX_ITEMS: int = 500
+FETCH_PAGE_MAX_BYTES: int = 4 * 1024 * 1024
+#: A household's fetch request id (echoed back).
+MAX_FETCH_REQ_CHARS: int = 64
+#: ``ring_id`` — 64 random bits, lowercase hex.
+RING_ID_HEX_CHARS: int = 16
+_RING_ID = re.compile(r"^[0-9a-f]{16}$")
+#: Upper bound on a sequence number on the wire (2**53, JSON-safe).
+MAX_RING_SEQ: int = 2**53
+
+
+def valid_ring_id(value: object) -> str:
+    if not isinstance(value, str) or not _RING_ID.fullmatch(value):
+        raise InvalidChannelWire("invalid field: ring_id")
+    return value
+
+
+def _seq(raw: dict, name: str) -> int:
+    value = raw.get(name)
+    if not _is_int(value) or not 0 <= value <= MAX_RING_SEQ:  # type: ignore[operator]
+        raise InvalidChannelWire(f"invalid field: {name}")
+    return int(value)  # type: ignore[arg-type]
+
+
+def _channel_list(raw: dict, name: str) -> tuple[str, ...]:
+    value = raw.get(name, [])
+    if not isinstance(value, list) or len(value) > MAX_WATCHED_CHANNELS:
+        raise InvalidChannelWire(f"invalid field: {name}")
+    return tuple(dict.fromkeys(valid_channel_id(v) for v in value))
+
+
+@dataclass(slots=True, frozen=True)
+class ChannelWatch:
+    """``{"type": "channel_watch", "watch": [...], "unwatch": [...]}``."""
+
+    watch: tuple[str, ...]
+    unwatch: tuple[str, ...]
+
+    @classmethod
+    def from_wire(cls, raw: object) -> ChannelWatch:
+        body = _exact_optional(
+            raw,
+            frozenset({"type"}),
+            frozenset({"watch", "unwatch"}),
+            CHANNEL_WATCH_FRAME,
+        )
+        if body["type"] != CHANNEL_WATCH_FRAME:
+            raise InvalidChannelWire("not a channel_watch")
+        return cls(
+            watch=_channel_list(body, "watch"),
+            unwatch=_channel_list(body, "unwatch"),
+        )
+
+    def to_wire(self) -> dict:
+        return {
+            "type": CHANNEL_WATCH_FRAME,
+            "watch": list(self.watch),
+            "unwatch": list(self.unwatch),
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class ChannelFetch:
+    """``{"type": "channel_fetch", "channel_id", "since_seq", "ring_id"?,
+    "req"}`` — items after ``since_seq`` of the ring named ``ring_id``
+    (absent: the household holds no cursor yet)."""
+
+    channel_id: str
+    since_seq: int
+    req: str
+    ring_id: str | None = None
+
+    @classmethod
+    def from_wire(cls, raw: object) -> ChannelFetch:
+        body = _exact_optional(
+            raw,
+            frozenset({"type", "channel_id", "since_seq", "req"}),
+            frozenset({"ring_id"}),
+            CHANNEL_FETCH_FRAME,
+        )
+        if body["type"] != CHANNEL_FETCH_FRAME:
+            raise InvalidChannelWire("not a channel_fetch")
+        ring_id = body.get("ring_id")
+        return cls(
+            channel_id=valid_channel_id(body.get("channel_id")),
+            since_seq=_seq(body, "since_seq"),
+            req=_str(body, "req", MAX_FETCH_REQ_CHARS),
+            ring_id=valid_ring_id(ring_id) if ring_id is not None else None,
+        )
+
+    def to_wire(self) -> dict:
+        out: dict = {
+            "type": CHANNEL_FETCH_FRAME,
+            "channel_id": self.channel_id,
+            "since_seq": self.since_seq,
+            "req": self.req,
+        }
+        if self.ring_id is not None:
+            out["ring_id"] = self.ring_id
+        return out
+
+
+@dataclass(slots=True, frozen=True)
+class ChannelHead:
+    """One entry of a ``channel_heads`` ping / a fetch answer."""
+
+    channel_id: str
+    head_seq: int
+    ring_id: str
+
+    def to_wire(self) -> dict:
+        return {
+            "channel_id": self.channel_id,
+            "head_seq": self.head_seq,
+            "ring_id": self.ring_id,
+        }
+
+    @classmethod
+    def from_wire(cls, raw: object) -> ChannelHead:
+        if not isinstance(raw, dict):
+            raise InvalidChannelWire("channel head: expected a JSON object")
+        return cls(
+            channel_id=valid_channel_id(raw.get("channel_id")),
+            head_seq=_seq(raw, "head_seq"),
+            ring_id=valid_ring_id(raw.get("ring_id")),
+        )
+
+
+#: The keys a ring server adds to a fan-out frame — a position, never an
+#: identity (``seq`` counts the channel's items, ``ring_id`` is random).
+RING_POSITION_KEYS: frozenset[str] = frozenset({"seq", "ring_id"})
+
+
+def ring_frame(frame: dict, *, seq: int, ring_id: str, push_all: bool) -> dict:
+    """A channel fan-out frame (:func:`channel_frame`) with its place in the
+    ring. A v_96 household ignores the extra keys."""
+    out = {**frame, "seq": seq, "ring_id": ring_id}
+    if push_all:
+        out["push_all"] = True
+    return out
+
+
+def ring_position(raw: dict) -> tuple[int, str] | None:
+    """``(seq, ring_id)`` of a relay frame from a ring, or ``None`` (a v_96
+    server, or malformed)."""
+    try:
+        return _seq(raw, "seq"), valid_ring_id(raw.get("ring_id"))
+    except InvalidChannelWire:
+        return None

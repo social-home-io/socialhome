@@ -484,6 +484,29 @@ CHANNEL_UNUSED_TTL_SECONDS: int = 24 * 60 * 60
 
 
 @dataclass(slots=True, frozen=True)
+class RingItem:
+    """One item in a channel's ring (v_97, migration 0034)."""
+
+    channel_id: str
+    seq: int
+    epoch: int
+    ring_class: str
+    payload: str
+    created_at: int
+
+
+@dataclass(slots=True, frozen=True)
+class RingState:
+    """A channel ring's position: ``head_seq`` (0 = empty since birth),
+    ``ring_id`` (``None`` until the first item) and the oldest ``seq`` still
+    held (``None`` when nothing is held)."""
+
+    head_seq: int
+    ring_id: str | None
+    oldest_seq: int | None
+
+
+@dataclass(slots=True, frozen=True)
 class GfsChannel:
     """One opaque channel (v_51, migration 0016) — a space's member and
     follower relay (private since v_51, global since v_96), keyed by a random
@@ -505,6 +528,19 @@ class GfsChannel:
     writer_key_pk: str | None = None
     writer_key_prev_epoch: int | None = None
     writer_key_prev_pk: str | None = None
+
+    def open_epochs(self, *, now: int) -> set[int]:
+        """The epochs a pass / seat may carry right now: the current one,
+        the next, and the previous one for the grace after the raise."""
+        if self.epoch is None:
+            return set()
+        epochs = {self.epoch, self.epoch + 1}
+        if (
+            self.epoch_prev is not None
+            and now - (self.epoch_raised_at or 0) <= CHANNEL_EPOCH_GRACE_S
+        ):
+            epochs.add(self.epoch_prev)
+        return epochs
 
     def admits(
         self, epoch: int, *, now: int, grace_s: int = CHANNEL_EPOCH_GRACE_S

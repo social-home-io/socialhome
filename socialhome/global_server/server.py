@@ -46,6 +46,7 @@ from .addressee import GfsAddressee
 from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
 from .blob_store import FsBlobFiles
+from .channel_ring import GfsChannelRing
 from .channels import GfsChannelService, build_channel_rate_limit
 from .client_spread import build_client_spread_watch
 from .cluster import ClusterService
@@ -96,6 +97,7 @@ from .repositories import (
     SqliteClusterRepo,
     SqliteGfsAdminRepo,
     SqliteGfsChannelRepo,
+    SqliteGfsChannelRingRepo,
     SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsHighlightPublicationRepo,
@@ -342,6 +344,7 @@ class GfsApp:
             mailboxes=SqliteGfsMailboxRepo(db),
             mailbox_tickets=SqliteGfsMailboxTicketRepo(db),
             channels=SqliteGfsChannelRepo(db),
+            channel_ring=SqliteGfsChannelRingRepo(db),
             invites=SqliteGfsInviteRepo(db),
         )
 
@@ -536,6 +539,14 @@ class GfsApp:
             nodes=cluster.live_node_count,
         )
         cluster_fan_out.register_audience(AUDIENCE_CHANNEL, channels.audience_targets)
+        # v_97 — one ring of recent items per channel: watchers get items
+        # live, every other ring socket a heads ping and a fetch.
+        channel_ring = GfsChannelRing(
+            ring_repo=repos.channel_ring,
+            channel_repo=repos.channels,
+            ws_registry=ws_registry,
+        )
+        channels.attach_ring(channel_ring)
         # Periodic retention sweep — purges expired admin sessions, expired
         # highlight publications, aged pair tokens, and envelopes whose TTL
         # ran out (the GFS otherwise has no recurring cleanup loop; these
@@ -581,6 +592,7 @@ class GfsApp:
             federation=federation,
             cluster=cluster,
             maintenance=maintenance,
+            channel_ring=channel_ring,
             moment_media=moment_media,
             space_media=space_media,
             space_media_auth=space_media_auth,
@@ -690,6 +702,8 @@ class GfsApp:
         a[K.gfs_fan_out_key] = self.services.fan_out
         a[K.gfs_channel_repo_key] = self.repos.channels
         a[K.gfs_channel_service_key] = self.services.channels
+        a[K.gfs_channel_ring_key] = self.services.channel_ring
+        a[K.gfs_channel_ring_repo_key] = self.repos.channel_ring
         a[K.gfs_invite_repo_key] = self.repos.invites
         a[K.gfs_invite_service_key] = self.services.invites
         a[K.gfs_token_service_key] = self.services.tokens
@@ -738,6 +752,7 @@ class GfsApp:
         # then hourly (the boot purge above stays for an immediate clean).
         await self.services.maintenance.start()
         await self.services.fan_out.start()
+        await self.services.channel_ring.start()
         # Logs the alias stragglers on a timer (and the last ones at stop).
         await self.services.addressee.start()
 
@@ -748,6 +763,7 @@ class GfsApp:
         # Delete-certificate drains move cursors in the DB (v_66).
         await self.services.moment_delete_log.close()
         await self.services.maintenance.stop()
+        await self.services.channel_ring.stop()
         await self.services.fan_out.stop()
         await self.services.addressee.stop()
         await self.services.cluster.stop()

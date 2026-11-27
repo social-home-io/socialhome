@@ -30,6 +30,7 @@ from socialhome.domain.gfs_channel import (
     ChannelPublishAnonRequest,
     ChannelSubscribeRequest,
     ChannelUnsubscribeRequest,
+    valid_ring_id,
 )
 from socialhome.gfs_channel import (
     channel_pk_of,
@@ -54,6 +55,7 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.channels import (
     CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS,
+    CHANNEL_ANON_PER_NODE_FLOOR,
     CHANNEL_PUBLISH_MAX_PER_MINUTE,
     CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
     CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP,
@@ -634,6 +636,8 @@ async def test_publish_fans_out_an_identity_free_frame(gfs) -> None:
         # No publisher is known, so every seat — the publisher's too — gets
         # it (the household drops its own echo).
         echo = await asyncio.wait_for(pub_ws.receive_json(), timeout=5)
+    ring_id = frame.pop("ring_id")
+    echo.pop("ring_id")
     assert (
         frame
         == echo
@@ -643,9 +647,13 @@ async def test_publish_fans_out_an_identity_free_frame(gfs) -> None:
             "event_type": "space_item",
             "epoch": 3,
             "payload": CT,
+            # v_97 — its place in the channel's ring (a v_96 household
+            # ignores the two keys).
+            "seq": 1,
         }
     )
-    assert set(frame) - {"type"} == CHANNEL_FRAME_KEYS
+    assert valid_ring_id(ring_id) == ring_id
+    assert set(frame) - {"type", "seq"} == CHANNEL_FRAME_KEYS
     for leak in (gfs.member.instance_id, SPACE_ID, SPACE_PK.hex()):
         assert leak not in json.dumps(frame)
 
@@ -712,7 +720,7 @@ async def test_anonymous_publish_under_the_pinned_writer_key(gfs) -> None:
     assert resp.status == 200, await resp.text()
     queued = await _queued(gfs, gfs.other)
     assert len(queued) == 1
-    assert set(queued[0].sealed) == CHANNEL_FRAME_KEYS
+    assert set(queued[0].sealed) == CHANNEL_FRAME_KEYS | {"seq", "ring_id"}
     # An exact replay is refused.
     await _refused(await gfs.post("/gfs/channels/publish-anon", json=body))
 
@@ -816,7 +824,10 @@ async def test_channel_limits_are_cluster_wide(gfs) -> None:
     await _ready(gfs, epoch=3)
     svc = gfs.app_[gfs_channel_service_key]
     svc._nodes = lambda: 4
-    per_addr = -(-CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS // 4)
+    # v_97 (owner Q5 B): never below the per-node floor.
+    per_addr = max(
+        CHANNEL_ANON_PER_NODE_FLOOR, -(-CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS // 4)
+    )
     for _ in range(per_addr):
         await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
     with pytest.raises(ChannelRateLimited):

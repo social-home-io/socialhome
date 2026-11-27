@@ -34,6 +34,13 @@ ACCEPTS_SPACE_MEDIA_SERVE: str = "space_media_serve"
 #: the GFS dequeued it).
 ACCEPTS_ENVELOPE_MEDIA: str = "envelope_media"
 
+#: v_97 — the household reads its channels from the GFS's channel ring: the
+#: socket sends ``channel_watch`` / ``channel_fetch`` frames, gets live items
+#: only for the channels it watches (and every ``push_all`` item), a
+#: ``channel_heads`` ping, and no offline copies of channel items
+#: (``docs/protocol/space-items.md``).
+ACCEPTS_CHANNEL_RING: str = "channel_ring"
+
 #: What this household lists in its WS hello.
 OUR_HELLO_ACCEPTS: tuple[str, ...] = (
     ACCEPTS_WS_BINARY1,

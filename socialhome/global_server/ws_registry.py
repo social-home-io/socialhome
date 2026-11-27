@@ -47,6 +47,7 @@ from typing import Any
 import orjson
 from aiohttp import web
 
+from ..domain.gfs_channel import MAX_WATCHED_CHANNELS as _MAX_WATCHED
 from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.ws_binary_frame import encode_binary_frame
 from .fanout_stats import FanoutStats, frame_kind
@@ -105,6 +106,10 @@ def _dumps(payload: Any) -> bytes:
     return orjson.dumps(payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME)
 
 
+#: Channels one ring socket may watch at once (mirrors the wire bound).
+MAX_WATCHED_CHANNELS: int = _MAX_WATCHED
+
+
 class GfsWebSocketRegistry:
     """Per-instance registry of live GFS-side WebSocket sessions."""
 
@@ -116,6 +121,8 @@ class GfsWebSocketRegistry:
         "_lock",
         "_log_ids",
         "_media_serve",
+        "_ring",
+        "_watching",
         "fanout_stats",
     )
 
@@ -135,6 +142,10 @@ class GfsWebSocketRegistry:
         #: The instances whose CURRENT socket opens binary relay media
         #: frames (``envelope_media`` in its hello, v_87).
         self._envelope_media: set[str] = set()
+        #: v_97 — the instances whose CURRENT socket reads the channel ring
+        #: (``channel_ring`` in its hello), and the channels each watches.
+        self._ring: set[str] = set()
+        self._watching: dict[str, set[str]] = {}
         #: What this node pushed, by frame kind and size class (admin
         #: overview) — counted only for frames that reached a socket.
         self.fanout_stats = FanoutStats()
@@ -152,18 +163,23 @@ class GfsWebSocketRegistry:
         binary: bool = False,
         media_serve: bool = False,
         envelope_media: bool = False,
+        ring: bool = False,
     ) -> None:
         """Register *ws* for *instance_id*, evicting any prior socket.
         ``binary``: this socket reads ``ws_binary1`` frames.
         ``media_serve``: it answers ``space_media_request`` (v_83).
-        ``envelope_media``: it opens binary relay media frames (v_87)."""
+        ``envelope_media``: it opens binary relay media frames (v_87).
+        ``ring``: it reads the channel ring (v_97) — it starts watching
+        nothing."""
         async with self._lock:
             previous = self._by_instance.get(instance_id)
             self._by_instance[instance_id] = ws
+            self._watching.pop(instance_id, None)
             for labels, on in (
                 (self._binary, binary),
                 (self._media_serve, media_serve),
                 (self._envelope_media, envelope_media),
+                (self._ring, ring),
             ):
                 if on:
                     labels.add(instance_id)
@@ -265,9 +281,62 @@ class GfsWebSocketRegistry:
             return instance_id in self._media_serve
         return True
 
+    # ─── v_97: the channel ring ───────────────────────────────────────────
+
+    def ring_instances(self) -> list[str]:
+        """The instances whose current socket here reads the ring."""
+        return [i for i in self._ring if i in self._by_instance]
+
+    def is_current(self, instance_id: str, ws: web.WebSocketResponse) -> bool:
+        """Whether *ws* is still *instance_id*'s registered socket."""
+        return self._by_instance.get(instance_id) is ws
+
+    def is_ring(self, instance_id: str) -> bool:
+        return instance_id in self._ring
+
+    def set_watching(
+        self,
+        instance_id: str,
+        *,
+        add: list[str] | tuple[str, ...],
+        remove: tuple[str, ...],
+    ) -> None:
+        """Change what a ring socket watches (the caller checked the seats
+        of ``add``); bounded by ``MAX_WATCHED_CHANNELS``."""
+        if instance_id not in self._ring:
+            return
+        watched = self._watching.setdefault(instance_id, set())
+        watched.difference_update(remove)
+        for channel_id in add:
+            if len(watched) >= MAX_WATCHED_CHANNELS:
+                break
+            watched.add(channel_id)
+
+    def watching(self, instance_id: str) -> frozenset[str]:
+        return frozenset(self._watching.get(instance_id, ()))
+
+    def _ring_skips(self, instance_id: str, payload: dict[str, Any]) -> bool:
+        """A channel item a ring socket does not take live: it does not
+        watch the channel and the item is not ``push_all`` — the ring holds
+        it for the household's next fetch."""
+        if instance_id not in self._ring or payload.get("type") != "relay":
+            return False
+        channel_id = payload.get("channel_id")
+        if not isinstance(channel_id, str) or payload.get("push_all") is True:
+            return False
+        return channel_id not in self._watching.get(instance_id, ())
+
     # ─── Push ─────────────────────────────────────────────────────────────
 
     async def send(self, instance_id: str, payload: dict[str, Any]) -> bool:
+        """:meth:`send_direct`, except that a channel item a ring socket
+        does not watch is not pushed — and reported delivered (``True``):
+        the ring holds it, so no caller queues an offline copy for it."""
+        if self._ring_skips(instance_id, payload):
+            return True
+        return await self.send_direct(instance_id, payload)
+
+    async def send_direct(self, instance_id: str, payload: dict[str, Any]) -> bool:
         """Push a JSON frame to *instance_id* — as a ``ws_binary1`` binary
         frame when that socket asked for one and the frame carries a listed
         ciphertext (:mod:`socialhome.domain.ws_binary_frame`), else as text.

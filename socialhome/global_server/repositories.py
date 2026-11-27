@@ -18,6 +18,7 @@ business logic.
 from __future__ import annotations
 
 import heapq
+import secrets
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -48,6 +49,8 @@ from .domain import (
     GfsUserPicture,
     GfsUserRegistration,
     GlobalSpace,
+    RingItem,
+    RingState,
     RtcConnection,
 )
 
@@ -4275,7 +4278,12 @@ class AbstractGfsChannelRepo(Protocol):
     async def list_targets(self, channel_id: str, epochs: set[int]) -> list[str]: ...
 
     async def list_recently_seen(
-        self, channel_id: str, epochs: set[int], *, within_s: int
+        self,
+        channel_id: str,
+        epochs: set[int],
+        *,
+        within_s: int,
+        include_ring: bool = True,
     ) -> set[str]: ...
 
     async def prune_idle(self, *, older_than: int) -> int: ...
@@ -4436,19 +4444,26 @@ class SqliteGfsChannelRepo:
         return [str(_as_dict(r)["instance_id"]) for r in rows]
 
     async def list_recently_seen(
-        self, channel_id: str, epochs: set[int], *, within_s: int
+        self,
+        channel_id: str,
+        epochs: set[int],
+        *,
+        within_s: int,
+        include_ring: bool = True,
     ) -> set[str]:
         """:meth:`list_targets` narrowed to households that held a WS session
         long enough within ``within_s`` (``client_instances.relay_seen_at``)
-        — only they get offline copies queued."""
+        — only they get offline copies queued. ``include_ring=False`` leaves
+        out households that read the channel ring (v_97: they pull)."""
         if not epochs:
             return set()
         marks = ",".join("?" for _ in epochs)
+        ring = "" if include_ring else " AND ci.channel_ring = 0"
         rows = await self._db.fetchall(
             "SELECT cs.instance_id FROM gfs_channel_subscribers cs"
             " JOIN client_instances ci USING (instance_id)"
             f" WHERE cs.channel_id=? AND ci.status='active' AND cs.pass_epoch IN ({marks})"
-            " AND ci.relay_seen_at IS NOT NULL AND ci.relay_seen_at >= ?",
+            f" AND ci.relay_seen_at IS NOT NULL AND ci.relay_seen_at >= ?{ring}",
             (channel_id, *sorted(epochs), int(time.time()) - int(within_s)),
         )
         return {str(_as_dict(r)["instance_id"]) for r in rows}
@@ -4617,3 +4632,296 @@ class SqliteGfsInviteRepo:
             return int(cur.rowcount or 0)
 
         return await self._db.transact(_run)
+
+
+# ─── v_97: the channel ring (migration 0034) ─────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsChannelRingRepo(Protocol):
+    """One ring of recent items per channel (``docs/protocol/space-items.md``)."""
+
+    async def append(
+        self,
+        channel_id: str,
+        *,
+        epoch: int,
+        ring_class: str,
+        payload: str,
+        now: int,
+        max_items: int,
+        max_bytes: int,
+    ) -> tuple[int, str] | None: ...
+
+    async def state(self, channel_id: str) -> RingState | None: ...
+
+    async def fetch(
+        self, channel_id: str, *, after_seq: int, max_items: int, max_bytes: int
+    ) -> list[RingItem]: ...
+
+    async def heads_for_seats(
+        self, instance_id: str
+    ) -> list[tuple[str, int, str, int]]: ...
+
+    async def seat_epoch(self, channel_id: str, instance_id: str) -> int | None: ...
+
+    async def expire(self, *, durable_before: int, ephemeral_before: int) -> int: ...
+
+    async def total_bytes(self) -> int: ...
+
+    async def trim_largest(self, *, excess: int) -> int: ...
+
+    async def set_channel_ring(self, instance_id: str, on: bool) -> None: ...
+
+
+class SqliteGfsChannelRingRepo:
+    """SQLite-backed :class:`AbstractGfsChannelRingRepo`.
+
+    ``append`` allocates the sequence number, inserts the row and trims the
+    ring in ONE ``BEGIN IMMEDIATE`` transaction on the shared database, so
+    two cluster nodes publishing into one channel can never hand out the
+    same ``seq`` or leave a gap (a seq is allocated only together with its
+    row)."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def append(
+        self,
+        channel_id: str,
+        *,
+        epoch: int,
+        ring_class: str,
+        payload: str,
+        now: int,
+        max_items: int,
+        max_bytes: int,
+    ) -> tuple[int, str] | None:
+        """Add one item; ``(seq, ring_id)``, or ``None`` when the channel is
+        gone. Evicts the oldest items while the ring holds more than
+        ``max_items`` or ``max_bytes`` (the new item always stays)."""
+        size = len(payload)
+
+        def _run(conn) -> tuple[int, str] | None:
+            row = conn.execute(
+                "SELECT head_seq, ring_id FROM gfs_channels WHERE channel_id=?",
+                (channel_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            ring_id = row[1] or secrets.token_hex(8)
+            seq = int(row[0]) + 1
+            conn.execute(
+                "INSERT INTO gfs_channel_ring(channel_id, seq, epoch, ring_class,"
+                " payload, bytes, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (channel_id, seq, epoch, ring_class, payload, size, now),
+            )
+            conn.execute(
+                "UPDATE gfs_channels SET head_seq=?, ring_id=?,"
+                " ring_bytes=ring_bytes + ? WHERE channel_id=?",
+                (seq, ring_id, size, channel_id),
+            )
+            # Count bound by seq: a hole (an expired ephemeral item) only
+            # makes the ring hold fewer.
+            cur = conn.execute(
+                "DELETE FROM gfs_channel_ring WHERE channel_id=? AND seq<=?"
+                " RETURNING bytes",
+                (channel_id, seq - max_items),
+            )
+            freed = sum(int(r[0]) for r in cur.fetchall())
+            ring_bytes = (
+                int(
+                    conn.execute(
+                        "SELECT ring_bytes FROM gfs_channels WHERE channel_id=?",
+                        (channel_id,),
+                    ).fetchone()[0]
+                )
+                - freed
+            )
+            while ring_bytes > max_bytes:
+                oldest = conn.execute(
+                    "SELECT seq, bytes FROM gfs_channel_ring WHERE channel_id=?"
+                    " AND seq<? ORDER BY seq LIMIT 64",
+                    (channel_id, seq),
+                ).fetchall()
+                if not oldest:
+                    break
+                for old_seq, old_bytes in oldest:
+                    if ring_bytes <= max_bytes:
+                        break
+                    conn.execute(
+                        "DELETE FROM gfs_channel_ring WHERE channel_id=? AND seq=?",
+                        (channel_id, old_seq),
+                    )
+                    ring_bytes -= int(old_bytes)
+                    freed += int(old_bytes)
+            if freed:
+                conn.execute(
+                    "UPDATE gfs_channels SET ring_bytes=ring_bytes - ?"
+                    " WHERE channel_id=?",
+                    (freed, channel_id),
+                )
+            return seq, ring_id
+
+        return await self._db.transact(_run)
+
+    async def state(self, channel_id: str) -> RingState | None:
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT head_seq, ring_id, (SELECT MIN(seq) FROM gfs_channel_ring r"
+                " WHERE r.channel_id = c.channel_id) AS oldest"
+                " FROM gfs_channels c WHERE channel_id=?",
+                (channel_id,),
+            )
+        )
+        if not row:
+            return None
+        oldest = row.get("oldest")
+        return RingState(
+            head_seq=int(row.get("head_seq") or 0),
+            ring_id=row.get("ring_id"),
+            oldest_seq=int(oldest) if oldest is not None else None,
+        )
+
+    async def fetch(
+        self, channel_id: str, *, after_seq: int, max_items: int, max_bytes: int
+    ) -> list[RingItem]:
+        """Items with ``seq > after_seq``, oldest first, at most ``max_items``
+        and about ``max_bytes`` (the first item always fits)."""
+        rows = await self._db.fetchall(
+            "SELECT seq, epoch, ring_class, payload, created_at FROM gfs_channel_ring"
+            " WHERE channel_id=? AND seq>? ORDER BY seq LIMIT ?",
+            (channel_id, after_seq, max_items),
+        )
+        out: list[RingItem] = []
+        used = 0
+        for raw in rows:
+            r = _as_dict(raw)
+            size = len(str(r["payload"]))
+            if out and used + size > max_bytes:
+                break
+            used += size
+            out.append(
+                RingItem(
+                    channel_id=channel_id,
+                    seq=int(r["seq"]),
+                    epoch=int(r["epoch"]),
+                    ring_class=str(r["ring_class"]),
+                    payload=str(r["payload"]),
+                    created_at=int(r["created_at"]),
+                )
+            )
+        return out
+
+    async def heads_for_seats(
+        self, instance_id: str
+    ) -> list[tuple[str, int, str, int]]:
+        """``(channel_id, head_seq, ring_id, pass_epoch)`` of every channel
+        ``instance_id`` holds a seat on whose ring has an item — the caller
+        keeps only the seats at an open epoch."""
+        rows = await self._db.fetchall(
+            "SELECT c.channel_id, c.head_seq, c.ring_id, cs.pass_epoch"
+            " FROM gfs_channel_subscribers cs JOIN gfs_channels c USING (channel_id)"
+            " WHERE cs.instance_id=? AND c.ring_id IS NOT NULL",
+            (instance_id,),
+        )
+        return [
+            (
+                str(r["channel_id"]),
+                int(r["head_seq"]),
+                str(r["ring_id"]),
+                int(r["pass_epoch"]),
+            )
+            for r in map(_as_dict, rows)
+        ]
+
+    async def seat_epoch(self, channel_id: str, instance_id: str) -> int | None:
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT pass_epoch FROM gfs_channel_subscribers"
+                " WHERE channel_id=? AND instance_id=?",
+                (channel_id, instance_id),
+            )
+        )
+        return int(row["pass_epoch"]) if row else None
+
+    async def expire(self, *, durable_before: int, ephemeral_before: int) -> int:
+        """Drop items past their class's age; returns how many."""
+
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_channel_ring WHERE (ring_class='durable'"
+                " AND created_at<?) OR (ring_class='ephemeral' AND created_at<?)"
+                " RETURNING channel_id, bytes",
+                (durable_before, ephemeral_before),
+            )
+            freed: dict[str, int] = {}
+            n = 0
+            for channel_id, size in cur.fetchall():
+                freed[channel_id] = freed.get(channel_id, 0) + int(size)
+                n += 1
+            for channel_id, size in freed.items():
+                conn.execute(
+                    "UPDATE gfs_channels SET ring_bytes=MAX(0, ring_bytes - ?)"
+                    " WHERE channel_id=?",
+                    (size, channel_id),
+                )
+            return n
+
+        return await self._db.transact(_run)
+
+    async def total_bytes(self) -> int:
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT COALESCE(SUM(ring_bytes), 0) AS n FROM gfs_channels"
+            )
+        )
+        return int(row.get("n") or 0)
+
+    async def trim_largest(self, *, excess: int) -> int:
+        """Fair eviction under the server cap: free at least ``excess`` bytes
+        from the channel holding the MOST, oldest items first (one channel
+        per call; the caller loops). Returns the bytes freed."""
+
+        def _run(conn) -> int:
+            row = conn.execute(
+                "SELECT channel_id FROM gfs_channels WHERE ring_bytes > 0"
+                " ORDER BY ring_bytes DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return 0
+            channel_id = row[0]
+            freed = 0
+            while freed < excess:
+                oldest = conn.execute(
+                    "SELECT seq, bytes FROM gfs_channel_ring WHERE channel_id=?"
+                    " ORDER BY seq LIMIT 256",
+                    (channel_id,),
+                ).fetchall()
+                if not oldest:
+                    break
+                for seq, size in oldest:
+                    conn.execute(
+                        "DELETE FROM gfs_channel_ring WHERE channel_id=? AND seq=?",
+                        (channel_id, seq),
+                    )
+                    freed += int(size)
+                    if freed >= excess:
+                        break
+            conn.execute(
+                "UPDATE gfs_channels SET ring_bytes=MAX(0, ring_bytes - ?)"
+                " WHERE channel_id=?",
+                (freed, channel_id),
+            )
+            return freed
+
+        return await self._db.transact(_run)
+
+    async def set_channel_ring(self, instance_id: str, on: bool) -> None:
+        await self._db.enqueue(
+            "UPDATE client_instances SET channel_ring=? WHERE instance_id=?"
+            " AND channel_ring<>?",
+            (int(on), instance_id, int(on)),
+        )

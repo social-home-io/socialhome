@@ -9,6 +9,7 @@ from aiohttp.web import AppKey
 
 from ..db import AsyncDatabase
 from .admin_service import GfsAdminService
+from .channel_ring import GfsChannelRing
 from .channels import GfsChannelService
 from .cluster import ClusterService
 from .cluster_relay import ClusterRelayFanOut
@@ -30,6 +31,7 @@ from .repositories import (
     AbstractClusterRepo,
     AbstractGfsAdminRepo,
     AbstractGfsChannelRepo,
+    AbstractGfsChannelRingRepo,
     AbstractGfsEnvelopeQueueRepo,
     AbstractGfsFederationRepo,
     AbstractGfsHighlightPublicationRepo,
@@ -137,6 +139,10 @@ gfs_fan_out_key: AppKey[GfsFanOutWorkers] = AppKey("gfs_fan_out")
 #: seats and relay — keyed by a random id, never by a space.
 gfs_channel_repo_key: AppKey[AbstractGfsChannelRepo] = AppKey("gfs_channel_repo")
 gfs_channel_service_key: AppKey[GfsChannelService] = AppKey("gfs_channel_service")
+gfs_channel_ring_key: AppKey[GfsChannelRing] = AppKey("gfs_channel_ring")
+gfs_channel_ring_repo_key: AppKey[AbstractGfsChannelRingRepo] = AppKey(
+    "gfs_channel_ring_repo"
+)
 
 #: Viewer links for the public pages (``/spaces``, ``/join``, ``/moments/{user}``)
 #: — ``None`` when they render on this server (:mod:`.public_viewer`).

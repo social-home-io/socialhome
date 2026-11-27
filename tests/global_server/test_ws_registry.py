@@ -572,3 +572,62 @@ async def test_a_backed_up_media_skip_keeps_the_socket_open(registry):
     await _settle_closes(registry)
     assert registry.is_connected("x")
     assert busy.closed_with is None
+
+
+# ── v_97: ring sockets take a channel item only while watching ──────────
+
+_CH = "a" * 32
+
+
+def _item(**extra) -> dict:
+    return {"type": "relay", "channel_id": _CH, "epoch": 1, "payload": "p", **extra}
+
+
+async def test_a_ring_socket_skips_unwatched_items_without_queueing(registry):
+    ws = _FakeWS()
+    await registry.register("inst-1", ws, ring=True)
+    assert registry.ring_instances() == ["inst-1"]
+    # Reported delivered (the ring holds it), nothing sent.
+    assert await registry.send("inst-1", _item()) is True
+    assert ws.sent == []
+    registry.set_watching("inst-1", add=[_CH], remove=())
+    assert await registry.send("inst-1", _item()) is True
+    assert len(ws.sent) == 1
+    registry.set_watching("inst-1", add=[], remove=(_CH,))
+    assert await registry.send("inst-1", _item()) is True
+    assert len(ws.sent) == 1
+
+
+async def test_push_all_and_direct_sends_reach_a_ring_socket(registry):
+    ws = _FakeWS()
+    await registry.register("inst-1", ws, ring=True)
+    assert await registry.send("inst-1", _item(push_all=True)) is True
+    assert await registry.send_direct("inst-1", _item()) is True
+    # Not a channel item at all: never filtered.
+    assert await registry.send("inst-1", {"type": "envelope", "sealed": {}}) is True
+    assert len(ws.sent) == 3
+
+
+async def test_a_v96_socket_takes_every_item_and_watches_nothing(registry):
+    ws = _FakeWS()
+    await registry.register("inst-1", ws)
+    registry.set_watching("inst-1", add=[_CH], remove=())
+    assert registry.watching("inst-1") == frozenset()
+    assert await registry.send("inst-1", _item()) is True
+    assert len(ws.sent) == 1
+
+
+async def test_watching_is_bounded_and_dies_with_the_socket(registry, monkeypatch):
+    monkeypatch.setattr(ws_registry_mod, "MAX_WATCHED_CHANNELS", 2)
+    ws = _FakeWS()
+    await registry.register("inst-1", ws, ring=True)
+    registry.set_watching("inst-1", add=["1" * 32, "2" * 32, "3" * 32], remove=())
+    assert len(registry.watching("inst-1")) == 2
+    assert registry.is_current("inst-1", ws)
+    # A new socket starts watching nothing; the old one's set is gone.
+    ws2 = _FakeWS()
+    await registry.register("inst-1", ws2, ring=True)
+    assert registry.watching("inst-1") == frozenset()
+    await registry.unregister("inst-1", ws2)
+    assert registry.ring_instances() == []
+    assert not registry.is_current("inst-1", ws2)

@@ -43,6 +43,7 @@ from socialhome.domain.gfs_channel import (
     CHANNEL_ROUTES,
     GFS_KEY_FIELD,
     PUBLISH_ANON_KEYS,
+    RING_POSITION_KEYS,
 )
 from socialhome.domain.space import JoinMode, SpaceFeatures, SpaceType
 from socialhome.domain.space_author_profile import (
@@ -229,7 +230,7 @@ async def test_the_gfs_never_learns_the_global_space_or_the_publisher(world):
     )
     channel_id = world.owner.spaces.channel[0]
     assert len(queued) == 1
-    assert set(queued[0].sealed) == CHANNEL_FRAME_KEYS
+    assert set(queued[0].sealed) == CHANNEL_FRAME_KEYS | RING_POSITION_KEYS
     assert queued[0].sealed["channel_id"] == channel_id
     publishes = 0
     for method, url, body in world.requests:
