@@ -346,11 +346,13 @@ planned for accepted it (`space_item_outbox`, household migration 0158;
   {space}" with **Try again** / **Discard** (`/api/spaces/{id}/unsent`, the
   `space.unsent` frame). A GFS that no longer serves the space (dropped
   from the owner's list) just loses its copy.
-- **Files** (v_97): the space's file uploads wait in the same queue — one
+- **Files** (v_97): the space's file uploads wait in the same table — one
   row per blob (or 8 MiB piece) per GFS, a small locator (the bytes are
-  sealed again when the row goes) — in their own line, so an 8 MiB upload
-  never holds the space's chat back on the same GFS, and a busy answer to
-  an upload never parks the items.
+  sealed again when the row goes), a whole file stored in one go — in their
+  own lane: their own loop, their own bound (1 000 rows per space) and
+  backoff, so an 8 MiB upload never holds the space's chat back and a busy
+  answer to an upload never parks the items. A file that waited past 12 h
+  keeps its locator (Retry seals it again).
 - **Bounded per space**: 2 000 rows / 32 MiB. Past it a new item is refused
   and the author sees "too much is already waiting to go out". Items still
   waiting count in the space's `waiting_to_send`.

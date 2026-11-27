@@ -1081,13 +1081,20 @@ and files from the GFS space media cache. One path:
   reads (so it still goes as ONE space item), not in a per-household copy.
 - **Uploads** go to every GFS the space's channel lives on (plus each
   link-joined member's), through the durable item queue (above).
-- **No push.** A `SPACE_MEDIA_BLOB` row to a v_97 household of a GFS
-  space is dropped at send time (whatever it is: live, catch-up, asked
-  for); a household below v_97 keeps the push, as it keeps the legacy
-  events during the window.
-- **No `SPACE_MEDIA_WANTED`.** A household never asks a host or a helper
-  for a GFS space's file; a miss in the cache goes through v_83 on demand
-  (below), for members as for followers.
+- **No push for what the cache holds.** A live item's file that the item
+  described AND that is queued for the cache
+  (`SpaceMediaGfsUploader.push_targets`) is not pushed to a v_97
+  household; a household below v_97 keeps the push, and so does everyone
+  while the space's 14-day window is open (the households the legacy
+  events are for). Everything else keeps the push: a file no descriptor
+  covers (a comment's picture, a bazaar photo, a file no GFS of the space
+  takes, one not only the space's), a §25.6 catch-up (its records carry a
+  descriptor only for link-joined readers), a file someone asked for.
+- **No `SPACE_MEDIA_WANTED` for a described file.** A file a household
+  reads from the GFS cache (it holds a `space_media_refs` row) is never
+  asked of a host or a helper; a miss in the cache goes through v_83 on
+  demand (below), for members as for followers. A file without a
+  descriptor keeps the `SPACE_MEDIA_WANTED` heal.
 
 Mesh spaces keep the push and `SPACE_MEDIA_WANTED` unchanged.
 
@@ -1108,9 +1115,14 @@ another length, or onto another file (`space_media_seal.piece_aad_name`).
   An older receiver drops the entry (unknown keys) and shows the item
   without that file.
 - **Upload**: one durable row per piece per GFS proving `pieces`, each
-  carrying the piece manifest (≤ 25 × 64 hex); a GFS of the space without
-  `pieces` gets no big file, and with none the author is told ("too large
-  to send"). Past 200 MiB nothing goes through a GFS.
+  carrying the piece manifest (≤ 25 × 64 hex), all rows of one file stored
+  in one go (never half a file); file uploads run in their own lane of the
+  durable queue — their own loop, bound (1 000 rows per space) and
+  backoff — so an 8 MiB upload never holds a chat message back, and a busy
+  answer defers that GFS's other pieces, not the items. A GFS of the space
+  without `pieces` gets no big file, and with none the author is told
+  ("too large to send") and the file keeps the household push. Past 200
+  MiB nothing goes through a GFS.
 - **Reader**: the file takes its content name (`sc-`, the whole-file
   checksum; a hash map that names another hash is refused). A view fetches
   the pieces still missing, one at a time, from its GFS sources; each must
@@ -1120,10 +1132,22 @@ another length, or onto another file (`space_media_seal.piece_aad_name`).
   demand, alone** (the hint names the piece). When all are here, the joined
   file must hash to its content name — else every piece is dropped and
   nothing is written. A file in pieces is **never prefetched**.
-- **Holder** (on demand): finds the file under the same names and rules as
-  a whole file, describes it in pieces (sealed once, remembered by the
-  file's size and mtime) and reseals only the asked piece, sending its
-  proof.
+- **Holder** (on demand): any household holding the file — under the
+  author's name or its own (`sc-` / `sd-` / `sg-`) — finds it under the
+  same names and rules as a whole file, describes it in pieces under the
+  AUTHOR's file name (the AAD's; sealed once, remembered by the file's size
+  and mtime) and reseals only the asked piece, sending its proof. A locator
+  whose file seals to other addresses is remembered for 10 minutes, so
+  made-up addresses never make it seal 200 MiB again.
+- **Refused once, not again at once.** A refused file (a piece that does
+  not open, a wrong checksum) enters the view's 5-minute miss memory like
+  a miss. A piece's GET gets 120 s.
+- **Residuals** (follow-ups): the part directory of a file whose last piece
+  never comes stays until the space goes (no total cap); a content-named
+  row is first-describer-wins, so a member who describes a file's checksum
+  first with a junk address makes the file unfetchable until that row goes;
+  one big file can take most of a channel's 256 MiB cache share (the
+  least recently fetched files go first).
 - **Not yet** (follow-up): progressive playback while pieces arrive;
   a reader with the file in another space still fetches it.
 
