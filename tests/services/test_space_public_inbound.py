@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import zlib
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -2609,3 +2610,19 @@ async def test_an_event_shaped_item_without_a_dispatch_is_dropped(item_env):
     frame = await _item_frame(item_env, inner=inner, item_type="space_task_created")
     await _relay(item_env["inbound"], frame)
     assert item_env["events"] == []
+
+
+async def test_an_event_shaped_item_into_an_archived_space_reaches_the_gates(
+    item_env,
+):
+    """The archived-space decision for an item is the federation gate's
+    (a removal and the host's own write still land) — never a blanket
+    drop before the item is even read."""
+    space = await item_env["space_repo"].get("sp-1")
+    await item_env["space_repo"].save(replace(space, archived=True))
+    dispatch = _RecordingDispatch()
+    item_env["inbound"].attach_item_dispatch(dispatch)
+    inner = {"item_type": "space_post_deleted", "body": {"post_id": "p"}}
+    frame = await _item_frame(item_env, inner=inner, item_type="space_post_deleted")
+    await _relay(item_env["inbound"], frame)
+    assert [c[2] for c in dispatch.calls] == ["space_post_deleted"]

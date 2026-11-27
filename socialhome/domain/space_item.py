@@ -142,9 +142,11 @@ def required_scope(item_type: str) -> str:
 #: * ``tombstone`` — a removal leaves a tombstone, a late copy never revives;
 #: * ``advance`` — a state that only moves forward (a bid, a poll close);
 #: * ``latest`` — only the newest value counts (a location pin);
-#: * ``arrival`` — applied in arrival order (RSVP / schedule answer live,
-#:   corrected by the 30-minute incremental sync — the documented residual
-#:   of ``sync.md`` "Not on the rule yet");
+#: * ``arrival`` — applied in arrival order: the handler keeps no stamp, so
+#:   two copies crossing (two GFSs, a live push and a ring fetch) can leave
+#:   the older one standing until the 30-minute incremental sync corrects it
+#:   — the documented residual of ``sync.md`` "Not on the rule yet" (RSVP,
+#:   schedule answer, and since v_97 the update types marked so here);
 #: * ``state`` — a host statement whose repeat converges (roster, config).
 IDEMPOTENCY_CLASSES: frozenset[str] = frozenset(
     {"id", "lww", "tombstone", "advance", "latest", "arrival", "state"}
@@ -252,20 +254,20 @@ ITEM_SPECS: dict[str, ItemSpec] = {
         _person(_E.SPACE_PAGE_UPDATED, "lww"),
         _person(_E.SPACE_PAGE_DELETED, "tombstone"),
         _person(_E.SPACE_TASK_CREATED, "id"),
-        _person(_E.SPACE_TASK_UPDATED, "lww"),
+        _person(_E.SPACE_TASK_UPDATED, "arrival"),
         _person(_E.SPACE_TASK_DELETED, "tombstone"),
         _person(_E.SPACE_TASK_LIST_CREATED, "id"),
-        _person(_E.SPACE_TASK_LIST_UPDATED, "lww"),
+        _person(_E.SPACE_TASK_LIST_UPDATED, "arrival"),
         _person(_E.SPACE_TASK_LIST_DELETED, "tombstone"),
         _person(_E.SPACE_POLL_CREATED, "id"),
         _person(_E.SPACE_POLL_VOTE_CAST, "lww"),
         _person(_E.SPACE_POLL_CLOSED, "advance"),
         _person(_E.SPACE_STICKY_CREATED, "id"),
-        _person(_E.SPACE_STICKY_UPDATED, "lww"),
+        _person(_E.SPACE_STICKY_UPDATED, "arrival"),
         _person(_E.SPACE_STICKY_DELETED, "tombstone"),
         # ── Calendar, schedules ──
         _person(_E.SPACE_CALENDAR_EVENT_CREATED, "id"),
-        _person(_E.SPACE_CALENDAR_EVENT_UPDATED, "lww"),
+        _person(_E.SPACE_CALENDAR_EVENT_UPDATED, "arrival"),
         _person(_E.SPACE_CALENDAR_EVENT_DELETED, "tombstone"),
         _person(_E.SPACE_RSVP_UPDATED, "arrival"),
         _person(_E.SPACE_RSVP_DELETED, "arrival"),
@@ -274,28 +276,28 @@ ITEM_SPECS: dict[str, ItemSpec] = {
         _person(_E.SPACE_SCHEDULE_FINALIZED, "advance"),
         # ── Gallery ──
         _person(_E.SPACE_GALLERY_ALBUM_CREATED, "id"),
-        _person(_E.SPACE_GALLERY_ALBUM_UPDATED, "lww"),
+        _person(_E.SPACE_GALLERY_ALBUM_UPDATED, "arrival"),
         _person(_E.SPACE_GALLERY_ALBUM_DELETED, "tombstone"),
         _person(_E.SPACE_GALLERY_ITEM_CREATED, "id"),
-        _person(_E.SPACE_GALLERY_ITEM_UPDATED, "lww"),
+        _person(_E.SPACE_GALLERY_ITEM_UPDATED, "arrival"),
         _person(_E.SPACE_GALLERY_ITEM_DELETED, "tombstone"),
         # ── Bazaar (listings and bids; threads and offers stay targeted) ──
         _person(_E.BAZAAR_LISTING_CREATED, "id"),
-        _person(_E.BAZAAR_LISTING_UPDATED, "lww"),
-        _person(_E.BAZAAR_LISTING_FAQ_UPDATED, "lww"),
-        _person(_E.BAZAAR_BID_PLACED, "advance"),
+        _person(_E.BAZAAR_LISTING_UPDATED, "arrival"),
+        _person(_E.BAZAAR_LISTING_FAQ_UPDATED, "arrival"),
+        _person(_E.BAZAAR_BID_PLACED, "id"),
         _person(_E.BAZAAR_OFFER_ACCEPTED, "advance"),
         # ── Apps, zones, timetables ──
-        _person(_E.SPACE_APP_TABLE, "lww"),
-        _person(_E.SPACE_ZONE_UPSERTED, "lww"),
+        _person(_E.SPACE_APP_TABLE, "arrival"),
+        _person(_E.SPACE_ZONE_UPSERTED, "arrival"),
         _person(_E.SPACE_ZONE_DELETED, "tombstone"),
         _person(_E.SPACE_TIMETABLE_UPSERTED, "lww"),
         _person(_E.SPACE_TIMETABLE_DELETED, "tombstone"),
         # ── Chat and location ──
         _person(_E.SPACE_CHAT_MESSAGE_CREATED, "id", budget=BUDGET_CHAT),
-        _person(_E.SPACE_CHAT_MESSAGE_UPDATED, "lww", budget=BUDGET_CHAT),
+        _person(_E.SPACE_CHAT_MESSAGE_UPDATED, "arrival", budget=BUDGET_CHAT),
         _person(_E.SPACE_CHAT_MESSAGE_DELETED, "tombstone", budget=BUDGET_CHAT),
-        _person(_E.SPACE_CHAT_REACTION, "lww", budget=BUDGET_CHAT),
+        _person(_E.SPACE_CHAT_REACTION, "arrival", budget=BUDGET_CHAT),
         _person(
             _E.SPACE_LOCATION_UPDATED,
             "latest",

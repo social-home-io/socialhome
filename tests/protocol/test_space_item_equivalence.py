@@ -22,6 +22,7 @@ item path may refuse MORE, never less.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -282,11 +283,11 @@ async def test_an_archived_space_refuses_both_ways(world):
     member = _Household("u-member")
     await _seat(world[3], member, SpaceRole.MEMBER.value)
     space = await world[2].get(SPACE_ID)
-    from dataclasses import replace
-
     await world[2].save(replace(space, archived=True))
     cert = _cert(member, WRITER_SCOPE_WRITE)
     assert await _both(world, E.SPACE_TASK_CREATED, member, cert) == (False, False)
+    # A removal still lands in an archived space — both ways.
+    assert await _both(world, E.SPACE_TASK_DELETED, member, cert) == (True, True)
 
 
 # ── Item-only refusals: the item path may refuse more, never less ────────

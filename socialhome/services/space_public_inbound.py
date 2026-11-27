@@ -514,8 +514,6 @@ class SpacePublicInbound:
                 space_id,
             )
             return
-        if archive_refusal(space, "") is not None:
-            return
         if self._writer_certs is None:
             return
         try:
@@ -542,6 +540,18 @@ class SpacePublicInbound:
             )
             return
         opened = pt
+        event_item = parse_event_item(opened)
+        if event_item is not None:
+            # v_97 — an event-shaped item: one receiver, the federation
+            # gates (the archived-space step included — a removal and the
+            # host's own write still land) and the event's own handler.
+            if self._item_dispatch is not None:
+                await self._item_dispatch.apply(
+                    space, epoch=epoch, item_type=event_item[0], inner=event_item[1]
+                )
+            return
+        if archive_refusal(space, "") is not None:
+            return
         if is_channel_authority(opened):
             # v_96 — an authority item on the space's opaque channel: the
             # inner carries the space authority signature (the frame has
@@ -549,15 +559,6 @@ class SpacePublicInbound:
             await self._on_channel_authority(
                 space, epoch=epoch, opened=opened, frame=frame
             )
-            return
-        event_item = parse_event_item(opened)
-        if event_item is not None:
-            # v_97 — an event-shaped item: one receiver, the federation
-            # gates and the event's own handler (SpaceItemDispatch).
-            if self._item_dispatch is not None:
-                await self._item_dispatch.apply(
-                    space, epoch=epoch, item_type=event_item[0], inner=event_item[1]
-                )
             return
         try:
             parsed = parse_item_plaintext(opened)

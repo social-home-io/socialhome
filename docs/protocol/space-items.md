@@ -117,8 +117,18 @@ One entry per item type (`domain/space_item.py`):
 | `scope` | writer-cert scope the receiver requires (`write` / `comment`) |
 | `ring_class` | `durable` (24 h in the ring) or `ephemeral` (15 min — live location) |
 | `authority` | a host statement (authority inner) rather than a person action |
-| `idempotency` | how a replay is harmless: `id` (owner-bound id, insert-once), `lww` (signed stamp / version, newest wins), `tombstone` (a delete leaves a tombstone), `latest` (latest-only, e.g. a location pin) |
+| `idempotency` | the per-type stamp audit — how a copy is harmless: `id` (insert-once), `lww` (a stamp / version the handler compares: post and comment edits, post reactions, poll votes, pages, timetables), `tombstone` (a delete leaves a tombstone), `advance` (a state that only moves forward), `latest` (only the newest counts: a location pin), `state` (a host statement whose repeat converges), `arrival` (applied in arrival order — see below) |
+| `reader_as` | the v1 type a follower's `reader` cert is judged as (comments, own comment deletes, post reactions); none → a reader cert never carries it |
 | `budget` | sender priority class: `authority` > `content` > `chat` > `location` |
+
+**The `arrival` residual.** Tasks, task lists, stickies, calendar events,
+gallery albums and items, bazaar listings and FAQs, app tables, zones, chat
+edits and chat reactions (with RSVPs and schedule answers, as before) are
+applied in arrival order: their handlers keep no stamp. Two copies that
+cross (two GFSs, a live push and a fetch) can leave the older value standing
+until the 30-minute incremental sync corrects it ([sync › Not on the rule
+yet](./sync.md#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)).
+Moving them onto `item_merge` is a follow-up.
 
 Targeted secrets never become items: rekeys, key shares, writer grants,
 roster snapshots, invites and joins, moderation submissions (to the host),
@@ -148,22 +158,22 @@ sequenceDiagram
     M->>M: registry handler(event_type, from_instance = origin)
 ```
 
-Both transports end in `SpaceItemDispatch.handle(space, epoch, ciphertext)`:
+Both transports end in `SpacePublicInbound.handle_channel_item(space_id, epoch, ciphertext)`, which decrypts and hands an event-shaped item to `SpaceItemDispatch.apply(space, epoch, item_type, inner)`:
 
 1. decrypt at the item's epoch (a missing key holds the item, as today);
 2. parse; a v1 shape goes to the existing v1 path unchanged;
 3. a v2 inner: drop our own echo; the type must be in `ITEM_SPECS` and not
    `authority`; the signed `space_id` must be this space; `origin` derives
-   from `author_pk`; the author signature verifies; the writer cert verifies
+   from `author_pk`; the author signature verifies; a seen `item_id` is
+   dropped here (an item reaches us from several GFSs and from the ring
+   after a live push); the writer cert verifies
    for this space, the item's epoch (fresh: newest or previous within the
    grace), `author_pk` and the spec's scope; `ts` is no more than 300 s
    ahead;
 4. an authority `space_event`: the authority signature verifies against
    the pinned space key; `origin` must act as host
    (`host_equivalence.acts_as_host`) at the time of applying;
-5. seen `item_id` → dropped (an item reaches us from several GFSs and from
-   the ring after a live push);
-6. a `FederationEvent(event_type, from_instance=origin, space_id, payload=body)`
+5. a `FederationEvent(event_type, from_instance=origin, space_id, payload=body)`
    is built and run through **the same post-decrypt gates** a federation
    envelope gets (`FederationService.space_write_gates()`: ban, deprovisioned
    author, archived space, writer seat with hold-for-seat), then dispatched
