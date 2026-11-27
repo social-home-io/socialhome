@@ -2517,6 +2517,9 @@ def _wire_federation_stack(
         file_hasher=space_media_sync_service.file_hasher,
     )
 
+    # A household the host's roster snapshot adds gets our recent rows.
+    private_invite_handler.attach_space_resume(space_sync_resume_provider)
+
     # v_86 — which files of a row we ship: on a catch-up, as a non-host
     # household, our own people's files only; on a SPACE_MEDIA_WANTED,
     # holding an admin / moderator seat, other people's too.
@@ -6827,6 +6830,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # that would only fail its send against a torn-down channel.
         # The deferred mesh re-sends of space broadcasts go first: they ride
         # the routed handler, so stopping it underneath them would fail them.
+        # Pushes to the households a roster snapshot added: ended while the
+        # federation stack and the database are still up.
+        if (invites := app.get(K.private_invite_handler_key)) is not None:
+            await invites.stop()
         fed_svc = app.get(K.federation_service_key)
         if fed_svc is not None:
             await fed_svc.stop()

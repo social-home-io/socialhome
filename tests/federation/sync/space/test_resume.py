@@ -1884,3 +1884,86 @@ async def test_a_replay_takes_the_route_the_request_came_by(provider_factory):
     fed2.route_ok = False
     assert await unreachable.handle_request(request) == 0
     assert fed2.sent == []
+
+
+# ── Push to a household the host's roster snapshot added ───────────────
+
+
+def _posts_to(fed, to: str) -> list[str]:
+    return [
+        s["payload"]["id"]
+        for s in fed.sent
+        if s["to"] == to and s["type"] is FederationEventType.SPACE_POST_CREATED
+    ]
+
+
+@pytest.mark.parametrize("authority", [False, True])
+async def test_a_push_sends_only_our_own_peoples_rows_to_any_live_household(
+    authority,
+):
+    """Whatever our seat (even acting for the roster), a push carries our
+    own people's rows only — everyone else's come from the host — and it
+    reaches a follower-only household too (full read parity)."""
+    provider, fed, _outbox, base = _helper_provider(authority=authority)
+    for household in ("peer-a", "follower"):
+        sent = await provider.push_own_rows_to(
+            space_id="sp-1", instance_id=household, since=base.isoformat()
+        )
+        assert sent > 0
+        assert _posts_to(fed, household) == ["p-0"]
+    # Not a member household: nothing.
+    assert (
+        await provider.push_own_rows_to(
+            space_id="sp-1", instance_id="stranger", since=base.isoformat()
+        )
+        == 0
+    )
+    assert _posts_to(fed, "stranger") == []
+
+
+async def test_a_push_keeps_its_own_cooldown_taken_only_once_it_delivered():
+    """A push that delivered nothing is retried by the next snapshot; one
+    that delivered is not repeated for 30 minutes — and neither holds back
+    the household's own SPACE_SYNC_RESUME."""
+    provider, fed, _outbox, base = _helper_provider(authority=False)
+    since = base.isoformat()
+    fed.route_ok = False
+    first = await provider.push_own_rows_to(
+        space_id="sp-1", instance_id="peer-a", since=since
+    )
+    assert first == 0
+    fed.route_ok = True
+    again = await provider.push_own_rows_to(
+        space_id="sp-1", instance_id="peer-a", since=since
+    )
+    assert again > 0
+    repeat = await provider.push_own_rows_to(
+        space_id="sp-1", instance_id="peer-a", since=since
+    )
+    assert repeat == 0
+    asked = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": since})
+    )
+    assert asked > 0
+
+
+async def test_a_push_that_fails_never_raises(provider_factory):
+    since = "2026-01-01T00:00:00+00:00"
+    provider, _fed, _posts = provider_factory(
+        posts=[_post(0, datetime(2026, 4, 1, tzinfo=UTC))], members=["peer-a"]
+    )
+
+    async def _boom(*_args):
+        raise RuntimeError("db gone")
+
+    provider.attach_row_scope(_boom, own_members=_boom, member_gate=_boom)
+    failed = await provider.push_own_rows_to(
+        space_id="sp-1", instance_id="peer-a", since=since
+    )
+    assert failed == 0
+    # Unwired (our own people unknown): nothing.
+    bare, _f, _p = provider_factory(posts=[], members=["peer-a"])
+    unwired = await bare.push_own_rows_to(
+        space_id="sp-1", instance_id="peer-a", since=since
+    )
+    assert unwired == 0

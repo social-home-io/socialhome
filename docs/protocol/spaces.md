@@ -1122,6 +1122,32 @@ member household, not only on the host:
   (the ACK's roster is taken at seat time, and the redeemer has no space row
   yet). The host signs a snapshot's entries, and the receiver verifies
   them, in a worker thread, off the event loop.
+- **Rows for the households a snapshot adds.** A household that accepts an
+  invitation is seated from the invitation's roster — with several
+  invitations sent at once, the host alone — so what it posts before the
+  seat-time snapshot lands reaches only the host. When a snapshot from the
+  host adds households to its roster, it pushes its own people's rows of
+  the last 30 minutes (the periodic catch-up tick) to each one, in the
+  background, through the §4.4 replay
+  (`SpaceSyncResumeProvider.push_own_rows_to`): to any household with a
+  live seat, followers included (full read parity); its own people's rows
+  only, whatever its seat (everyone else's come from the host); deletes as
+  tombstones, files shipped, over whichever path reaches that household.
+  The receiver upserts by id. Its own cooldown, 30 minutes per household,
+  is taken only once something was delivered, so a failed push is retried
+  by the next snapshot and never holds back that household's own
+  `SPACE_SYNC_RESUME` or a resync (`PrivateSpaceInviteHandler
+  ._push_to_gained`). Only the host's snapshot does this, and it goes to
+  one household (on seating it, or as a repair), so a join never makes
+  every member push. At most 64 households per snapshot; the rest catch up
+  from the host. Cost per snapshot: the households it adds × our rows in
+  the window (a newcomer: its first one or two). Not carried, so left to
+  the catch-up: reactions, votes and chat; a household learned only through
+  live gossip; and a household invited by a delegated admin, which sends no
+  snapshot.
+  A roster entry adds its household to `space_instances` only while that
+  household holds a live seat: a stale JOINED (at or below a removal we
+  hold) never makes a removed household a broadcast target again.
 - **Repair on a digest mismatch, in reply to an admitted BEGIN.** The host
   never sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
   member household (this version) sends to the space's host — direct, the
