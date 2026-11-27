@@ -46,6 +46,7 @@ from ..domain.preferences import FeatureDisabledError
 from ..domain.space import (
     AccessAdminOnlyError,
     ContentQueuedForReview,
+    GlobalGfsMembersError,
     HostTooOldError,
     HostUnreachableError,
     HouseholdUpgradeRequiredError,
@@ -593,6 +594,16 @@ class BaseView(web.View):
                 "PRIVATE_GFS_LINK_MEMBERS",
                 "Remove the households that joined with a GFS link before "
                 "turning the GFS off for this space.",
+                extra={"households": exc.households},
+            )
+        except GlobalGfsMembersError as exc:
+            # v_97 — a global space can't become public while households
+            # reach it only through a GFS.
+            return error_response(
+                409,
+                "GLOBAL_GFS_MEMBERS",
+                "Remove the households that reach this space only through a "
+                "GFS before making it public.",
                 extra={"households": exc.households},
             )
         except PrivateGfsOffError:

@@ -226,6 +226,7 @@ from ..domain.space import (
     BannedFromSpaceError,
     BanNotAllowedError,
     ContentAction,
+    GlobalGfsMembersError,
     HostedSpaceListing,
     HostNotPairedError,
     HostTooOldError,
@@ -3801,6 +3802,7 @@ class SpaceService(
                         f"instance already advertises {count} public spaces "
                         f"(max {MAX_PUBLIC_SPACES})",
                     )
+            await self.check_tier_change(space, stype)
             new_fields["space_type"] = stype
             payload["space_type"] = stype.value
             will_be_global = stype is SpaceType.GLOBAL
@@ -4081,6 +4083,19 @@ class SpaceService(
             except Exception:
                 log.exception("private gfs: the link's GFS as channel server failed")
         return True
+
+    async def check_tier_change(self, space: Space, stype: SpaceType) -> None:
+        """v_97 — a GLOBAL space may not become public (or a household
+        space) while households reach it only through a GFS: those tiers
+        have no GFS path. Raises :class:`GlobalGfsMembersError` naming them
+        — when the tier change is proposed, and again when it is enacted."""
+        if space.space_type is SpaceType.GLOBAL and stype in (
+            SpaceType.PUBLIC,
+            SpaceType.HOUSEHOLD,
+        ):
+            stranded = await self._link_joined_households(space.id)
+            if stranded:
+                raise GlobalGfsMembersError(stranded)
 
     async def _link_joined_households(self, space_id: str) -> list[dict]:
         """The member households of ``space_id`` seated through an invite

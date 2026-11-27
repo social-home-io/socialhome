@@ -193,6 +193,15 @@ class SpaceApprovalService(ProtectionGateMixin):
                         )
                     ),
                 }
+        if (
+            action is ProposalAction.SET_PUBLIC_TIER
+            and params.get("space_type")
+            and self._space_service is not None
+        ):
+            # v_97 — refused up front, never as a failed enactment.
+            await self._space_service.check_tier_change(
+                space, SpaceType(str(params["space_type"]))
+            )
         if action is ProposalAction.SET_PUBLIC_TIER:
             # §CP.R: a protected account can't publish a space — neither by
             # asking for it nor by joining an open proposal that does

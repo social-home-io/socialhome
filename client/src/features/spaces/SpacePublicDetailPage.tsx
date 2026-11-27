@@ -37,6 +37,7 @@ import { JoinRequestModal } from './JoinRequestModal'
 import { SpaceGlyph } from './SpaceGlyph'
 import { followersLabel, followersShown } from './SpaceListRow'
 import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
+import { askGfsConsent } from '@/components/gfsConsent'
 import {
   aboutWays, approvalSeatsUs, contentIsGated, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeChip, joinModeShown,
@@ -223,6 +224,11 @@ export default function SpacePublicDetailPage() {
     const carries = joinCarriesLocation(entry)
     if ((action === 'join' || action === 'follow') && carries
       && !await askLocationConsent(hostLabel(entry))) return
+    // A GFS space (v_97): its items ride only its channel — the household
+    // connects to a GFS first, with the person's consent (an admin), or an
+    // admin is asked to. Cancel sends nothing.
+    if ((action === 'join' || action === 'follow')
+      && !await askGfsConsent(entry.space_id, entry.scope, entry.name)) return
     try {
       if (action === 'follow') {
         // Hosted here: followed at once. Elsewhere: its host approves the

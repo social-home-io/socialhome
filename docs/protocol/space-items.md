@@ -301,16 +301,23 @@ are `ephemeral` in the ring.
 
 ## GFS spaces: joining and switching
 
-- **Join preflight.** Joining a GFS space (from local discovery, an invite
-  or the GFS directory) first checks that this household is registered on
-  ≥ 1 of the space's listed GFSs. If not, the SPA shows the consent dialog
-  ("This space uses a connection server…") with **Connect and join** for an
-  admin (Q7 A) and **Ask an admin** otherwise; **Cancel** sends nothing.
+- **Join preflight.** Joining or following a GFS space from Discover first
+  asks the household (`GET /api/public_spaces/{id}/join-preflight`) whether
+  it holds an active GFS connection that proves `channel_ring`. If not,
+  the SPA shows the consent dialog ("This space uses a GFS…"): **Connect
+  and join** for an admin (Q7 A — it connects the household to its default
+  GFS, then joins), **Ask an admin** for anyone else; **Cancel** sends
+  nothing. Which of the space's own listed GFSs the household reads it on
+  is settled after the join, from the owner's signed list in the space's
+  metadata (a household connected to none of them gets the Connect prompt
+  below).
 - **Private ON/OFF.** Turning `private_gfs` ON makes the space a GFS space;
   OFF is refused while households reachable only through a GFS remain
   (`409 PRIVATE_GFS_LINK_MEMBERS`, unchanged).
-- **Global → public** is refused while households reachable only through a
-  GFS remain (`409 GLOBAL_GFS_MEMBERS`): a public space has no GFS path.
+- **Global → public** (or household) is refused while households reachable
+  only through a GFS remain (`409 GLOBAL_GFS_MEMBERS`, naming them — when
+  the tier change is proposed, and again when it is enacted): a public
+  space has no GFS path.
 - **The 14-day window** (Q6 A). For 14 days after a space became a GFS space
   on this household, its items also go as legacy events to every member
   household (receivers dedupe); afterwards only to households below v_97.

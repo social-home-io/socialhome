@@ -345,6 +345,7 @@ from .public_spaces import (
     PublicSpaceBlockInstanceView,
     PublicSpaceCollectionView,
     PublicSpaceHideView,
+    PublicSpaceJoinPreflightView,
     PublicSpaceJoinRequestView,
     PublicSpacesRefreshView,
 )
@@ -1506,6 +1507,10 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view(
         "/api/public_spaces/{space_id}/join-request",
         PublicSpaceJoinRequestView,
+    )
+    app.router.add_view(
+        "/api/public_spaces/{space_id}/join-preflight",
+        PublicSpaceJoinPreflightView,
     )
     app.router.add_view("/api/public_spaces/{space_id}/hide", PublicSpaceHideView)
     app.router.add_view(

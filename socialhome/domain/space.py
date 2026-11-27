@@ -1497,6 +1497,17 @@ class PrivateGfsLinkMembersError(Exception):
         self.households = households
 
 
+class GlobalGfsMembersError(Exception):
+    """v_97 — a GLOBAL space may not become PUBLIC (or a household space)
+    while households that reach it only through a GFS are members: a public
+    space has no GFS path, so they would be stranded. The API answers 409
+    ``GLOBAL_GFS_MEMBERS`` naming them; the owner removes them first."""
+
+    def __init__(self, households: list[dict[str, object]]) -> None:
+        super().__init__("households that reach the space only through a GFS")
+        self.households = households
+
+
 class PrivateGfsOffError(Exception):
     """A connection-server (``gfs``) invite link was asked for on a private
     space whose owner has not turned ``SpaceFeatures.private_gfs`` on. The

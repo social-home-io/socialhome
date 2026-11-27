@@ -2605,6 +2605,15 @@ class GfsConnectionService:
             self._subscriber_seats,
         )
 
+    async def ring_connected(self) -> bool:
+        """v_97 — whether this household holds at least one active GFS
+        connection that proves ``channel_ring``: what joining a GFS space
+        needs (``docs/protocol/space-items.md`` › joining)."""
+        for conn in await self._repo.list_active():
+            if conn.status == "active" and await self.channel_ring_supported(conn):
+                return True
+        return False
+
     async def channel_ring_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS proved ``channel_ring`` on /gfs/info (v_97).
 

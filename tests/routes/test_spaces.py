@@ -649,6 +649,42 @@ async def test_turning_private_gfs_off_with_link_joined_members_is_a_409(client)
     assert (await _features(client, sid))["private_gfs"] is True
 
 
+async def test_a_global_space_with_gfs_only_households_cannot_become_public(client):
+    """v_97 — a public space has no GFS path: households that reach a
+    global space only through a GFS would be stranded."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "GlobalGfs", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, source) VALUES('gfs-hh', 'Finn home', 'pk', 'k1',"
+        " 'k2', '', 'inbox-gfs-hh', 'space_session')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id,"
+        " display_name) VALUES(?, 'gfs-hh', 'u-finn', 'Finn')",
+        (sid,),
+    )
+    # A tier change is proposed (multi-admin approval); the owner alone
+    # enacts it at once — and is refused.
+    r = await client.post(
+        f"/api/spaces/{sid}/proposals",
+        json={"action": "set_public_tier", "space_type": "public"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 409, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "GLOBAL_GFS_MEMBERS"
+    assert body["error"]["households"][0]["instance_id"] == "gfs-hh"
+    r = await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    assert (await r.json())["space_type"] == "global"
+
+
 async def test_invite_link_type_on_a_private_space(client):
     sid = await _private_space(client, "PrivLinks")
     # Off: the default is internal, and a gfs link is a 409.

@@ -8,6 +8,7 @@ from socialhome.repositories.public_space_repo import (
     SqlitePublicSpaceRepo,
 )
 from socialhome.routes import public_spaces as public_spaces_routes
+from socialhome.services.gfs_connection_service import GfsConnectionService
 
 from .conftest import _auth
 
@@ -492,3 +493,37 @@ async def test_list_returns_the_declared_counts_or_null(client):
         None,
         None,
     )
+
+
+# ── v_97: joining a GFS space needs a GFS connection ─────────────────────
+
+
+async def test_join_preflight_says_a_global_space_needs_a_gfs(client, monkeypatch):
+    async def none(self):
+        return False
+
+    monkeypatch.setattr(GfsConnectionService, "ring_connected", none)
+    r = await client.get(
+        "/api/public_spaces/sp-g/join-preflight?space_type=global",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert await r.json() == {
+        "gfs_space": True,
+        "connected": False,
+        "may_connect": True,
+    }
+
+
+async def test_join_preflight_is_quiet_for_a_mesh_space(client):
+    r = await client.get(
+        "/api/public_spaces/sp-p/join-preflight?space_type=public",
+        headers=_auth(client._tok),
+    )
+    body = await r.json()
+    assert (body["gfs_space"], body["connected"]) == (False, True)
+
+
+async def test_join_preflight_needs_a_session(client):
+    r = await client.get("/api/public_spaces/sp-g/join-preflight?space_type=global")
+    assert r.status == 401
