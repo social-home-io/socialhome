@@ -103,10 +103,17 @@ registry `domain/space_item.py::ITEM_SPECS` names which. The inner is
   (`writer_cert.py`), checked against the pinned space key with the scope
   `ITEM_SPECS` names.
 
-The v1 shapes (`post`, `post_edit`, `comment`, … — `POST_SHAPED_ITEM_TYPES`,
-`GENERIC_ITEM_TYPES`) stay on the channel during the v_97 window for the
-types they already carry, so a v_96 seat keeps reading them; v_98 moves them
-to v2.
+**Posts and comments too (owner 2026-11-27).** In a GFS space a post,
+its edits, deletes and reactions, and comments are v2 items like every
+other change: sealed, stored in the durable queue, one delivery path for
+all content. A household no longer puts the v1 shapes (`post`, `post_edit`,
+`comment`, … — `POST_SHAPED_ITEM_TYPES`, `GENERIC_ITEM_TYPES`) on a GFS
+space's channel from memory; a v_96 seat gets the legacy event instead (the
+same rule as every item: households below v_97 and the 14-day window). The
+v1 receive path stays for items from v_96 authors; v_98 removes it. A
+follower's `reader` cert is checked before sealing (the space's follower
+switches, `reader_cert_permits`): what receivers would refuse is shown to
+its author, never sent. The v_60 author profile still rides the v1 path.
 
 ### Host statements stay on the guaranteed path
 
@@ -145,8 +152,14 @@ Moving them onto `item_merge` is a follow-up.
 
 Targeted secrets never become items: rekeys, key shares, writer grants,
 roster snapshots, invites and joins, moderation submissions (to the host),
-reports, DMs, bazaar threads and offers, app sessions, sync streams and
-media blobs keep their per-recipient events.
+reports, DMs, bazaar threads and offers, app sessions and sync streams keep
+their per-recipient events. **Files**: in a mesh space they keep the
+per-household push (`SPACE_MEDIA_BLOB`); in a GFS space every household
+takes them from the GFS space media cache — the item carries the
+`media_refs` descriptor on its one shared payload, the author's uploads
+wait in the durable queue (rows of kind `space_media_upload`), files over
+8 MiB go in proven 8 MiB pieces, and a miss is fetched on demand
+([media.md](./media.md#gfs-spaces-every-household-from-the-cache-v_97)).
 
 ## One receiver: `SpaceItemDispatch`
 
@@ -333,6 +346,11 @@ planned for accepted it (`space_item_outbox`, household migration 0158;
   {space}" with **Try again** / **Discard** (`/api/spaces/{id}/unsent`, the
   `space.unsent` frame). A GFS that no longer serves the space (dropped
   from the owner's list) just loses its copy.
+- **Files** (v_97): the space's file uploads wait in the same queue — one
+  row per blob (or 8 MiB piece) per GFS, a small locator (the bytes are
+  sealed again when the row goes) — in their own line, so an 8 MiB upload
+  never holds the space's chat back on the same GFS, and a busy answer to
+  an upload never parks the items.
 - **Bounded per space**: 2 000 rows / 32 MiB. Past it a new item is refused
   and the author sees "too much is already waiting to go out". Items still
   waiting count in the space's `waiting_to_send`.
@@ -390,9 +408,12 @@ mesh space's households keep the last pin, so nothing repeats there.
 - GFS capability **`channel_ring`**: households use the ring and the new
   publish fields only on a GFS that proves it; on another GFS the v_96
   channel behaviour holds.
-- No household migration. One additive GFS migration (0034).
+- Household migration 0158 (`space_item_outbox`, the durable queue — its
+  `replans` / `delivered` columns were added in place before any release).
+  One additive GFS migration (0034). The GFS's space media cache needs no
+  migration for pieces (`pieces` in its signed `space_media` block).
 - v_98 (a later release, after one window) deletes the legacy fan-out and
-  moves the v1 channel shapes to v2.
+  the v1 receive path.
 
 ## Cost
 
