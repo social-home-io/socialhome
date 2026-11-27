@@ -63,6 +63,7 @@ from socialhome.domain.events import (
     PostEdited,
     RemoteSpaceInviteDeclined,
     SpaceAdminSeedsRetiredAfterRestore,
+    SpaceChannelActivity,
     SpaceConfigChanged,
     SpaceDelegationBlocked,
     SpaceJoinApproved,
@@ -5845,3 +5846,29 @@ async def test_a_blocked_delegation_tells_the_owner_only(stack):
         for n in await stack.notif_repo.list(bob.user_id, limit=10)
         if n.type == "space_delegation_blocked"
     ]
+
+
+async def test_channel_activity_rings_one_contentless_feed_row(stack):
+    """v_97 (owner F6): a GFS space's ring holding unfetched items is one
+    "New activity in {space}" row at "Everything", about the space's feed,
+    naming nothing else; catching up (``unread`` 0) says nothing."""
+    _space_svc, space, u = await _mention_space(stack, "bob")
+    await stack.bus.publish(SpaceChannelActivity(space_id=space.id, unread=0))
+    assert await _links(stack, u["bob"], "space_activity") == []
+    await stack.bus.publish(SpaceChannelActivity(space_id=space.id, unread=4))
+    assert await _links(stack, u["bob"], "space_activity") == [f"/spaces/{space.id}"]
+    (row,) = [
+        n
+        for n in await stack.notif_repo.list(u["bob"].user_id, limit=50)
+        if n.type == "space_activity"
+    ]
+    assert row.title == f"New activity in {space.name}"
+    await stack.bus.publish(SpaceChannelActivity(space_id="nope", unread=4))
+
+
+async def test_channel_activity_respects_a_quieter_level(stack):
+    _space_svc, space, u = await _mention_space(
+        stack, "bob", levels={"bob": "mentions"}
+    )
+    await stack.bus.publish(SpaceChannelActivity(space_id=space.id, unread=4))
+    assert await _links(stack, u["bob"], "space_activity") == []

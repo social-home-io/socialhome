@@ -521,6 +521,7 @@ class GfsConnectionService:
         "_authority_rotation",
         "_caps_warned",
         "_change_lock",
+        "_channel_ring",
         "_cover_repo",
         "_encrypted_moment_media",
         "_encrypted_moments",
@@ -689,6 +690,9 @@ class GfsConnectionService:
         # of a space that takes follows but no requests (invite-only with
         # followers on). Such a contact goes only to a server that proved it.
         self._subscriber_seats: dict[str, bool] = {}
+        #: GFS id → proved ``channel_ring`` (v_97: per-channel ring, watch /
+        #: fetch / heads, signed ``ring_class`` / ``push_all`` on publish).
+        self._channel_ring: dict[str, bool] = {}
         #: GFS id → proved ``listing_counts`` (folds a listing's signed
         #: ``member_count`` / ``follower_count`` into the bytes it verifies).
         self._listing_counts: dict[str, bool] = {}
@@ -940,6 +944,7 @@ class GfsConnectionService:
             self._moment_counts,
             self._join_contact,
             self._subscriber_seats,
+            self._channel_ring,
             self._listing_counts,
             self._private_channels,
             self._addressee_key,
@@ -2598,6 +2603,17 @@ class GfsConnectionService:
             conn,
             "subscriber_seats",
             self._subscriber_seats,
+        )
+
+    async def channel_ring_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``channel_ring`` on /gfs/info (v_97).
+
+        Gates everything this household does with a channel's ring there:
+        the signed ``ring_class`` / ``push_all`` publish fields (an older
+        GFS refuses unknown publish keys) and the ring client's watch /
+        fetch frames (``docs/protocol/space-items.md``)."""
+        return await self._signed_capability_supported(
+            conn, "channel_ring", self._channel_ring
         )
 
     async def sealed_highlight_stream_supported(self, conn: GfsConnection) -> bool:

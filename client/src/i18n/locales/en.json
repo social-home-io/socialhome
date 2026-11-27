@@ -6257,6 +6257,7 @@
   "spaces.list.just_you": "Just you",
   "spaces.list.active": "active {when}",
   "spaces.list.new": "{n} new",
+  "spaces.list.activity": "New activity",
   "spaces.list.needs_you": "{n} things need you",
   "spaces.list.needs_you_one": "{n} thing needs you",
   "spaces.list.following": "Following",

@@ -183,6 +183,8 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "post_created": NotifKind.ACTIVITY,
     "comment_added": NotifKind.ACTIVITY,
     "space_post_created": NotifKind.ACTIVITY,
+    # v_97 — contentless "New activity in {space}" from a channel ring.
+    "space_activity": NotifKind.ACTIVITY,
     "space_comment_added": NotifKind.ACTIVITY,
     "space_member_joined": NotifKind.ACTIVITY,
     # A new app in the household (D13: "Anna added Chess"). Household

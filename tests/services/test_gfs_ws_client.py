@@ -23,6 +23,7 @@ from socialhome.federation.inbound_validator import (
 )
 from socialhome.services.gfs_ws_client import (
     ENVELOPE_MEDIA_FRAME,
+    RING_CONNECTED_FRAME,
     GfsWebSocketClient,
     _to_ws_url,
 )
@@ -1423,3 +1424,56 @@ async def test_refused_media_frames_warn_once_a_minute_without_a_traceback(caplo
     assert len(warnings) == 1
     assert "Traceback" not in caplog.text
     assert all(r.exc_info is None for r in warnings)
+
+
+# ── v_97: the channel ring ───────────────────────────────────────────────
+
+
+async def test_ring_answers_and_item_positions_go_to_on_ring(fake_gfs, http_session):
+    """A ring answer goes to ``on_ring`` only; a relay item with a ring
+    position goes to ``on_relay`` FIRST, then its position to ``on_ring``;
+    every (re)connect tells ``on_ring`` first; a frame the household sends
+    reaches the GFS."""
+    seed, _pub = _gen_keypair()
+    order: list[str] = []
+
+    async def on_relay(frame: dict) -> None:
+        order.append("relay")
+
+    async def on_ring(frame: dict) -> None:
+        order.append(f"ring:{frame['type']}")
+
+    client = GfsWebSocketClient(
+        gfs_url=fake_gfs.url,
+        instance_id="sh-ring",
+        signing_key=seed,
+        session_factory=lambda: http_session,
+        on_relay=on_relay,
+        on_ring=on_ring,
+    )
+    assert await client.send_frame({"type": "channel_watch"}) is False
+    await client.start()
+    try:
+        for _ in range(100):
+            if client.connected:
+                break
+            await asyncio.sleep(0.02)
+        await fake_gfs.outbound.put({"type": "channel_heads", "heads": []})
+        await fake_gfs.outbound.put(
+            {"type": "relay", "channel_id": "c" * 32, "seq": 1, "ring_id": "0" * 16}
+        )
+        await fake_gfs.outbound.put({"type": "relay", "channel_id": "c" * 32})
+        for _ in range(100):
+            if order.count("relay") == 2:
+                break
+            await asyncio.sleep(0.02)
+        assert order == [
+            f"ring:{RING_CONNECTED_FRAME}",
+            "ring:channel_heads",
+            "relay",
+            "ring:relay",
+            "relay",
+        ]
+        assert await client.send_frame({"type": "channel_watch", "watch": []})
+    finally:
+        await client.stop()

@@ -18,8 +18,11 @@ Lifecycle:
   inbound ``{type:"relay", ...}`` frame to the injected ``on_relay``
   callable.
 
-Heartbeat is WebSocket-protocol-level (aiohttp ``heartbeat=30``); the SH
-never sends application frames after hello.
+Heartbeat is WebSocket-protocol-level (aiohttp ``heartbeat=30``). After
+the hello the SH sends only the v_97 channel-ring frames (``channel_watch``
+/ ``channel_fetch``, :meth:`GfsWebSocketClient.send_frame`) to a GFS that
+proved ``channel_ring``; the ring's answers and the position of every relay
+item go to ``on_ring`` (:mod:`socialhome.services.channel_ring_client`).
 """
 
 from __future__ import annotations
@@ -34,6 +37,11 @@ import aiohttp
 import orjson
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.gfs_channel import (
+    CHANNEL_FETCH_DONE_FRAME,
+    CHANNEL_GAP_FRAME,
+    CHANNEL_HEADS_FRAME,
+)
 from ..domain.gfs_hello_accepts import OUR_HELLO_ACCEPTS
 from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.relay_media_frame import is_relay_media_body
@@ -53,6 +61,16 @@ MEDIA_REFUSED_WARN_INTERVAL_S: float = 60.0
 
 
 RECONNECT_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 30.0)
+
+#: v_97 — the in-process frame ``on_ring`` gets when a session (re)opens:
+#: the GFS forgot this socket's watches. Never on a wire.
+RING_CONNECTED_FRAME: str = "ring_connected"
+
+#: v_97 — the channel ring's answers to this household (heads pings, the end
+#: of a fetch page, a gap), handed to ``on_ring``.
+RING_ANSWER_FRAMES: frozenset[str] = frozenset(
+    {CHANNEL_HEADS_FRAME, CHANNEL_FETCH_DONE_FRAME, CHANNEL_GAP_FRAME}
+)
 
 # WebSocket close codes the GFS uses to reject a hello (see
 # ``global_server/routes/ws.py``): auth failure / hello timeout / protocol
@@ -106,6 +124,7 @@ class GfsWebSocketClient:
         "_on_highlight_signal",
         "_on_moment_public",
         "_on_relay",
+        "_on_ring",
         "_on_space_media_request",
         "_reconnect_delays",
         "_session_factory",
@@ -130,6 +149,7 @@ class GfsWebSocketClient:
         on_envelope: Callable[[dict], Awaitable[None]] | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
         on_space_media_request: Callable[[dict], Awaitable[None]] | None = None,
+        on_ring: Callable[[dict], Awaitable[None]] | None = None,
         reconnect_delays: tuple[float, ...] = RECONNECT_DELAYS,
     ) -> None:
         self._gfs_url = gfs_url
@@ -147,6 +167,9 @@ class GfsWebSocketClient:
         self._media_warned_at = -math.inf
         #: v_83 — a GFS asks this household for a space blob a reader missed.
         self._on_space_media_request = on_space_media_request
+        #: v_97 — the channel ring's answers and the ring position of every
+        #: relay item (after ``on_relay`` handled it).
+        self._on_ring = on_ring
         self._reconnect_delays = reconnect_delays
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -163,6 +186,10 @@ class GfsWebSocketClient:
         # surface "re-pair may be required" instead of a silent reconnect
         # hammer. Cleared once a session is confirmed live.
         self.last_auth_error: str | None = None
+
+    def attach_ring_handler(self, handler: Callable[[dict], Awaitable[None]]) -> None:
+        """Late-bound — the v_97 channel-ring client."""
+        self._on_ring = handler
 
     def attach_highlight_signal_handler(
         self,
@@ -258,6 +285,21 @@ class GfsWebSocketClient:
                 self._task.cancel()
             self._task = None
 
+    async def send_frame(self, frame: dict) -> bool:
+        """Send one application frame on the live session (v_97: a
+        channel-ring ``channel_watch`` / ``channel_fetch``). ``False`` when
+        there is no live session or the send failed — the caller retries on
+        the next connect."""
+        ws = self._ws
+        if ws is None or ws.closed:
+            return False
+        try:
+            await ws.send_str(orjson.dumps(frame).decode())
+        except (ConnectionError, RuntimeError, aiohttp.ClientError) as exc:
+            log.info("gfs.ws.client: send to %s failed: %s", self._gfs_url, exc)
+            return False
+        return True
+
     @property
     def connected(self) -> bool:
         """``True`` while a WebSocket is currently open."""
@@ -327,6 +369,8 @@ class GfsWebSocketClient:
             self._ws = ws
             await ws.send_json(self._build_hello())
             self._connected_event.set()
+            # v_97 — before any frame of this session: the watches go again.
+            await self._ring({"type": RING_CONNECTED_FRAME})
             if self._on_connected is not None:
                 try:
                     await self._on_connected()
@@ -598,6 +642,9 @@ class GfsWebSocketClient:
             if self._on_connected is not None:
                 await self._on_connected()
             return
+        if frame_type in RING_ANSWER_FRAMES:
+            await self._ring(frame)
+            return
         if frame_type != "relay":
             log.debug(
                 "gfs.ws.client: ignoring non-relay frame type=%r",
@@ -609,6 +656,22 @@ class GfsWebSocketClient:
         except Exception as exc:  # defensive
             log.warning(
                 "gfs.ws.client: on_relay handler raised for %s: %s",
+                self._gfs_url,
+                exc,
+                exc_info=True,
+            )
+        if "seq" in frame:
+            # v_97 — after the item was handled: its place in the ring.
+            await self._ring(frame)
+
+    async def _ring(self, frame: dict) -> None:
+        if self._on_ring is None:
+            return
+        try:
+            await self._on_ring(frame)
+        except Exception as exc:  # defensive
+            log.warning(
+                "gfs.ws.client: on_ring handler raised for %s: %s",
                 self._gfs_url,
                 exc,
                 exc_info=True,

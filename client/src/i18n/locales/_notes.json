@@ -592,6 +592,7 @@
   "space.leave.owner_note": "Shown in a space's More menu to its owner instead of a Leave button; followed by a 'Hand over ownership' link to the space's settings.",
   "space.chat.empty": "Shown inside an empty space chat thread. {space} is the space's name.",
   "spaces.list.new": "Quiet count at the end of a space row: unread chat messages. Keep very short.",
+  "spaces.list.activity": "Quiet mark at the end of a space row: the space has new items this household has not loaded yet (nothing about what). Keep very short.",
   "spaces.list.following_meta": "Meta line on a space the user follows (reads, cannot post).",
   "spaces.discover.chip_paired": "Discover filter chip: public spaces of households this one is paired with.",
   "spaces.discover.chip_global": "Discover filter chip: spaces listed on a GFS (Global Federation Server).",

@@ -341,6 +341,7 @@ from .services.calendar_service import (
 from .services.call_service import CallSignalingService, StaleCallCleanupScheduler
 from .services.capabilities_outbound import CapabilitiesOutbound
 from .services.capability_resync import request_capability_resync
+from .services.channel_ring_client import ChannelRingClient
 from .services.child_protection_service import ChildProtectionService
 from .services.corner_service import CornerService
 from .services.dashboard_display_service import DashboardDisplayService
@@ -6271,6 +6272,21 @@ def create_app(config: Config | None = None) -> web.Application:
         # v_83 — a GFS asks this household for a space blob a reader missed.
         if (responder := app.get(K.space_media_gfs_responder_key)) is not None:
             gfs_ws_supervisor.attach_space_media_request_handler(responder.handle)
+        # v_97 — a GFS space's channel ring: watch while viewed (the host
+        # always), cursors per GFS, fetch on open, gaps → §25.6 catch-up.
+        if gfs_channels is not None:
+            ring_client = ChannelRingClient(
+                spaces=repos.space,
+                channels=gfs_channels,
+                config=repos.instance_config,
+                bus=bus,
+                own_instance_id=real_instance_id,
+            )
+            ring_client.attach_sender(gfs_ws_supervisor.send)
+            ring_client.attach_sync_scheduler(app[K.space_sync_scheduler_key])
+            gfs_ws_supervisor.attach_ring_handler(ring_client.on_frame)
+            await ring_client.start()
+            app[K.channel_ring_client_key] = ring_client
         await gfs_ws_supervisor.start()
         app[K.gfs_ws_supervisor_key] = gfs_ws_supervisor
         # A new active connection's push socket opens at once, not at the
@@ -6709,6 +6725,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_info_refresh.stop()
         if gfs_reconcile_retry is not None:
             await gfs_reconcile_retry.stop()
+        if (ring_client := app.get(K.channel_ring_client_key)) is not None:
+            await ring_client.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
         # v_89 — the anonymous mailbox claim sockets and ticket loops.

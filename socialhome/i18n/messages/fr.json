@@ -9,6 +9,7 @@
   "notification.task.assigned": "On vous a assigné : {title}",
   "notification.task.deadline_due": "Tâche due aujourd'hui : {title}",
   "notification.space.post.created": "Nouvelle publication dans {space_name}",
+  "notification.space.activity": "Nouvelle activité dans {space_name}",
   "notification.space.moderation.queued": "Un contenu attend une vérification dans {space_name}",
   "notification.space.join.approved": "Vous êtes dans : {space_name}",
   "notification.space.ownership.transferred": "Vous êtes maintenant propriétaire de {space_name}",

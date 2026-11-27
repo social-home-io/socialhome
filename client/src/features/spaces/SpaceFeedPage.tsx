@@ -4,6 +4,7 @@ import { useLocation, useRoute } from 'preact-iso'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { ws } from '@/ws'
+import { useSpaceViewing } from '@/hooks/useSpaceViewing'
 import { currentUser } from '@/store/auth'
 import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
@@ -612,6 +613,9 @@ export default function SpaceFeedPage() {
   // (``sync.unsent_posts``, live with the ``space.sync_state`` frame).
   const ownerId = spaceDetail.value?.owner_instance_id ?? null
   const syncLive = useSpaceSync(spaceId, spaceDetail.value?.sync)
+  // v_97 — while it is open the household watches the space's GFS channel
+  // ring (live items) and pulls what it missed.
+  useSpaceViewing(spaceId)
   const hostedHere = !!ownerId && ownerId === instanceConfig.value?.instance_id
   // Known to be hosted on another household (unknown → no: nothing hidden
   // on a guess; the server refuses what it must).

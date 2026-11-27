@@ -109,6 +109,7 @@ from ..domain.events import (
     ShoppingStoreDeleted,
     ShoppingStoreRenamed,
     ShoppingStoresReordered,
+    SpaceChannelActivity,
     SpaceConfigChanged,
     SpaceJoinApproved,
     SpaceJoinDenied,
@@ -325,6 +326,7 @@ class RealtimeService:
         self._bus.subscribe(SpaceConfigChanged, self._on_space_config_changed)
         self._bus.subscribe(SpaceProposalUpdated, self._on_space_proposal_updated)
         self._bus.subscribe(SpaceSyncStateChanged, self._on_space_sync_state)
+        self._bus.subscribe(SpaceChannelActivity, self._on_space_channel_activity)
         self._bus.subscribe(RemoteSpaceDissolved, self._on_remote_space_dissolved)
         self._bus.subscribe(SpaceZoneUpserted, self._on_space_zone_upserted)
         self._bus.subscribe(SpaceZoneDeleted, self._on_space_zone_deleted)
@@ -954,6 +956,18 @@ class RealtimeService:
                 "space_id": event.space_id,
                 "proposal_id": event.proposal_id,
                 "proposal": event.view,
+            },
+        )
+
+    async def _on_space_channel_activity(self, event: SpaceChannelActivity) -> None:
+        """v_97 — the space's channel ring holds ``unread`` items this
+        household has not fetched: the badge (``0`` clears it). Every seat."""
+        await self._broadcast_space(
+            event.space_id,
+            {
+                "type": "space.activity",
+                "space_id": event.space_id,
+                "unread": event.unread,
             },
         )
 

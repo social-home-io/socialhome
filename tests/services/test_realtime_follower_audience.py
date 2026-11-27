@@ -10,6 +10,7 @@ import orjson
 import pytest
 
 from socialhome.domain.events import (
+    SpaceChannelActivity,
     SpaceMemberJoined,
     SpaceMemberLeft,
     SpaceMemberProfileUpdated,
@@ -160,3 +161,12 @@ async def test_the_sync_state_frame_carries_the_status(env):
     await bus.publish(SpaceSyncStateChanged(space_id="sp-1", sync=sync))
     frame = orjson.loads(socks["mem"].sent[0])
     assert frame == {"type": "space.sync_state", "space_id": "sp-1", "sync": sync}
+
+
+async def test_the_activity_frame_reaches_every_seat(env):
+    """v_97 — the badge of a GFS space's unfetched items, follower too."""
+    bus, socks = env
+    await bus.publish(SpaceChannelActivity(space_id="sp-1", unread=3))
+    for uid in _ROLES:
+        frame = orjson.loads(socks[uid].sent[0])
+        assert frame == {"type": "space.activity", "space_id": "sp-1", "unread": 3}

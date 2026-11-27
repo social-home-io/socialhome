@@ -47,6 +47,7 @@ class GfsWebSocketSupervisor:
         "_on_highlight_signal",
         "_on_moment_public",
         "_on_relay",
+        "_on_ring",
         "_on_space_media_request",
         "_repo",
         "_session_factory",
@@ -82,6 +83,9 @@ class GfsWebSocketSupervisor:
         self._on_connected = on_connected
         #: v_83 — ``(frame, *, gfs_id)``: a GFS asks for a space blob.
         self._on_space_media_request: Callable[..., Awaitable[None]] | None = None
+        #: v_97 — ``(frame, *, gfs_id)``: the channel ring's answers and the
+        #: ring position of every relay item.
+        self._on_ring: Callable[..., Awaitable[None]] | None = None
         self._interval = reconcile_interval_seconds
         self._clients: dict[str, GfsWebSocketClient] = {}
         #: ``gfs_id`` → that client's base URL, so a late-bound handler can
@@ -124,6 +128,21 @@ class GfsWebSocketSupervisor:
         self._on_space_media_request = handler
         for gfs_id, client in list(self._clients.items()):
             client.attach_space_media_request_handler(_bind_gfs_id(handler, gfs_id))
+
+    def attach_ring_handler(self, handler: Callable[..., Awaitable[None]]) -> None:
+        """Late-bound — the v_97 channel-ring client, told which connection
+        a frame came on (``gfs_id``): its cursors are per GFS."""
+        self._on_ring = handler
+        for gfs_id, client in list(self._clients.items()):
+            client.attach_ring_handler(_bind_gfs_id(handler, gfs_id))
+
+    async def send(self, gfs_id: str, frame: dict) -> bool:
+        """Send one application frame (v_97: ``channel_watch`` /
+        ``channel_fetch``) on *gfs_id*'s live socket; ``False`` without one."""
+        client = self._clients.get(gfs_id)
+        if client is None:
+            return False
+        return await client.send_frame(frame)
 
     def attach_follow_changed_handler(
         self,
@@ -290,6 +309,11 @@ class GfsWebSocketSupervisor:
             on_space_media_request=(
                 _bind_gfs_id(self._on_space_media_request, conn.id)
                 if self._on_space_media_request is not None
+                else None
+            ),
+            on_ring=(
+                _bind_gfs_id(self._on_ring, conn.id)
+                if self._on_ring is not None
                 else None
             ),
         )

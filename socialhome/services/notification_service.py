@@ -141,6 +141,7 @@ from ..domain.events import (
     ReportResolved,
     SchedulePollFinalized,
     SpaceAdminSeedsRetiredAfterRestore,
+    SpaceChannelActivity,
     SpaceConfigChanged,
     SpaceDelegationBlocked,
     SpaceInviteAnswered,
@@ -1589,6 +1590,7 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(TaskAssigned, self.on_task_assigned)
         self._subscribe(TaskDeadlineDue, self.on_task_deadline_due)
         self._subscribe(SpacePostCreated, self.on_space_post_created)
+        self._subscribe(SpaceChannelActivity, self.on_space_channel_activity)
         self._subscribe(SpaceModerationQueued, self.on_moderation_queued)
         self._subscribe(ReportFiled, self.on_report_filed)
         self._subscribe(ReportResolved, self.on_report_resolved)
@@ -4815,6 +4817,43 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=author_id,
                 actor_name=name,
                 withheld=blocked,
+            )
+
+    async def on_space_channel_activity(self, event: SpaceChannelActivity) -> None:
+        """v_97 — a GFS space's channel ring holds items this household has
+        not fetched (nobody has the space open): ONE contentless row per
+        member at the "Everything" level, "New activity in {space}" (owner
+        F6), grouped on the space's feed like the plain new-post row, no
+        push. Only when activity starts (``unread`` > 0); catching up says
+        nothing. The items themselves notify as usual once fetched."""
+        if event.unread <= 0:
+            return
+        space = await self._spaces.get(event.space_id)
+        if space is None:
+            return
+        about = NotificationSubject.of(
+            NotificationObject.SPACE_FEED,
+            event.space_id,
+            space_id=event.space_id,
+            space_name=space.name,
+        )
+        for member in await self._space_members(event.space_id):
+            if await self._space_level(member, space) is not SpaceNotifLevel.ALL:
+                continue
+            recipient = await self._local_user(member.user_id)
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_activity",
+                    title=self._t(
+                        "notification.space.activity",
+                        locale=self._locale(recipient),
+                        fallback="New activity in {space_name}",
+                        space_name=space.name,
+                    ),
+                    link_url=space_feed_link(event.space_id),
+                ),
+                about=about,
             )
 
     async def _space_prefs(

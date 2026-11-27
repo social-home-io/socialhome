@@ -46,6 +46,7 @@ OUR_HELLO_ACCEPTS: tuple[str, ...] = (
     ACCEPTS_WS_BINARY1,
     ACCEPTS_SPACE_MEDIA_SERVE,
     ACCEPTS_ENVELOPE_MEDIA,
+    ACCEPTS_CHANNEL_RING,
 )
 
 #: The most labels one hello may carry.

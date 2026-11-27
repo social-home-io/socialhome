@@ -1544,6 +1544,20 @@ class SpaceSyncDeferred(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceChannelActivity(DomainEvent):
+    """v_97 — a GFS space's channel ring holds ``unread`` items this
+    household has not fetched yet (a heads ping above its cursor; ``0``
+    once it caught up). Local only: the realtime layer sends the space's
+    members a ``space.activity`` frame (the badge), and the first activity
+    after a quiet spell is one contentless "New activity in {space}"
+    notification (owner F6)."""
+
+    space_id: str
+    unread: int
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceSyncStateChanged(DomainEvent):
     """What a member sees about a space it does not host changed (up to
     date, catching up, behind, host offline, never — read-time

@@ -230,6 +230,23 @@ describe('SpaceListPage — one number per row', () => {
     await r.waitFor(() => expect(r.getByText('Choir').closest('a')!.querySelector('.sh-spaces-new')?.textContent).toBe('2 new'))
   })
 
+  it('a space.activity frame shows a quiet "New activity" until it clears', async () => {
+    const r = await renderPage()
+    const choir = (await r.findByText('Choir')).closest('a')!
+    expect(choir.querySelector('[data-testid="space-activity"]')).toBeNull()
+    emit('space.activity', { space_id: 'sA', unread: 7 })
+    await r.waitFor(() => expect(
+      r.getByText('Choir').closest('a')!.querySelector('[data-testid="space-activity"]')?.textContent,
+    ).toBe('New activity'))
+    emit('space.activity', { space_id: 'sA', unread: 0 })
+    await r.waitFor(() => expect(
+      r.getByText('Choir').closest('a')!.querySelector('[data-testid="space-activity"]'),
+    ).toBeNull())
+    // A malformed frame changes nothing.
+    emit('space.activity', { space_id: 'sA', unread: 'x' })
+    expect(r.getByText('Choir').closest('a')!.querySelector('[data-testid="space-activity"]')).toBeNull()
+  })
+
   it('a WS reconnect re-reads the list (frames missed while down)', async () => {
     const r = await renderPage()
     await r.findByText('Choir')

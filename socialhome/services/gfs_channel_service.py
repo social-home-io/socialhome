@@ -1895,6 +1895,28 @@ class GfsChannelService:
             return None
         return await self.own_grant(space_id, epoch)
 
+    async def ring_connections(
+        self, space_id: str
+    ) -> tuple[str, list[GfsConnection]] | None:
+        """v_97 — ``(channel_id, connections)`` this household reads the
+        space's channel ring on: the channel's servers (the owner's chosen
+        and confirmed ones, else our grant's) that we are connected to and
+        that prove ``channel_ring``. ``None`` for a space with no channel
+        here."""
+        space = await self._spaces.get(space_id)
+        stored = await self._spaces.get_gfs_channel(space_id)
+        if space is None or stored is None or not channel_on(space):
+            return None
+        gfs_ids = await self._channel_gfs_ids(space)
+        if not gfs_ids and space.owner_instance_id == self._own_instance_id:
+            gfs_ids = await self._grant_gfs_ids(space)
+        conns = [
+            c
+            for c in await self._capable_in(gfs_ids)
+            if await self._gfs.channel_ring_supported(c)
+        ]
+        return stored[0], conns
+
     async def has_channel(self, space_id: str) -> bool:
         """Whether this private space currently uses a channel here (the
         owner's own, or a member's grant)."""

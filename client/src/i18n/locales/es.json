@@ -6248,6 +6248,7 @@
   "spaces.list.just_you": "Solo tú",
   "spaces.list.active": "activo {when}",
   "spaces.list.new": "{n} nuevos",
+  "spaces.list.activity": "Novedades",
   "spaces.list.needs_you": "{n} cosas te esperan",
   "spaces.list.needs_you_one": "{n} cosa te espera",
   "spaces.list.following": "Siguiendo",

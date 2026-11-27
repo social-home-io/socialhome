@@ -4820,3 +4820,24 @@ async def test_subscriber_seats_needs_the_signed_flag(env):
     session = _InviteSession(info={"server_name": "x", "subscriber_seats": True})
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     assert not await svc.subscriber_seats_supported(unsigned)
+
+
+async def test_channel_ring_needs_the_signed_flag(env):
+    """v_97: the ring's watch / fetch and the signed publish fields only on
+    a server whose SIGNED block proves ``channel_ring``."""
+    _db, repo = env
+    signed = _make_conn("cr-1", public_key=_GFS_KP.public_key.hex())
+    unsigned = _make_conn("cr-2", public_key=_GFS_KP.public_key.hex())
+    for conn in (signed, unsigned):
+        await repo.save(conn)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=signed.gfs_instance_id,
+            capabilities={"channel_ring": True},
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert await svc.channel_ring_supported(signed)
+    session = _InviteSession(info={"server_name": "x", "channel_ring": True})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert not await svc.channel_ring_supported(unsigned)

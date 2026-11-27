@@ -177,6 +177,8 @@ gfs_connection_repo_key: AppKey = AppKey("gfs_connection_repo")
 #: The owner's choice of GFSs for a global space + the members' signed list.
 gfs_server_selection_service_key: AppKey = AppKey("gfs_server_selection_service")
 gfs_ws_supervisor_key: AppKey = AppKey("gfs_ws_supervisor")
+#: v_97 — the household side of the GFS channel ring (watch, cursors, fetch).
+channel_ring_client_key: AppKey = AppKey("channel_ring_client")
 #: v_89 — this household's GFS mailboxes (one per GFS) and member directory.
 space_mailbox_service_key: AppKey = AppKey("space_mailbox_service")
 space_member_directory_key: AppKey = AppKey("space_member_directory")

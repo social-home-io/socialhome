@@ -520,6 +520,9 @@ export interface Space {
   /** ``GET /api/spaces`` rows: "Some posts may be missing" — the list's
    *  dot (``sync.may_be_missing``; never for a follower). */
   sync_may_be_missing?: boolean
+  /** v_97 — the space's GFS channel ring holds items not fetched yet (a
+   *  heads ping, ``space.activity``); cleared once the space is opened. */
+  new_activity?: boolean
   /** The uploaded icon (signed), ``null`` without one. */
   icon_url?: string | null
 }

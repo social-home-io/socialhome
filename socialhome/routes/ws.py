@@ -173,6 +173,23 @@ class WebSocketView(BaseView):
                 str(cid) if cid else None,
             )
             return
+        if cmd == "space.viewing":
+            # v_97 — a person has a space open: the household watches its
+            # GFS channel ring (and pulls what it missed). Only a space the
+            # user is a member of; anything else is ignored.
+            body = payload.get("data") or {}
+            space_id = body.get("space_id") if isinstance(body, dict) else None
+            ring = self.request.app.get(K.channel_ring_client_key)
+            if not isinstance(space_id, str) or not space_id or ring is None:
+                return
+            member = await self.svc(K.space_repo_key).get_member(space_id, ctx.user_id)
+            if member is None:
+                return
+            try:
+                await ring.viewing(space_id)
+            except Exception as exc:  # defensive — never end the socket
+                log.warning("space.viewing failed: %s", exc, exc_info=True)
+            return
         if cmd == "typing":
             typing_svc = self.request.app.get(K.typing_service_key)
             if typing_svc is None:

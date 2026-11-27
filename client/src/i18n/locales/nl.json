@@ -6221,6 +6221,7 @@
   "spaces.list.just_you": "Alleen jij",
   "spaces.list.active": "actief {when}",
   "spaces.list.new": "{n} nieuw",
+  "spaces.list.activity": "Nieuwe activiteit",
   "spaces.list.needs_you": "{n} dingen wachten op jou",
   "spaces.list.needs_you_one": "{n} ding wacht op jou",
   "spaces.list.following": "Gevolgd",

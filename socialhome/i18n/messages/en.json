@@ -31,6 +31,7 @@
   "notification.space.mention": "{author} mentioned you in {space_name}",
   "notification.space.moderation.queued": "Something is waiting for review in {space_name}",
   "notification.space.post.created": "New post in {space_name}",
+  "notification.space.activity": "New activity in {space_name}",
   "notification.space.remote_invite.accepted": "{name} accepted your invite to {space_name}",
   "notification.space.remote_invite.declined": "{name} declined your invite to {space_name}",
   "notification.task.assigned": "You were assigned: {title}",

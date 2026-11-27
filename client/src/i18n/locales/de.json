@@ -6221,6 +6221,7 @@
   "spaces.list.just_you": "Nur du",
   "spaces.list.active": "aktiv {when}",
   "spaces.list.new": "{n} neu",
+  "spaces.list.activity": "Neue Aktivität",
   "spaces.list.needs_you": "{n} Dinge warten auf dich",
   "spaces.list.needs_you_one": "{n} Sache wartet auf dich",
   "spaces.list.following": "Gefolgt",

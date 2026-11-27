@@ -737,3 +737,67 @@ async def test_supervisor_tells_space_media_requests_which_connection(http_sessi
             assert seen == ["g1", "g2"]
         finally:
             await supervisor.stop()
+
+
+async def test_supervisor_binds_the_ring_handler_and_sends_per_connection(
+    http_session,
+):
+    """v_97: ring frames are told the connection they came on (cursors are
+    per GFS); ``send`` reaches that connection's socket, and nothing for a
+    connection it does not run."""
+    repo = _FakeRepo(
+        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
+    )
+    seen: list[str] = []
+
+    async def on_ring(frame: dict, *, gfs_id: str | None = None) -> None:
+        seen.append(gfs_id or "")
+
+    captured: dict[str, object] = {}
+    sent: list[tuple[str, dict]] = []
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, on_ring=None, **_kwargs):
+            self.url = gfs_url
+            captured[gfs_url] = on_ring
+
+        def attach_ring_handler(self, handler):
+            captured[self.url] = handler
+
+        async def send_frame(self, frame: dict) -> bool:
+            sent.append((self.url, frame))
+            return True
+
+        def is_alive(self) -> bool:
+            return True
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=repo,
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            reconcile_interval_seconds=0.05,
+        )
+        supervisor.attach_ring_handler(on_ring)
+        await supervisor.start()
+        try:
+            await captured["http://gfs1.test"]({"type": "channel_heads"})
+            supervisor.attach_ring_handler(on_ring)
+            await captured["http://gfs2.test"]({"type": "channel_heads"})
+            assert seen == ["g1", "g2"]
+            assert await supervisor.send("g2", {"type": "channel_watch"})
+            assert sent == [("http://gfs2.test", {"type": "channel_watch"})]
+            assert not await supervisor.send("nope", {"type": "channel_watch"})
+        finally:
+            await supervisor.stop()

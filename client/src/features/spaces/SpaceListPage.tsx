@@ -60,6 +60,22 @@ export function applyPostCreated(data: unknown, me: string | undefined): void {
   if (hit) spaces.value = next
 }
 
+/** A ``space.activity`` frame (v_97): the space's channel ring holds items
+ *  this household has not fetched — a quiet "New activity" on the row
+ *  (``unread`` 0 clears it). Exported for tests. */
+export function applyActivity(data: unknown): void {
+  const d = data as { space_id?: string; unread?: unknown } | undefined
+  if (!d?.space_id || typeof d.unread !== 'number') return
+  const active = d.unread > 0
+  let hit = false
+  const next = spaces.value.map((s) => {
+    if (s.id !== d.space_id || !!s.new_activity === active) return s
+    hit = true
+    return { ...s, new_activity: active }
+  })
+  if (hit) spaces.value = next
+}
+
 /** A ``space.sync_state`` frame: the row's "Some posts may be missing"
  *  dot follows it live. Exported for tests. */
 export function applySyncState(data: unknown): void {
@@ -83,16 +99,18 @@ async function loadAll(): Promise<void> {
 
 /** The row's end slot: a filled needs-you count (it wins), else the
  *  quiet count of new posts. */
-export function rowEnd(s: Space): { needs: number; unread: number } {
+export function rowEnd(s: Space): { needs: number; unread: number; activity: boolean } {
   const needs = s.needs_you ?? 0
-  return { needs, unread: needs > 0 ? 0 : (s.unread_posts ?? 0) }
+  const unread = needs > 0 ? 0 : (s.unread_posts ?? 0)
+  return { needs, unread, activity: needs === 0 && unread === 0 && !!s.new_activity }
 }
 
-function SpaceRowEnd({ needs, unread }: { needs: number; unread: number }) {
+function SpaceRowEnd({ needs, unread, activity }: { needs: number; unread: number; activity: boolean }) {
   if (needs > 0) return <span class="sh-spaces-attn">{needs > 99 ? '99+' : needs}</span>
   if (unread > 0) {
     return <span class="sh-spaces-new">{t('spaces.list.new', { n: unread > 99 ? '99+' : String(unread) })}</span>
   }
+  if (activity) return <span class="sh-spaces-new" data-testid="space-activity">{t('spaces.list.activity')}</span>
   return null
 }
 
@@ -121,7 +139,7 @@ function MemberRow({ space: s, following }: { space: Space; following?: boolean 
   const meta = following
     ? [t('spaces.list.following_meta'), activity].filter(Boolean).join(' · ')
     : activity
-  const { needs, unread } = rowEnd(s)
+  const { needs, unread, activity: fresh } = rowEnd(s)
   // Every seat sees the sync status — a follower's too (P10).
   const missing = s.sync_may_be_missing === true
   return (
@@ -132,7 +150,7 @@ function MemberRow({ space: s, following }: { space: Space; following?: boolean 
       name={s.name}
       meta={meta}
       label={rowLabel(s, meta, needs, unread, missing)}
-      end={<>{missing && <SyncMissingMark />}<SpaceRowEnd needs={needs} unread={unread} /></>}
+      end={<>{missing && <SyncMissingMark />}<SpaceRowEnd needs={needs} unread={unread} activity={fresh} /></>}
     />
   )
 }
@@ -169,12 +187,13 @@ export default function SpaceListPage() {
       applyPostCreated(e.data, currentUser.value?.user_id)
     })
     const offSync = ws.on('space.sync_state', (e) => { applySyncState(e.data) })
+    const offActivity = ws.on('space.activity', (e) => { applyActivity(e.data) })
     let prev = connectionState.value
     const offConn = connectionState.subscribe((next) => {
       if (prev === 'reconnecting' && next === 'open') void loadSpaces()
       prev = next
     })
-    return () => { off(); offSync(); offConn() }
+    return () => { off(); offSync(); offActivity(); offConn() }
   }, [])
 
   // Opened as ``/spaces?discover=…`` (the retired /spaces/browse, a shared
