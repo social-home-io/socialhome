@@ -6237,6 +6237,8 @@
   "space.unsent.reason.queue_full_one": "Een wijziging is niet verzonden: er wacht al te veel om te worden verzonden.",
   "space.unsent.reason.seal_failed": "{n} wijzigingen konden niet worden voorbereid om te verzenden.",
   "space.unsent.reason.seal_failed_one": "Een wijziging kon niet worden voorbereid om te verzenden.",
+  "space.unsent.reason.too_old": "{n} wijzigingen hebben te lang op verzending gewacht. Schrijf ze opnieuw.",
+  "space.unsent.reason.too_old_one": "Een wijziging heeft te lang op verzending gewacht. Schrijf hem opnieuw.",
   "space.unsent.failed": "Dat is niet gelukt. Probeer het zo opnieuw.",
   "spaces.list.needs_you": "{n} dingen wachten op jou",
   "spaces.list.needs_you_one": "{n} ding wacht op jou",

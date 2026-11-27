@@ -1066,9 +1066,13 @@ def test_channel_ring_loads_from_toml_and_env_wins(tmp_dir, monkeypatch):
         ("durable_ttl_seconds = 172800", "durable_ttl_seconds"),
         ("ephemeral_ttl_seconds = 3600", "ephemeral_ttl_seconds"),
         (
-            "durable_ttl_seconds = 300\nephemeral_ttl_seconds = 600",
-            "must not exceed",
+            "durable_ttl_seconds = 1800\ndurable_ttl_seconds_x = 1",
+            "unknown key",
         ),
+        # 10k review, finding 10: a ring shorter than two heads pings.
+        ("durable_ttl_seconds = 300", "durable_ttl_seconds"),
+        ("max_bytes = 1048576", "max_bytes"),
+        ("max_byte = 67108864", "unknown key"),
         (
             "max_bytes = 268435456\nserver_max_bytes = 1048576",
             "at least max_bytes",

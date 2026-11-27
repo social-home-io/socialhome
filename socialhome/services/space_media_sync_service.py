@@ -32,7 +32,7 @@ import pathlib
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -104,6 +104,7 @@ class SpaceMediaSyncService:
 
     __slots__ = (
         "_budget",
+        "_cache_readers",
         "_federation",
         "_federation_repo",
         "_held",
@@ -147,6 +148,12 @@ class SpaceMediaSyncService:
         #: v_80 — who reads the space's pictures from a GFS media cache
         #: instead (:meth:`SpaceMediaGfsUploader.reads_from_gfs`).
         self._relay_readers: _RelayReaders | None = None
+        #: v_97 — ``(space, file, targets) → targets still pushed``: a
+        #: live item's file it described for the GFS cache reaches its v_97
+        #: households from there (the uploader's :meth:`push_targets`).
+        self._cache_readers: (
+            Callable[[str, str, list[str]], Awaitable[list[str]]] | None
+        ) = None
         #: Bytes of the files the current pass holds (``MAX_INFLIGHT_FILE_BYTES``).
         self._budget = asyncio.Condition()
         self._held = 0
@@ -167,6 +174,17 @@ class SpaceMediaSyncService:
         the file (it fetches it from there then)."""
         self._relay_readers = readers
 
+    def attach_cache_readers(
+        self, readers: Callable[[str, str, list[str]], Awaitable[list[str]]]
+    ) -> None:
+        """v_97 (owner 2026-11-27) — a GFS space's files reach its
+        households through the GFS space media cache: a LIVE item's file the
+        item described for the cache is pushed only to the households that
+        cannot read it there (``SpaceMediaGfsUploader.push_targets``).
+        Catch-up rows, asked-for rows and files no descriptor covers (a
+        comment's picture, a file no GFS takes) keep the push."""
+        self._cache_readers = readers
+
     def attach_federation(self, federation: FederationService) -> None:
         """Wire federation after construction (breaks the boot cycle).
 
@@ -186,8 +204,13 @@ class SpaceMediaSyncService:
         media_urls: list[str],
         push: bool = False,
         wire_names: Mapping[str, str] | None = None,
+        live: bool = False,
     ) -> None:
         """One outbox row per (media_url, peer) tuple.
+
+        ``live`` (v_97): the files of an item going out now, whose
+        descriptor rides the item — in a GFS space a file it described for
+        the GFS cache is not pushed to a household that reads it there.
 
         ``push`` (v_92): the targets asked for these files
         (``SPACE_MEDIA_WANTED``) — they already missed their GFS cache, so
@@ -223,7 +246,24 @@ class SpaceMediaSyncService:
                     filename,
                 )
                 continue
-            for target in target_instance_ids:
+            targets = list(target_instance_ids)
+            if live and self._cache_readers is not None:
+                try:
+                    targets = await self._cache_readers(space_id, filename, targets)
+                except Exception:
+                    log.warning(
+                        "space-media-sync: cache readers of %s unknown — pushed",
+                        filename,
+                        exc_info=True,
+                    )
+                if len(targets) < len(target_instance_ids):
+                    log.info(
+                        "space-media-sync: %s reaches %d household(s) through"
+                        " the GFS cache — no push to them",
+                        filename,
+                        len(target_instance_ids) - len(targets),
+                    )
+            for target in targets:
                 if not target:
                     continue
                 await self._outbox.enqueue(
@@ -321,12 +361,14 @@ class SpaceMediaSyncService:
         target_instance_ids: list[str],
         media_urls: list[str],
         space_id: str = "",
+        live: bool = False,
     ) -> None:
         await self.enqueue_for_blob(
             space_id=space_id,
             correlation_id=post_id,
             target_instance_ids=target_instance_ids,
             media_urls=media_urls,
+            live=live,
         )
 
     # ── Scheduler loop ────────────────────────────────────────────────

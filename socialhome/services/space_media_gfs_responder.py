@@ -69,9 +69,13 @@ import aiofiles.os
 from cryptography.exceptions import InvalidTag
 
 from ..domain.gfs_space_media import (
+    ADDR_SUITE_SM1,
+    ADDR_SUITE_SM1P,
     SCOPE_CHANNEL,
+    PieceProof,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
+    piece_address,
 )
 from ..domain.gfs_space_media_on_demand import (
     MODE_CACHE,
@@ -86,7 +90,7 @@ from ..space_media_hint import (
     SpaceMediaLocator,
     open_space_media_hint,
 )
-from ..space_media_seal import MAX_SPACE_MEDIA_BYTES
+from ..space_media_seal import MAX_SPACE_MEDIA_BYTES, split_piece_name
 from ..task_drain import wait_tasks_done
 from .inbound_media_store import (
     gfs_space_media_name,
@@ -161,6 +165,7 @@ class SpaceMediaGfsResponder:
         "_in_flight",
         "_in_flight_by_gfs",
         "_media_refs",
+        "_proofs",
         "_resealed",
         "_reuploaded",
         "_sealed",
@@ -207,6 +212,9 @@ class SpaceMediaGfsResponder:
         self._sealed: OrderedDict[tuple[str, str, str], tuple[float, bytes]] = (
             OrderedDict()
         )
+        #: v_97 — (scope, scope id, blob) of a PIECE → its proof header (the
+        #: GFS checks a piece by it, an upload's and a serve's alike).
+        self._proofs: OrderedDict[tuple[str, str, str], str] = OrderedDict()
 
     def attach_federation(self, federation: FederationService) -> None:
         self._federation = federation
@@ -259,6 +267,7 @@ class SpaceMediaGfsResponder:
                     conn, req.ticket, None, decline_reason=reason
                 )
                 return
+            proof = self._proofs.get((req.scope, req.scope_id, req.blob_id))
             upload_auth = await self._upload_auth(
                 req.mode,
                 req.scope,
@@ -267,12 +276,13 @@ class SpaceMediaGfsResponder:
                 conn,
                 blob,
                 lambda claim: self._uploader.authorize(claim, space_id),
+                addr_suite=ADDR_SUITE_SM1P if proof else ADDR_SUITE_SM1,
             )
             # Charged BEFORE the bytes go: a GFS that reads the body and then
             # answers 409 / 422 / 429 still spent this household's budget.
             charge = self._charge(conn.id, len(blob))
             status = await self._gfs.serve_space_media(
-                conn, req.ticket, blob, upload_auth=upload_auth
+                conn, req.ticket, blob, upload_auth=upload_auth, piece_proof=proof
             )
             if status is None:
                 # Nothing left this household (no connection): refunded.
@@ -384,6 +394,27 @@ class SpaceMediaGfsResponder:
         # nothing of the author's file name: the item's content-addressed
         # files are candidates too (the sealed address picks the one).
         content_names = await self._media_refs.content_names_of_item(loc.item_id)
+        piece = split_piece_name(loc.filename)
+        if piece is not None:
+            # v_97 — a piece of a larger file: found under the file's names.
+            base, index, count = piece
+            loc = SpaceMediaLocator(
+                item_id=loc.item_id,
+                origin=loc.origin,
+                filename=base,
+                issued_at=loc.issued_at,
+            )
+            return await self._find_piece(
+                space_id,
+                scope,
+                scope_id,
+                blob_id,
+                hint.epoch,
+                loc,
+                index,
+                count,
+                [*self._candidates(space_id, loc), *content_names],
+            )
         for name in [*self._candidates(space_id, loc), *content_names]:
             if not await self._media_refs.confined_to_space(
                 name, space_id
@@ -410,6 +441,93 @@ class SpaceMediaGfsResponder:
                 self._remember_locator(locator, addresses)
                 self._sealed_put(sealed_key, blob)
                 return blob, ""
+        if held_any:
+            self._remember_locator(locator, addresses)
+            return None, DECLINE_BAD_HINT
+        return None, DECLINE_NOT_HELD
+
+    async def _find_piece(
+        self,
+        space_id: str,
+        scope: str,
+        scope_id: str,
+        blob_id: str,
+        epoch: int,
+        loc: SpaceMediaLocator,
+        index: int,
+        count: int,
+        names: list[str],
+    ) -> tuple[bytes | None, str]:
+        """Piece *index* of *count* of the file *loc* names (v_97): the
+        same rules as a whole file (confined to the space, live in it), its
+        manifest describes it (sealed once more on a miss), and the piece
+        sits at exactly *blob_id*. The proof the GFS checks it by is kept
+        for the serve. A locator whose file seals to other addresses is
+        remembered (as for a whole file): the same locator with made-up
+        addresses is declined without sealing the file again."""
+        locator = (
+            scope,
+            scope_id,
+            epoch,
+            loc.item_id,
+            loc.origin,
+            loc.filename,
+            "pieces",
+        )
+        known = self._resealed.get(locator)
+        if known is not None and known[0] > _monotonic():
+            file_addresses = known[1]
+            if not any(piece_address(a, index) == blob_id for a in file_addresses):
+                return None, DECLINE_BAD_HINT
+        held_any = False
+        addresses: set[str] = set()
+        for name in names:
+            if not await self._media_refs.confined_to_space(
+                name, space_id
+            ) or not await self._media_refs.live_in_space(name, space_id):
+                continue
+            pieced = await self._uploader.manifest_of(
+                space_id,
+                name,
+                epoch=epoch,
+                item_id=loc.item_id,
+                origin=loc.origin,
+                scope=scope,
+                scope_id=scope_id,
+                # The AAD names the author's file, whatever name we hold it
+                # under (``sc-`` / ``sd-`` / ``sg-``).
+                filename=loc.filename,
+            )
+            if pieced is None:
+                continue
+            held_any = True
+            addresses.add(pieced.address)
+            if (
+                len(pieced.manifest) != count
+                or piece_address(pieced.address, index) != blob_id
+            ):
+                continue
+            blob = await self._uploader.seal_piece(
+                space_id,
+                name,
+                epoch=epoch,
+                item_id=loc.item_id,
+                origin=loc.origin,
+                index=index,
+                count=count,
+                filename=loc.filename,
+            )
+            if blob is None:
+                continue
+            key = (scope, scope_id, blob_id)
+            self._proofs[key] = PieceProof(
+                manifest=pieced.manifest, index=index
+            ).to_header()
+            self._proofs.move_to_end(key)
+            while len(self._proofs) > 4096:
+                self._proofs.popitem(last=False)
+            self._remember_locator(locator, addresses)
+            return blob, ""
         if held_any:
             self._remember_locator(locator, addresses)
             return None, DECLINE_BAD_HINT
@@ -488,6 +606,8 @@ class SpaceMediaGfsResponder:
         conn: GfsConnection,
         blob: bytes,
         authorize: Callable[[SpaceMediaClaim], Awaitable[SpaceMediaUploadAuth | None]],
+        *,
+        addr_suite: str = ADDR_SUITE_SM1,
     ) -> str | None:
         """The upload authorization (from *authorize*) for a cache request —
         once per (GFS, blob) per :data:`REUPLOAD_COALESCE_S`, whoever asked
@@ -506,6 +626,7 @@ class SpaceMediaGfsResponder:
             size=len(blob),
             expires_at=wall + KEEP_S,
             ts=wall,
+            addr_suite=addr_suite,
         )
         auth = await authorize(claim)
         if auth is None:

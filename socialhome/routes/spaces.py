@@ -645,7 +645,9 @@ class SpaceUnsentView(BaseView):
     * ``DELETE`` (Discard) → ``{"discarded": n}``.
 
     Only the caller's own items: nobody sees, retries or discards another
-    person's. Empty when this household has no durable item queue."""
+    person's — except that a household admin also gets the items that name
+    nobody (an automation's), so none is lost unseen. Empty when this
+    household has no durable item queue."""
 
     def _outbox(self):
         return self.request.app.get(space_item_outbox_key)
@@ -653,7 +655,9 @@ class SpaceUnsentView(BaseView):
     async def get(self) -> web.Response:
         outbox = self._outbox()
         items = (
-            await outbox.unsent(self.match("id"), self.user.user_id)
+            await outbox.unsent(
+                self.match("id"), self.user.user_id, admin=self.user.is_admin
+            )
             if outbox is not None
             else []
         )
@@ -662,7 +666,9 @@ class SpaceUnsentView(BaseView):
     async def post(self) -> web.Response:
         outbox = self._outbox()
         n = (
-            await outbox.retry(self.match("id"), self.user.user_id)
+            await outbox.retry(
+                self.match("id"), self.user.user_id, admin=self.user.is_admin
+            )
             if outbox is not None
             else 0
         )
@@ -671,7 +677,9 @@ class SpaceUnsentView(BaseView):
     async def delete(self) -> web.Response:
         outbox = self._outbox()
         n = (
-            await outbox.discard(self.match("id"), self.user.user_id)
+            await outbox.discard(
+                self.match("id"), self.user.user_id, admin=self.user.is_admin
+            )
             if outbox is not None
             else 0
         )

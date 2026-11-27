@@ -58,7 +58,21 @@ async def _failed(client, sid: str, *, author: str, payload: str | None) -> None
             )
         ]
     )
-    await repo.mark_failed(f"i-{author}", "g1", "refused")
+    await repo.mark_failed(
+        QueuedSpaceItem(
+            item_id=f"i-{author}",
+            gfs_id="g1",
+            space_id=sid,
+            epoch=1,
+            ring_class="durable",
+            event_type="space_chat_message_created",
+            author_user_id=author,
+            payload=payload,
+            next_attempt_at=T0,
+            created_at=T0,
+        ),
+        "refused",
+    )
 
 
 async def test_the_author_lists_retries_and_discards_only_their_own(client, people):
@@ -96,3 +110,19 @@ async def test_unsent_needs_a_login_and_a_seat(client, people):
     url = f"/api/spaces/{people['sid']}/unsent"
     assert (await client.get(url)).status == 401
     assert (await client.get(url, headers=people["guest"])).status == 403
+
+
+async def test_an_item_naming_nobody_is_shown_to_the_household_admins(client, people):
+    """10k review, finding 9: no silent loss — an automation's item (no
+    author) reaches the household's admins, never an ordinary member."""
+    await client._db.enqueue("UPDATE users SET is_admin=1 WHERE user_id='uid-anna'")
+    await _failed(client, people["sid"], author="", payload="ct")
+    url = f"/api/spaces/{people['sid']}/unsent"
+    r = await client.get(url, headers=people["ben"])
+    assert (await r.json())["items"] == []
+    r = await client.get(url, headers=people["anna"])
+    assert [i["error"] for i in (await r.json())["items"]] == ["refused"]
+    r = await client.post(url, headers=people["ben"])
+    assert (await r.json()) == {"retried": 0}
+    r = await client.delete(url, headers=people["anna"])
+    assert (await r.json()) == {"discarded": 1}

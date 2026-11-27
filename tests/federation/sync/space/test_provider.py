@@ -2066,7 +2066,7 @@ class _ReaderUploader:
         self.items.append(item_id)
         return _ReaderPlan(urls) if urls else None
 
-    def upload(self, plan):
+    async def upload(self, plan, *, author_user_id=""):
         self.uploaded.append(plan)
 
 

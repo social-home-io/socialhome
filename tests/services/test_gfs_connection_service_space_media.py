@@ -129,7 +129,7 @@ async def test_a_warm_info_fetch_records_it_and_forgetting_drops_it(env):
     svc._record_capabilities(
         conn, _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["channel"]})
     )
-    assert svc._space_media["g1"] == (4096, frozenset({"channel"}), 600, None)
+    assert svc._space_media["g1"] == (4096, frozenset({"channel"}), 600, None, False)
     svc._forget_listing("g1")
     assert "g1" not in svc._space_media
 
@@ -657,3 +657,17 @@ async def test_envelope_multi_is_forgotten_with_the_listing(env):
     assert await svc.envelope_multi_supported(conn)
     svc._forget_listing(conn.id)
     assert svc.envelope_multi_max_recipients(conn) == 0
+
+
+async def test_pieces_are_proven_only_by_the_signed_block(env):
+    """v_97 — a GFS keeps the 8 MiB pieces of a larger file only when its
+    signed ``space_media`` block says ``pieces: true`` (nothing else counts)."""
+    for block, want in (
+        ({"max_blob_bytes": 4096, "scopes": ["channel"], "pieces": True}, True),
+        ({"max_blob_bytes": 4096, "scopes": ["channel"], "pieces": 1}, False),
+        ({"max_blob_bytes": 4096, "scopes": ["channel"]}, False),
+    ):
+        session = _MediaSession(info=_info(block))
+        svc = await _svc(env, session)
+        conn = await env[1].get("g1")
+        assert await svc.space_media_pieces(conn) is want

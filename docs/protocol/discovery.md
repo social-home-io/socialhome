@@ -2361,7 +2361,34 @@ blob_id = lowercase hex of SHA-256( b"sm1|" + scope_kind + b"|" + scope_id + b"|
 
 (`domain/gfs_space_media.space_media_address`; a scope id never contains
 `|`, so the input parses one way only; test vectors in
-`tests/domain/test_gfs_space_media.py`). The GFS recomputes it on upload from
+`tests/domain/test_gfs_space_media.py`).
+
+**Pieces of a larger file (address suite `sm1p`, v_97).** A file over one
+blob (8 MiB, up to the 200 MiB upload cap) is split by its household into
+fixed 8 MiB pieces, each sealed as its own blob. Its address is derived,
+never hashed from the piece:
+
+```
+file_addr  = SHA-256( b"sm1p|" + scope_kind + b"|" + scope_id + b"|" + h_0 ‖ … ‖ h_{N-1} )   (h_i = SHA-256(ciphertext of piece i), raw 32 bytes)
+piece_addr = SHA-256( b"sm1p|piece|" + file_addr + b"|" + decimal(i) )
+```
+
+An upload (and an on-demand serve, below) of piece *i* carries a
+**piece proof** in `X-SH-Space-Media-Piece`: base64url canonical JSON
+`{"manifest": [h_0 … h_{N-1}], "index": i}` (2 ≤ N ≤ 25, each a lowercase
+SHA-256 hex, `0 ≤ i < N`, ≤ 8 KiB; anything else `400` before any body
+is read). The GFS checks `SHA-256(body) == h_i`, the manifest → `file_addr`
+→ the asked `piece_addr` (`domain/gfs_space_media.check_piece`), else
+`422 blob_id_mismatch` — so, as for `sm1`, no other bytes can ever sit at a
+real piece address: a forged manifest only derives another file's
+addresses, and a valid piece replayed under another manifest lands at
+another address nobody's item names. The proof is unsigned (it proves
+itself); the claim says `addr_suite: "sm1p"` (signed), and an `sm1` claim
+is always checked as a content address, whatever header rides along. An
+unknown address suite is refused (`UnsupportedSpaceMediaAddrSuite`); `sm1p`
+is never a content address (`space_media_address` refuses it). A GFS
+advertises `"pieces": true` in its signed `space_media` block only when a
+whole piece fits its blob cap; a household sends pieces only there. The GFS recomputes it on upload from
 the claim's scope and refuses a mismatch (`422 blob_id_mismatch`); a reader
 checks it with the scope id it knows. **Why:** with a bare content hash, a
 follower who saw a blob's address (it rides in the item, before the
@@ -2391,6 +2418,7 @@ the routes below, the capability, the sweep and the admin counts.
 | Method | Path | |
 |---|---|---|
 | `PUT` | `/gfs/media/{blob_id}` | One encrypted blob, the raw body, for the scope the signed claim names — a space's opaque channel (`channel_id` = 32 hex; the only scope since v_96). The scope never rides in the URL (security review F3: a channel id must not land in an access log or a proxy). `blob_id` = the scope-bound address of the body (above; `422 blob_id_mismatch` otherwise), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; the scope's retry is `200 {stored: false, status: "already_stored"}`, never an error. **`already_stored` does not extend the blob's expiry** (it keeps the expiry of the scope's first upload): a household must not assume a fresh TTL from it. `503 space_media_disabled` while the operator has the cache off. |
+| `PUT` (piece) | `/gfs/media/{blob_id}` | v_97 — the same route for a piece of a larger file: the claim's `addr_suite` is `sm1p` and the `X-SH-Space-Media-Piece` proof places the body at `blob_id` (above). |
 | `GET` | `/gfs/media/{blob_id}` | Anyone, no credentials: the ciphertext, `application/octet-stream`, `nosniff`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=3600, immutable`; `404` with `no-store` for unknown, expired, evicted or a banned space's blob. |
 | `POST` | `/gfs/media/{blob_id}/delete` | The scope's seed holder deletes one of the scope's blobs: `{scope, scope_id, ts, sig, sig_suite}` (the signature covers scope, scope id, blob and `ts`); `{deleted}` (`false` for another scope's blob). Taken once: an exact replay is the uniform 403. |
 
@@ -2639,6 +2667,15 @@ the moment media store), `routes/space_media.py`, the reused checks in
 `repositories.SqliteGfsSpaceMediaRepo`, GFS migration `0025`.
 
 ### Space media on demand (v_83)
+
+**Pieces (v_97).** A holder asked for a piece of a larger file (the hint
+names `filename#i/N`) answers `PUT /gfs/media/serve/{ticket}` with that
+piece and its `X-SH-Space-Media-Piece` proof; the GFS verifies the body
+against it exactly as an upload (`verify` → `check_piece`) before a reader
+gets the last byte, and stores it under the holder's `sm1p` upload
+authorization in `cache` mode. A malformed proof is `422 bad_piece_proof`
+before any body is read; without a proof the body is checked as an `sm1`
+content address.
 
 **Purpose.** The cache keeps a blob for its TTL at most and evicts the least
 recently fetched first; after that every reader missed it for good. Now a

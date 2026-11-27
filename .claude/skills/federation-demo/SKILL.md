@@ -817,7 +817,7 @@ space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
 gfs-moment-late-delete → gfs-join-request → gfs-space-follow →
-gfs-global-channel → gfs-follower-comment → gfs-space-bans → members-page-catchup → verify``
+gfs-global-channel → gfs-big-file → gfs-follower-comment → gfs-space-bans → members-page-catchup → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -2264,6 +2264,21 @@ a ``join_contact``). e (paired with nobody) sees it ``gfs_followable``,
 
 Mini-chain: ``up, pair, space-follow-paired, gfs-up, gfs-pair,
 gfs-space-follow, verify, down``.
+
+### ``gfs-big-file`` — a file over 8 MiB through the GFS cache, in pieces (v_97)
+
+Owner 2026-11-27: in a GFS space every household takes the space's files
+from the GFS space media cache. In a's global space (from
+``gfs-global-channel``) member **b** posts a ~12 MiB file. The paired owner
+**a** and the GFS-only follower **e** each hold ONE ``sm1p`` descriptor row
+(the file's address, its size, the whole-file checksum as an ``sc-``
+content name), fetch the two 8 MiB pieces from the GFS on view and join
+them byte-identical (``joined 2 pieces from the GFS``). b's log shows the
+piece uploads from the durable queue; no household logs a
+``SPACE_MEDIA_BLOB`` or a ``space media wanted`` request for it (b's media
+outbox drops the push to v_97 households: ``from the GFS cache — no
+push``); the GFS holds full 8 MiB pieces under the channel scope. Prereq:
+``gfs-global-channel``. In ``all`` right after it.
 
 ### ``gfs-global-channel`` — a global space's members and followers on one channel (v_96, P3)
 

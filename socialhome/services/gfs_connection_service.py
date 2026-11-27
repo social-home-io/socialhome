@@ -84,6 +84,7 @@ from ..domain.gfs_mailbox import (
 from ..domain.gfs_server import GfsServer
 from ..domain.gfs_space_media import (
     MEDIA_SCOPES,
+    PIECE_PROOF_HEADER,
     SCOPE_CHANNEL,
     SPACE_MEDIA_AUTH_HEADER,
     SPACE_MEDIA_CAPABILITY,
@@ -164,11 +165,12 @@ def _envelope_multi_cap(entry: object) -> int:
 
 def _space_media_limit(
     caps: dict,
-) -> tuple[int, frozenset[str], int | None, int | None] | None:
-    """``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s)`` of a verified
-    ``space_media`` capability entry (``ttl_s`` / ``on_demand_wait_s``
-    ``None`` when absent or malformed), or ``None`` when the entry is
-    absent / malformed."""
+) -> tuple[int, frozenset[str], int | None, int | None, bool] | None:
+    """``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s, pieces)`` of a
+    verified ``space_media`` capability entry (``ttl_s`` /
+    ``on_demand_wait_s`` ``None`` when absent or malformed; ``pieces``: it
+    keeps the 8 MiB pieces of a larger file, v_97), or ``None`` when the
+    entry is absent / malformed."""
     entry = caps.get(SPACE_MEDIA_CAPABILITY)
     if not isinstance(entry, dict):
         return None
@@ -191,7 +193,8 @@ def _space_media_limit(
         and 0 < wait <= MAX_ON_DEMAND_WAIT_S
         else None
     )
-    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s
+    pieces = entry.get("pieces") is True
+    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s, pieces
 
 
 #: Characters of a *remote-authored* error body that may be interpolated
@@ -675,7 +678,7 @@ class GfsConnectionService:
         # server that proved it; absent = not proven (re-probed, never a
         # sticky no).
         self._space_media: dict[
-            str, tuple[int, frozenset[str], int | None, int | None]
+            str, tuple[int, frozenset[str], int | None, int | None, bool]
         ] = {}
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
@@ -4076,6 +4079,15 @@ class GfsConnectionService:
         cached = self._space_media.get(conn.id)
         return cached[2] if cached is not None else None
 
+    async def space_media_pieces(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved (signed ``space_media.pieces``, v_97)
+        that it keeps the 8 MiB pieces of a file larger than one blob — a
+        pieced file is uploaded only there."""
+        if conn.id not in self._space_media:
+            await self.space_media_max_blob(conn)  # one probe on a cold miss
+        cached = self._space_media.get(conn.id)
+        return cached is not None and cached[4]
+
     async def space_media_on_demand_wait(self, conn: GfsConnection) -> int | None:
         """How long *conn*'s GFS lets a ``wanted`` request wait (its signed
         ``space_media.on_demand.wait_s``, v_83), or ``None`` when it proved
@@ -4132,6 +4144,7 @@ class GfsConnectionService:
         *,
         upload_auth: str | None = None,
         decline_reason: str = "not_held",
+        piece_proof: str | None = None,
     ) -> int | None:
         """Answer a GFS's ``space_media_request`` (v_83): ``PUT
         /gfs/media/serve/{ticket}`` with *blob* (and, for a re-upload, the
@@ -4174,6 +4187,9 @@ class GfsConnectionService:
             headers["Content-Type"] = "application/octet-stream"
             if upload_auth:
                 headers[SPACE_MEDIA_AUTH_HEADER] = upload_auth
+            if piece_proof:
+                # v_97 — a piece (sm1p): the GFS checks it by its proof.
+                headers[PIECE_PROOF_HEADER] = piece_proof
             async with client.put(
                 base,
                 data=blob,
@@ -4218,6 +4234,7 @@ class GfsConnectionService:
         blob_id: str,
         blob: bytes,
         auth_header: str,
+        piece_proof: str | None = None,
     ) -> int | None:
         """``PUT /gfs/media/{blob_id}`` — the one scope-free path; the scope
         (a listed space, or a private space's opaque channel) rides only
@@ -4231,6 +4248,9 @@ class GfsConnectionService:
             SPACE_MEDIA_AUTH_HEADER: auth_header,
             "Content-Type": "application/octet-stream",
         }
+        if piece_proof:
+            # v_97 — a piece (sm1p): the GFS checks it by its proof.
+            headers[PIECE_PROOF_HEADER] = piece_proof
         try:
             async with self.anon_session(conn) as client:
                 if client is None:

@@ -506,7 +506,9 @@ class SpaceMediaWanted:
 
     async def _asks_the_host(self, space_id: str) -> bool:
         """A seat here AND a paired / mesh path to the host (P10: by path,
-        never by role); else the household fetches through its GFS."""
+        never by role); else the household fetches through its GFS. A
+        file the household reads from a GFS cache (a GFS space's described
+        file, v_97) is never asked for here (``attach_gfs_refs``)."""
         return await holds_seat(
             self._spaces, space_id
         ) and await self._federation.reaches_host_directly(space_id)

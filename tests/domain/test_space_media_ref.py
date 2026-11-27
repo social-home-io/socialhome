@@ -421,3 +421,48 @@ def test_a_space_scope_entry_is_dropped() -> None:
     wire = media_refs_to_wire([_ref("x.webp")])
     wire["x.webp"]["scope"] = "space"
     assert parse_media_refs(wire, space_id="sp", allowed={"x.webp"}) == []
+
+
+# ── v_97 pieces (sm1p): one entry, the whole file's size and SHA-256 ─────
+
+
+def test_a_pieced_entry_round_trips_with_its_whole_file_checksum() -> None:
+    ref = _ref("v.webm", addr_suite="sm1p", size=20 * 1024 * 1024, sha256="c" * 64)
+    wire = media_refs_to_wire([ref])
+    assert wire["v.webm"]["sha256"] == "c" * 64
+    assert "sha256" not in media_refs_to_wire([_ref()])["x.webp"]
+    [back] = parse_media_refs(wire, space_id="sp", allowed={"v.webm"})
+    assert back == ref and back.pieced
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"sha256": "nothex"},
+        {"size": 8 * 1024 * 1024},  # one blob holds it: never pieced
+        {"size": 201 * 1024 * 1024},  # past the 200 MiB bound
+        {"sha256": None},
+    ],
+)
+def test_a_malformed_pieced_entry_is_dropped(over) -> None:
+    wire = {
+        "v.webm": {
+            "blob_id": BID,
+            "suite": SUITE,
+            "epoch": 2,
+            "size": 20 * 1024 * 1024,
+            "scope": "channel",
+            "addr_suite": "sm1p",
+            "sha256": "c" * 64,
+            **over,
+        }
+    }
+    if over.get("sha256", "") is None:
+        del wire["v.webm"]["sha256"]
+    assert parse_media_refs(wire, space_id="sp", allowed={"v.webm"}) == []
+
+
+def test_a_whole_blob_entry_never_carries_a_checksum() -> None:
+    wire = media_refs_to_wire([_ref()])
+    wire["x.webp"]["sha256"] = "c" * 64
+    assert parse_media_refs(wire, space_id="sp", allowed={"x.webp"}) == []

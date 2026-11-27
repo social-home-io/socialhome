@@ -3540,7 +3540,7 @@ class _CoverMediaGfs:
         self.items: list = []
         self.uploaded: list = []
 
-    async def plan(self, space_id, urls, *, item_id, followers):
+    async def plan(self, space_id, urls, *, item_id, followers, author_user_id=""):
         self.planned.append((space_id, list(urls), followers))
         self.items.append(item_id)
         return _CoverPlan()
@@ -3548,7 +3548,7 @@ class _CoverMediaGfs:
     async def is_relay_reader(self, iid):
         return iid in self.readers
 
-    def upload(self, plan):
+    async def upload(self, plan, *, author_user_id=""):
         self.uploaded.append(plan)
 
 
@@ -3562,7 +3562,7 @@ class _PerPeerFed:
         self.calls.append((event_type, payload, kw))
 
 
-async def test_a_new_cover_carries_media_refs_for_link_joined_members(space_cal_env):
+async def test_a_new_cover_carries_media_refs_for_every_household(space_cal_env):
     env = space_cal_env
     fed = _PerPeerFed()
     env.space_cal_svc.attach_federation(fed)
@@ -3580,10 +3580,10 @@ async def test_a_new_cover_carries_media_refs_for_link_joined_members(space_cal_
     assert media.items == [created_event.id]  # sealed for the event itself
     created = [c for c in fed.calls if c[0].value == "space_calendar_event_created"]
     _evt, payload, kw = created[0]
-    assert "media_refs" not in payload
-    to_e = await kw["per_peer"]("peer-e", payload)
-    assert to_e["media_refs"] == _CoverPlan().wire()
-    assert "media_refs" not in await kw["per_peer"]("peer-b", payload)
+    # v_97 — every household of the GFS space reads the cover from the GFS
+    # cache: the descriptor rides the one shared payload.
+    assert payload["media_refs"] == _CoverPlan().wire()
+    assert "per_peer" not in kw
     assert len(media.uploaded) == 1
 
 
@@ -3629,11 +3629,9 @@ async def test_a_released_cover_reaches_every_kind_of_member_household(env):
     assert sorted(call["target_instance_ids"]) == ["peer-b", "peer-c"]
     assert media.planned == [("cal-ao", ["api/media/cover.webp"], False)]
     created = [c for c in fed.calls if c[0].value == "space_calendar_event_created"]
-    _evt, payload, kw = created[0]
+    _evt, payload, _kw = created[0]
     assert payload["cover_url"] == "api/media/cover.webp"
-    assert (await kw["per_peer"]("peer-e", payload))["media_refs"] == (
-        _CoverPlan().wire()
-    )
+    assert payload["media_refs"] == _CoverPlan().wire()
 
 
 async def test_an_unchanged_cover_plans_nothing_on_edit(space_cal_env):

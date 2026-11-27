@@ -123,11 +123,14 @@ def test_limits_from_config_and_capability():
         "space_max_bytes": 256 * 1024**2,
         "space_uploads_per_hour": 300,
         "scopes": ["channel"],
+        "pieces": True,
     }
     small = SpaceMediaLimits.from_config(
         GfsConfig(space_media_max_bytes=1_000_000, space_media_ttl_seconds=3_600)
     )
     assert small.capability()["max_blob_bytes"] == 1_000_000
+    # A cap below one whole piece keeps no pieces (v_97).
+    assert "pieces" not in small.capability()
     off = SpaceMediaLimits.from_config(GfsConfig(space_media_max_bytes=0))
     assert off.capability() is None
 

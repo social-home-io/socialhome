@@ -4,6 +4,7 @@ scope since v_96 (a space's opaque channel), the kinds it takes."""
 from __future__ import annotations
 
 import base64
+import hashlib
 
 import orjson
 import pytest
@@ -224,3 +225,131 @@ def test_delete_payload_binds_scope_blob_and_time():
         "blob_id": BID,
         "ts": 5,
     }
+
+
+# ── Pieces (sm1p, v_97): a file over one blob, split into 8 MiB pieces ──
+
+
+def _hashes(*blobs: bytes) -> tuple[str, ...]:
+    return tuple(hashlib.sha256(b).hexdigest() for b in blobs)
+
+
+def _proof(blobs, index):
+    return gfs_space_media.PieceProof(manifest=_hashes(*blobs), index=index)
+
+
+def _addr(proof, scope_id=CHANNEL):
+    return gfs_space_media.piece_address(
+        gfs_space_media.pieced_file_address(SCOPE_CHANNEL, scope_id, proof.manifest),
+        proof.index,
+    )
+
+
+def test_sm1p_is_a_supported_suite_with_its_own_constant():
+    assert gfs_space_media.ADDR_SUITE_SM1P == "sm1p"
+    assert gfs_space_media.ADDR_SUITE_SM1P in SUPPORTED_ADDR_SUITES
+
+
+def test_a_piece_count_follows_the_file_size():
+    pc = gfs_space_media.piece_count
+    piece = gfs_space_media.PIECE_BYTES
+    assert piece == 8 * 1024 * 1024
+    assert pc(piece + 1) == 2
+    assert pc(3 * piece) == 3
+    assert pc(gfs_space_media.MAX_PIECED_FILE_BYTES) == gfs_space_media.MAX_PIECES
+    assert gfs_space_media.MAX_PIECES == 25
+    for bad in (0, piece, gfs_space_media.MAX_PIECED_FILE_BYTES + 1, True, "9"):
+        with pytest.raises(ValueError):
+            pc(bad)
+
+
+def test_piece_addresses_derive_from_the_file_address_and_the_index():
+    hs = _hashes(b"a", b"b", b"c")
+    file_addr = gfs_space_media.pieced_file_address(SCOPE_CHANNEL, CHANNEL, hs)
+    # Bound to the scope and to every piece.
+    assert file_addr != gfs_space_media.pieced_file_address(SCOPE_CHANNEL, "d" * 32, hs)
+    assert file_addr != gfs_space_media.pieced_file_address(
+        SCOPE_CHANNEL, CHANNEL, _hashes(b"a", b"x", b"c")
+    )
+    addrs = {gfs_space_media.piece_address(file_addr, i) for i in range(3)}
+    assert len(addrs) == 3
+    # Never the content address of the piece itself.
+    assert gfs_space_media.piece_address(file_addr, 0) != space_media_address(
+        SCOPE_CHANNEL, CHANNEL, b"a"
+    )
+    with pytest.raises(ValueError):
+        gfs_space_media.piece_address(file_addr, -1)
+    with pytest.raises(ValueError):
+        gfs_space_media.piece_address(file_addr, gfs_space_media.MAX_PIECES)
+
+
+def test_space_media_address_refuses_sm1p_content_addressing():
+    with pytest.raises(UnsupportedSpaceMediaAddrSuite):
+        space_media_address(SCOPE_CHANNEL, CHANNEL, b"x", suite="sm1p")
+
+
+def test_check_piece_accepts_the_right_piece_at_its_address():
+    proof = _proof((b"one", b"two", b"three"), 1)
+    assert gfs_space_media.check_piece(
+        SCOPE_CHANNEL, CHANNEL, _addr(proof), b"two", proof
+    )
+
+
+def test_check_piece_refuses_a_wrong_piece_at_a_real_address():
+    blobs = (b"one", b"two", b"three")
+    proof = _proof(blobs, 1)
+    addr = _addr(proof)
+    check = gfs_space_media.check_piece
+    assert not check(SCOPE_CHANNEL, CHANNEL, addr, b"evil", proof)
+    # A forged manifest naming the evil piece gives another file address.
+    forged = _proof((b"one", b"evil", b"three"), 1)
+    assert not check(SCOPE_CHANNEL, CHANNEL, addr, b"evil", forged)
+    # The right piece under another index, or another channel, is refused.
+    assert not check(SCOPE_CHANNEL, CHANNEL, addr, b"one", _proof(blobs, 0))
+    assert not check(SCOPE_CHANNEL, "d" * 32, addr, b"two", proof)
+
+
+def test_a_valid_piece_replayed_under_another_file_address_lands_elsewhere():
+    proof = _proof((b"one", b"two"), 1)
+    other = _proof((b"zzz", b"two"), 1)
+    assert _addr(other) != _addr(proof)
+    assert not gfs_space_media.check_piece(
+        SCOPE_CHANNEL, CHANNEL, _addr(proof), b"two", other
+    )
+
+
+def test_check_piece_never_raises_on_a_bad_scope():
+    proof = _proof((b"a", b"b"), 0)
+    assert not gfs_space_media.check_piece(SCOPE_CHANNEL, "", "0" * 64, b"a", proof)
+
+
+def test_piece_proof_header_round_trips():
+    proof = _proof((b"a", b"b", b"c"), 2)
+    assert gfs_space_media.PieceProof.from_header(proof.to_header()) == proof
+
+
+def _raw_proof(obj) -> str:
+    return base64.urlsafe_b64encode(orjson.dumps(obj)).decode().rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "!!!",
+        _raw_proof([]),
+        _raw_proof({"manifest": ["a" * 64, "b" * 64], "index": 2}),
+        _raw_proof({"manifest": ["a" * 64, "b" * 64], "index": -1}),
+        _raw_proof({"manifest": ["a" * 64, "b" * 64], "index": True}),
+        _raw_proof({"manifest": ["a" * 64], "index": 0}),
+        _raw_proof({"manifest": ["a" * 64] * 26, "index": 0}),
+        _raw_proof({"manifest": ["A" * 64, "b" * 64], "index": 0}),
+        _raw_proof({"manifest": ["a" * 63, "b" * 64], "index": 0}),
+        _raw_proof({"manifest": "ab", "index": 0}),
+        _raw_proof({"manifest": ["a" * 64, "b" * 64], "index": 0, "x": 1}),
+        "a" * 5000,
+    ],
+)
+def test_malformed_piece_proofs_are_refused(raw):
+    with pytest.raises(gfs_space_media.InvalidPieceProof):
+        gfs_space_media.PieceProof.from_header(raw)

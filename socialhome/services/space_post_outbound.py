@@ -190,19 +190,22 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._own_identity_seed = own_identity_seed
 
     async def _channel_sends(self, space_id: str, author_user_id: str) -> bool:
-        """Whether our member publisher puts *author_user_id*'s post in
-        *space_id* on the space's opaque channel (v_96) — a channel space,
-        and the publisher would send it to at least one channel server.
-        Never raises."""
-        if self._member_gfs is None:
+        """Whether our post in *space_id* goes on the space's opaque
+        channel ourselves — v_97: in every GFS space, as one space item
+        through the durable queue, whoever the author is. Never raises."""
+        return await self._gfs_space(space_id)
+
+    async def _gfs_space(self, space_id: str | None) -> bool:
+        """Whether *space_id* is a GFS space here (v_97): its posts and
+        comments go as space items through the durable queue
+        (``broadcast_to_space_members`` → the item sealer), never the v1
+        channel publish. Never raises."""
+        if self._member_gfs is None or not space_id:
             return False
         try:
-            return bool(
-                await self._member_gfs.channel_space(space_id)
-                and await self._member_gfs.plan_post(space_id, author_user_id)
-            )
+            return bool(await self._member_gfs.channel_space(space_id))
         except Exception:
-            log.exception("channel plan failed for space=%s", space_id)
+            log.exception("channel check failed for space=%s", space_id)
             return False
 
     async def _schedule_gfs_publish(
@@ -277,6 +280,10 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             )
         ):
             return False
+        if await self._gfs_space(space_id):
+            # v_97 — a GFS space's write is ONE space item in the durable
+            # queue (the broadcast's item sealer): no v1 channel copy.
+            return False
         space = await self._spaces.get(space_id)
         if space is None:
             return False
@@ -349,6 +356,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 item_media_urls("posts", post),
                 item_id=post.id,
                 followers=True,
+                author_user_id=post.author,
             )
             inner = build_signed_author_inner(
                 post=post,
@@ -364,7 +372,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 media_refs=media_plan.wire() if media_plan is not None else None,
                 file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
-            self._upload_media(media_plan)
+            await self._upload_media(media_plan, author_user_id=post.author)
             self._member_gfs.schedule_item(
                 space_id, post.author, ITEM_TYPE_POST_EDIT, inner
             )
@@ -505,17 +513,18 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             and self._own_instance_pk
             and self._own_identity_seed
         )
-        # v_80 — households reading the space through a GFS get the pictures
-        # as a ``media_refs`` descriptor: a link-joined member inside its own
-        # copy of the payload (``per_peer``), followers inside the relayed
-        # inner — planned first, because the author signs the descriptor
-        # there (a separate ``media_refs_sig``, not in the main author bytes).
+        # v_80 / v_97 — in a GFS space every household gets the pictures as
+        # a ``media_refs`` descriptor on the one shared payload (and inside
+        # the relayed inner) — planned first, because the author signs the
+        # descriptor there (a separate ``media_refs_sig``, not in the main
+        # author bytes).
         media_urls = item_media_urls("posts", post)
         media_plan = await self._plan_media_refs(
             event.space_id,
             media_urls,
             item_id=post.id,
             followers=relayable,
+            author_user_id=post.author,
         )
         media_refs = media_plan.wire() if media_plan is not None else None
         if relayable:
@@ -562,12 +571,12 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                     payload["public_relay"][CHANNEL_SENT_FIELD] = True
         with_release(payload)
         payload = await self._with_file_hashes(payload, media_urls)
+        payload = self._with_media_refs(payload, media_plan)
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,
                 FederationEventType.SPACE_POST_CREATED,
                 payload,
-                per_peer=self._media_refs_per_peer(media_plan),
             )
         except Exception:
             log.exception(
@@ -582,15 +591,17 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # copy — and receivers dedupe the two by post id. The GFS copy
         # carries its own inner, with the real item type and target bound
         # inside the author signature.
-        if self._member_gfs is not None and (
-            "public_relay" in payload
-            # v_51 — a private space's member publishes through its channel.
-            or await self._member_gfs.channel_space(event.space_id)
+        if (
+            self._member_gfs is not None
+            and "public_relay" in payload
+            # v_97 — a GFS space's post went as ONE space item in the
+            # durable queue (the broadcast above): no v1 channel copy.
+            and not await self._gfs_space(event.space_id)
         ):
             await self._schedule_gfs_publish(
                 event.space_id, post, media_refs=media_refs
             )
-        self._upload_media(media_plan)
+        await self._upload_media(media_plan, author_user_id=post.author)
         # Hand off the bytes-federation to SpaceMediaSyncService.
         # SPACE_POST_CREATED carries only the URL strings; without
         # the outbox-driven SPACE_MEDIA_BLOB stream the receiver's
@@ -622,6 +633,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                         target_instance_ids=targets,
                         media_urls=media_urls,
                         space_id=event.space_id,
+                        live=True,
                     )
                 except Exception:
                     log.exception(

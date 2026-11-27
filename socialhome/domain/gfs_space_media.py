@@ -53,8 +53,9 @@ from dataclasses import dataclass
 import orjson
 
 from ..canonical_json import canonical_bytes
-from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
+from ..moment_public_media import MAX_BLOB_BYTES, MAX_MEDIA_BYTES, is_blob_id
 from .gfs_channel import InvalidChannelWire, valid_channel_id
+from .media_constraints import VIDEO_MAX_UPLOAD_BYTES
 from .writer_cert import MAX_WRITER_CERT_EPOCH
 
 #: The header carrying the upload authorization.
@@ -87,7 +88,156 @@ AUTH_KINDS_BY_SCOPE: dict[str, frozenset[str]] = {
 #: lowercase hex. A scope id never contains ``|`` (so the input parses one
 #: way only).
 ADDR_SUITE_SM1: str = "sm1"
-SUPPORTED_ADDR_SUITES: frozenset[str] = frozenset({ADDR_SUITE_SM1})
+#: v_97 — a PIECE of a file larger than one blob (see "Pieces" below): the
+#: address is derived, not hashed from the bytes, and an upload proves the
+#: bytes with a :class:`PieceProof`. Never a content address
+#: (:func:`space_media_address` refuses it).
+ADDR_SUITE_SM1P: str = "sm1p"
+SUPPORTED_ADDR_SUITES: frozenset[str] = frozenset({ADDR_SUITE_SM1, ADDR_SUITE_SM1P})
+
+# ── Pieces (sm1p, v_97) ──────────────────────────────────────────────────
+#
+# A file over one blob (8 MiB) is split into fixed 8 MiB pieces, each sealed
+# like any space file (its AAD names the piece). Its descriptor carries ONE
+# address, the file's — ``sha256("sm1p|" + scope + "|" + scope_id + "|" +
+# h_0 ‖ … ‖ h_{N-1})`` over the SHA-256 of every sealed piece — and each
+# piece sits at ``sha256("sm1p|piece|" + file address + "|" + index)``. A
+# reader derives every piece address without a per-piece list. The GFS keeps
+# its content check: an upload (or an on-demand serve) of piece *i* carries
+# the manifest ``[h_0 … h_{N-1}]`` and *i* (:data:`PIECE_PROOF_HEADER`), and
+# the GFS checks ``sha256(body) == h_i``, the manifest → the file address →
+# the asked piece address (:func:`check_piece`). So no other bytes can ever
+# sit at a real piece address, and a forged manifest only names another
+# file.
+
+#: One piece of a file: the largest file one blob holds.
+PIECE_BYTES: int = MAX_MEDIA_BYTES
+#: The largest pieced file (the 200 MiB upload cap) and its piece count.
+MAX_PIECED_FILE_BYTES: int = VIDEO_MAX_UPLOAD_BYTES
+MAX_PIECES: int = -(-MAX_PIECED_FILE_BYTES // PIECE_BYTES)
+
+#: The header carrying a :class:`PieceProof` (unsigned: it proves itself).
+PIECE_PROOF_HEADER: str = "X-SH-Space-Media-Piece"
+_PIECE_PROOF_MAX_CHARS: int = 8192
+_PIECE_PROOF_KEYS: frozenset[str] = frozenset({"manifest", "index"})
+
+
+class InvalidPieceProof(ValueError):
+    """A malformed piece proof."""
+
+
+def piece_count(file_size: object) -> int:
+    """How many pieces a file of *file_size* bytes is split into — only a
+    file larger than one blob and at most :data:`MAX_PIECED_FILE_BYTES`
+    (:class:`ValueError` otherwise)."""
+    if (
+        not isinstance(file_size, int)
+        or isinstance(file_size, bool)
+        or not PIECE_BYTES < file_size <= MAX_PIECED_FILE_BYTES
+    ):
+        raise ValueError("not a pieced file size")
+    return -(-file_size // PIECE_BYTES)
+
+
+def _scope_prefix(suite: str, scope_kind: str, scope_id: str) -> bytes:
+    if scope_kind not in MEDIA_SCOPES:
+        raise ValueError(f"unknown scope {scope_kind!r}")
+    if not scope_id or "|" in scope_id:
+        raise ValueError("a scope id is non-empty and has no '|'")
+    return f"{suite}|{scope_kind}|{scope_id}|".encode()
+
+
+def pieced_file_address(
+    scope_kind: str, scope_id: str, piece_hashes: tuple[str, ...] | list[str]
+) -> str:
+    """A pieced file's address: bound to its scope and to the SHA-256 of
+    every sealed piece, in order. :class:`ValueError` for a bad scope or a
+    manifest entry that is no SHA-256 hex."""
+    h = hashlib.sha256(_scope_prefix(ADDR_SUITE_SM1P, scope_kind, scope_id))
+    for entry in piece_hashes:
+        if not is_blob_id(entry):
+            raise ValueError("a manifest entry is a lowercase SHA-256 hex")
+        h.update(bytes.fromhex(entry))
+    return h.hexdigest()
+
+
+def piece_address(file_address: str, index: int) -> str:
+    """Where piece *index* of the file at *file_address* sits."""
+    if (
+        not is_blob_id(file_address)
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < MAX_PIECES
+    ):
+        raise ValueError("bad piece address input")
+    return hashlib.sha256(
+        f"{ADDR_SUITE_SM1P}|piece|{file_address}|{index}".encode()
+    ).hexdigest()
+
+
+@dataclass(slots=True, frozen=True)
+class PieceProof:
+    """What proves a piece's bytes at its address: the file's manifest
+    (the SHA-256 of every sealed piece, 2 … :data:`MAX_PIECES`) and which
+    piece this is."""
+
+    manifest: tuple[str, ...]
+    index: int
+
+    def to_header(self) -> str:
+        return (
+            base64.urlsafe_b64encode(
+                canonical_bytes({"manifest": list(self.manifest), "index": self.index})
+            )
+            .decode()
+            .rstrip("=")
+        )
+
+    @classmethod
+    def from_header(cls, raw: str) -> PieceProof:
+        """Parse a header value, bounded; :class:`InvalidPieceProof` on
+        anything malformed (the content check is :func:`check_piece`)."""
+        if not isinstance(raw, str) or not raw or len(raw) > _PIECE_PROOF_MAX_CHARS:
+            raise InvalidPieceProof("bad header")
+        try:
+            obj = orjson.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        except (ValueError, binascii.Error) as exc:
+            raise InvalidPieceProof("not base64url JSON") from exc
+        if not isinstance(obj, dict) or set(obj) != _PIECE_PROOF_KEYS:
+            raise InvalidPieceProof("unexpected fields")
+        manifest = obj.get("manifest")
+        index = obj.get("index")
+        if (
+            not isinstance(manifest, list)
+            or not 2 <= len(manifest) <= MAX_PIECES
+            or not all(is_blob_id(h) for h in manifest)
+        ):
+            raise InvalidPieceProof("bad manifest")
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < len(manifest)
+        ):
+            raise InvalidPieceProof("bad index")
+        return cls(manifest=tuple(str(h) for h in manifest), index=index)
+
+
+def check_piece(
+    scope_kind: str, scope_id: str, blob_id: str, data: bytes, proof: PieceProof
+) -> bool:
+    """Whether *data* is piece ``proof.index`` of the file *proof*'s
+    manifest names in this scope, and that piece sits at *blob_id*. Never
+    raises. Hashing up to 8 MiB: async callers run it in a worker thread."""
+    try:
+        if not 0 <= proof.index < len(proof.manifest):
+            return False
+        if hashlib.sha256(data).hexdigest() != proof.manifest[proof.index]:
+            return False
+        file_addr = pieced_file_address(scope_kind, scope_id, proof.manifest)
+        return piece_address(file_addr, proof.index) == blob_id
+    except ValueError:
+        return False
+
 
 #: Domain separation of the writer key's signed bytes (the scope is inside).
 SPACE_MEDIA_WRITER_PREFIX: bytes = b"space-media-put:v1:"
@@ -128,14 +278,10 @@ def space_media_address(
     empty or contains ``|``; :class:`UnsupportedSpaceMediaAddrSuite` for an
     unknown suite. Hashing up to 8 MiB: callers in async code run it in a
     worker thread."""
-    if suite not in SUPPORTED_ADDR_SUITES:
-        raise UnsupportedSpaceMediaAddrSuite(f"unsupported address suite {suite!r}")
-    if scope_kind not in MEDIA_SCOPES:
-        raise ValueError(f"unknown scope {scope_kind!r}")
-    if not scope_id or "|" in scope_id:
-        raise ValueError("a scope id is non-empty and has no '|'")
-    h = hashlib.sha256()
-    h.update(f"{suite}|{scope_kind}|{scope_id}|".encode())
+    if suite != ADDR_SUITE_SM1:
+        # sm1p (a piece) is derived, never hashed from the bytes.
+        raise UnsupportedSpaceMediaAddrSuite(f"no content address for {suite!r}")
+    h = hashlib.sha256(_scope_prefix(suite, scope_kind, scope_id))
     h.update(data)
     return h.hexdigest()
 

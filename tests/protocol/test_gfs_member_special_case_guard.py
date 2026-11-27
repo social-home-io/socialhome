@@ -166,17 +166,9 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "GFS cache (live content)",
             "catch-up records carry media_refs for a cache reader",
         ),
-        "socialhome/services/page_federation_outbound.py": (
-            "GFS cache (live content)",
-            "a page version's media_refs for a cache reader",
-        ),
         "socialhome/services/page_proposal_forwarder.py": (
             "GFS cache (live content)",
             "a proposal's files via the cache when the host takes no frames",
-        ),
-        "socialhome/services/space_media_refs.py": (
-            "GFS cache (live content)",
-            "a live item's media_refs for a cache reader",
         ),
     },
     "reads_from_gfs": {
@@ -369,10 +361,8 @@ _COUNTS: dict[str, dict[str, int]] = {
     "is_relay_reader": {
         "socialhome/app.py": 1,
         "socialhome/federation/sync/space/provider.py": 3,
-        "socialhome/services/page_federation_outbound.py": 1,
         "socialhome/services/page_proposal_forwarder.py": 1,
         "socialhome/services/space_media_gfs_uploader.py": 2,
-        "socialhome/services/space_media_refs.py": 1,
     },
     "reads_from_gfs": {
         "socialhome/services/space_media_gfs_uploader.py": 1,

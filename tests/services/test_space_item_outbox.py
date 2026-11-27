@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,6 +15,7 @@ from socialhome.domain.space_item_outbox import (
     UNSENT_REFUSED,
     UNSENT_TOO_LARGE,
 )
+from socialhome.repositories import space_item_outbox_repo as repo_mod
 from socialhome.repositories.space_item_outbox_repo import SqliteSpaceItemOutboxRepo
 from socialhome.services import space_item_outbox as mod
 from socialhome.services.gfs_publish_retry import PublishOutcome
@@ -365,3 +367,120 @@ async def test_a_sender_that_raises_backs_off(db, caplog, monkeypatch):
     assert "attempt for space sp failed" in caplog.text
     assert await box.run_once() == 0
     assert mod.BATCH > 0
+
+
+# ── Review of the 10k sizing (Fable, 2026-11-27) ──────────────────────────
+
+
+async def test_a_gfs_down_a_while_never_uses_up_the_replans(db):
+    """Finding 6a: transient failures, then the GFS leaves the owner's list
+    — the item is planned afresh to the replacement, not failed."""
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.transient()] * 3 + [PublishOutcome.gone()]
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m")
+    gfs.plan = ["g9"]
+    for _ in range(8):
+        await box.run_once()
+        clock.advance(601)
+    assert told == []
+    assert gfs.accepted == [("g9", "m")]
+
+
+async def test_an_item_that_waited_too_long_is_shown_never_sent(db):
+    """Finding 8: receivers would drop it — its author is told instead."""
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.transient()]
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m")
+    await box.run_once()
+    clock.advance(13 * 3600)
+    await box.run_once()
+    assert gfs.accepted == []
+    [unsent] = await box.unsent("sp", "anna")
+    assert (unsent.error, unsent.retryable) == ("too_old", False)
+    assert told == [("sp", "anna")]
+
+
+async def test_an_item_naming_nobody_is_told_to_the_admins(db, caplog):
+    """Finding 9: an item with no named author still surfaces — logged at
+    WARNING and handed to the notifier with no author (the app sends it to
+    the household's admins)."""
+
+    caplog.set_level(logging.WARNING)
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.permanent()]
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m", author="")
+    await box.run_once()
+    assert told == [("sp", "")]
+    assert any("names no author" in r.getMessage() for r in caplog.records)
+    assert await box.unsent("sp", "ben") == []
+    [item] = await box.unsent("sp", "admin", admin=True)
+    assert item.error == "refused"
+
+
+# ── v_97 file uploads: their own lane (media review 5–7, 11) ─────────────
+
+
+async def _queue_file(box, n=3, gfs_ids=("g1",), space_id="sp"):
+    return await box.queue_media(
+        space_id=space_id,
+        epoch=3,
+        parts=[(f"piece-{i}", list(gfs_ids)) for i in range(n)],
+        author_user_id="anna",
+    )
+
+
+def _media_outbox(db, clock, gfs, told=None):
+    box = _outbox(db, clock, gfs, told)
+    box.attach_media(gfs.send)
+    return box
+
+
+async def test_file_uploads_run_in_their_own_lane(db):
+    """An 8 MiB upload never holds an item back: the items' pass sends no
+    file row, the file lane sends no item."""
+    clock, gfs = _Clock(), _Gfs()
+    box = _media_outbox(db, clock, gfs)
+    await _queue_file(box, n=2)
+    await _queue(box, "chat")
+    await box.run_once()
+    assert gfs.accepted == [("g1", "chat")]
+    await box.run_once(media=True)
+    assert gfs.accepted[1:] == [("g1", "piece-0"), ("g1", "piece-1")]
+
+
+async def test_file_rows_never_fill_the_items_bound(db, monkeypatch):
+    clock, gfs = _Clock(), _Gfs()
+    box = _media_outbox(db, clock, gfs)
+    monkeypatch.setattr(repo_mod, "SPACE_MEDIA_QUEUE_MAX_ITEMS", 3)
+    assert await _queue_file(box, n=3)
+    # The file lane is full: a whole file is refused (never half queued)…
+    assert not await _queue_file(box, n=2)
+    # …and the space's items still queue.
+    assert await _queue(box, "chat")
+
+
+async def test_a_busy_upload_holds_that_gfss_other_pieces_not_the_items(db):
+    clock, gfs = _Clock(), _Gfs()
+    gfs.answers["g1"] = [PublishOutcome.transient(retry_after_s=600)]
+    box = _media_outbox(db, clock, gfs)
+    await _queue_file(box, n=3)
+    await _queue(box, "chat")
+    await box.run_once(media=True)
+    assert gfs.tries == ["g1"]  # one attempt, the other pieces deferred
+    await box.run_once()
+    assert ("g1", "chat") in gfs.accepted
+
+
+async def test_a_file_waiting_too_long_keeps_its_locator_for_retry(db):
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.transient()]
+    box = _media_outbox(db, clock, gfs, told)
+    await _queue_file(box, n=1)
+    await box.run_once(media=True)
+    clock.advance(13 * 3600)
+    await box.run_once(media=True)
+    [unsent] = await box.unsent("sp", "anna")
+    assert (unsent.error, unsent.retryable) == ("too_old", True)

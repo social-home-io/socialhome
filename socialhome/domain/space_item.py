@@ -314,22 +314,6 @@ ITEM_SPECS: dict[str, ItemSpec] = {
     )
 }
 
-#: The event types whose content already rides a GFS space's channel as a
-#: v1 item (``POST_SHAPED_ITEM_TYPES`` / ``GENERIC_ITEM_TYPES``) until v_98:
-#: in a GFS space they keep that path, so a v_96 seat still reads them.
-V1_CHANNEL_EVENT_TYPES: frozenset[str] = frozenset(
-    t.value
-    for t in (
-        _E.SPACE_POST_CREATED,
-        _E.SPACE_POST_UPDATED,
-        _E.SPACE_POST_DELETED,
-        _E.SPACE_POST_REACTION,
-        _E.SPACE_COMMENT_CREATED,
-        _E.SPACE_COMMENT_UPDATED,
-        _E.SPACE_COMMENT_DELETED,
-    )
-)
-
 #: Mentioned households one item sends a ``SPACE_MENTION_NOTE`` to.
 MAX_MENTION_NOTES: int = 20
 

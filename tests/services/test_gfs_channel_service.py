@@ -796,6 +796,10 @@ async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
     # The receiving household routes it to its space locally.
     await env.member.svc.handle_frame({"type": "relay", **frame})
     assert env.member.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
+    # v_97 — the owner, which holds no grant, reads its own channel too
+    # (with the grant it derives from its seed).
+    await env.owner.svc.handle_frame({"type": "relay", **frame})
+    assert env.owner.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
     # And the other way round: the paired member holds a seat now, so the
     # link-joined member's item reaches it live while the host is away.
     targets = await env.member.svc.plan(SPACE_ID)

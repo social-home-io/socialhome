@@ -1255,6 +1255,13 @@ class FederationService:
             event=event,
         )
         if not await run_post_decrypt_gates(ctx, steps=self.space_write_gates()):
+            log.info(
+                "space_item: %s from %s in space %s held or refused by the gates (%s)",
+                event.event_type.value,
+                event.from_instance,
+                event.space_id,
+                ctx.early_response,
+            )
             return False
         await self._dispatch_event(event)
         return True
