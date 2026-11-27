@@ -1061,23 +1061,21 @@ async def test_held_files_names_only_the_files_that_are_here(tmp_path):
     ) == ["api/media/here.webp", "here.webp?exp=1"]
 
 
-class _ChannelFed:
-    """The federation service as the media queue sees it (v_96)."""
-
-    async def channel_reached_followers(self, space_id, instance_ids):
-        return frozenset({"peer-b"}) & set(instance_ids)
+class _AnyFed:
+    """A federation service: the media queue asks it nothing about roles."""
 
 
 @pytest.mark.parametrize("push", [False, True])
-async def test_a_gfs_reached_follower_is_queued_no_pushed_media(
+async def test_a_gfs_reached_follower_is_queued_media_like_a_member(
     db, outbox, tmp_path, push
 ):
-    """v_96 — a follower reached only through its channel seat gets no
-    per-file mesh push (it reads from its GFS cache) — unless it asked."""
+    """P10 (owner 2026-11-27): no follower-specific delivery rule — every
+    target the caller names is queued, a follower reached only through a
+    GFS like a member in the same position (the v_96 skip is gone)."""
     await _seed_space(db)
     svc = SpaceMediaSyncService(
         outbox=outbox,
-        federation=_ChannelFed(),  # type: ignore[arg-type]
+        federation=_AnyFed(),  # type: ignore[arg-type]
         media_dir=tmp_path,
     )
     await svc.enqueue_for_blob(
@@ -1088,5 +1086,4 @@ async def test_a_gfs_reached_follower_is_queued_no_pushed_media(
         push=push,
     )
     rows = await outbox.list_for_correlation("p-1")
-    want = {"peer-a", "peer-b"} if push else {"peer-a"}
-    assert {r.target_instance_id for r in rows} == want
+    assert {r.target_instance_id for r in rows} == {"peer-a", "peer-b"}

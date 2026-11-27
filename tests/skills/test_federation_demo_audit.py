@@ -614,3 +614,16 @@ def test_numbered_splitter_reports_header_lines(harness):
     numbered = harness._split_log_into_numbered_blocks(text)
     assert [n for n, _, _ in numbered] == [0, 1, 5]
     assert harness._split_log_into_blocks(text) == [(h, b) for _, h, b in numbered]
+
+
+def test_a_wait_timeout_names_the_step_that_waited(harness, monkeypatch):
+    """``_wait_for`` is shared by several steps; a timeout in
+    ``space-report`` was reported as ``group-dm: …``."""
+    monkeypatch.setattr(harness.time, "sleep", lambda _s: None)
+
+    def cmd_space_report():
+        harness._wait_for("c to hold d's post", lambda: False, timeout=0.0)
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_space_report()
+    assert str(exc.value) == "space-report: timed out waiting for c to hold d's post"

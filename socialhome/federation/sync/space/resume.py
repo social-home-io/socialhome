@@ -284,11 +284,11 @@ class SpaceSyncResumeProvider(FileHashesMixin):
     ) -> None:
         """Wire whose rows a replay carries, and to whom (v_92): the roster
         authority (``roster_authority(space_id)``) replays every row to any
-        household of the space (a follower gets its subset there); any other
+        household of the space (a follower gets what a member gets, P10); any other
         household — a trusted helper asked while the host is offline —
         replays only its own people's rows (``own_members(space_id)``) and
-        their files, and only to a household holding a writer seat
-        (``member_gate(space_id, household)``,
+        their files, and only to a household holding a seat — a follower's
+        included (``member_gate(space_id, household)``,
         ``SpaceWriterHouseholds.may_receive``)."""
         self._roster_authority = roster_authority
         self._own_members = own_members
@@ -400,8 +400,8 @@ class SpaceSyncResumeProvider(FileHashesMixin):
         §319.6 resync paths (:meth:`replay_space_to` /
         :meth:`replay_calendar_to`) run this check before any
         ``_replay_*`` call so a resync request can't bypass it. A household
-        that is not the roster authority (a v_92 helper) serves only writer
-        seats — the §25.6 provider's gate for member-only data.
+        that is not the roster authority (a v_92 helper) serves the seated
+        households the gate names — every seat, a follower's included (P10).
         """
         if (
             self._member_gate is not None
@@ -431,8 +431,62 @@ class SpaceSyncResumeProvider(FileHashesMixin):
             return 0
         if not self._claim_window(instance_id, space_id):
             return 0
-        since = _clamped_since(since)
-        own = await self._own_rows_only(space_id)
+        return await self._replay(
+            space_id,
+            instance_id,
+            _clamped_since(since),
+            await self._own_rows_only(space_id),
+        )
+
+    async def push_own_rows_to(
+        self, *, space_id: str, instance_id: str, since: str
+    ) -> int:
+        """Send a household our own people's rows of ``space_id`` newer than
+        ``since`` — unasked: the host's roster snapshot just added it, and
+        our live fan-out, planned over a roster that lacked it, never
+        reached it (``PrivateSpaceInviteHandler._push_to_gained``).
+
+        To any household with a live seat (a follower too: full read
+        parity), our own people's rows only — whatever our seat; everyone
+        else's come from the host. Its own cooldown, taken only once
+        something went out, so a failed push is retried by the next
+        snapshot and never holds back the household's own
+        ``SPACE_SYNC_RESUME`` or a resync. Never raises."""
+        key = (f"push:{instance_id}", space_id)
+        try:
+            if self._own_members is None:
+                return 0
+            last = self._last_resume.get(key)
+            if last is not None and self._clock() - last < RESUME_COOLDOWN_S:
+                return 0
+            if instance_id not in await self._space_repo.list_member_instances(
+                space_id
+            ):
+                return 0
+            own = frozenset(await self._own_members(space_id))
+            if not own:
+                return 0
+            sent = await self._replay(space_id, instance_id, _clamped_since(since), own)
+        except Exception:
+            log.warning(
+                "space %s: pushing our recent rows to %s failed",
+                space_id,
+                instance_id,
+                exc_info=True,
+            )
+            return 0
+        if sent:
+            self._last_resume[key] = self._clock()
+            self._last_resume.move_to_end(key)
+            while len(self._last_resume) > RESUME_COOLDOWN_TRACKED:
+                self._last_resume.popitem(last=False)
+        return sent
+
+    async def _replay(
+        self, space_id: str, instance_id: str, since: str, own: frozenset[str] | None
+    ) -> int:
+        """Every resource newer than ``since`` (only *own*'s rows unless
+        ``None``) to ``instance_id``, then their files."""
         to = instance_id
         media: _Media = []
         sent = 0

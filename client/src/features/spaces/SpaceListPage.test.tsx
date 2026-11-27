@@ -265,11 +265,11 @@ describe('SpaceListPage — "Some posts may be missing" dot', () => {
     expect(dot(r.getByText('Band').closest('a')!)).toBeNull()
   })
 
-  it('never on a followed space', async () => {
+  it('on a followed space too (P10: a follower syncs like a member)', async () => {
     wire({ spaces: missing('sK') })
     const r = await renderPage()
     const kunst = (await r.findByText('Kunstverein')).closest('a')!
-    expect(dot(kunst)).toBeNull()
+    expect(dot(kunst)).not.toBeNull()
   })
 
   it('sits next to the row\'s count', async () => {

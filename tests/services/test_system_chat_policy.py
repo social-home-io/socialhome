@@ -209,12 +209,17 @@ async def test_space_writers_read_and_write(space_env, role):
     assert await policy.can_write(_chat(SystemChatScope.SPACE), "u-anna")
 
 
-async def test_space_follower_neither_reads_nor_writes(space_env):
+async def test_space_follower_reads_but_never_writes(space_env):
+    """Owner 2026-11-26 (P10): a follower is a limited member but still a
+    member — it reads the space chat; posting (and every other chat write)
+    stays a member's."""
     spaces, policy = space_env
     spaces.members["u-anna"] = SpaceRole.SUBSCRIBER.value
-    assert not await policy.can_read(_chat(SystemChatScope.SPACE), "u-anna")
+    assert await policy.can_read(_chat(SystemChatScope.SPACE), "u-anna")
+    await policy.require(_chat(SystemChatScope.SPACE), "u-anna", write=False)
+    assert not await policy.can_write(_chat(SystemChatScope.SPACE), "u-anna")
     with pytest.raises(PermissionError):
-        await policy.require(_chat(SystemChatScope.SPACE), "u-anna", write=False)
+        await policy.require(_chat(SystemChatScope.SPACE), "u-anna", write=True)
 
 
 async def test_space_non_member_and_inactive_users_are_refused(space_env):
@@ -334,10 +339,12 @@ def remote_env():
     return spaces, policy
 
 
-async def test_space_remote_seats_are_the_writers_on_other_households(remote_env):
+async def test_space_remote_seats_are_every_known_seat_on_other_households(remote_env):
+    """P10: a follower's seat is in the chat's roster too (it reads, and
+    may be mentioned); an unknown role stays out."""
     _spaces, policy = remote_env
     seats = await policy.remote_seats(_chat(SystemChatScope.SPACE))
-    assert [s.user_id for s in seats] == ["r-member", "r-admin"]
+    assert [s.user_id for s in seats] == ["r-member", "r-admin", "r-follower"]
     first = seats[0]
     assert first.conversation_id == "hh"
     assert first.instance_id == "peer-b"

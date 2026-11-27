@@ -69,7 +69,7 @@ from .domain.federation import (
 )
 from .domain.gfs_channel import InvalidChannelWire, valid_channel_id
 from .domain.gfs_server import MAX_GFS_SERVERS
-from .domain.space import ContentAction
+from .domain.space import ContentAction, SpaceRole
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import MULTI_MAX_TRANSIENT, FederationService
@@ -485,7 +485,7 @@ from .services.space_service import own_inviter_proof
 from .services.space_summary_service import SpaceSummaryService
 from .services.space_sync_status import SpaceSyncStatusService
 from .services.space_writer_cert_service import SpaceWriterCertService
-from .services.space_writer_households import SpaceWriterHouseholds
+from .services.space_writer_households import SEAT_ROLES, SpaceWriterHouseholds
 from .services.space_zone_outbound import SpaceZoneOutbound
 from .services.space_zone_service import SpaceZoneService
 from .services.sticky_federation_outbound import StickyFederationOutbound
@@ -2238,10 +2238,13 @@ def _wire_federation_stack(
     page_proposal_forwarder.wire()
     app[K.page_proposal_forwarder_key] = page_proposal_forwarder
 
-    # Member-only data (whereabouts, zones) goes to member households only
-    # — never to one whose people only follow the space (owner decision 13).
+    # The members' whereabouts and zones go to every seated household — a
+    # follower is a limited member but still a member (owner 2026-11-26,
+    # P10); it reads the map, it never shares its own location.
     member_households = SpaceWriterHouseholds(
-        space_remote_member_repo, own_instance_id=identity.instance_id
+        space_remote_member_repo,
+        own_instance_id=identity.instance_id,
+        roles=SEAT_ROLES,
     )
     # §23.8.6 — fan a household PresenceUpdated out to opted-in spaces
     # as a GPS-only WS frame + sealed federation event. ``zone_name`` is
@@ -2514,6 +2517,9 @@ def _wire_federation_stack(
         file_hasher=space_media_sync_service.file_hasher,
     )
 
+    # A household the host's roster snapshot adds gets our recent rows.
+    private_invite_handler.attach_space_resume(space_sync_resume_provider)
+
     # v_86 — which files of a row we ship: on a catch-up, as a non-host
     # household, our own people's files only; on a SPACE_MEDIA_WANTED,
     # holding an admin / moderator seat, other people's too.
@@ -2527,8 +2533,12 @@ def _wire_federation_stack(
     space_sync_resume_provider.attach_row_scope(
         _roster_authority,
         own_members=_own_members,
+        # Helpers replay to every seated household, followers included
+        # (P10): a follower syncs like a member.
         member_gate=SpaceWriterHouseholds(
-            space_remote_member_repo, own_instance_id=identity.instance_id
+            space_remote_member_repo,
+            own_instance_id=identity.instance_id,
+            roles=SEAT_ROLES,
         ).may_receive,
     )
     # v_92 — the receiver notes each answer of a space's acting host; a
@@ -2798,12 +2808,15 @@ def _build_sync_pages(
     # most hourly per space (the scheduler's tick pushes a page that waited
     # for the hour mark); one receive path for the push and the targeted
     # send a stale BEGIN ref gets.
-    writers = SpaceWriterHouseholds(seat_repo, own_instance_id=own_instance_id)
+    # P10: pages are pushed to every seated household, followers included.
+    writers = SpaceWriterHouseholds(
+        seat_repo, own_instance_id=own_instance_id, roles=SEAT_ROLES
+    )
 
-    async def _writers(space_id: str) -> set[str]:
+    async def _seated(space_id: str) -> set[str]:
         return set(await writers.households(space_id))
 
-    pages.attach_push(sender=federation_service, writers=_writers)
+    pages.attach_push(sender=federation_service, seated=_seated)
     federation_service._event_registry.register(
         FederationEventType.SPACE_SYNC_PAGE, pages.on_page_event
     )
@@ -2830,10 +2843,12 @@ def _build_space_media_wanted(
     decides what we ship, within the shared budget; the media outbox
     pushes it)."""
     provider = SpaceMediaWantedProvider(
-        # Member households only — the §25.6 gate for member-only data; a
-        # follower-only household asks its GFS (v_83).
+        # Every seated household — a follower's too (P10): it asks for a
+        # missing file like a member.
         member_gate=SpaceWriterHouseholds(
-            space_remote_member_repo, own_instance_id=own_instance_id
+            space_remote_member_repo,
+            own_instance_id=own_instance_id,
+            roles=SEAT_ROLES,
         ).may_receive,
         media_refs=media_reference_repo,
         file_gates=file_gates,
@@ -3075,8 +3090,10 @@ def _build_space_chat_federation(
     ``chat_messages`` exporter (gated per requester to the same writer
     households) and the receiver's chat sink (the live create rule).
     """
+    # Every seated household reads the chat — a follower's too (P10, owner
+    # 2026-11-26); only writer seats post (SpaceChatAccess).
     audience = SpaceWriterHouseholds(
-        remote_member_repo, own_instance_id=own_instance_id
+        remote_member_repo, own_instance_id=own_instance_id, roles=SEAT_ROLES
     )
     SpaceChatOutbound(
         bus=bus,
@@ -3098,6 +3115,13 @@ def _build_space_chat_federation(
     handlers.attach_child_protection(child_protection)
     handlers.attach_to(federation_service)
     app[K.space_sync_service_key].attach_member_gate(audience.may_receive)
+    # The ban reason: owner / admin households only (owner 2026-11-27).
+    admins = SpaceWriterHouseholds(
+        remote_member_repo,
+        own_instance_id=own_instance_id,
+        roles=frozenset({SpaceRole.OWNER, SpaceRole.ADMIN}),
+    )
+    app[K.space_sync_service_key].attach_admin_gate(admins.may_receive)
     app[K.space_sync_receiver_key].attach_chat_sink(handlers)
 
 
@@ -6806,6 +6830,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # that would only fail its send against a torn-down channel.
         # The deferred mesh re-sends of space broadcasts go first: they ride
         # the routed handler, so stopping it underneath them would fail them.
+        # Pushes to the households a roster snapshot added: ended while the
+        # federation stack and the database are still up.
+        if (invites := app.get(K.private_invite_handler_key)) is not None:
+            await invites.stop()
         fed_svc = app.get(K.federation_service_key)
         if fed_svc is not None:
             await fed_svc.stop()

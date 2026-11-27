@@ -483,7 +483,7 @@ class _SpaceRepoStub:
     async def get_member(self, space_id, user_id):
         return SimpleNamespace(user_id=user_id) if user_id == "u-seated" else None
 
-    # ``holds_member_seat``: this household's one local user ``u-local``
+    # ``holds_seat``: this household's one local user ``u-local``
     # holds a member's seat, or only a follower's (``follower_only``).
     async def list_local_member_user_ids(self, space_id):
         return ["u-local"]

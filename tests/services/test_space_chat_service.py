@@ -50,10 +50,11 @@ async def test_ensure_chat_is_idempotent_and_refuses_unknown_spaces(stack):
         await stack.chat.ensure_chat("sp-nowhere")
 
 
-async def test_reconcile_seats_writers_only(stack):
+async def test_reconcile_seats_every_seat_followers_included(stack):
     chat = await stack.chat.reconcile(SP)
-    # Owner, member, moderator — never the follower nor a non-member.
-    assert await _seated(stack, chat.id) == {"anna", "bob", "mod"}
+    # Owner, member, moderator and the follower (P10: it reads the chat) —
+    # never a non-member.
+    assert await _seated(stack, chat.id) == {"anna", "bob", "mod", "finn"}
     (seat,) = [
         m for m in await stack.convos.list_members(chat.id) if m.username == "bob"
     ]
@@ -68,10 +69,8 @@ async def test_reconciler_follows_joins_leaves_and_role_changes(stack):
     )
     await stack.bus.publish(SpaceMemberJoined(space_id=SP, user_id="u-zoe"))
     assert "zoe" in await _seated(stack, chat.id)
-    # Demoted to follower: out, on the role change.
-    await stack.db.enqueue(
-        "UPDATE space_members SET role='subscriber' WHERE user_id='u-bob'"
-    )
+    # Out of the space: out of the chat, on the leave.
+    await stack.db.enqueue("DELETE FROM space_members WHERE user_id='u-bob'")
     await stack.bus.publish(
         SpaceConfigChanged(
             space_id=SP, event_type="role_changed", payload={}, sequence=0
@@ -80,7 +79,7 @@ async def test_reconciler_follows_joins_leaves_and_role_changes(stack):
     assert "bob" not in await _seated(stack, chat.id)
     await stack.spaces.delete_member(SP, "u-zoe")
     await stack.bus.publish(SpaceMemberLeft(space_id=SP, user_id="u-zoe"))
-    assert await _seated(stack, chat.id) == {"anna", "mod"}
+    assert await _seated(stack, chat.id) == {"anna", "mod", "finn"}
 
 
 async def test_space_events_before_the_chat_exists_create_nothing(stack):
@@ -123,13 +122,14 @@ async def test_summary_reports_unread_and_mute(stack):
     assert (await stack.chat.summary(SP, "bob")).unread == 2
 
 
-async def test_summary_follower_and_chat_off_are_disabled(stack):
+async def test_summary_follower_reads_and_chat_off_is_disabled(stack):
     follower = await stack.chat.summary(SP, "finn")
-    assert not follower.enabled and follower.conversation_id is None
+    assert follower.enabled and follower.conversation_id is not None
+    assert follower.can_post is False
+    assert (await stack.chat.summary(SP, "bob")).can_post is True
     await stack.db.enqueue("UPDATE spaces SET feature_chat=0 WHERE id=?", (SP,))
     off = await stack.chat.summary(SP, "bob")
     assert not off.enabled and off.conversation_id is None
-    assert await stack.chat.get_chat(SP) is None
 
 
 @pytest.mark.parametrize("who", ["zoe", "nobody"])
@@ -168,18 +168,17 @@ async def test_send_mints_an_owner_bound_id_and_reaches_the_writers(stack):
     )
     (created,) = stack.events(DmMessageCreated)
     assert created.system_scope == "space" and created.origin_instance_id is None
-    assert set(created.recipient_user_ids) == {"u-bob", "u-mod"}
+    # Every seat reads the chat — the follower too (P10).
+    assert set(created.recipient_user_ids) == {"u-bob", "u-mod", "u-finn"}
 
 
-async def test_a_demoted_seat_is_not_in_the_audience_before_reconciling(stack):
+async def test_a_removed_seat_is_not_in_the_audience_before_reconciling(stack):
     chat_id = (await stack.chat.summary(SP, "anna")).conversation_id
-    # The seat is still there; the live policy keeps bob out anyway.
-    await stack.db.enqueue(
-        "UPDATE space_members SET role='subscriber' WHERE user_id='u-bob'"
-    )
+    # The chat seat is still there; the live policy keeps bob out anyway.
+    await stack.db.enqueue("DELETE FROM space_members WHERE user_id='u-bob'")
     await stack.dm.send_message(chat_id, sender_username="anna", content="hi")
     (created,) = stack.events(DmMessageCreated)
-    assert created.recipient_user_ids == ("u-mod",)
+    assert set(created.recipient_user_ids) == {"u-mod", "u-finn"}
 
 
 @pytest.mark.parametrize(
@@ -211,13 +210,19 @@ async def test_a_reply_must_name_a_message_of_the_same_chat(stack):
         )
 
 
-async def test_followers_and_strangers_cannot_post_or_read(stack):
+async def test_followers_read_but_never_post_and_strangers_neither(stack):
     chat_id = (await stack.chat.summary(SP, "anna")).conversation_id
-    for who in ("finn", "zoe"):
-        with pytest.raises(PermissionError):
-            await stack.dm.send_message(chat_id, sender_username=who, content="x")
-        with pytest.raises(PermissionError):
-            await stack.dm.list_messages(chat_id, reader_username=who)
+    msg = await stack.dm.send_message(chat_id, sender_username="bob", content="x")
+    # P10: a follower reads the chat, never writes to it.
+    assert [m.id for m in await stack.dm.list_messages(chat_id, reader_username="finn")]
+    with pytest.raises(PermissionError):
+        await stack.dm.send_message(chat_id, sender_username="finn", content="x")
+    with pytest.raises(PermissionError):
+        await stack.dm.add_reaction(msg.id, username="finn", emoji="👍")
+    with pytest.raises(PermissionError):
+        await stack.dm.send_message(chat_id, sender_username="zoe", content="x")
+    with pytest.raises(PermissionError):
+        await stack.dm.list_messages(chat_id, reader_username="zoe")
 
 
 async def test_chat_off_refuses_and_archived_refuses_writes_only(stack):
@@ -247,7 +252,7 @@ async def test_moderators_delete_anyones_message_members_do_not(stack):
     ]
     assert deleted[0].system_scope == "space"
     # Every local reader's open thread — the moderator's other tabs too.
-    assert set(deleted[0].recipient_user_ids) == {"u-anna", "u-bob", "u-mod"}
+    assert set(deleted[0].recipient_user_ids) == {"u-anna", "u-bob", "u-mod", "u-finn"}
     stored = await stack.convos.get_message(by_bob.id)
     assert stored is not None and stored.deleted
 
@@ -268,9 +273,11 @@ async def test_unread_by_space_follows_level_and_mute(stack):
     await stack.dm.mute(chat_id, username="bob", duration="forever")
     muted = (await stack.chat.unread_by_space("bob"))[SP]
     assert muted.unread == 0 and muted.muted_until == MUTED_FOREVER
-    # The sender's own messages never count; a follower has no seat.
+    # The sender's own messages never count; a follower's seat counts like
+    # a member's (P10: it reads the chat).
     assert (await stack.chat.unread_by_space("anna"))[SP].unread == 0
-    assert await stack.chat.unread_by_space("finn") == {}
+    await stack.chat.summary(SP, "finn")
+    assert SP in await stack.chat.unread_by_space("finn")
 
 
 async def test_unread_by_space_skips_the_mention_parse_without_unread(stack):

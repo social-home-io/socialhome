@@ -9,10 +9,10 @@ reconciler has not caught up on yet never grants (or withholds) anything:
 
 * **household** — an active local user, while ``feat_household_chat`` is
   on (:class:`HouseholdChatAccess`).
-* **space** — a local ``space_members`` seat with a WRITER role (owner,
-  admin, moderator, member — never a follower), ``features.chat`` on, not
-  banned, the space not dissolved; posting also needs the space not
-  archived (reading an archived space's chat stays allowed)
+* **space** — a local ``space_members`` seat (a follower's included: it
+  reads, P10), ``features.chat`` on, not banned, the space not dissolved;
+  posting needs a WRITER role (owner, admin, moderator, member) and the
+  space not archived (reading an archived space's chat stays allowed)
   (:class:`SpaceChatAccess`).
 
 A scope with no registered access is refused (fail closed), so a
@@ -40,6 +40,7 @@ from ..domain.space import (
     Space,
     SpaceArchivedError,
     SpacePermissionError,
+    SpaceRole,
 )
 from ..domain.user import User
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
@@ -57,6 +58,9 @@ HOUSEHOLD_CHAT_SECTION = "household_chat"
 SPACE_CHAT_SECTION = "space:chat"
 
 _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
+#: Every known seat role — a follower's included (P10); an unknown role
+#: (a newer peer's) stays out.
+_SEAT_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in SpaceRole)
 _CONTENT_ROLE_VALUES: frozenset[str] = frozenset(
     r.value for r in CONTENT_AUTHORITY_ROLES
 )
@@ -115,21 +119,26 @@ class HouseholdChatAccess:
 
 
 class SpaceChatAccess:
-    """A space's chat: the space's local WRITER seats, while chat is on.
+    """A space's chat: every local seat reads it, the WRITER seats post,
+    while chat is on.
 
-    Read and write need a local ``space_members`` seat whose role is a
-    writer one (:data:`~socialhome.domain.space.WRITER_ROLES` — a follower
-    neither reads nor posts), no ban, and the space neither dissolved nor
-    unknown; then ``features.chat`` on (:class:`FeatureDisabledError`
-    otherwise). Posting also needs the space not archived
+    Reading needs a local ``space_members`` seat of any role — a follower
+    reads the chat like any member (owner 2026-11-26: a follower is a
+    limited member but still a member) — no ban, and the space neither
+    dissolved nor unknown; then ``features.chat`` on
+    (:class:`FeatureDisabledError` otherwise). Every write (a message, a
+    reaction, an edit) needs a writer role
+    (:data:`~socialhome.domain.space.WRITER_ROLES`): a follower never
+    writes to the chat. Posting also needs the space not archived
     (:class:`SpaceArchivedError`), like posts and comments; reading an
     archived space's chat stays allowed. Content authority (owner, admin,
     moderator) may delete anyone's message (:meth:`may_moderate`).
 
     The members on other households come from the space roster
-    (``space_remote_members``, :meth:`remote_seats`) — never a follower,
-    a banned or a removed seat — so the composer can @-mention them and
-    their messages carry their names.
+    (``space_remote_members``, :meth:`remote_seats`) — every seat, a
+    follower's included (P10: it reads the chat), never a banned or a
+    removed seat — so the composer can @-mention them and their messages
+    carry their names.
     """
 
     __slots__ = ("_remote_members", "_spaces")
@@ -145,8 +154,9 @@ class SpaceChatAccess:
         self._spaces = space_repo
         self._remote_members = remote_members
 
-    async def _writer_role(self, conv: Conversation, user: User) -> tuple[Space, str]:
-        """``conv``'s space and the user's writer role in it; raise otherwise."""
+    async def _seat_role(self, conv: Conversation, user: User) -> tuple[Space, str]:
+        """``conv``'s space and the user's role in it (any seat, a
+        follower's included); raise otherwise."""
         if user.state != "active" or user.deleted_at is not None:
             raise PermissionError("not a member of this space chat")
         space_id = conv.space_id
@@ -154,9 +164,9 @@ class SpaceChatAccess:
         if space is None or space.dissolved:
             raise PermissionError("not a member of this space chat")
         member = await self._spaces.get_member(space.id, user.user_id)
-        role = str(member.role) if member is not None else ""
-        if role not in _WRITER_ROLE_VALUES:
+        if member is None:
             raise PermissionError("not a member of this space chat")
+        role = str(member.role)
         if await self._spaces.is_banned(space.id, user.user_id):
             raise PermissionError("not a member of this space chat")
         if not space.features.chat:
@@ -164,23 +174,26 @@ class SpaceChatAccess:
         return space, role
 
     async def check(self, conv: Conversation, user: User, *, write: bool) -> None:
-        space, _role = await self._writer_role(conv, user)
+        space, role = await self._seat_role(conv, user)
+        if write and role not in _WRITER_ROLE_VALUES:
+            # A follower reads the chat; it never writes to it.
+            raise PermissionError("followers read this space chat")
         if write and space.archived:
             raise SpaceArchivedError()
 
     async def may_moderate(self, conv: Conversation, user: User) -> bool:
         try:
-            _space, role = await self._writer_role(conv, user)
+            _space, role = await self._seat_role(conv, user)
         except PermissionError, FeatureDisabledError:
             return False
         return role in _CONTENT_ROLE_VALUES
 
     async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
-        """The space's writers on other households, seat-shaped.
+        """The space's seats on other households, seat-shaped — a
+        follower's included (P10: it reads the chat and may be mentioned).
 
-        Only writer roles are kept (an allow-list — a follower, or any role
-        added later, stays out); banned and removed (tombstoned) seats are
-        left out, as is everything while the space is unknown, dissolved
+        A role this household doesn't know stays out (an allow-list);
+        banned and removed (tombstoned) seats are left out, as is everything while the space is unknown, dissolved
         or has chat off. ``remote_username`` is always empty: the roster
         carries no login, so consumers look the person up by ``user_id``
         (``remote_users``), and the roster's ``display_name`` names them
@@ -197,7 +210,7 @@ class SpaceChatAccess:
         for seat in await self._remote_members.list_for_space(space.id):
             if seat.tombstoned or seat.user_id in seen or seat.user_id in banned:
                 continue
-            if seat.role not in _WRITER_ROLE_VALUES:
+            if seat.role not in _SEAT_ROLE_VALUES:
                 continue
             seen.add(seat.user_id)
             out.append(

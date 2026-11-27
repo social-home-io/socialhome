@@ -1281,21 +1281,18 @@ def _zones_provider(encoder) -> SpaceSyncService:
     return SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
 
 
-@pytest.mark.parametrize("member", [True, False])
-async def test_zones_stream_only_to_a_member_household(encoder, member):
-    """The members' places are member-only data (owner decision 13): a
-    follower-only household gets no zones by catch-up, as it gets none
-    live."""
+async def test_zones_stream_to_every_seated_household(encoder):
+    """P10 (owner 2026-11-26): a follower reads the members' places — the
+    zones stream to every seated household like any other resource."""
     svc = _zones_provider(encoder)
 
-    async def _gate(_space_id: str, _instance_id: str) -> bool:
-        return member
+    async def _seat(_space_id: str, _instance_id: str) -> bool:
+        return True
 
-    svc.attach_member_gate(_gate)
+    svc.attach_member_gate(_seat)
     session = _FakeSession()
     await svc.stream_initial(session)
-    streamed = sorted(set(_resources(session)))
-    assert streamed == (["space_zones", "space_zones_deleted"] if member else [])
+    assert sorted(set(_resources(session))) == ["space_zones", "space_zones_deleted"]
 
 
 def _roster_provider(encoder) -> SpaceSyncService:
@@ -1414,11 +1411,13 @@ async def test_without_an_authority_check_the_roster_streams_as_before(encoder):
     ]
 
 
-async def test_zones_never_stream_without_a_gate(encoder):
+async def test_zones_need_no_member_gate_any_more(encoder):
+    """P10: the zones are no member-only resource; who may sync at all is
+    the BEGIN's own seat check."""
     svc = _zones_provider(encoder)
     session = _FakeSession()
     await svc.stream_initial(session)
-    assert _resources(session) == []
+    assert sorted(set(_resources(session))) == ["space_zones", "space_zones_deleted"]
 
 
 # ─── §25.6 incremental sessions: change stamps + per-household watermark ──
@@ -2620,14 +2619,12 @@ async def test_a_chunk_may_ride_a_route_raw_only_to_a_requester_that_reads_it(
     assert {c.kwargs["routed_raw_body"] for c in calls} == {raw}
 
 
-@pytest.mark.parametrize("member", [True, False, None])
-async def test_a_follower_gets_who_is_banned_never_why(encoder, member):
-    """P9 (P7b Fable M4): the ``bans`` catch-up shipped every ban's free-text
-    reason to follower households too. A follower needs the target (its
-    authorship checks refuse a banned person's items) and the banner (the
-    receiver drops a person ban without one), never the reason; a member
-    household keeps it (the ban list's documented audience). No gate wired
-    reads as a follower (fail closed)."""
+@pytest.mark.parametrize("admin", [True, False, None])
+async def test_the_ban_reason_reaches_admin_households_only(encoder, admin):
+    """Owner 2026-11-27 (M2): every seated household gets who is banned and
+    by whom; the free-text ``reason`` only an owner / admin household —
+    every role alike (a plain member's household too). No gate wired
+    (``None``) strips it: fail closed."""
     builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
     row = {"space_id": "sp", "user_id": "u-x", "banned_by": "u-a", "reason": "spam"}
     svc = SpaceSyncService(
@@ -2635,15 +2632,14 @@ async def test_a_follower_gets_who_is_banned_never_why(encoder, member):
         exporters={"bans": _FakeExporter("bans", [row])},
         sig_suite="ed25519",
     )
-    if member is not None:
+    if admin is not None:
 
         async def _gate(_space_id: str, _instance_id: str) -> bool:
-            return member
+            return admin
 
-        svc.attach_member_gate(_gate)
+        svc.attach_admin_gate(_gate)
     session = _FakeSession()
     await svc.stream_initial(session)
     (got,) = _records(session)["bans"]
-    assert got["user_id"] == "u-x"
-    assert got["banned_by"] == "u-a"
-    assert ("reason" in got) is bool(member)
+    assert got["banned_by"] == "u-a" and got["user_id"] == "u-x"
+    assert got.get("reason") == ("spam" if admin else None)

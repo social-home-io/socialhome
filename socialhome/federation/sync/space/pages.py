@@ -12,7 +12,7 @@
   BEGIN never waits for it.
 * **Deliver (push; owner decision 2026-11-22).** A new page is pushed as
   ``SPACE_SYNC_PAGE`` (the page and its full vector, sealed under the space
-  content key) to every member household holding a writer seat, at most
+  content key) to every seated household (a follower's included, P10), at most
   once an hour per space (a seal within the hour waits for the hour mark;
   the scheduler's tick pushes the newest page then). A member whose BEGIN
   names an older page than the one last pushed gets the same event from
@@ -75,7 +75,7 @@ from ....domain.space_sync_page import (
 from ....services.inbound_media_store import media_basename
 from ....services.pending_decrypts_cache import KEY_WAIT_MAX_AHEAD
 from ....services.space_crypto_service import MissingEpochKey
-from ....services.space_writer_households import holds_member_seat
+from ....services.space_writer_households import holds_seat
 from ....sync_page import (
     COMMIT_SPECS,
     COMMITTED_RESOURCES,
@@ -887,10 +887,12 @@ class SyncPageService:
         "_push_pending",
         "_pushed",
         "_pushed_payload",
+        "_rejudged",
         "_repo",
         "_request_round",
         "_round_left",
         "_rounds",
+        "_seated",
         "_seats",
         "_sender",
         "_seqs",
@@ -902,7 +904,6 @@ class SyncPageService:
         "_tasks",
         "_versions",
         "_wanted",
-        "_writers",
     )
 
     def __init__(
@@ -954,6 +955,9 @@ class SyncPageService:
         self._tasks: set[asyncio.Task] = set()
         #: space → the last compare of our copy with its page.
         self._checks: OrderedDict[str, _Compare] = OrderedDict()
+        #: space → the page root a completed stream already had re-judged
+        #: (:meth:`_compare_if_unjudged`) — once per page.
+        self._rejudged: OrderedDict[str, bytes] = OrderedDict()
         #: space → the (epoch, signer) whose equivocation we saw.
         self._conflicts: OrderedDict[str, tuple[int, str]] = OrderedDict()
         #: Parks a page that arrived ahead of its epoch's content key
@@ -979,12 +983,12 @@ class SyncPageService:
         self._fetching: dict[str, float] = {}
         #: space → the buckets a member fetch cannot complete (R3).
         self._stuck: OrderedDict[str, _Stuck] = OrderedDict()
-        #: Push (:meth:`attach_push`): the fan-out, the writer households of
-        #: a space (never a follower-only one), and per space when the last
+        #: Push (:meth:`attach_push`): the fan-out, the seated households of
+        #: a space (a follower's included, P10), and per space when the last
         #: push went (monotonic) with that page's order key; the spaces
         #: whose newer page waits for the hour mark.
         self._sender: _PageSender | None = None
-        self._writers: Callable[[str], Awaitable[set[str]]] | None = None
+        self._seated: Callable[[str], Awaitable[set[str]]] | None = None
         self._pushed: OrderedDict[str, tuple[float, tuple[int, int, int]]] = (
             OrderedDict()
         )
@@ -1319,16 +1323,16 @@ class SyncPageService:
         self,
         *,
         sender: _PageSender,
-        writers: Callable[[str], Awaitable[set[str]]],
+        seated: Callable[[str], Awaitable[set[str]]],
     ) -> None:
         """Wire page delivery: ``sender`` — the federation service's space
         fan-out (``broadcast_to_space_members``: paired and mesh members
         directly, GFS-reached ones in ONE multi upload per GFS) and its
-        one-household send; ``writers(space_id)`` — the member households
-        holding a writer seat (a follower-only household never gets a
-        page: its vector covers member-only resources)."""
+        one-household send; ``seated(space_id)`` — the households holding
+        a seat, a follower's included (P10, owner 2026-11-26: a follower
+        syncs like a member and holds the same rows, so ONE checksum)."""
         self._sender = sender
-        self._writers = writers
+        self._seated = seated
 
     async def _page_event(self, space_id: str, held: _Held) -> dict:
         """The ``SPACE_SYNC_PAGE`` payload: the page and its full vector,
@@ -1349,7 +1353,7 @@ class SyncPageService:
     async def _push_or_schedule(self, space_id: str) -> None:
         """A page was sealed here: push it now, or — within the hour after
         the last push — once at the hour mark (:meth:`push_due`)."""
-        if self._sender is None or self._writers is None:
+        if self._sender is None or self._seated is None:
             return
         last = self._pushed.get(space_id)
         if last is not None and self._monotonic() - last[0] < PAGE_PUSH_INTERVAL_S:
@@ -1367,9 +1371,9 @@ class SyncPageService:
                 await self._push(space_id)
 
     async def _push(self, space_id: str) -> None:
-        """Push the page sealed here to every writer household. Fail-soft."""
+        """Push the page sealed here to every seated household. Fail-soft."""
         self._push_pending.discard(space_id)
-        if self._sender is None or self._writers is None:
+        if self._sender is None or self._seated is None:
             return
         try:
             space = await self._spaces.get(space_id)
@@ -1385,19 +1389,19 @@ class SyncPageService:
             self._pushed_payload.move_to_end(space_id)
             while len(self._pushed_payload) > MAX_PUSHED_PAYLOADS:
                 self._pushed_payload.popitem(last=False)
-            writers = await self._writers(space_id)
+            seated = await self._seated(space_id)
             await self._sender.broadcast_to_space_members(
                 space_id,
                 FederationEventType.SPACE_SYNC_PAGE,
                 payload,
                 min_proto_version=FederationCapability.MIN_FOR_SYNC_PAGES,
-                only_instances=writers,
+                only_instances=seated,
             )
             log.info(
-                "sync page: pushed page %d of space %s to %d member household(s)",
+                "sync page: pushed page %d of space %s to %d seated household(s)",
                 held.page.seq,
                 space_id,
-                len(writers),
+                len(seated),
             )
         except Exception:
             log.exception("sync page: pushing the page of %s failed", space_id)
@@ -1472,8 +1476,9 @@ class SyncPageService:
     ) -> None:
         """A BEGIN from *requester* (a stream ends): when its ``page`` ref
         shows it missed a push (:meth:`page_for`), the same
-        ``SPACE_SYNC_PAGE`` event goes to that one household — never a
-        follower-only one. The sentinel carries no page. Fail-soft.
+        ``SPACE_SYNC_PAGE`` event goes to that one household — any seated
+        one, a follower's included (P10). The sentinel carries no page.
+        Fail-soft.
 
         Security check 2: only a SIGNER answers (the page it last pushed) —
         a tick sends one BEGIN to every peer, and every member holding the
@@ -1482,7 +1487,7 @@ class SyncPageService:
         signer answers it). Each signer judges the requester's entry for
         ITSELF (``signers``), so a signer's own entry for its own page never
         makes another signer resend."""
-        if self._sender is None or self._writers is None:
+        if self._sender is None or self._seated is None:
             self.seal_soon(space_id)
             return
         try:
@@ -1496,7 +1501,7 @@ class SyncPageService:
                 requester_version=requester_version,
                 requester_ref=requester_ref,
             )
-            if payload is None or requester not in await self._writers(space_id):
+            if payload is None or requester not in await self._seated(space_id):
                 return
             await self._sender.send_with_mesh_fallback(
                 to_instance_id=requester,
@@ -1510,8 +1515,15 @@ class SyncPageService:
     def sentinel_seen(self, space_id: str) -> None:
         """A sentinel of a stream of *space_id* arrived (no page rides it any
         more): compare the held page if it has no verdict yet (verdicts are
-        memory only — after a restart the stored page waits otherwise)."""
-        self._spawn(self._compare_if_unjudged(space_id), f"sync-page-seen-{space_id}")
+        memory only — after a restart the stored page waits otherwise), and
+        re-judge once a verdict that found unexplained buckets — formed
+        before this stream's rows landed (the page push can beat a
+        household's first stream), it would otherwise stand until the next
+        round and the household could prove, and so deliver, nothing."""
+        self._spawn(
+            self._compare_if_unjudged(space_id, stream_ended=True),
+            f"sync-page-seen-{space_id}",
+        )
 
     async def on_page_event(self, event: FederationEvent) -> None:
         """The ``SPACE_SYNC_PAGE`` handler (the dispatch registry): the
@@ -1533,11 +1545,12 @@ class SyncPageService:
         sealed = payload.get("page_sealed") if isinstance(payload, dict) else None
         if sealed is None:
             return False
-        if not await holds_member_seat(self._spaces, space_id):  # type: ignore[arg-type]
-            # The receiving half of "no page to a follower" (L5): a
-            # follower-only household drops a page sent to it by mistake.
+        if not await holds_seat(self._spaces, space_id):  # type: ignore[arg-type]
+            # A household with nobody seated in the space keeps nothing of
+            # it (a follower's seat counts, P10).
             log.info(
-                "sync page: a page of %s for a follower household dropped", space_id
+                "sync page: a page of %s for a household with no seat dropped",
+                space_id,
             )
             return False
         return await self.receive(
@@ -1596,7 +1609,7 @@ class SyncPageService:
         :data:`KEY_WAIT_MAX_AHEAD` past it (the epoch is plaintext and is
         read before anything is verified), once per (space, provider,
         epoch); else it waits for the next sync. The replay re-checks our
-        own seat ("no page to a follower")."""
+        own seat (any seat, a follower's included)."""
         held = await self._crypto.get_current_epoch(space_id)
         key = (space_id, provider, epoch)
         if (
@@ -1624,7 +1637,7 @@ class SyncPageService:
 
         async def _again() -> None:
             self._parked_keys.discard(key)
-            if not await holds_member_seat(self._spaces, space_id):  # type: ignore[arg-type]
+            if not await holds_seat(self._spaces, space_id):  # type: ignore[arg-type]
                 return
             await self.receive(
                 space_id=space_id, sync_id=sync_id, provider=provider, sealed=sealed
@@ -1800,15 +1813,37 @@ class SyncPageService:
         made for that older page."""
         self._asked = asked
 
-    async def _compare_if_unjudged(self, space_id: str) -> None:
-        """A sentinel brought no newer page: compare the held page only if
-        it has no verdict yet — compare results live in memory, so after a
-        restart the stored page would otherwise wait for the next page.
-        Never a second compare of a judged page. Fail-soft."""
+    async def _compare_if_unjudged(
+        self, space_id: str, *, stream_ended: bool = False
+    ) -> None:
+        """A sentinel brought no newer page: compare the held page if it has
+        no verdict yet — compare results live in memory, so after a restart
+        the stored page would otherwise wait for the next page — or, when a
+        stream ended (*stream_ended*), once per page re-judge a verdict that
+        left buckets unexplained (see :meth:`sentinel_seen`). A matching verdict is never compared again.
+        Fail-soft."""
         try:
-            if space_id in self._comparing or await self._judged(space_id):
+            if space_id in self._comparing:
                 return
-            self.compare_soon(space_id)
+            if not await self._judged(space_id):
+                self.compare_soon(space_id)
+                return
+            check = self._checks.get(space_id)
+            if (
+                not stream_ended
+                or check is None
+                or check.unexplained == 0
+                or self._rejudged.get(space_id) == check.root
+                or self._judging.get(space_id) == check.root
+            ):
+                return
+            # Once per page, at once (no cadence wait): the stream that just
+            # ended may have brought exactly the rows the verdict lacked.
+            self._rejudged[space_id] = check.root
+            self._rejudged.move_to_end(space_id)
+            while len(self._rejudged) > MAX_TRACKED:
+                self._rejudged.popitem(last=False)
+            await self.compare(space_id)
         except Exception:
             log.exception("sync page: checking the verdict of %s failed", space_id)
 
@@ -2303,7 +2338,7 @@ class SyncPageService:
 
     async def _fetch_round(self, space_id: str) -> None:
         """One round of asks: the member households at v_95 (never a host,
-        never us, never a follower), sorted and rotated from a stable
+        never us; a follower household serves like a member, P10), sorted and rotated from a stable
         per-household offset plus one step per round, at most
         :data:`MAX_FETCH_ASKS`, one at a time while no host answers and a
         bucket is still to fetch. One ask in flight per space."""

@@ -249,7 +249,7 @@ class SpaceSyncStatusService(BusPublisherMixin):
 
     async def status(self, space_id: str) -> SpaceSyncStatus | None:
         """The space's sync status; ``None`` for an unknown space. The
-        caller decides who may see it (members, never followers)."""
+        caller decides who may see it (every seat, a follower's included)."""
         space = await self._space_repo.get(space_id)
         if space is None:
             return None

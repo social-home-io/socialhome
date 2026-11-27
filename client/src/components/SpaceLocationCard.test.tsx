@@ -583,6 +583,26 @@ describe('SpaceLocationCard', () => {
     await findByText(/Your location is private here/i)
   })
 
+  it('the ask says members AND followers see it, with the follower count (P10)', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({ feature_enabled: true, location_mode: 'gps', entries: [] })
+      }
+      if (url.includes('/members')) {
+        return Promise.resolve([{ user_id: 'u_pascal', role: 'member', location_share_enabled: false }])
+      }
+      return Promise.resolve({ zones: [] })
+    })
+    const { findByText, findAllByText } = render(
+      <SpaceLocationCard spaceId="sp_test" currentUserId="u_pascal" takesFollowers followerCount={12} />,
+    )
+    await findByText(/Your location is private here/i)
+    // On the switch itself and in the first-visit ask alike.
+    const lines = await findAllByText('Everyone in this space means its members and its 12 followers.')
+    expect(lines.length).toBeGreaterThanOrEqual(1)
+    expect(lines.some((el) => el.closest('.sh-sharing-chip'))).toBe(true)
+  })
+
   it('subscribes to space_zone_changed WS events', async () => {
     mockApi.get.mockResolvedValue({
       feature_enabled: true, location_mode: 'gps', entries: [],

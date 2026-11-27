@@ -214,7 +214,7 @@ class HouseholdChatService:
         if user is None or user.state != "active" or user.deleted_at is not None:
             raise PermissionError("not a member of the household chat")
         if not await self._access.enabled():
-            return SystemChatSummary(enabled=False)
+            return SystemChatSummary(enabled=False, can_post=False)
         chat = await self.reconcile()
         seat = next(
             (

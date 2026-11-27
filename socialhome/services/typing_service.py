@@ -190,11 +190,12 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         sender_user_id: str,
         sender_username: str,
     ) -> int:
-        """Typing in a system chat: only from someone the policy lets read
-        it right now (chat on, still a member), only to its live audience,
+        """Typing in a system chat: only from someone the policy lets WRITE
+        it right now (chat on, a writer seat — a space's follower reads but
+        never types, P10), only to its live audience,
         never federated (household chat) — a space chat's typing would ride
         its own events."""
-        if self._system_chats is None or not await self._system_chats.can_read(
+        if self._system_chats is None or not await self._system_chats.can_write(
             conv, sender_user_id
         ):
             return 0

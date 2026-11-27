@@ -42,8 +42,8 @@ class SpaceZoneOutbound:
     ) -> None:
         self._bus = bus
         self._federation = federation_service
-        #: Zones are the members' places — never sent to a household that
-        #: only follows the space (owner decision 13).
+        #: Zones go to every seated household of the space — followers
+        #: read the map too (P10, owner 2026-11-26).
         self._members = member_households
 
     def wire(self) -> None:

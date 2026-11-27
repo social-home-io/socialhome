@@ -1,8 +1,8 @@
 /**
  * A space's sync status in plain words — "is anything missing?" and "did
  * my post go out?" (``GET /api/spaces/{id}`` ``sync``, kept live by the
- * ``space.sync_state`` frame; members only, a follower gets ``null`` and
- * sees none of this).
+ * ``space.sync_state`` frame; every seat, a follower's included — it
+ * syncs like a member, P10).
  *
  * The server computes the state (``SpaceSyncStatusService``) and the one
  * warning, ``may_be_missing`` ("Some posts may be missing", the DM gap's

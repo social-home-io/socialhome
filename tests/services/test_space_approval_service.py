@@ -12,6 +12,7 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -449,6 +450,57 @@ async def test_mirror_update_shows_host_tally_not_local_recompute(stack):
     assert listed[0]["needed"] == 2
 
 
+async def test_a_mirror_never_keeps_an_old_hosts_ban_reason(stack):
+    """Fable round 3 (M-A): a host on an older build still sends a forwarded
+    ban's reason in ``params.fwd_params`` and the top-level ``fwd_params``;
+    the mirror scrubs both before it stores, frames or lists the view."""
+    from socialhome.domain.space import JoinMode, Space, SpaceFeatures
+
+    stub = Space(
+        id="sp-remote3",
+        name="S",
+        owner_instance_id="host-instance",
+        owner_username="hostowner",
+        identity_public_key="",
+        config_sequence=0,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+        emoji="🏠",
+        description="",
+    )
+    await stack.space_repo.save(stub)
+    seen: list = []
+
+    async def _capture(e):
+        seen.append(e)
+
+    stack.bus.subscribe(SpaceProposalUpdated, _capture)
+    fwd = {"user_id": "u-victim", "reason": "harassed my kid"}
+    await stack.approvals.apply_mirror_update(
+        stub.id,
+        {
+            "id": "prop-3",
+            "space_id": stub.id,
+            "action": ProposalAction.REMOTE_ADMIN_ACTION.value,
+            "params": {"fwd_action": "ban", "fwd_params": dict(fwd)},
+            "fwd_action": "ban",
+            "fwd_params": dict(fwd),
+            "status": "pending",
+            "proposed_by_instance": "host-instance",
+            "proposed_by_user": "hostadmin",
+            "created_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+        },
+    )
+    (listed,) = await _open(stack, stub.id)
+    assert b"harassed" not in orjson.dumps(listed)
+    assert all(b"harassed" not in orjson.dumps(e.view) for e in seen)
+    (row,) = await stack.proposals.list_open(stub.id)
+    assert b"harassed" not in orjson.dumps(row.host_view)
+    assert b"harassed" not in orjson.dumps(row.params)
+
+
 async def test_mirror_update_drops_resolved_proposal(stack):
     """A resolved (executed/rejected) host view removes the mirror row."""
     from socialhome.domain.space import JoinMode, Space, SpaceFeatures
@@ -524,6 +576,37 @@ async def test_enqueue_owner_approval_creates_pending_no_vote(stack):
     assert await stack.proposals.list_votes(v["id"]) == []
     # An update event was emitted.
     assert any(e.proposal_id == v["id"] for e in seen)
+
+
+async def test_a_forwarded_ban_reason_reaches_owner_and_admins_only(stack):
+    """Owner 2026-11-27 (M2) / Fable round 2 (H-2): a forwarded ban's
+    free-text reason never rides the proposal view — not the broadcast
+    event, not a mirror, not a plain seat's list; an owner / admin reading
+    the host's own row sees it as ``fwd_reason``."""
+    owner = await _user(stack, "alice")
+    space = await stack.setup.create_space(owner_username="alice", name="S")
+    seen: list = []
+
+    async def _capture(e):
+        seen.append(e)
+
+    stack.bus.subscribe(SpaceProposalUpdated, _capture)
+    await stack.approvals.enqueue_owner_approval(
+        space.id,
+        actor_instance="host-B",
+        actor_user="ben",
+        fwd_action="ban",
+        fwd_params={"user_id": "u-victim", "reason": "harassed my kid"},
+    )
+    (plain,) = await _open(stack, space.id)
+    assert "reason" not in plain["params"]["fwd_params"]
+    assert "reason" not in plain["fwd_params"]
+    assert "fwd_reason" not in plain
+    assert all(b"harassed" not in orjson.dumps(e.view) for e in seen)
+    (mine,) = await stack.approvals.list_for_space(
+        space.id, viewer_user_id=owner.user_id
+    )
+    assert mine["fwd_reason"] == "harassed my kid"
 
 
 async def test_enqueue_owner_approval_no_dedup(stack):
@@ -1219,9 +1302,9 @@ async def test_list_for_space_refuses_a_caller_without_a_seat(stack):
             await stack.approvals.list_for_space(sid, viewer_user_id="uid-outsider")
 
 
-async def test_list_for_space_refuses_a_follower(stack):
-    """A follower is an outsider to the space's governance (owner
-    decision 13): the same 403 as no seat at all."""
+async def test_a_follower_reads_the_proposals_but_never_votes(stack):
+    """P10 (owner 2026-11-26): a follower reads the proposals like a member
+    and never votes on one; no seat at all is still the outsider's 403."""
     await _user(stack, "alice")
     space = await stack.setup.create_space(owner_username="alice", name="S")
     await stack.space_repo.save_member(
@@ -1232,14 +1315,16 @@ async def test_list_for_space_refuses_a_follower(stack):
             joined_at="2026-10-18T00:00:00+00:00",
         )
     )
+    assert (
+        await stack.approvals.list_for_space(space.id, viewer_user_id="uid-fol") == []
+    )
     with pytest.raises(SpacePermissionError, match="Not a space member"):
-        await stack.approvals.list_for_space(space.id, viewer_user_id="uid-fol")
+        await stack.approvals.list_for_space(space.id, viewer_user_id="uid-none")
 
 
-async def test_the_proposal_mirror_skips_follower_only_households(stack):
-    """Governance is the members' business (owner decision 13): the host
-    mirrors a proposal onto member households only, never onto one whose
-    people only follow the space."""
+async def test_the_proposal_mirror_reaches_follower_only_households(stack):
+    """P10: every seated household reads the proposals — the host mirrors
+    a proposal onto a household whose people only follow the space too."""
     space = await _space(stack)
     await _add_admin(stack, space.id, "bob")
     for house, role in (("house-member", "member"), ("house-follower", "subscriber")):
@@ -1255,7 +1340,9 @@ async def test_the_proposal_mirror_skips_follower_only_households(stack):
         space.id, actor_username="alice", action=ProposalAction.DISSOLVE
     )
     call = stack.fed.broadcast_to_space_members.await_args
-    assert call.kwargs["only_instances"] == frozenset({"house-member"})
+    assert call.kwargs["only_instances"] == frozenset(
+        {"house-member", "house-follower"}
+    )
 
 
 # ── voted_by_me: the list never asks a voter to vote twice (bug 9) ──

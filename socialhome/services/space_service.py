@@ -10302,9 +10302,8 @@ class SpaceService(
         ``location_share_enabled`` in ``space_id``; returns the new value.
 
         Needs a seat (403 ``Not a space member.`` otherwise). Turning it
-        **on** needs a member's seat: a follower is an outsider to the
-        space's people (owner decision 13) — they see no pins, and theirs
-        are not the members' to see — so they get 403
+        **on** needs a member's seat: a follower reads the members' pins
+        (P10) but never shares a location of its own — 403
         ``SUBSCRIBER_READ_ONLY``. Turning it off is always allowed. On
         opt-in :class:`SpaceMemberLocationOptedIn` refires the member's
         current position for this one space; on opt-out

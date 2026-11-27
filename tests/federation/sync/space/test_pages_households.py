@@ -193,6 +193,26 @@ async def _position(member, member_pages):
     return await member_pages.position(space)
 
 
+async def test_a_page_judged_before_the_first_stream_is_rejudged_when_it_ends(pair):
+    """The page push can beat a household's first stream: its verdict then
+    reads 'differs' with the rows still on their way. When a stream ends
+    the verdict is re-judged once — at once, not at the next round — so the
+    household matches the page and can prove (and deliver) its buckets."""
+    host, member, host_pages, member_pages, _clock, _wire = pair
+    await _post(host)
+    page = await host_pages.seal_if_due(SPACE)
+    assert page is not None and page.rows == 1
+    assert await _round(host_pages, member_pages, "s-1")  # page, no rows yet
+    before = await _position(member, member_pages)
+    assert before is not None and before.match is not True
+    await _stream(host, member)  # the first stream lands
+    member_pages.sentinel_seen(SPACE)
+    await member_pages.wait_idle()
+    after = await _position(member, member_pages)
+    assert after is not None
+    assert (after.seq, after.match, after.differing_buckets) == (page.seq, True, 0)
+
+
 async def test_a_page_round_trips_and_the_member_matches_it(pair):
     host, member, host_pages, member_pages, _clock, wire = pair
     await _post(host)

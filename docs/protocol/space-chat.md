@@ -70,15 +70,16 @@ travels**: each household maps `space_id` to its own chat.
 Mentions are not a field. Each household resolves @-mentions on the
 decrypted text against its own view of the chat's members, as for DMs and
 space posts. A space chat keeps no seat rows for members on other
-households: that view is its local seats plus the space roster's writers
-on other households (`SpaceChatAccess.remote_seats` — never a follower,
-a banned or a removed seat). The same roster feeds
+households: that view is its local seats plus the space roster's seats
+on other households (`SpaceChatAccess.remote_seats` — followers included
+since P10, never a banned or a removed seat, never an unknown role). The same roster feeds
 `GET /api/conversations/{id}/members`, so the composer offers members of
 every household and their messages carry their names.
 
 **In the SPA** the chat is the space's **Chat** section
 (`SpaceFeedPage` at `/spaces/{id}/chat` — where chat notifications link), shown
-to a member (never a follower) while `features.chat` is on. Owners,
+to every seat while `features.chat` is on — a follower reads it with no
+composer (`can_post: false`, P10). Owners,
 admins and moderators get Delete on anyone's message; everybody on their
 own.
 
@@ -160,9 +161,8 @@ page in storage order (oldest stored first), encrypted under the space
 content key like every resource (`ChatMessagesExporter`). No fixed count
 cuts it. The
 provider gates it per requester. A requester must be at v_55 and hold a
-writer seat (`SpaceWriterHouseholds.may_receive`). Otherwise it gets no
-exporter: a follower-only household gets the chat by catch-up no more than
-live.
+seat — a follower's included (P10; `SpaceWriterHouseholds.may_receive`
+with `SEAT_ROLES`). Otherwise it gets no exporter.
 
 The receiver runs each record through the live create rule
 (`SpaceChatInboundHandlers.apply_sync_records`), with the providing
@@ -220,9 +220,8 @@ window every space write has; the roster gossip closes it.
 
 | Peer | Behaviour |
 |---|---|
-| ≥ v_55 writer household | live events + `chat_messages` catch-up |
+| ≥ v_55 seated household (a follower-only one included, P10) | live events + `chat_messages` catch-up |
 | < v_55 | skipped silently (no fallback; its users see no chat) |
-| follower-only household | never sent anything |
 
 ## Implementation pointers
 

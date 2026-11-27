@@ -111,12 +111,20 @@ function modalSeenKey(spaceId: string): string {
 export function SpaceLocationCard({
   spaceId,
   currentUserId,
+  takesFollowers = false,
+  followerCount = null,
 }: {
   spaceId: string
   /** Optional: when present, drives the sharing chip + onboarding
    *  modal. When absent we still render the map but skip the
-   *  member-self-service surface. */
+   *  member-self-service surface (a follower reads the map, P10, but
+   *  never shares). */
   currentUserId?: string
+  /** The space takes followers: they see a shared location too (P10), so
+   *  the ask says so. */
+  takesFollowers?: boolean
+  /** How many follow it, when known (``null``: no number). */
+  followerCount?: number | null
 }) {
   const [data, setData] = useState<SpacePresenceResponse | null>(null)
   const [zones, setZones] = useState<SpaceZone[]>([])
@@ -303,6 +311,15 @@ export function SpaceLocationCard({
   }
 
   const isZoneOnly = data.location_mode === 'zone_only'
+  // Who sees it (P10): in a space that takes followers, its followers too —
+  // with their number when the server shares one.
+  const audience = !takesFollowers
+    ? null
+    : typeof followerCount === 'number'
+      ? t(isOne(followerCount)
+        ? 'location.card.ask_point_audience_count_one'
+        : 'location.card.ask_point_audience_count', { n: String(followerCount) })
+      : t('location.card.ask_point_audience')
 
   // Everyone the map can place: zone-only members at their zone (no
   // coordinates exist), GPS members at their point — in the zone bubble
@@ -377,6 +394,9 @@ export function SpaceLocationCard({
                   : t('location.card.gps_hint')}
               </span>
             )}
+            {/* Who sees it — on the switch itself too, not only in the
+             *  first-visit ask (P10: followers see a shared location). */}
+            {audience && <span class="sh-muted">{audience}</span>}
           </div>
           <Button
             variant={sharingMe ? 'danger' : 'primary'}
@@ -433,6 +453,7 @@ export function SpaceLocationCard({
             <>
               <p>{t('location.card.ask_zone_body')}</p>
               <ul>
+                {audience && <li>{audience}</li>}
                 <li>{t('location.card.ask_zone_point_gps')}</li>
                 <li>{t('location.card.ask_zone_point_none')}</li>
                 <li>{t('location.card.ask_point_stop')}</li>
@@ -442,6 +463,7 @@ export function SpaceLocationCard({
             <>
               <p>{t('location.card.ask_location_body')}</p>
               <ul>
+                {audience && <li>{audience}</li>}
                 <li>{t('location.card.ask_point_stop')}</li>
                 <li>{t('location.card.ask_location_point_zones')}</li>
               </ul>

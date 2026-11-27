@@ -152,7 +152,6 @@ from ..domain.notification_kinds import kind_of
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
-    WRITER_ROLES,
     SpaceModerationItem,
 )
 from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
@@ -956,13 +955,12 @@ class RealtimeService:
                 "proposal_id": event.proposal_id,
                 "proposal": event.view,
             },
-            members_only=True,
         )
 
     async def _on_space_sync_state(self, event: SpaceSyncStateChanged) -> None:
         """The space's sync status changed (``SpaceSyncStatusService``):
-        up to date, catching up, behind, host offline. Members only — a
-        follower gets no sync status. Sent on a change, never per sync."""
+        up to date, catching up, behind, host offline. Every seat, a
+        follower's included (P10). Sent on a change, never per sync."""
         await self._broadcast_space(
             event.space_id,
             {
@@ -970,7 +968,6 @@ class RealtimeService:
                 "space_id": event.space_id,
                 "sync": dict(event.sync),
             },
-            members_only=True,
         )
 
     async def _on_remote_space_dissolved(self, event: RemoteSpaceDissolved) -> None:
@@ -1017,7 +1014,6 @@ class RealtimeService:
                     },
                 },
             },
-            members_only=True,
         )
 
     async def _on_space_zone_deleted(self, event: SpaceZoneDeleted) -> None:
@@ -1032,7 +1028,6 @@ class RealtimeService:
                     "zone": None,
                 },
             },
-            members_only=True,
         )
 
     # ─── Space membership (§23.52) ───────────────────────────────────────
@@ -2070,24 +2065,14 @@ class RealtimeService:
         payload: dict,
         *,
         withheld: frozenset[str] = frozenset(),
-        members_only: bool = False,
     ) -> int:
-        """Fan ``payload`` out to the space's local seats. ``members_only``
-        leaves its followers out — for frames about the space's people
-        (governance, whereabouts) that a follower may not read either
-        (owner decision 13). Roster frames (joined / left / profile) reach
-        every seat: the roster is the same for everyone in the space,
-        followers included (D3, v_96)."""
+        """Fan ``payload`` out to the space's local seats — every seat, a
+        follower's included: a follower reads everything a member does
+        (P10, owner 2026-11-26), governance, whereabouts, zones and the
+        sync status too."""
         if self._media_signer is not None:
             sign_media_urls_in(payload, self._media_signer, extra_fields=("url",))
-        if members_only:
-            ids = [
-                m.user_id
-                for m in await self._space_repo.list_members(space_id)
-                if m.role in WRITER_ROLES
-            ]
-        else:
-            ids = await self._space_repo.list_local_member_user_ids(space_id)
+        ids = await self._space_repo.list_local_member_user_ids(space_id)
         return await self._ws.broadcast_to_users(
             [uid for uid in ids if uid not in withheld], payload
         )

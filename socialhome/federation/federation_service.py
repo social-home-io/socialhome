@@ -64,6 +64,7 @@ from ..domain.events import (
     SpaceSyncDeferred,
 )
 from ..domain.federation import (
+    DELIVERY_ERROR_HOST_HOP,
     DELIVERY_ERROR_MESH_DEFER_FULL,
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_NO_ROUTE,
@@ -134,6 +135,7 @@ from .gfs_relay_transport import (
     normalize_gfs_base,
     relay_envelope_fits,
 )
+from .host_equivalence import acting_hosts, serves_as_host
 from .inbound_retry import InboundRetry
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
@@ -250,18 +252,6 @@ log = logging.getLogger(__name__)
 #: A writer seat's role values (a household holding none only follows).
 _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
-#: Events a fan-out always tries every household with (no channel carries
-#: them): the content key and the roster.
-_NEVER_CHANNEL_REACHED: frozenset[FederationEventType] = frozenset(
-    {
-        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
-        FederationEventType.SPACE_MEMBER_JOINED,
-        FederationEventType.SPACE_MEMBER_LEFT,
-        FederationEventType.SPACE_ROSTER_SNAPSHOT,
-        FederationEventType.SPACE_INSTANCE_LEFT,
-    }
-)
-
 #: ``begin_mesh_catchup_sync`` failures that are a window, not a fault: no
 #: route yet, and the route-discovery negative cooldown after one. The
 #: scheduler retries both (they never count against its attempt cap).
@@ -325,6 +315,13 @@ MESH_DEFERRED_RETRY_BACKOFF_S: tuple[float, ...] = (0.0, 60.0, 120.0, 240.0)
 #: Ceiling on mesh targets with a deferred-send queue at once. There is one
 #: task per target (a FIFO drained in order), so this also bounds tasks.
 MAX_DEFERRED_MESH_TARGETS: int = 256
+
+#: At most this many households without a row of ours are tried over the
+#: mesh (each a possible ``SPACE_FIND_ROUTE`` flood, up to ~4 s) in ONE
+#: space broadcast; the rest go to their deferred queue (P10, H1). A
+#: household with no row AND no mesh claim in a space another household
+#: hosts is not tried at all (:data:`DELIVERY_ERROR_HOST_HOP`).
+MAX_MESH_DISCOVERIES_PER_BROADCAST: int = 32
 
 #: Ceiling on queued broadcasts per target. Each lives at most the retry
 #: budget (:data:`MESH_DEFERRED_RETRY_BACKOFF_S`, ~8 minutes) plus the sends
@@ -499,6 +496,7 @@ class FederationService:
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
+        "_mesh_cap_offsets",
         "_mesh_claim_answer",
         "_mesh_claim_answer_tasks",
         "_moment_looks",
@@ -673,6 +671,9 @@ class FederationService:
         #: unreferenced task can be GC'd mid-flight); it removes both entries
         #: when its queue is empty. :meth:`stop` cancels the rest.
         self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
+        #: Where the next broadcast's mesh-discovery window starts among its
+        #: row-less targets (P10, H1) — moves on so none is always capped.
+        self._mesh_cap_offsets: dict[str, int] = {}
         #: See :meth:`attach_mesh_claim_answer`.
         self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
         #: Answers on their way (:meth:`_spawn_mesh_claim_answer`).
@@ -1929,43 +1930,6 @@ class FederationService:
             return False
         return await self.space_member_version(instance_id) >= min_version
 
-    async def channel_reached_followers(
-        self, space_id: str, instance_ids: Collection[str]
-    ) -> frozenset[str]:
-        """The households of *instance_ids* a fan-out from here does not try
-        to reach (v_96): in a space that runs an opaque channel here, those
-        holding no writer seat (followers) for which we hold no path of
-        our own — no peer row, or only the lazy directory seat its member
-        card made (a ``space_session`` row without ``relay_via``: its
-        mailbox address, not a path beside the channel), and no mesh claim
-        — a follower that came through a GFS. We have
-        no path to one but a mesh route discovery per event (N × M at a
-        global space's scale); it is reached through its channel seat, or
-        by the host, which holds its space-session row. A member household
-        is never in it; nor is anyone in a space without a channel. The
-        writer set is read once, only when a candidate needs it."""
-        if self._space_remote_member_repo is None or self._space_repo is None:
-            return frozenset()
-        if await self._space_repo.get_gfs_channel(space_id) is None:
-            return frozenset()
-
-        async def _unreached(iid: str) -> bool:
-            peer = await self._federation_repo.get_instance(iid)
-            # A directory seat (a member card's lazy space-session row, no
-            # ``relay_via``) is the follower's mailbox address, not a path
-            # beside its channel seat — judged like no row, or every member
-            # would copy every item to every follower (N × M). A follower
-            # that claimed its version over the mesh stays reachable.
-            if peer is not None and not (
-                peer.source is InstanceSource.SPACE_SESSION and not peer.relay_via
-            ):
-                return False
-            claim = await self._federation_repo.get_space_member_version(iid)
-            # A version claimed over the mesh: reachable.
-            return claim is None or claim[0] <= 0
-
-        return await self._followers_where(space_id, instance_ids, _unreached)
-
     async def gfs_reached_followers(
         self, space_id: str, instance_ids: Collection[str]
     ) -> frozenset[str]:
@@ -1975,7 +1939,7 @@ class FederationService:
         hold no row or card for one (no mailbox, or the owner's directory
         has not reached it), so the owner passes the admin's rekey on to
         exactly these (``SpaceService.relay_admin_rekey_to_followers``)
-        — the owner-side mirror of :meth:`channel_reached_followers`. A
+        — an extra copy only the host can send. A
         household holding a writer seat, a paired one, one we hold no row
         for and ourselves are never in it."""
         if self._space_remote_member_repo is None:
@@ -1996,8 +1960,7 @@ class FederationService:
         """The households of *instance_ids* — never ourselves — that
         ``candidate`` accepts and that hold no writer seat in ``space_id``
         (followers only). The writer set is read once, only when a candidate
-        needs it. The one loop behind :meth:`channel_reached_followers` and
-        :meth:`gfs_reached_followers`, so their follower rule cannot drift."""
+        needs it. The loop behind :meth:`gfs_reached_followers`."""
         assert self._space_remote_member_repo is not None
         writers: frozenset[str] | None = None
         out: set[str] = set()
@@ -4176,9 +4139,8 @@ class FederationService:
         ``only_instances``, when given, narrows the fan-out to the member
         households it names (still minus bans, still per-peer mesh-routed):
         a household outside it is skipped silently, as if it were not a
-        member. For content only part of the space may see — the v_55 space
-        chat goes only to households holding a WRITER seat, never to a
-        follower-only household. It never ADDS a target: a household that
+        member. Every space read audience is every seated household (P10);
+        callers narrow it for a targeted send. It never ADDS a target: a household that
         is not a member of ``space_id`` gets nothing whatever it lists.
 
         ``per_peer``, when given, is awaited with ``(instance_id, payload)``
@@ -4226,13 +4188,6 @@ class FederationService:
         instance_ids = await self._federation_repo.list_member_instance_ids(
             space_id,
         )
-        # v_96 — see :meth:`channel_reached_followers`. Never for the key and
-        # roster events: no channel carries those.
-        unreached = (
-            frozenset()
-            if event_type in _NEVER_CHANNEL_REACHED
-            else await self.channel_reached_followers(space_id, instance_ids)
-        )
         results: list[DeliveryResult] = []
         #: ``(instance_id, final payload)`` per target, in member order.
         planned: list[tuple[str, dict]] = []
@@ -4247,12 +4202,7 @@ class FederationService:
                 # households" — and keep self out of attempted/failed/results.
                 continue
             if only_instances is not None and iid not in only_instances:
-                # Not in the caller's audience (e.g. a follower-only
-                # household for the space chat) — skip, like a non-member.
-                continue
-            if iid in unreached:
-                # v_96 — a follower that came through a GFS: reached through
-                # its own channel seat, or by the host and its catch-up.
+                # Not in the caller's audience — skip, like a non-member.
                 continue
             if min_proto_version is not None and not await self.space_member_supports(
                 iid,
@@ -4294,9 +4244,67 @@ class FederationService:
         # one's mailbox and nobody else's. Everyone else goes per recipient
         # below, in the original order.
         queued = await self._queue_multi_groups(space_id, event_type, planned)
+        # P10 (H1, role-neutral — a member and a follower alike): the
+        # households we hold a row for go first; a household with no row of
+        # ours is a mesh discovery (up to ~4 s each, one after another), so
+        # it goes last, at most MAX_MESH_DISCOVERIES_PER_BROADCAST of them
+        # (the rest wait in their deferred queue) — and none at all when it
+        # never claimed a version over the mesh either and another household
+        # hosts the space (it holds the seat and serves the catch-up; the
+        # host itself is never skipped, and a host tries everyone).
+        # Trade-off: what no catch-up carries (live location) reaches such
+        # a household only from the host's people.
+        hosts: frozenset[str] | None = None
+        direct: list[tuple[str, dict]] = []
+        rowless: list[tuple[str, dict]] = []
         for iid, peer_payload in planned:
             if iid in queued:
                 results.append(queued[iid])
+                continue
+            if iid in self._deferred_mesh_queues or await self._has_row(iid):
+                direct.append((iid, peer_payload))
+                continue
+            if not await self._claimed_over_mesh(iid):
+                if hosts is None:
+                    hosts = await self._hosts_elsewhere(space_id)
+                # Never the host itself: it is the one everyone relies on.
+                if hosts and iid not in hosts:
+                    results.append(
+                        DeliveryResult(
+                            instance_id=iid, ok=False, error=DELIVERY_ERROR_HOST_HOP
+                        )
+                    )
+                    continue
+            rowless.append((iid, peer_payload))
+        # The cap's window starts somewhere else on each broadcast, so no
+        # household is always past it.
+        if len(rowless) > MAX_MESH_DISCOVERIES_PER_BROADCAST:
+            # Per space, so another space's broadcasts never pin it.
+            offset = self._mesh_cap_offsets.get(space_id, 0)
+            start = offset % len(rowless)
+            self._mesh_cap_offsets[space_id] = (
+                start + MAX_MESH_DISCOVERIES_PER_BROADCAST
+            )
+            rowless = rowless[start:] + rowless[:start]
+        capped = {
+            iid
+            for iid, _p in rowless[MAX_MESH_DISCOVERIES_PER_BROADCAST:]
+            if iid not in self._deferred_mesh_queues
+        }
+        for iid, peer_payload in direct + rowless:
+            if iid in capped:
+                results.append(
+                    self._defer_mesh_send(
+                        DeliveryResult(
+                            instance_id=iid,
+                            ok=False,
+                            error=DELIVERY_ERROR_MESH_DEFER_FULL,
+                        ),
+                        space_id=space_id,
+                        event_type=event_type,
+                        payload=peer_payload,
+                    )
+                )
                 continue
             if iid in self._deferred_mesh_queues:
                 # A deferred send to this target is still pending: queue
@@ -4376,6 +4384,84 @@ class FederationService:
                 ", ".join(f"{r.instance_id}={r.error}" for r in terminal),
             )
         return broadcast
+
+    async def _hosts_elsewhere(self, space_id: str) -> frozenset[str]:
+        """The households acting as ``space_id``'s host HERE when that is
+        not us (P10, H1): they hold every seat's row and serve its catch-up,
+        so a household we have no path for is theirs to reach. Empty when we
+        host it (we must try everyone), it is unknown, or a lookup failed —
+        fail open: the mesh is tried."""
+        if self._space_repo is None:
+            return frozenset()
+        try:
+            space = await self._space_repo.get(space_id)
+            if space is None:
+                return frozenset()
+            hosts = frozenset(
+                h
+                for h in await acting_hosts(
+                    self._space_repo,
+                    self._space_remote_member_repo,
+                    space,
+                    own_instance_id=self._own_instance_id,
+                )
+                if h
+            )
+        except Exception:
+            log.debug("space %s: host lookup failed", space_id, exc_info=True)
+            return frozenset()
+        if self._own_instance_id in hosts or await serves_as_host(
+            self._space_repo, space, own_instance_id=self._own_instance_id
+        ):
+            # We host it (the owner, or a delegated admin serving as host):
+            # nobody else reaches the households we have no path for.
+            return frozenset()
+        return hosts
+
+    async def reaches_host_directly(self, space_id: str) -> bool:
+        """Does THIS household reach ``space_id``'s host other than through
+        a GFS — a paired row, or a version it claimed over the mesh — or
+        host it itself? The media fetch path is decided by this (P10:
+        by path, never by role): ``False`` (only a channel or relay seat)
+        → the v_83 GFS on-demand fetch; ``True`` → ``SPACE_MEDIA_WANTED``
+        to the host. Fail soft to ``False`` (the GFS path needs nothing of
+        the host)."""
+        try:
+            hosts = await self._hosts_elsewhere(space_id)
+            if not hosts:
+                space = (
+                    await self._space_repo.get(space_id)
+                    if self._space_repo is not None
+                    else None
+                )
+                return space is not None  # we host it (or serve as host)
+            for host in hosts:
+                row = await self._federation_repo.get_instance(host)
+                if row is not None and row.source is not InstanceSource.SPACE_SESSION:
+                    return True
+                claim = await self._federation_repo.get_space_member_version(host)
+                if claim is not None and claim[0] > 0:
+                    return True
+        except Exception:
+            log.debug("host path lookup failed for %s", space_id, exc_info=True)
+        return False
+
+    async def _has_row(self, instance_id: str) -> bool:
+        """We hold a ``remote_instances`` row for it (fail-soft: yes)."""
+        try:
+            return await self._federation_repo.get_instance(instance_id) is not None
+        except Exception:
+            log.debug("row lookup failed for %s", instance_id, exc_info=True)
+            return True
+
+    async def _claimed_over_mesh(self, instance_id: str) -> bool:
+        """It claimed a space version over the mesh (fail-soft: yes)."""
+        try:
+            claim = await self._federation_repo.get_space_member_version(instance_id)
+        except Exception:
+            log.debug("claim lookup failed for %s", instance_id, exc_info=True)
+            return True
+        return claim is not None and claim[0] > 0
 
     async def _queue_multi_groups(
         self,
@@ -4725,7 +4811,12 @@ class FederationService:
             name=f"fed-mesh-deferred-send[{target}]",
         )
         self._deferred_mesh_tasks[target] = task
-        log.info(
+        # A capped send (P10 H1) is routine at scale: DEBUG, not one INFO
+        # line per household per broadcast.
+        log.log(
+            logging.DEBUG
+            if result.error == DELIVERY_ERROR_MESH_DEFER_FULL
+            else logging.INFO,
             "broadcast_to_space_members: space=%s event=%s — mesh cannot"
             " reach %s yet (%s); re-sending in %.1fs",
             space_id,

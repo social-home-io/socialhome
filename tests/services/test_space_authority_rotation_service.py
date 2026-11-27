@@ -44,6 +44,7 @@ from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services import space_authority_rotation_service
 from socialhome.services import space_authority_rotation_service as mod
 from socialhome.services.space_authority_rotation_service import (
     SpaceAuthorityRotationService,
@@ -709,6 +710,37 @@ async def test_behind_member_gets_its_bundle_resent_once_per_interval(env):
     assert {t for t, _e, _p in env.fed.sent} == {"v44"}
     await _begin(env, echo={"key_epoch": epoch, "owed_epoch": 3})
     assert len(_sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)) == 1
+
+
+async def test_a_behind_follower_household_gets_its_bundle_resent_too(env):
+    """P10 (owner 2026-11-27): a follower-only household heals like a
+    member's — its echo gets the bundle re-sent (the old "no writer seat"
+    cut is gone)."""
+    await env.remote.add(
+        space_id=SPACE,
+        instance_id="v44",
+        user_id="u-v44",
+        user_pk=None,
+        display_name=None,
+        role="subscriber",
+    )
+    epoch = await env.svc.rotate(SPACE)
+    env.fed.sent.clear()
+    await _begin(env, echo={"key_epoch": epoch, "baseline_epoch": 0})
+    assert len(_sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)) == 1
+
+
+async def test_echo_resends_have_a_per_space_budget(env, monkeypatch):
+    """P10 M1: every seat heals, so the re-sends per space are capped —
+    N households echoing "behind" can't make the owner send N bundles an
+    hour."""
+    monkeypatch.setattr(space_authority_rotation_service, "ECHO_RESENDS_PER_SPACE", 1)
+    epoch = await env.svc.rotate(SPACE)
+    env.fed.sent.clear()
+    await _begin(env, sender="v44", echo={"key_epoch": epoch, "baseline_epoch": 0})
+    await _begin(env, sender="v43", echo={"key_epoch": epoch, "baseline_epoch": 0})
+    assert len(_sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)) == 1
+    assert _sent(env, "v43", FET.SPACE_AUTHORITY_ROTATED) == []
 
 
 async def test_caught_up_member_gets_nothing(env):

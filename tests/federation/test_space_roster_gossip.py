@@ -19,7 +19,9 @@ guard), so out-of-order delivery converges deterministically.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -580,6 +582,102 @@ async def test_a_fully_applied_host_snapshot_is_noted_for_the_echo(tmp_dir):
         )
     )
     assert noted.applied == [(SPACE_ID, OWNER, 9)]
+    await db.shutdown()
+
+
+class _Replays:
+    """Records the pushes the handler asks for; ``gate`` holds them."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.gate: asyncio.Event | None = None
+
+    async def push_own_rows_to(self, *, space_id, instance_id, since) -> int:
+        if self.gate is not None:
+            await self.gate.wait()
+        self.calls.append((space_id, instance_id, since))
+        return 1
+
+
+async def test_a_household_the_hosts_snapshot_adds_gets_our_recent_rows(tmp_dir):
+    """Regression (demo ``space-report``): a household seated from a stale
+    invitation roster (the host alone) posted before the host's snapshot
+    landed, so the members the snapshot names got the post only at their
+    next §25.6 catch-up. Applying the host's snapshot now replays our rows
+    of the last 30 minutes to each household it added — once, only those,
+    and never on a snapshot from anyone but the host."""
+    h, spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    replays = _Replays()
+    h.attach_space_resume(replays)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    joined = _entry(j, _signed_payload(j, seed=seed, member_version=4))
+    assert MEMBER_INSTANCE not in await spaces.list_member_instances(SPACE_ID)
+    # Not the host's: merged (trust is the space key) but no push.
+    await h._on_space_roster_snapshot(_snapshot([joined], from_instance="p-other"))
+    await h.drain_pushes()
+    assert replays.calls == []
+    await spaces.remove_space_instance(SPACE_ID, MEMBER_INSTANCE)
+    before = datetime.now(UTC)
+    await h._on_space_roster_snapshot(_snapshot([joined]))
+    await h.drain_pushes()
+    assert [(s, i) for s, i, _ in replays.calls] == [(SPACE_ID, MEMBER_INSTANCE)]
+    since = datetime.fromisoformat(replays.calls[0][2])
+    assert timedelta(minutes=29) < before - since < timedelta(minutes=31)
+    # Nothing added the second time: nothing pushed.
+    await h._on_space_roster_snapshot(_snapshot([joined]))
+    await h.drain_pushes()
+    assert len(replays.calls) == 1
+    await db.shutdown()
+
+
+async def test_a_push_never_holds_up_the_snapshot_and_is_capped(tmp_dir, monkeypatch):
+    """The push runs in the background: the snapshot's own bookkeeping (the
+    roster version noted for the echo) never waits for it. One snapshot
+    pushes to at most ``MAX_GAINED_PUSHES`` households."""
+    monkeypatch.setattr(handler_module, "MAX_GAINED_PUSHES", 1)
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    replays = _Replays()
+    replays.gate = asyncio.Event()
+    h.attach_space_resume(replays)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_roster_snapshot(
+        _versioned_snapshot(
+            [
+                _entry(j, _signed_payload(j, seed=seed, member_version=4)),
+                _entry(
+                    j,
+                    _signed_payload(
+                        j, seed=seed, member_version=5, instance_id="peer-y"
+                    ),
+                ),
+            ],
+            version=9,
+        )
+    )
+    assert noted.applied == [(SPACE_ID, OWNER, 9)]
+    assert replays.calls == []
+    replays.gate.set()
+    await h.drain_pushes()
+    assert len(replays.calls) == 1
+    await db.shutdown()
+
+
+async def test_stop_ends_the_pushes_under_way(tmp_dir):
+    """App cleanup cancels a push still waiting, before the database goes."""
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    replays = _Replays()
+    replays.gate = asyncio.Event()
+    h.attach_space_resume(replays)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await h._on_space_roster_snapshot(
+        _snapshot([_entry(j, _signed_payload(j, seed=seed, member_version=4))])
+    )
+    assert h._pushes
+    await h.stop()
+    assert not h._pushes and replays.calls == []
+    await h.stop()  # nothing under way: a no-op
     await db.shutdown()
 
 
@@ -1805,3 +1903,41 @@ async def test_a_removed_household_cannot_seat_another_household(tmp_dir, caplog
         assert await rm.get(SPACE_ID, "peer-second", "uid-2") is not None
     finally:
         await db.shutdown()
+
+
+async def test_a_stale_joined_never_makes_a_removed_household_a_target(tmp_dir):
+    """SECURITY: a JOINED at or below a removal we hold is refused by the
+    version guard — and must not put the removed household back into
+    ``space_instances`` either, or every later fan-out (posts, rekeys)
+    reaches it again. A repeat of a live seat's JOINED still restores a
+    missing row."""
+    h, spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j, left = (
+        FederationEventType.SPACE_MEMBER_JOINED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+    )
+    await h._on_space_member_joined(
+        _event(j, _signed_payload(j, seed=seed, member_version=4))
+    )
+    assert MEMBER_INSTANCE in await spaces.list_member_instances(SPACE_ID)
+    # The equal-version repeat restores a row that went missing.
+    await spaces.remove_space_instance(SPACE_ID, MEMBER_INSTANCE)
+    await h._on_space_member_joined(
+        _event(j, _signed_payload(j, seed=seed, member_version=4))
+    )
+    assert MEMBER_INSTANCE in await spaces.list_member_instances(SPACE_ID)
+    await h._on_space_member_left(
+        _event(left, _signed_payload(left, seed=seed, member_version=6))
+    )
+    assert MEMBER_INSTANCE not in await spaces.list_member_instances(SPACE_ID)
+    stale = _entry(j, _signed_payload(j, seed=seed, member_version=4))
+    await h._on_space_roster_snapshot(_snapshot([stale]))
+    await h._on_space_member_joined(
+        _event(j, _signed_payload(j, seed=seed, member_version=4))
+    )
+    seats = await remote.list_for_instance(
+        SPACE_ID, MEMBER_INSTANCE, include_tombstoned=True
+    )
+    assert [s.tombstoned for s in seats] == [True]
+    assert MEMBER_INSTANCE not in await spaces.list_member_instances(SPACE_ID)
+    await db.shutdown()

@@ -59,7 +59,6 @@ interface Member {
   user_id: string
   display_name?: string | null
   role: string
-  /** Absent on a follower's roster (it lists who, not when). */
   joined_at?: string
   space_display_name?: string | null
   /** §4.1.6 — viewer's private rename (only the requesting user sees it). */
@@ -123,7 +122,6 @@ export function SpaceMemberList({
   spaceId, viewerRole, joinRequests = 0, adminsActForOwner = false,
   takesFollowers = false, hostedElsewhere = false, ownerInstanceId = null,
 }: Props) {
-  const follower = isFollower(viewerRole)
   const reload = () => {
     loading.value = true
     loadFailed.value = false
@@ -277,10 +275,9 @@ export function SpaceMemberList({
           // kicks in. The space-override still wins when set.
           src={resolveAvatar(spaceId, m.user_id, null)}
           size={32}
-          // A follower sees who, never when (owner decision 13): the
-          // server sends them no presence, and the household-wide
-          // ``user.*`` frames must not paint a dot on their roster.
-          online={!follower && m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
+          // Everyone in the space sees the same roster, presence
+          // included — a follower too (P10).
+          online={m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
         />
         <span class="sh-member-info">
           <span class="sh-member-name">{r.name}</span>

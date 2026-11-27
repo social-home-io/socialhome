@@ -7470,7 +7470,7 @@ def _picture_via_gfs_media_cache(
     space_id: str,
     step: str,
     timeout: float = 90.0,
-    member_push_ok: bool = False,
+    member_push_ok: bool = True,
 ) -> str:
     """v_80 — *author* posts a ~0.7 MB photo in *space_id*; *reader*, which
     reads the space only through the GFS (a link-joined member or a
@@ -7490,8 +7490,9 @@ def _picture_via_gfs_media_cache(
     runs on the post's arrival, before the queued upload lands, and the
     10 s retry then finds the file stored. Either transport is accepted for
     *reader*'s copy (logged as such); the GFS must still hold the one
-    upload under the channel. A follower (the default) gets no push, so it
-    must fetch from the GFS.
+    upload under the channel. Since P10 a follower gets the push like a
+    member (no follower-specific delivery rule), so the default accepts
+    either transport for every reader.
 
     Returns the file name."""
     a = state["instances"][author]
@@ -7893,7 +7894,10 @@ def _forget_gfs_copies(local_name: str) -> int:
 @_offline_step
 def cmd_gfs_space_healing() -> None:
     """v_92 — a GFS-only member heals from the host, then from a helper
-    while the host is offline.
+    while the host is offline. P10 (by path, never by role): e reaches the
+    space only through the GFS, so its missed PICTURES come back through the
+    GFS on-demand fetch (steps 2 and 4 assert no SPACE_MEDIA_WANTED);
+    missed EVENTS still come from the helper's resume (step 3).
 
     Prereqs: the gfs chain through ``gfs-member-mesh`` (e holds a
     link-joined seat in a's space reached only through the GFS; d, paired
@@ -7979,13 +7983,15 @@ def cmd_gfs_space_healing() -> None:
         return ""
 
     def _view_until(post_id: str, original: bytes, timeout: float) -> tuple[str, int]:
-        """e views the picture; its first view must miss. Polls the view
-        until e serves the original bytes; returns (name, first status)."""
+        """e views the picture its copy of which went. P10 (by path): e
+        reaches the space only through the GFS, so the view asks the GFS on
+        demand — it may serve at once. Polls until e serves the original
+        bytes; returns (name, first status)."""
         name = _space_post_file("e", post_id)
         url = f"{e_base}/api/media/{name}"
-        first, _ = _http_get_bytes(url, token=e["token"], timeout=60.0)
-        if first == 200:
-            raise SystemExit(f"{step}: e still served {name[:15]}… after its copy went")
+        first, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
+        if first == 200 and body == original:
+            return name, first
         deadline = time.time() + timeout
         while time.time() < deadline:
             s, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
@@ -8038,27 +8044,23 @@ def cmd_gfs_space_healing() -> None:
         )
         dropped = _forget_gfs_copies(name1)
         (_instance_dir("e") / "media" / name1).unlink()
-        a_off, e_off = _log_size("a"), _log_size("e")
+        a_off = _log_size("a")
         _, first = _view_until(post1, pic1, 90.0)
-        asked = _log_lines_matching("e", f"to {a['instance_id']}: sent", offset=e_off)
-        helper_asked = _log_lines_matching("e", f"to {d['instance_id']}:", offset=e_off)
+        # P10, by path: e reaches the space only through the GFS — its view
+        # asked the GFS on demand, never the host with SPACE_MEDIA_WANTED.
         served = _log_lines_matching(
             "a", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=a_off
         )
-        if not asked or not [x for x in served if "1 file(s) queued" in x]:
+        if served:
             raise SystemExit(
-                f"{step}: no SPACE_MEDIA_WANTED round-trip with the host "
-                f"(e: {asked!r}, a: {served!r})"
-            )
-        if helper_asked:
-            raise SystemExit(
-                f"{step}: e asked the helper d while the host answered: "
-                f"{helper_asked!r}"
+                f"{step}: GFS-reached e asked the host with SPACE_MEDIA_WANTED "
+                f"instead of its GFS: {served!r}"
             )
         print(
             f"  old picture {name1[:15]}… (GFS copies dropped: {dropped}, e's copy "
-            f"gone): e's view → HTTP {first}, SPACE_MEDIA_WANTED to the host a "
-            "only, a served it, e holds it byte-identical ✓"
+            f"gone): e's view → HTTP {first}, through its GFS on demand (P10: by "
+            "path — e reaches the space only through the GFS); e holds it "
+            "byte-identical ✓"
         )
 
         # 3. A second picture both hold, gone from the GFS and from e; then
@@ -8162,28 +8164,25 @@ def cmd_gfs_space_healing() -> None:
         )
 
         # 4. Old picture, host silent → the helper d serves it.
-        d_off, e_off = _log_size("d"), _log_size("e")
+        d_off = _log_size("d")
         t0 = time.time()
         _, first = _view_until(post2, pic2, 180.0)
         took = time.time() - t0
-        to_d = _log_lines_matching("e", f"to {d['instance_id']}: sent", offset=e_off)
-        served = [
-            x
-            for x in _log_lines_matching(
-                "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
-            )
-            if "1 file(s) queued" in x
-        ]
-        if not to_d or not served:
+        # P10, by path: through the GFS on demand (a holder — d — serves the
+        # GFS over its socket), never SPACE_MEDIA_WANTED to the helper.
+        served = _log_lines_matching(
+            "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
+        )
+        if served:
             raise SystemExit(
-                f"{step}: the helper d did not serve e's request with the host "
-                f"silent (e asked d: {to_d!r}; d served: {served!r})"
+                f"{step}: GFS-reached e asked the helper d with SPACE_MEDIA_WANTED "
+                f"instead of its GFS: {served!r}"
             )
         print(
             f"  host a silent; old picture {name2[:15]}… (GFS copies dropped: "
             f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
-            f"a being silent, it asked the helper d instead, which served it; "
-            f"byte-identical after {took:.0f} s ✓"
+            f"a being silent: through its GFS on demand (P10: by path), never "
+            f"SPACE_MEDIA_WANTED to the helper; byte-identical after {took:.0f} s ✓"
         )
 
         # 5. What the GFS saw over the whole step.
@@ -17538,6 +17537,96 @@ def _chat_row_by_id(label: str, msg_id: str) -> dict | None:
     return dict(rows[0]) if rows else None
 
 
+def _follower_reads_like_a_member(state: dict, space_id: str, nonce: str, wait) -> None:
+    """P10 (owner 2026-11-26/27) — follower household d of Beta's space gets
+    what a member gets: b's zone, a's shared live location (4 dp), and a
+    signed sync page; its own location sharing is refused."""
+    inst = state["instances"]
+    a, b, d = inst["a"], inst["b"], inst["d"]
+    base = f"/api/spaces/{space_id}"
+
+    def call(info: dict, method: str, path: str, body: dict | None = None):
+        return _request(
+            f"http://127.0.0.1:{info['port']}{path}",
+            token=info["token"],
+            method=method,
+            body=body,
+        )
+
+    s, patched = call(b, "PATCH", base, {"features": {"location": True}})
+    _must("follower-parity: b turns the map on", s, patched, ok=(200,))
+    lat, lon = 47.3769, 8.5417
+    zone_name = f"Salon zone {nonce}"
+    s, zone = call(
+        b,
+        "POST",
+        f"{base}/zones",
+        {"name": zone_name, "latitude": lat, "longitude": lon, "radius_m": 300},
+    )
+    _must("follower-parity: b creates a zone", s, zone, ok=(200, 201))
+
+    def d_zone_names() -> set[str]:
+        s, body = call(d, "GET", f"{base}/zones")
+        if s != 200:
+            return set()
+        rows = body.get("zones", body) if isinstance(body, dict) else body
+        return {z.get("name") for z in rows or []}
+
+    wait("follower d to hold b's zone", lambda: zone_name in d_zone_names(), 90.0)
+    print("  b's zone reaches follower d ✓")
+
+    s, on = call(a, "PATCH", f"{base}/members/me/location-sharing", {"enabled": True})
+    _must("follower-parity: a shares its location", s, on, ok=(200,))
+    s, _ = call(
+        a,
+        "POST",
+        "/api/presence/location",
+        {
+            "username": a["username"],
+            "latitude": lat,
+            "longitude": lon,
+            "accuracy_m": 10,
+            "zone_name": None,
+        },
+    )
+    if s not in (200, 204):
+        raise SystemExit(f"follower-parity: a's presence fix answered {s}")
+
+    def d_sees_a() -> bool:
+        s, body = call(d, "GET", f"{base}/presence")
+        if s != 200:
+            return False
+        return any(e.get("user_id") == a["user_id"] for e in body.get("entries", []))
+
+    wait("follower d to see a's shared location", d_sees_a, 90.0)
+    print("  a's shared location reaches follower d's map ✓")
+
+    s, refused = call(
+        d, "PATCH", f"{base}/members/me/location-sharing", {"enabled": True}
+    )
+    if s != 403:
+        raise SystemExit(f"follower-parity: d's own sharing answered {s} {refused!r}")
+    print("  d's own location sharing is refused (403) ✓")
+
+    def d_holds_page() -> bool:
+        return bool(
+            _rows("d", "SELECT 1 FROM space_sync_pages WHERE space_id=?", (space_id,))
+        )
+
+    deadline = time.monotonic() + 150.0
+    asked = 0
+    next_ask = 0.0
+    while not d_holds_page() and time.monotonic() < deadline:
+        if asked < 3 and time.monotonic() >= next_ask:
+            call(d, "POST", f"{base}/sync")  # a follower may ask too (P10)
+            asked += 1
+            next_ask = time.monotonic() + 20.0
+        time.sleep(1.0)
+    if not d_holds_page():
+        raise SystemExit("follower-parity: follower d never held a sync page")
+    print("  follower d holds a signed sync page of the space ✓")
+
+
 def cmd_space_chat() -> None:
     """Every space's members' chat across households (v_55).
 
@@ -17547,7 +17636,8 @@ def cmd_space_chat() -> None:
     1. **Follower household.** Beta mints a ``subscriber`` (Follower)
        invite link (``via: internal``) and Delta — paired with Beta only —
        redeems it over federation, so d sits in the space as a read-only
-       follower household. Its chat summary must say ``enabled: false``.
+       follower household. P10: its chat summary says ``enabled: true``,
+       ``can_post: false``, and a send from d is refused (403).
     2. a / b / c read their own chat summary (each household maps the
        space to its own conversation — no conversation id rides the wire).
     3. **Create.** a posts; b and c hold it (``SPACE_CHAT_MESSAGE_CREATED``).
@@ -17560,9 +17650,10 @@ def cmd_space_chat() -> None:
     7. **Moderator delete.** b — the space's owner — deletes c's reply;
        it is deleted (content gone) on a, b and c
        (``SPACE_CHAT_MESSAGE_DELETED``).
-    8. **Follower household gets nothing.** d holds no chat message of
-       this run (``only_instances`` limits fan-out to households with a
-       writer seat).
+    8. **Follower household reads like a member (P10).** d holds a's
+       message; b's zone reaches d; a's shared location reaches d's map;
+       d's own location sharing is refused (403); d holds a signed sync
+       page of the space (pushed or sent on its "Sync now").
     9. **v_55.** ``OURS`` is at least ``MIN_FOR_SPACE_CHAT`` and a, b and c
        see each other at it.
     """
@@ -17631,10 +17722,20 @@ def cmd_space_chat() -> None:
         lambda: all(d_is_follower_on(x) for x in ("a", "c")),
     )
     print("  b, a and c hold d's follower seat ✓")
+    # P10: a follower reads the chat, never posts.
     d_chat = _space_chat_conv("d", d, space_id)
-    if d_chat.get("enabled") is not False or d_chat.get("conversation_id"):
-        raise SystemExit(f"space-chat: follower d got a chat: {d_chat!r}")
-    print("  d (follower) sees no chat ✓")
+    if d_chat.get("enabled") is not True or d_chat.get("can_post") is not False:
+        raise SystemExit(f"space-chat: follower d's chat summary: {d_chat!r}")
+    s, refused = _request(
+        f"http://127.0.0.1:{d['port']}/api/conversations/"
+        f"{d_chat['conversation_id']}/messages",
+        token=d["token"],
+        method="POST",
+        body={"content": f"a follower must not post {nonce}"},
+    )
+    if s != 403:
+        raise SystemExit(f"space-chat: d's chat send answered {s} {refused!r}")
+    print("  d (follower) reads the chat, its send is refused (403) ✓")
 
     # 2. Every member household's own chat.
     convs: dict[str, str] = {}
@@ -17758,30 +17859,13 @@ def cmd_space_chat() -> None:
         wait(f"{x} to drop c's reply", gone)
     print("  b (owner) deletes c's reply; deleted on a, b and c ✓")
 
-    # 8. The follower household received nothing of the chat.
-    leaked = _rows(
-        "d",
-        "SELECT id, content FROM conversation_messages WHERE content LIKE ?",
-        (f"%{nonce}%",),
+    # 8. P10 — the follower household reads like a member.
+    wait(
+        "follower d to hold a's chat message",
+        lambda: _chat_row("d", d_chat["conversation_id"], hello) is not None,
     )
-    d_space_convs = _rows(
-        "d", "SELECT id FROM conversations WHERE space_id=?", (space_id,)
-    )
-    d_msgs = (
-        _rows(
-            "d",
-            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id=?",
-            (d_space_convs[0][0],),
-        )[0][0]
-        if d_space_convs
-        else 0
-    )
-    if leaked or d_msgs:
-        raise SystemExit(
-            f"space-chat: follower household d holds chat messages: "
-            f"{leaked!r} / {d_msgs} in its space chat"
-        )
-    print("  d (follower household) holds no chat message ✓")
+    print("  d (follower household) holds a's chat message ✓")
+    _follower_reads_like_a_member(state, space_id, nonce, wait)
 
     # 9. v_55.
     if _OURS < _Cap.MIN_FOR_SPACE_CHAT:
@@ -19192,9 +19276,31 @@ def cmd_members_page_catchup() -> None:
         ),
         timeout=90.0,
     )
+    # The deliverer can only prove buckets it holds unchanged: its verdict
+    # must read a match too before the host goes down. A verdict it formed
+    # before its own first stream landed (the page push can beat the
+    # stream) is redone on its next round — press "Sync now" until then.
+    deadline = time.monotonic() + 120.0
+    next_ask = 0.0
+    while time.monotonic() < deadline:
+        verdict = (_sync_state_of(state, _PC_DLV, space_id) or {}).get("page") or {}
+        if verdict.get("match") is True:
+            break
+        if time.monotonic() >= next_ask:
+            _request(
+                f"{c_url}/api/spaces/{space_id}/sync",
+                token=c["token"],
+                method="POST",
+            )
+            next_ask = time.monotonic() + 25.0
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: the deliverer {_PC_DLV}'s copy never matched the host's page"
+        )
     print(
         f"  both members hold the host's signed page {signed['seq']} ({signed['rows']} rows); "
-        f"{_PC_LAG}'s copy matches it ✓"
+        f"{_PC_LAG}'s and {_PC_DLV}'s copies match it ✓"
     )
 
     a_down = b_down = False
@@ -21091,13 +21197,25 @@ def _message_texts(label: str, conv_id: str) -> set[str]:
     }
 
 
+def _calling_step() -> str:
+    """The demo step (``cmd_space_report`` → ``space-report``) whose body
+    is on the call stack, for messages of helpers several steps share."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        name = frame.f_code.co_name
+        if name.startswith("cmd_"):
+            return name[len("cmd_") :].replace("_", "-")
+        frame = frame.f_back
+    return "demo"
+
+
 def _wait_for(what: str, check, *, timeout: float = 45.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if check():
             return
         time.sleep(1.0)
-    raise SystemExit(f"group-dm: timed out waiting for {what}")
+    raise SystemExit(f"{_calling_step()}: timed out waiting for {what}")
 
 
 def _send_group(label: str, info: dict, conv_id: str, text: str) -> None:
@@ -21409,6 +21527,11 @@ def cmd_space_report() -> None:
     # (and a's moderator is other authority, so no anonymous fallback) —
     # b's queue as Bob would rightly stay empty.
     d = inst["d"]
+    # d posts a moment after it accepted: its roster is still the
+    # invitation's (b alone) until b's snapshot lands, so a and c get the
+    # post from d's replay when that snapshot comes
+    # (``PrivateSpaceInviteHandler._push_to_gained``), not at their next
+    # §25.6 catch-up — the wait below once timed out on that.
     s, post = _request(
         f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/posts",
         token=d["token"],

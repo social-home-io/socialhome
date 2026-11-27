@@ -809,11 +809,18 @@ async def test_inbound_typing_from_a_blocked_person_skips_the_protected_account(
 
 
 class _Policy:
-    def __init__(self, readers: set[str]) -> None:
+    """``readers`` may read; ``writers`` (default: the readers) may write —
+    typing needs write (P10: a space's follower reads, never types)."""
+
+    def __init__(self, readers: set[str], writers: set[str] | None = None) -> None:
         self.readers = readers
+        self.writers = readers if writers is None else writers
 
     async def can_read(self, conv, user_id: str) -> bool:
         return user_id in self.readers
+
+    async def can_write(self, conv, user_id: str) -> bool:
+        return user_id in self.writers
 
 
 class _SystemConvos:
@@ -867,6 +874,21 @@ async def test_typing_in_a_system_chat_needs_read_access(readers, expected):
         conversation_id="hh", sender_user_id="u-anna", sender_username="anna"
     )
     assert ws.sent == expected
+
+
+async def test_a_reader_who_may_not_write_never_types():
+    """P10: a space's follower reads the chat but never shows "typing"."""
+    ws = _SystemWs()
+    svc = TypingService(
+        conversation_repo=_SystemConvos(),
+        user_repo=_SystemUsers(),
+        ws_manager=ws,
+    )
+    svc.attach_system_chats(_Policy({"u-anna", "u-bob"}, writers={"u-bob"}))
+    await svc.user_started_typing(
+        conversation_id="hh", sender_user_id="u-anna", sender_username="anna"
+    )
+    assert ws.sent == []
 
 
 async def test_typing_in_a_system_chat_without_a_policy_goes_nowhere():

@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from socialhome.domain.space import SpaceRole
+from socialhome.domain.space import WRITER_ROLES, SpaceRole
 from socialhome.services.space_writer_households import (
     SEAT_ROLES,
     SpaceWriterHouseholds,
-    holds_member_seat,
+    holds_seat,
 )
 
 
@@ -24,7 +24,7 @@ class _Seats:
         return [iid for iid, role in self._seats.items() if role in roles]
 
 
-async def test_member_households_leave_out_followers_and_ourselves():
+async def test_writer_households_leave_out_followers_and_ourselves():
     seats = _Seats(
         {
             "house-a": "admin",
@@ -33,12 +33,15 @@ async def test_member_households_leave_out_followers_and_ourselves():
             "me": "member",
         }
     )
-    members = SpaceWriterHouseholds(seats, own_instance_id="me")
+    members = SpaceWriterHouseholds(seats, own_instance_id="me", roles=WRITER_ROLES)
     assert await members.households("sp") == {"house-a", "house-m"}
     assert "subscriber" not in seats.asked[0]
     assert await members.may_receive("sp", "house-m")
     assert not await members.may_receive("sp", "house-f")
     assert not await members.may_receive("sp", "me")
+    # P10: the default is every seat, a follower's included.
+    every = SpaceWriterHouseholds(seats, own_instance_id="me")
+    assert await every.households("sp") == {"house-a", "house-m", "house-f"}
 
 
 async def test_the_seat_set_counts_every_role_a_followers_included():
@@ -64,10 +67,12 @@ class _Space:
         return [SimpleNamespace(user_id="u1", role=self._role)]
 
 
-async def test_our_own_seat_is_a_writer_seat_unless_any_seat_is_asked_for():
-    assert await holds_member_seat(_Space("member"), "sp")
-    assert not await holds_member_seat(_Space("subscriber"), "sp")
-    assert await holds_member_seat(_Space("subscriber"), "sp", roles=SEAT_ROLES)
-    assert not await holds_member_seat(
+async def test_our_own_seat_is_any_seat_unless_writers_are_asked_for():
+    """P10: the default is any seat, a follower's included."""
+    assert await holds_seat(_Space("member"), "sp")
+    assert await holds_seat(_Space("subscriber"), "sp")
+    assert not await holds_seat(_Space("subscriber"), "sp", roles=WRITER_ROLES)
+    assert await holds_seat(_Space("subscriber"), "sp", roles=SEAT_ROLES)
+    assert not await holds_seat(
         _Space("subscriber", local=False), "sp", roles=SEAT_ROLES
     )

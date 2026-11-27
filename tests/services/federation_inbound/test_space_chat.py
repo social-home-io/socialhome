@@ -60,7 +60,7 @@ async def test_a_writers_message_lands_and_notifies_local_writers(stack):
     assert stored.sender_user_id == "u-rb" and stored.content == "hi"
     (event,) = stack.events(DmMessageCreated)
     assert event.origin_instance_id == HOUSE_B and event.system_scope == "space"
-    assert set(event.recipient_user_ids) == {"u-anna", "u-bob", "u-mod"}
+    assert set(event.recipient_user_ids) == {"u-anna", "u-bob", "u-mod", "u-finn"}
     # The seat's display name stands in for a household we never paired with.
     assert event.sender_display_name == "U-RB"
 
@@ -107,12 +107,12 @@ async def test_a_banned_author_is_refused(stack):
     [
         "UPDATE spaces SET feature_chat=0",
         "UPDATE spaces SET dissolved=1",
-        # No local writer: a follower-only household stores no chat.
-        "UPDATE space_members SET role='subscriber'",
+        # No local seat at all: nobody here reads the chat.
+        "DELETE FROM space_members",
         # …even with the host's owner mirrored into ``space_members`` by
         # the §25.6 ``members`` sync: they are not one of our people.
         (
-            "UPDATE space_members SET role='subscriber'",
+            "DELETE FROM space_members",
             (
                 "INSERT INTO space_members(space_id, user_id, role)"
                 f" VALUES('{SP}', 'u-host-owner', 'owner')"
@@ -463,11 +463,11 @@ async def test_a_delete_reaches_the_local_readers(stack):
     await _create(stack, mid)
     await _delete(stack, mid, actor="u-rb")
     (deleted,) = stack.events(DmMessageDeleted)
-    assert set(deleted.recipient_user_ids) == {"u-anna", "u-bob", "u-mod"}
+    assert set(deleted.recipient_user_ids) == {"u-anna", "u-bob", "u-mod", "u-finn"}
 
 
-async def test_no_tombstone_where_nobody_writes_and_no_chat_exists(stack):
-    await stack.db.enqueue("UPDATE space_members SET role='subscriber'")
+async def test_no_tombstone_where_nobody_is_seated_and_no_chat_exists(stack):
+    await stack.db.enqueue("DELETE FROM space_members")
     await _delete(stack, chat_id("u-rb"), actor="u-rb", author="u-rb")
     assert await _tombstones(stack) == []
     assert await stack.chat.get_chat(SP) is None
@@ -577,3 +577,12 @@ async def test_a_banned_authors_edit_and_reaction_are_refused(stack):
     )
     assert (await _rows(stack))[0][2] == "hi"
     assert await stack.convos.list_reactions(mid) == []
+
+
+async def test_a_follower_only_household_keeps_the_chat(stack):
+    """P10 (owner 2026-11-26): a follower reads the space chat, so a
+    household whose people only follow the space stores it like any
+    member household (they never post: the policy refuses their writes)."""
+    await stack.db.enqueue("UPDATE space_members SET role='subscriber'")
+    await _create(stack, chat_id("u-rb"))
+    assert len(await _rows(stack)) == 1

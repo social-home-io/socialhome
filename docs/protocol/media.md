@@ -648,6 +648,16 @@ fallback) instead of a replay.
 
 ## Older files on view — `SPACE_MEDIA_WANTED` (v_92)
 
+**Who asks this way (P10, owner 2026-11-27: by path, never by role).** A
+household with a paired row to the host, or a version it claimed over the
+mesh, asks with `SPACE_MEDIA_WANTED` (host first, a helper as fallback),
+member or follower alike. A household that reaches the space only through a
+GFS — a relay seat and/or a channel seat, no paired row, no mesh claim —
+fetches a missed file through its GFS's v_83 on-demand path instead, member
+or follower alike (`FederationService.reaches_host_directly`). So v_92
+media healing now covers paired / mesh households only; GFS spaces deliver
+through their GFS.
+
 **Why.** A member household can hold a live space item whose file never
 reached it: a push the GFS relay accepted and dropped, a catch-up that
 left the file out for its budget, a picture past the GFS media cache's few

@@ -79,7 +79,7 @@ from ..rate_limiter import RateLimiter, client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_attention import needs_you_count, space_attention
-from ..services.space_member_guard import require_member_seat
+from ..services.space_member_guard import require_seat
 from ..services.space_service import (
     _UNSET_MEMBER_PROFILE,
     DEFAULT_INVITE_TOKEN_TTL_SECONDS,
@@ -210,14 +210,15 @@ class SpaceCollectionView(BaseView):
                 # null unless the caller has content authority here.
                 "needs_you": await self._needs_you(s.id, listing.role),
                 # "Some posts may be missing" — the list's dot; the
-                # detail's ``sync.may_be_missing``, never for a follower.
-                "sync_may_be_missing": await self._may_be_missing(s.id, listing.role),
+                # detail's ``sync.may_be_missing`` — a follower's too (P10:
+                # it syncs like a member).
+                "sync_may_be_missing": await self._may_be_missing(s.id),
             }
         )
 
-    async def _may_be_missing(self, space_id: str, role: str) -> bool:
+    async def _may_be_missing(self, space_id: str) -> bool:
         status_svc = self.request.app.get(space_sync_status_key)
-        if status_svc is None or role == SpaceRole.SUBSCRIBER:
+        if status_svc is None:
             return False
         return await status_svc.may_be_missing(space_id)
 
@@ -432,9 +433,9 @@ class SpaceDetailView(BaseView):
                 # proposals waiting for the caller — null unless they have
                 # content authority here (owner / admin / moderator).
                 # Does this space need sync? ``{state, last_ok_at,
-                # waiting_to_send}`` — members only (a follower is fed by
-                # the GFS, not the host); null otherwise.
-                "sync": await self._sync_status(space.id, member.role),
+                # waiting_to_send}`` — for every seat, a follower's included
+                # (P10: it syncs like a member); null while none is known.
+                "sync": await self._sync_status(space.id),
                 "attention": await space_attention(
                     space.id,
                     seat=member,
@@ -452,16 +453,16 @@ class SpaceDetailView(BaseView):
         return web.json_response(payload)
 
     async def _gfs_listing(self, space) -> tuple[list[dict] | None, bool]:
-        """Where a global space is listed — only for its members (not
-        followers) and, on the owner household, the household admins (who
-        manage its GFS connections). Anyone else gets ``(None, False)``:
-        which servers list a space is the members' business."""
+        """Where a global space is listed — for every seat, a follower's
+        included (P10), and, on the owner household, the household admins
+        (who manage its GFS connections). Anyone else gets ``(None, False)``:
+        which servers list a space is the seats' business."""
         selection = self.request.app.get(gfs_server_selection_service_key)
         if selection is None:
             return None, False
         ctx = self.user
         member = await self.svc(space_repo_key).get_member(space.id, ctx.user_id)
-        is_member = member is not None and member.role != SpaceRole.SUBSCRIBER
+        is_member = member is not None
         owner_household_admin = bool(ctx.is_admin) and (
             space.owner_instance_id == self.request.app.get(instance_id_key)
         )
@@ -469,9 +470,9 @@ class SpaceDetailView(BaseView):
             return None, False
         return await selection.describe(space)
 
-    async def _sync_status(self, space_id: str, role: str) -> dict | None:
+    async def _sync_status(self, space_id: str) -> dict | None:
         status_svc = self.request.app.get(space_sync_status_key)
-        if status_svc is None or role == SpaceRole.SUBSCRIBER:
+        if status_svc is None:
             return None
         status = await status_svc.status(space_id)
         if status is None:
@@ -933,31 +934,15 @@ def _member_to_dict_signed(
     return payload
 
 
-#: Roster fields a follower never gets (owner decision 13): session
-#: presence, when someone joined, and whether they share their location.
-_FOLLOWER_WITHHELD_FIELDS = frozenset(
-    {"is_online", "is_idle", "last_seen_at", "joined_at", "location_share_enabled"}
-)
-
-
-def _follower_roster_row(row: dict) -> dict:
-    """A roster row as a follower sees it — who, not when or where."""
-    return {k: v for k, v in row.items() if k not in _FOLLOWER_WITHHELD_FIELDS}
-
-
 class SpaceMembersView(BaseView):
     """GET/POST /api/spaces/{id}/members — list or add members."""
 
     async def get(self) -> web.Response:
         space_id = self.match("id")
-        seat = await self.svc(space_service_key).require_reader(
-            space_id, self.user.user_id
-        )
+        await self.svc(space_service_key).require_reader(space_id, self.user.user_id)
         # D3 (v_96): everyone in the space sees the same roster, followers
-        # included. A follower still learns nothing about when anyone is
-        # around (owner decision 13): no presence, join time or location
-        # opt-in on its rows.
-        follower = seat.role not in WRITER_ROLES
+        # included — the same rows and fields (P10, owner 2026-11-26: a
+        # follower reads everything a member does).
         members = await self.svc(space_repo_key).list_members(space_id)
         # §D1b — federated peers who accepted a cross-household invite
         # are seated in ``space_remote_members``, NOT ``space_members``.
@@ -1104,8 +1089,6 @@ class SpaceMembersView(BaseView):
             name_only(row) if row.get("user_id") in withheld else row
             for row in local_rows + remote_rows
         ]
-        if follower:
-            rows = [_follower_roster_row(row) for row in rows]
         return web.json_response(rows)
 
     async def post(self) -> web.Response:
@@ -2418,7 +2401,8 @@ def sync_now_wait_s(limiter: RateLimiter | None, space_id: str) -> int:
 
 
 class SpaceSyncTriggerView(BaseView):
-    """POST /api/spaces/{id}/sync — "Sync now", any member (not a follower).
+    """POST /api/spaces/{id}/sync — "Sync now", any seat (a follower syncs
+    like a member, P10).
 
     The small incremental ``SPACE_SYNC_BEGIN`` of one round, right away
     (``SpaceSyncScheduler.sync_now``), to each household acting as the
@@ -2434,8 +2418,7 @@ class SpaceSyncTriggerView(BaseView):
         space_svc = self.svc(space_service_key)
         space_id = self.match("id")
         await space_svc._require_space(space_id)
-        member = await space_svc._require_member(space_id, ctx.user_id)
-        space_svc._assert_writable_member(member, action="sync")
+        await space_svc._require_member(space_id, ctx.user_id)
         limiter = self.request.app.get(rate_limiter_key)
         key = _sync_now_key(space_id)
         if limiter is not None and not limiter.is_allowed(
@@ -2745,10 +2728,10 @@ class SpacePresenceView(BaseView):
             )
         space_id = self.match("id")
         repo = self.svc(space_repo_key)
-        # A member's seat, checked before the space row: the pins are the
-        # members' whereabouts, so a follower gets the outsider's 403, and
-        # an unknown id the same — no existence oracle.
-        await require_member_seat(repo, space_id, ctx.user_id)
+        # A seat, checked before the space row — a follower's included
+        # (P10: it reads the map); an unknown id answers the same 403 —
+        # no existence oracle.
+        await require_seat(repo, space_id, ctx.user_id)
         space = await self.svc(space_service_key)._require_space(space_id)
         if not space.features.location:
             return web.json_response(
@@ -3677,7 +3660,7 @@ class SpaceNotifPrefsView(BaseView):
                 **choice,
                 "feature_location": feature_location,
                 "location_share_enabled": bool(member.location_share_enabled),
-                # A follower is offered no sharing toggle (owner decision 13).
+                # A follower reads the map but never shares (P10): no toggle.
                 "location_share_allowed": feature_location
                 and member.role in WRITER_ROLES,
             }

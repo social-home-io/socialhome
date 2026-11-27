@@ -47,7 +47,7 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.space_zone_repo import AbstractSpaceZoneRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
-from .space_member_guard import SpaceMemberGuardMixin, require_member_seat
+from .space_member_guard import SpaceMemberGuardMixin, require_seat
 
 #: §23.8.7 radius bounds — defined in :mod:`socialhome.domain.space` so
 #: the inbound federation / sync paths apply the same rule.
@@ -112,10 +112,10 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         space_id: str,
         actor_user_id: str,
     ) -> list[SpaceZone]:
-        """List zones for ``space_id``. The caller needs a member's seat:
-        zones are the members' places, so a follower gets the outsider's
-        403 (and an unknown id the same — no existence oracle)."""
-        await require_member_seat(self._spaces, space_id, actor_user_id)
+        """List zones for ``space_id``. The caller needs a seat — a
+        follower's included (P10: it reads everything a member does); an
+        unknown id answers the same 403 — no existence oracle."""
+        await require_seat(self._spaces, space_id, actor_user_id)
         return await self._zones.list_for_space(space_id)
 
     # ── Write ───────────────────────────────────────────────────────────

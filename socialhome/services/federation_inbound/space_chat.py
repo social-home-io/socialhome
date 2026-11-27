@@ -72,7 +72,7 @@ from ..dm_mentions import DmMentionResolver
 from ..dm_service import MAX_DM_LENGTH
 from ..protection_gate import ProtectionGateMixin
 from ..space_chat_service import SpaceChatService
-from ..space_writer_households import holds_member_seat
+from ..space_writer_households import SEAT_ROLES, holds_seat
 from ..system_chat_policy import SystemChatPolicy
 
 if TYPE_CHECKING:
@@ -220,16 +220,16 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         if not space.features.chat:
             log_not_applied(event, what=what, row_id=row_id, reason="chat is off here")
             return None
-        if not await self._has_local_writer(space_id):
-            # A household whose people only follow the space (or that
-            # holds no seat at all) never stores chat content.
-            _refuse(event, what, row_id, "no writer of this space lives here")
+        if not await self._has_local_seat(space_id):
+            # A household none of whose people holds a seat (a follower's
+            # included — followers read the chat) never stores chat content.
+            _refuse(event, what, row_id, "nobody of this space lives here")
             return None
         return space_id, await self._chats.get_chat(space_id), authorship
 
-    async def _has_local_writer(self, space_id: str) -> bool:
+    async def _has_local_seat(self, space_id: str) -> bool:
         # One of OUR people — ``space_members`` also mirrors the host's.
-        return await holds_member_seat(self._spaces, space_id)
+        return await holds_seat(self._spaces, space_id, roles=SEAT_ROLES)
 
     async def _message_in(
         self,
@@ -631,7 +631,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             )
             return
         if chat is None:
-            if not await self._has_local_writer(space_id):
+            if not await self._has_local_seat(space_id):
                 log_not_applied(
                     event, what="chat delete", row_id=message_id, reason="no chat here"
                 )

@@ -51,6 +51,8 @@ interface Props {
   entry: CatalogEntry | null
   /** Owner / admin / moderator of the space: may close any game. */
   canEditGames: boolean
+  /** A follower: sees the card, never joins (no Join / Take / Ask). */
+  watchOnly?: boolean
   /** Something changed (joined, closed): re-read the list. */
   onChanged: () => void
   /** The heading level of the app's name (inside a section's h2). */
@@ -66,7 +68,7 @@ function entryFor(table: SpaceTable, look: AppLook, entry: CatalogEntry | null):
 }
 
 export function SpaceGameCard({
-  spaceId, table, look, entry, canEditGames, onChanged, headingLevel = 3,
+  spaceId, table, look, entry, canEditGames, watchOnly = false, onChanged, headingLevel = 3,
 }: Props) {
   const { route } = useLocation()
   const [busy, setBusy] = useState(false)
@@ -123,6 +125,7 @@ export function SpaceGameCard({
   }
 
   const main = (() => {
+    if (watchOnly && action !== 'open' && action !== 'resume') return null
     switch (action) {
       case 'join':
         return (

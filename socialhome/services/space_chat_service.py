@@ -1,12 +1,13 @@
-"""A space's chat — one system group chat per space, for its writers.
+"""A space's chat — one system group chat per space: every seat reads it,
+its writers post.
 
 Built on group-DM storage (``conversations`` with ``system_scope =
 'space'`` and ``space_id``, migration 0082): messages, reactions, edit /
 delete, mentions, unread, mute and notification level all go through the
 existing ``/api/conversations/{id}/...`` routes, authorised live by
 :class:`~socialhome.services.system_chat_policy.SpaceChatAccess` (a local
-writer seat — never a follower —, ``features.chat`` on, not banned, the
-space not dissolved; posting also needs it not archived). The chat travels
+seat — a follower reads, a writer seat posts —, ``features.chat`` on, not
+banned, the space not dissolved; posting also needs it not archived). The chat travels
 between member households as the v_55 ``SPACE_CHAT_*`` events
 (:class:`~socialhome.services.space_chat_outbound.SpaceChatOutbound`,
 :mod:`~socialhome.services.federation_inbound.space_chat`); each household
@@ -49,7 +50,7 @@ from ..domain.events import (
     SpaceMemberJoined,
     SpaceMemberLeft,
 )
-from ..domain.space import WRITER_ROLES, SpaceRole
+from ..domain.space import SpaceRole
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -152,10 +153,10 @@ class SpaceChatService:
 
         :class:`KeyError` (404) when the space is unknown or dissolved here,
         or ``username`` holds no seat in it (or is banned) — the chat of a
-        space you are not in does not exist for you. A **follower** gets
-        ``enabled=False`` (followers neither read nor post the chat), as
-        does everyone while the space's admins turned the chat off; nothing
-        is created then.
+        space you are not in does not exist for you. A **follower** reads
+        the chat (``can_post=False``: it never writes to it). Everyone gets
+        ``enabled=False`` while the space's admins turned the chat off;
+        nothing is created then.
         """
         user = await self._users.get(username)
         space = await self._spaces.get(space_id)
@@ -164,8 +165,8 @@ class SpaceChatService:
         member = await self._spaces.get_member(space_id, user.user_id)
         if member is None or await self._spaces.is_banned(space_id, user.user_id):
             raise NotFoundError(f"space {space_id!r} not found")
-        if str(member.role) == SpaceRole.SUBSCRIBER.value or not space.features.chat:
-            return SystemChatSummary(enabled=False)
+        if not space.features.chat:
+            return SystemChatSummary(enabled=False, can_post=False)
         chat = await self.reconcile(space_id)
         seat = next(
             (
@@ -177,7 +178,7 @@ class SpaceChatService:
         )
         if seat is None:
             # The policy refused this reader (e.g. an inactive account).
-            return SystemChatSummary(enabled=False)
+            return SystemChatSummary(enabled=False, can_post=False)
         muted_until = (
             seat.muted_until
             if mute_active(seat.muted_until, now=datetime.now(UTC))
@@ -194,6 +195,7 @@ class SpaceChatService:
             notif_level=seat.notif_level,
             muted_until=muted_until,
             last_read_at=seat.last_read_at,
+            can_post=str(member.role) != SpaceRole.SUBSCRIBER.value,
         )
 
     async def unread_by_space(self, username: str) -> dict[str, SpaceChatSeatUnread]:
@@ -217,7 +219,7 @@ class SpaceChatService:
         if user is None or not user.is_active():
             return {}
         rows = await self._convos.list_space_chat_unread(
-            username, writer_roles=frozenset(r.value for r in WRITER_ROLES)
+            username, roles=frozenset(r.value for r in SpaceRole)
         )
         now = datetime.now(UTC)
         resolver = DmMentionResolver(self._convos, self._users, self._policy)

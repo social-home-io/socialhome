@@ -162,7 +162,7 @@ from .gfs_server_targets import (
     is_listing_target_id,
     refusal_outcome,
 )
-from .space_writer_households import SEAT_ROLES, holds_member_seat
+from .space_writer_households import SEAT_ROLES, holds_seat
 
 if TYPE_CHECKING:
     from ..domain.space import Space
@@ -1914,7 +1914,7 @@ class GfsChannelService:
         if grant is None or grant.channel_pass is None:
             # A publish-only member never takes a seat.
             return 0
-        if not await holds_member_seat(self._spaces, space_id, roles=SEAT_ROLES):
+        if not await holds_seat(self._spaces, space_id, roles=SEAT_ROLES):
             # No person of ours holds a seat any more (removed at a
             # rotation: our last pass closed): no seat on the channel.
             return 0

@@ -1,8 +1,8 @@
-"""Frames about a space's people never reach its followers (owner decision
-13): approval proposals and zones go to the members only, like the
-``GET …/proposals`` / ``…/zones`` reads they keep live. Roster frames
-(joined / left / profile) reach every seat: the roster is the same for
-everyone, followers included (D3, v_96)."""
+"""Every space frame reaches every seat, a follower's included (P10, owner
+2026-11-26: a follower reads everything a member does — it replaces owner
+decision 13): approval proposals, zones and the sync status like the
+``GET …/proposals`` / ``…/zones`` reads they keep live, and the roster
+frames (joined / left / profile, D3, v_96)."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ _EVENTS = [
         updated_at="2026-10-18T00:00:00+00:00",
     ),
     SpaceZoneDeleted(space_id="sp-1", zone_id="z1", deleted_by="own"),
-    # A follower gets no sync status (the GFS feeds it, not the host).
+    # A follower syncs like a member, so it gets the sync status too.
     SpaceSyncStateChanged(
         space_id="sp-1",
         sync={"state": "behind", "last_ok_at": None, "waiting_to_send": 0},
@@ -106,13 +106,11 @@ _EVENTS = [
 
 
 @pytest.mark.parametrize("event", _EVENTS, ids=lambda e: type(e).__name__)
-async def test_people_frames_skip_followers(env, event):
+async def test_people_frames_reach_followers_too(env, event):
     bus, socks = env
     await bus.publish(event)
-    for uid in ("own", "adm", "mod", "mem"):
+    for uid in _ROLES:
         assert len(socks[uid].sent) == 1, uid
-    assert socks["fol"].sent == []
-    assert socks["fol2"].sent == []
 
 
 # ─── Roster frames: everyone sees the same roster (D3, v_96) ───────────────

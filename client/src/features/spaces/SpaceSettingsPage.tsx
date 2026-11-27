@@ -204,7 +204,9 @@ export default function SpaceSettingsPage() {
   const [saving, setSaving] = useState(false)
 
   const [notifLevel, setNotifLevel] = useSpaceNotifLevel(spaceId, viewer !== null)
-  const chatOn = viewer !== null && viewer !== 'follower' && (space?.features?.chat ?? true)
+  // Every seat reads the chat, a follower's too (P10): its notifications
+  // are theirs to set.
+  const chatOn = viewer !== null && (space?.features?.chat ?? true)
   const chatNotif = useSpaceChatNotif(spaceId, chatOn)
 
   // A member's own location sharing (the switch lives on the Map).

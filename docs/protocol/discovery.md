@@ -1577,14 +1577,21 @@ space-keyed seat before the space got a channel keeps it (and still applies
 a space-keyed item from a member below v_96) until P6/P7 remove that path.
 A third: the host's OWN items also reach a GFS-reached follower over
 federation (it holds the follower's space-session row) — one multi upload
-per GFS per host item; the same deferred lever. A non-host household does
-not try a GFS-reached follower at all in a space with a channel
-(`FederationService.channel_reached_followers`: no writer seat and no path
-of its own — no peer row, or only the lazy directory seat a card made (a
-`space_session` row without `relay_via`), and no mesh claim — never for the
-content key or the roster), nor queues it
-pictures it did not ask for, nor tries it in the mesh-announce sweep. A
-delegated admin's rotation reaches such a follower through the owner, which
+per GFS per host item; the same deferred lever. Since P10 (owner
+2026-11-27) there is no follower-specific rule — the v_96
+`channel_reached_followers` skip is gone. Instead, one rule for everyone:
+A household we hold no `remote_instances` row for (no pairing, no
+directory seat from its card) that never claimed a version over the mesh is
+**not tried** in a space another household hosts
+(`DELIVERY_ERROR_HOST_HOP`, not a loss): the host holds its seat and serves
+its catch-up. The host itself is never left out, and the host tries everyone. Role-neutral — a member and a
+follower in that position alike (P10, owner 2026-11-27). Households with a
+row go first; at most `MAX_MESH_DISCOVERIES_PER_BROADCAST` = 32 row-less
+households are tried over the mesh per broadcast, the rest wait in their
+deferred queue; the window moves on each broadcast so no household is always past it. A new mesh-only household is tried once its mesh claim lands (the startup announce or the 30-minute sweep); until then the host and its catch-up reach it. **Known gap:** what no catch-up carries — a live location
+pin — reaches such a household only from the host's own people. The
+follow-up is one general path: every space item type rides the channel like
+posts. A delegated admin's rotation reaches such a follower through the owner, which
 re-sends the admin's signed rekey to the follower-only households it holds
 a space-session row for (`SpaceService.relay_admin_rekey_to_followers`,
 see [spaces.md](./spaces.md#keys-and-rotation)). The `channel_sent` mark is set when the author's publisher plans the send,
@@ -2612,10 +2619,12 @@ reader that misses a blob **when a person views it** asks the GFS, and the
 GFS asks one household that holds the file to send the same deterministic
 ciphertext again — **streamed** straight to the waiting reader(s) with
 nothing stored, or **re-uploaded** into the cache. A prefetch never asks.
-Paired and mesh members never use this (they get the bytes from the
-household). Since v_92 it is for **followers** only: a household holding a
-member seat (link-joined included) asks its host or a helper with
-`SPACE_MEDIA_WANTED` instead
+Paired and mesh households never use this (they get the bytes from the
+household, or ask the host or a helper with `SPACE_MEDIA_WANTED`). Since
+P10 (owner 2026-11-27: by path, never by role) it is the path of **every
+household that reaches the space only through a GFS** — a relay seat
+and/or a channel seat, no paired row, no mesh claim — member or follower
+alike; v_92 media healing covers paired / mesh households only
 ([`media.md`](./media.md#older-files-on-view--space_media_wanted-v_92)). The
 household side, both flow diagrams and the cost are in
 [`media.md`](./media.md#space-media-on-demand-v_83).

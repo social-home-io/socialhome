@@ -338,9 +338,11 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/domain/federation.py": 3,
         # +1 (v_96): gfs_reached_followers — the follower households only
         # the host reaches (it re-sends a delegated admin's rekey to them).
-        # +1 (v_96 same path): channel_reached_followers treats a follower's
-        # lazy directory seat (no relay_via) as its mailbox address, not a
-        # path beside its channel seat (follower subset, no N × M copy).
+        # (P10: the v_96 channel_reached_followers skip is gone — a
+        # follower is reached like a member on the same paths.)
+        # +1 (P10, transport): reaches_host_directly — a GFS seat is no
+        # paired path to the host, so the media fetch goes through the GFS
+        # (by path, never by role).
         "socialhome/federation/federation_service.py": 20,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
