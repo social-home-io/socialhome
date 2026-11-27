@@ -473,7 +473,7 @@ class SpaceMediaSyncService:
             )
             return False
         if await self._reads_gfs_cache(entry, fed):
-            log.debug(
+            log.info(
                 "space-media-sync: %s takes %s from the GFS cache — no push",
                 entry.target_instance_id,
                 entry.blob_id,
