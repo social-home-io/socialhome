@@ -2741,6 +2741,30 @@ async def test_a_record_whose_file_is_still_on_its_way_waits_for_the_next_stream
     assert session.stream_clean is False
 
 
+async def test_a_record_that_could_not_be_described_waits_for_the_next_stream(
+    encoder,
+):
+    """Review H3c: a planning error toward a cache-only reader holds the
+    record back (the stream is not clean) — never sent undescribed."""
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        raise RuntimeError("no key")
+
+    uploader.plan_for_reader = plan_for_reader
+    svc = _media_provider(encoder, uploader)
+    svc._exporters["posts"] = _FakeExporter(
+        "posts",
+        [{"id": "p-1", "author": "u-1", "image_urls": ["api/media/a.webp"]}],
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    assert _streamed_records(session, "posts") == []
+    assert session.stream_clean is False
+
+
 async def test_a_bazaar_record_is_described_for_its_wrapper_post(encoder):
     """v_97 (owner B-3) — a bazaar record carries no ``id``: its files are
     described for the wrapper post's id, the one the listing's reader keeps

@@ -900,7 +900,20 @@ class SqliteMediaReferenceRepo:
                         continue
                     return False
                 referenced = True
+        if not referenced and await self._hosts(space_id):
+            # An open conflict side of a live page (its body is JSON, no
+            # registry column): our own file on the space's host (v_97).
+            referenced = basename in await self._page_raw_names(space_id, live=True)
         return referenced
+
+    async def _hosts(self, space_id: str) -> bool:
+        """Whether this household is *space_id*'s host."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM spaces hs, instance_identity ii"
+            " WHERE hs.id = ? AND hs.owner_instance_id = ii.instance_id",
+            (space_id,),
+        )
+        return row is not None
 
     async def live_in_space(self, basename: str, space_id: str) -> bool:
         """Whether a LIVE row of space *space_id* shows *basename* right now
@@ -943,12 +956,7 @@ class SqliteMediaReferenceRepo:
         # v_97 (coordinator 1A) — a live page's history and open sides show
         # to its members too; their raw names are our own files only on the
         # space's host.
-        hosted = await self._db.fetchone(
-            "SELECT 1 FROM spaces hs, instance_identity ii"
-            " WHERE hs.id = ? AND hs.owner_instance_id = ii.instance_id",
-            (space_id,),
-        )
-        return hosted is not None and basename in await self._page_raw_names(
+        return await self._hosts(space_id) and basename in await self._page_raw_names(
             space_id, live=True
         )
 

@@ -61,6 +61,7 @@ Cost per item: one upload per file (or piece) per GFS (never per reader).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
@@ -674,10 +675,16 @@ class SpaceMediaGfsUploader:
         :data:`MAX_DESCRIBING_STREAMS` describe at once (each seals in one
         worker thread); the rest wait."""
         pending: list[str] = []
-        async with self._describing:
-            refs = await self._describe_names(
-                space_id, names, item_id, pieces=MAX_PIECED_FILE_BYTES, pending=pending
-            )
+        # Only the sealing takes a slot — a fetch to describe waits outside
+        # it (review M5).
+        refs = await self._describe_names(
+            space_id,
+            names,
+            item_id,
+            pieces=MAX_PIECED_FILE_BYTES,
+            pending=pending,
+            seal_gate=self._describing,
+        )
         if not refs and not pending:
             return None
         return SpaceMediaPlan(
@@ -756,6 +763,7 @@ class SpaceMediaGfsUploader:
         pieces: int = 0,
         author: str = "",
         pending: list[str] | None = None,
+        seal_gate: asyncio.Semaphore | None = None,
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
         household — the household a reader authenticates as delivering the
@@ -781,56 +789,61 @@ class SpaceMediaGfsUploader:
         scope, scope_id = scoped
         refs: list[SpaceMediaRef] = []
         for name in names[:MAX_FILES_PER_ITEM]:
-            if not await self._space_file(space_id, name):
-                continue
+            # A file described before costs a stat and a lookup (review M4:
+            # the confinement check is ~25 table scans): it was confined
+            # then, and every upload and on-demand serve checks again.
             stamp = await self._stamp(name)
-            if stamp is None and not cached_only:
+            if stamp is not None:
+                cache_key = (space_id, epoch, scope, scope_id, item_id, name, *stamp)
+                cached = self._described.get(cache_key)
+                if cached is not None:
+                    self._described.move_to_end(cache_key)
+                    refs.append(cached)
+                    continue
+            if cached_only or not await self._space_file(space_id, name):
+                continue
+            if stamp is None:
                 stamp = await self._fetch_first(space_id, name)
                 if stamp is None and pending is not None and self._still_fetching(name):
                     pending.append(name)
             if stamp is None:
                 continue
             cache_key = (space_id, epoch, scope, scope_id, item_id, name, *stamp)
-            cached = self._described.get(cache_key)
-            if cached is not None:
-                self._described.move_to_end(cache_key)
-                refs.append(cached)
-                continue
-            if cached_only:
-                continue
             if stamp[0] > MAX_SPACE_MEDIA_BYTES:
-                ref = await self._describe_pieced(
-                    space_id,
-                    name,
-                    item_id,
-                    epoch,
-                    key,
-                    scope,
-                    scope_id,
-                    pieces=pieces,
-                    author=author,
-                )
+                async with seal_gate or contextlib.nullcontext():
+                    ref = await self._describe_pieced(
+                        space_id,
+                        name,
+                        item_id,
+                        epoch,
+                        key,
+                        scope,
+                        scope_id,
+                        pieces=pieces,
+                        author=author,
+                    )
                 if ref is not None:
                     self._described[cache_key] = ref
                     while len(self._described) > MAX_DESCRIBED:
                         self._described.popitem(last=False)
                     refs.append(ref)
                 continue
-            data = await self._read(name)
-            if data is None:
-                continue
-            blob, address = await asyncio.to_thread(
-                seal_and_address_sync,
-                key,
-                space_id,
-                epoch,
-                item_id,
-                origin,
-                name,
-                data,
-                scope,
-                scope_id,
-            )
+            async with seal_gate or contextlib.nullcontext():
+                data = await self._read(name)
+                if data is None:
+                    continue
+                blob, address = await asyncio.to_thread(
+                    seal_and_address_sync,
+                    key,
+                    space_id,
+                    epoch,
+                    item_id,
+                    origin,
+                    name,
+                    data,
+                    scope,
+                    scope_id,
+                )
             ref = SpaceMediaRef(
                 filename=name,
                 space_id=space_id,

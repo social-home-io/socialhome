@@ -519,3 +519,35 @@ async def test_a_streamed_comments_descriptor_names_its_picture_from_the_gfs(set
     assert [(x[3], x[4]) for x in sink.received] == [("c-m", "peer-a")]
     assert c.comments[0].media_url == "api/media/sg-a.webp"
     assert sink.kept == [{"a.webp": "sg-a.webp"}]
+
+
+async def test_a_hosts_hashed_comment_keeps_its_descriptor(setup):
+    """Review H2: the host's comment record carries both its file hashes
+    and the descriptor. The descriptor is keyed by the provider's file name,
+    so it is read before the picture takes its content name — and with the
+    host's hashes, which name it."""
+    r, c, kp = setup
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "comments",
+        [
+            {
+                "id": "c-h",
+                "post_id": "p-1",
+                "author": "u-1",
+                "type": "image",
+                "content": "pic",
+                "media_url": "api/media/a.webp",
+                "created_at": "2026-04-18T00:00:00+00:00",
+                "media_refs": _SYNC_REFS,
+                "files": {"a.webp": {"h": "a" * 64}},
+                "files_suite": "sha256",
+            },
+        ],
+    )
+    assert [x[2] for x in sink.received] == [["api/media/a.webp"]]
+    assert sink.hashes["c-h"] is not None
+    assert c.comments[0].media_url == "api/media/sg-a.webp"

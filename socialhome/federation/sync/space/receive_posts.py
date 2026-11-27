@@ -315,19 +315,12 @@ class PostsMixin(ReceiverBase):
             comment = _comment_from_record(r)
             if comment is None:
                 continue
-            # v_85 — a hashed picture takes its content name (the
-            # host's hashes only); a raw content name never lands.
-            comment = replace(
-                comment,
-                media_url=comment_media_ref(
-                    space_id,
-                    comment.media_url,
-                    parse_file_hashes(r) if comments_from_host else None,
-                ),
-            )
+            hashes = parse_file_hashes(r) if comments_from_host else None
             # v_97 — a GFS space's v_97 household takes the picture from
             # the GFS cache: the record's descriptor names it here (only
-            # for a comment new here, or from the host).
+            # for a comment new here, or from the host) — keyed by the
+            # provider's file name, so localized before any rename, with
+            # the host's hashes (a hashed file takes its content name).
             held_comment = await self._space_post_repo.get_comment(comment.id)
             media = await self._localize_gfs(
                 space_id,
@@ -336,8 +329,17 @@ class PostsMixin(ReceiverBase):
                 item_media_urls("comments", comment),
                 provider=provider,
                 takes_descriptor=held_comment is None or comments_from_host,
+                hashes=hashes,
             )
-            comment = media.item("comments", comment)
+            if media.names:
+                comment = media.item("comments", comment)
+            else:
+                # v_85 — a hashed picture takes its content name (the
+                # host's hashes only); a raw content name never lands.
+                comment = replace(
+                    comment,
+                    media_url=comment_media_ref(space_id, comment.media_url, hashes),
+                )
             if await self._space_post_repo.add_comment(comment, space_id=space_id):
                 await self._keep_media(media)
                 # History, not news: only replies held for this comment

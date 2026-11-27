@@ -1152,13 +1152,24 @@ class SpaceSyncResumeProvider(FileHashesMixin):
             if lazy:
                 assert described_of is not None and self._media_gfs is not None
                 described = described_of(row)
-                plan = (
-                    await self._media_gfs.plan_for_reader(
-                        space_id, described, to, item_id=row.id
+                try:
+                    plan = (
+                        await self._media_gfs.plan_for_reader(
+                            space_id, described, to, item_id=row.id
+                        )
+                        if described
+                        else None
                     )
-                    if described
-                    else None
-                )
+                except Exception:
+                    # Never undescribed to it: the catch-up brings the row.
+                    log.warning(
+                        "SPACE_SYNC_RESUME %s %s to %s: files not described",
+                        event_type,
+                        row.id,
+                        to,
+                        exc_info=True,
+                    )
+                    continue
                 if plan is not None and plan.pending:
                     log.info(
                         "SPACE_SYNC_RESUME %s %s to %s: a file is still on its"

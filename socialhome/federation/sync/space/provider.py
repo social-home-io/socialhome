@@ -325,6 +325,11 @@ class _WithMediaRefs:
                         self._requester,
                         exc_info=True,
                     )
+                    if self._lazy:
+                        # Never undescribed to a cache-only reader: the
+                        # next stream sends it (review H3c).
+                        self.deferred = True
+                        continue
                     plan = None
                 if self._lazy:
                     # Sealing ran in a worker thread; let other work in

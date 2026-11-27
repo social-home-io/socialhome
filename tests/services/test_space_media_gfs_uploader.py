@@ -8,6 +8,8 @@ import base64
 import hashlib
 import os
 import pathlib
+import threading
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -1569,17 +1571,21 @@ async def test_lazy_describing_is_capped_per_household(tmp_path, monkeypatch):
     u.attach_federation(_Fed({"paired": OURS}))
     running = 0
     peak = 0
-    real = up_mod.SpaceMediaGfsUploader._describe_names
+    lock = threading.Lock()
+    real = up_mod.seal_and_address_sync
 
-    async def slow(*args, **kwargs):
+    def slow(*args):
         nonlocal running, peak
-        running += 1
-        peak = max(peak, running)
-        await asyncio.sleep(0.01)
-        running -= 1
-        return await real(*args, **kwargs)
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.02)
+        with lock:
+            running -= 1
+        return real(*args)
 
-    monkeypatch.setattr(up_mod.SpaceMediaGfsUploader, "_describe_names", slow)
+    # Only the sealing (in a worker thread) takes a slot.
+    monkeypatch.setattr(up_mod, "seal_and_address_sync", slow)
     plans = await asyncio.gather(
         *(
             u.plan_for_reader(SPACE, ["api/media/a.webp"], "paired", item_id=f"i-{i}")

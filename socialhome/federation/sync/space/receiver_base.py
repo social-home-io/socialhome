@@ -204,6 +204,7 @@ class ReceiverBase:
         *,
         provider: str,
         takes_descriptor: bool,
+        hashes: Mapping[str, FileHash] | None = None,
     ) -> SpaceMediaLocalization:
         """v_97 — only the GFS cache's names for a streamed item's files
         (a comment keeps its direct names as it has them): what a record's
@@ -217,6 +218,7 @@ class ReceiverBase:
             urls,
             item_id=item_id,
             origin=provider,
+            hashes=hashes,
         )
 
     async def _keep_media(self, media: SpaceMediaLocalization) -> None:

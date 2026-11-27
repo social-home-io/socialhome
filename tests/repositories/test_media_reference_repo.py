@@ -959,6 +959,9 @@ async def test_a_live_pages_files_history_and_open_sides_are_live(db):
         assert await repo.live_in_space(name, "sp1"), name
         assert await repo.live_in_space(space_page_media_name("sp1", name), "sp1")
         assert not await repo.live_in_space(space_page_media_name("sp2", name), "sp2")
+        # …and this space's own on the host (review M1: a side-only file).
+        assert await repo.confined_to_space(name, "sp1"), name
+        assert not await repo.confined_to_space(name, "sp2"), name
     # A plain snapshot (no open side) is no live content.
     await db.enqueue(
         "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
