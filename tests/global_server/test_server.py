@@ -336,6 +336,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
             "scopes": ["channel"],
             # v_83 — a reader may ask for a blob it missed, waiting this long.
             "on_demand": {"wait_s": 25},
+            # v_97 — it keeps the 8 MiB pieces of a larger file (sm1p).
+            "pieces": True,
         },
         # v_87 — ``POST /gfs/envelope`` takes binary media frames.
         "envelope_media": True,
