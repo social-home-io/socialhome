@@ -2692,10 +2692,17 @@ async def test_a_malformed_space_item_is_dropped(item_env, payload):
     assert dispatch.calls == []
 
 
-async def test_a_host_statement_on_the_channel_reaches_the_item_dispatch(item_env):
+@pytest.mark.parametrize("archived", [False, True])
+async def test_a_host_statement_on_the_channel_reaches_the_item_dispatch(
+    item_env, archived
+):
     """v_97 — an authority item of kind ``space_event`` (signature checked
     against the pinned key) goes to the one receiver; a forged authority
-    signature never does."""
+    signature never does. An archived space too: the unarchive itself, or a
+    ban while archived, is judged by its own event's gates."""
+    if archived:
+        space = await item_env["space_repo"].get("sp-1")
+        await item_env["space_repo"].save(replace(space, archived=True))
     seen: list[dict] = []
 
     class _Dispatch(_RecordingDispatch):

@@ -45,6 +45,7 @@ import orjson
 
 from ..crypto import ed25519_public_key
 from ..domain.federation import FederationEventType, GfsConnection
+from ..domain.federation_retention import supersede_key
 from ..domain.gfs_channel import RING_CLASS_DURABLE
 from ..domain.space import SpaceFeatures, SpaceType
 from ..domain.space_item import (
@@ -284,7 +285,7 @@ class GfsMemberPublishService:
         """Let in-flight background publishes (and held items) finish."""
         self._stopping = True
         await self.wait_idle()
-        await self._budget.wait_idle()
+        await self._budget.close()
 
     # ── Publishing an item ────────────────────────────────────────────────
 
@@ -477,12 +478,31 @@ class GfsMemberPublishService:
         if event_type.value in AUTHORITY_ITEM_TYPES:
             # A host statement rides only a GFS space's channel (a mesh
             # space's host sends it to its members directly).
-            if not on_channel or not whole_space:
+            if (
+                not on_channel
+                or not whole_space
+                or self._channels is None
+                or not await self._channels.plan(space_id)
+            ):
                 return None
             return await self._seal_authority(space_id, event_type, payload)
         if on_channel and (
             not whole_space or event_type.value in V1_CHANNEL_EVENT_TYPES
         ):
+            return None
+        if not on_channel and (
+            supersede_key(event_type, space_id=space_id, payload=payload) is not None
+        ):
+            # Latest-only state (a pin, a poll selection) keeps its event on
+            # the mesh: the outbox holds one row per (peer, key) for it, and
+            # a queued SPACE_ITEM would not (no movement trail for an
+            # offline household, an opt-out still replaces a queued pin).
+            return None
+        if on_channel and (
+            self._channels is None or not await self._channels.plan(space_id)
+        ):
+            # No channel server to take it right now: the legacy event goes
+            # to everyone (never a change that reaches nobody).
             return None
         sealed = await self._seal_event(space_id, event_type, payload)
         if sealed is None:
@@ -494,7 +514,12 @@ class GfsMemberPublishService:
         await self._budget.submit(
             space_id,
             spec.budget,
-            str(payload.get("user_id") or payload.get("author") or ""),
+            str(
+                payload.get("user_id")
+                or payload.get("author_user_id")
+                or payload.get("author")
+                or ""
+            ),
             functools.partial(
                 self._publish_channel_item, space_id, epoch, ct, spec.ring_class
             ),
@@ -506,9 +531,15 @@ class GfsMemberPublishService:
             item=ct,
             via_channel=True,
             legacy_window=await self._in_legacy_window(space_id),
+            # Only a new message / item mentions anew (an edit would ring
+            # the same people twice).
             notes=tuple(
                 (iid, wire)
-                for iid in await self._mentioned_households(space_id, payload)
+                for iid in (
+                    await self._mentioned_households(space_id, payload)
+                    if event_type.value.endswith("_created")
+                    else []
+                )
             ),
         )
 
@@ -650,7 +681,11 @@ class GfsMemberPublishService:
         content = payload.get("content")
         if not isinstance(content, str) or "@" not in content:
             return []
-        author = payload.get("author") or payload.get("user_id")
+        author = (
+            payload.get("author_user_id")
+            or payload.get("author")
+            or payload.get("user_id")
+        )
         mentions = await self._mentions.resolve(
             space_id, content, author_id=str(author) if author else None
         )

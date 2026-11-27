@@ -2279,6 +2279,12 @@ class FederationService:
         )
         self._replay_cache.load(entries)
 
+    def replay_id_seen(self, msg_id: str) -> bool:
+        """Whether ``msg_id`` was claimed inside the replay window — read
+        only, so a copy is refused before it spends any budget (§24.11: "a
+        replay is refused there, never charged")."""
+        return self._replay_cache.contains(msg_id, now=datetime.now(UTC))
+
     async def note_replay_id(self, msg_id: str) -> bool:
         """Check-and-insert one id against the shared replay cache.
 
@@ -4195,6 +4201,7 @@ class FederationService:
         legacy_payload: dict | None,
         legacy_below: int | None,
         only_instances: Collection[str] | None = None,
+        whole_space: bool = True,
     ) -> BroadcastResult | None:
         """v_97 (``docs/protocol/space-items.md``) — a person's change as
         ONE sealed space item (the same bytes for every recipient):
@@ -4222,25 +4229,20 @@ class FederationService:
             else [iid for iid in members if iid in only_instances]
         )
         sealed = await self._item_sealer(
-            space_id, event_type, payload, whole_space=set(audience) == set(members)
+            space_id, event_type, payload, whole_space=whole_space
         )
         if sealed is None:
             return None
         items_to: list[str] = []
         legacy_to: list[str] = []
         for iid in audience:
-            if not sealed.via_channel and await self.space_member_supports(
+            v97 = await self.space_member_supports(
                 iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
-            ):
-                items_to.append(iid)
-            elif (
-                not sealed.via_channel
-                or sealed.legacy_window
-                or not await self.space_member_supports(
-                    iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
-                )
-            ):
+            )
+            if not v97 or (sealed.via_channel and sealed.legacy_window):
                 legacy_to.append(iid)
+            elif not sealed.via_channel:
+                items_to.append(iid)
         parts: list[BroadcastResult] = []
         if items_to:
             parts.append(
@@ -4249,6 +4251,7 @@ class FederationService:
                     FederationEventType.SPACE_ITEM,
                     sealed.wire(),
                     only_instances=items_to,
+                    as_item=False,
                 )
             )
         for iid, note in sealed.notes:
@@ -4262,6 +4265,7 @@ class FederationService:
                         FederationEventType.SPACE_MENTION_NOTE,
                         note,
                         only_instances=[iid],
+                        as_item=False,
                     )
                 )
         if legacy_to:
@@ -4274,6 +4278,7 @@ class FederationService:
                     legacy_payload=legacy_payload,
                     legacy_below=legacy_below,
                     only_instances=legacy_to,
+                    as_item=False,
                 )
             )
         results = tuple(r for part in parts for r in part.results)
@@ -4296,8 +4301,18 @@ class FederationService:
         legacy_below: int | None = None,
         per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
         only_instances: Collection[str] | None = None,
+        whole_space: bool | None = None,
+        as_item: bool = True,
     ) -> BroadcastResult:
         """Fan out to every member household of ``space_id``.
+
+        v_97 — a change of ``ITEM_SPECS`` goes as one space item
+        (:meth:`_broadcast_as_item`) unless ``as_item`` is ``False`` (the
+        item split's own sends). ``whole_space``: the caller's
+        ``only_instances`` is the whole space's audience, narrowed only by
+        version or seat (so a GFS space's channel — read by every seat — is
+        the right place); ``None`` reads it from ``only_instances is None``.
+        A targeted send (one household, a subset by role) never says so.
 
         ``only_instances``, when given, narrows the fan-out to the member
         households it names (still minus bans, still per-peer mesh-routed):
@@ -4348,8 +4363,10 @@ class FederationService:
         events that MUST always ship and degrade noisily on older
         peers).
         """
-        if self._item_sealer is not None and sends_as_item(
-            event_type, per_peer=per_peer
+        if (
+            as_item
+            and self._item_sealer is not None
+            and sends_as_item(event_type, per_peer=per_peer)
         ):
             split = await self._broadcast_as_item(
                 space_id,
@@ -4359,6 +4376,9 @@ class FederationService:
                 legacy_payload=legacy_payload,
                 legacy_below=legacy_below,
                 only_instances=only_instances,
+                whole_space=(
+                    whole_space if whole_space is not None else only_instances is None
+                ),
             )
             if split is not None:
                 return split

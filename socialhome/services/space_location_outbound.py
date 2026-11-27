@@ -52,6 +52,7 @@ from ..repositories.presence_repo import AbstractPresenceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.space_zone_repo import AbstractSpaceZoneRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .gfs_channel_service import channel_on
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -81,6 +82,8 @@ def _before(stamp: object, other: str) -> bool:
 
 #: v_97 (owner F3) — a shared pin is republished this often.
 KEEPALIVE_S: float = 15 * 60.0
+#: :meth:`SpaceLocationOutbound._current_pin` — shared, but in a mesh space.
+_MESH = object()
 
 
 class SpaceLocationOutbound:
@@ -92,9 +95,9 @@ class SpaceLocationOutbound:
     __slots__ = (
         "_bus",
         "_federation",
-        "_last_payload",
         "_last_sent",
         "_members",
+        "_pinned",
         "_presence",
         "_shared_from",
         "_spaces",
@@ -138,10 +141,10 @@ class SpaceLocationOutbound:
         #: first sent their pin. A pin never says "here since" earlier than
         #: that: where they were before they chose to share is not shared.
         self._shared_from: dict[tuple[str, str], str] = {}
-        #: v_97 — (space, user) → the last pin sent, republished every
-        #: :data:`KEEPALIVE_S` while they share (owner F3: a pin older than
-        #: 45 minutes reads as stale). In memory, bounded like the above.
-        self._last_payload: dict[tuple[str, str], dict] = {}
+        #: v_97 — (space, user) pairs with a pin out, rebuilt and repeated
+        #: every :data:`KEEPALIVE_S` in a GFS space while still shared (owner
+        #: F3). In memory, bounded like the above.
+        self._pinned: set[tuple[str, str]] = set()
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -315,7 +318,7 @@ class SpaceLocationOutbound:
         key = (event.space_id, event.user_id)
         self._last_sent.pop(key, None)
         self._shared_from.pop(key, None)
-        self._last_payload.pop(key, None)
+        self._pinned.discard(key)
         # This household's own open Map tabs drop the pin at once.
         await self._broadcast_removed(
             event.space_id, {"space_id": event.space_id, "user_id": event.user_id}
@@ -495,22 +498,70 @@ class SpaceLocationOutbound:
         if _before(payload.get("updated_at"), start):
             payload = {**payload, "updated_at": start}
         self._last_sent[key] = (said, payload.get("updated_at"))
-        self._last_payload[key] = payload
+        self._pinned.add(key)
         await self._broadcast_local(space_id, payload)
         if unchanged and not force:
             return
         await self._fan_out_federation(space_id, payload)
 
     async def keepalive(self) -> int:
-        """v_97 (owner F3) — republish every pin still shared, so a member
-        who opens the map (or a GFS space's ring, which keeps a pin 15
-        minutes) sees it; receivers show a pin older than 45 minutes as
-        stale. Returns how many went."""
+        """v_97 (owner F3) — republish every pin still shared in a GFS
+        space, whose channel ring keeps a pin only 15 minutes, so a member
+        who opens the map there sees it. A mesh space's households keep the
+        last pin, so it never repeats there.
+
+        Each pin is rebuilt from what is true NOW — still a member, still
+        sharing, location on, a live position, and (zone_only) still inside
+        a zone; otherwise it is forgotten and never repeated (the person
+        stopped sharing it; an opt-out sends "off" itself). Returns how many
+        went."""
         sent = 0
-        for (space_id, _user), payload in list(self._last_payload.items()):
-            await self._fan_out_federation(space_id, payload)
+        presences = {p.user_id: p for p in await self._presence.list_active()}
+        for key in list(self._pinned):
+            space_id, user_id = key
+            fresh = await self._current_pin(space_id, presences.get(user_id), user_id)
+            if fresh is None:
+                self._pinned.discard(key)
+                continue
+            if fresh is _MESH:
+                continue
+            assert isinstance(fresh, dict)
+            # Same place: the same pin, "here since" kept. Moved: the new
+            # one, as a position update would send it.
+            await self._publish(space_id, fresh, force=True)
             sent += 1
         return sent
+
+    async def _current_pin(
+        self, space_id: str, presence: object, user_id: str
+    ) -> dict | object | None:
+        """The pin ``user_id`` shares in ``space_id`` now, ``_MESH`` for a
+        space without a channel (nothing to repeat), ``None`` when it is no
+        longer shared."""
+        space = await self._spaces.get(space_id)
+        if space is None or space.dissolved or not space.features.location:
+            return None
+        member = await self._spaces.get_member(space_id, user_id)
+        if member is None or not member.location_share_enabled:
+            return None
+        lat = getattr(presence, "latitude", None)
+        lon = getattr(presence, "longitude", None)
+        if lat is None or lon is None:
+            return None
+        if not channel_on(space):
+            return _MESH
+        return await self._payload_for_space(
+            space=space,
+            user_id=user_id,
+            latitude=lat,
+            longitude=lon,
+            accuracy_m=getattr(presence, "gps_accuracy_m", None),
+            updated_at=(
+                getattr(presence, "located_since", None)
+                or getattr(presence, "updated_at", None)
+                or datetime.now(UTC).isoformat()
+            ),
+        )
 
     async def start(self) -> None:
         self._stop.clear()
@@ -547,6 +598,7 @@ class SpaceLocationOutbound:
                 FederationEventType.SPACE_LOCATION_UPDATED,
                 payload,
                 only_instances=await self._members.households(space_id),
+                whole_space=True,
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(

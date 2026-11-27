@@ -26,12 +26,19 @@ the numbers and rules below are the owner's.
   heads, answers fetches and gaps. It still sees only ciphertext of a
   channel it knows by a random id.
 
+## Event types
+
+- `SPACE_ITEM` — `{space_id, epoch, item}`: one sealed space item to a v_97
+  member household (a mesh space).
+- `SPACE_MENTION_NOTE` — the same shape, to a mentioned v_97 household only
+  (≤ 20 per item, only for a new message or item, never an edit).
+
 ## Two kinds of space
 
 | | **GFS space** | **mesh space** |
 |---|---|---|
 | Which spaces | a GLOBAL space with a channel; a PRIVATE space with `private_gfs` ON | every other space (household, public, private with `private_gfs` OFF) |
-| Items travel | only on the channel, to every listed GFS the author reaches | `SPACE_ITEM` via `broadcast_to_space_members` (direct, mesh, mailbox) |
+| Items travel | only on the channel, to every listed GFS the author reaches | `SPACE_ITEM` via `broadcast_to_space_members` (direct, mesh, mailbox); latest-only state (a pin, a poll selection) keeps its event, so the outbox still holds one row per (peer, key) |
 | Host hop for content | none | none (origin fans out, as before) |
 | Joining needs | a GFS registration on ≥ 1 listed GFS (consent dialog) | nothing new |
 
@@ -48,8 +55,10 @@ A space item is the sealed plaintext every channel item already uses:
 ```
 
 encrypted under the space content key at the current epoch (AES-256-GCM,
-`SpaceContentEncryption`), padded to a size bucket (`ITEM_SIZE_BUCKETS`,
-which since v_97 starts with **1 KiB, 2 KiB**, then 4, 16, 64, 128 KiB).
+`SpaceContentEncryption`), padded to a size bucket: an event-shaped item to `EVENT_ITEM_SIZE_BUCKETS`
+(**1, 2**, 4, 16, 64, 128 KiB — the 2 KiB step keeps a chat message or a
+pin from doubling to 4 KiB); v1 and authority items keep
+`ITEM_SIZE_BUCKETS` (1, 4, 16, 64, 128 KiB).
 
 ### Event-shaped inner (v2, person actions)
 
@@ -294,10 +303,14 @@ per-address limit gets a per-node floor of 8/min (Q5 B, ~32/min on 4 nodes).
 
 Per household and space: authority > content > chat > location.
 Chat ≤ 20 items/min (the rest wait for the next minute); location ≤ 1 per
-person per 60 s, latest only (a newer pin replaces a waiting one). A person
-sharing location republishes the latest pin every 15 min as a keepalive
-(owner F3); receivers show a pin older than 45 min as stale. Location items
-are `ephemeral` in the ring.
+person per 60 s, latest only (a newer pin replaces a waiting one). In a GFS
+space a person sharing location has the pin republished every 15 min as a
+keepalive (owner F3), since the ring keeps a location item only 15 min
+(`ephemeral`). Each keepalive is rebuilt from what is true then — still a
+member, still sharing, location on, a live position, still inside a zone
+for `zone_only` — and otherwise the pin is forgotten and never repeated. A
+mesh space's households keep the last pin, so nothing repeats there. On
+shutdown every held item goes at once.
 
 ## GFS spaces: joining and switching
 
@@ -330,8 +343,10 @@ are `ephemeral` in the ring.
 
 - Household **v_97** (`FederationCapability.MIN_FOR_SPACE_ITEMS`):
   `SPACE_ITEM`, `SPACE_MENTION_NOTE`, v2 and `space_event` inners. Below
-  v_97 a member gets the legacy event (mesh: per peer; GFS space: by
-  federation, `broadcast_to_space_members` with `below_version`).
+  v_97 a member gets the legacy event (`broadcast_to_space_members` splits
+  the audience by `space_member_supports(MIN_FOR_SPACE_ITEMS)`; an unknown
+  version counts as older). When no listed GFS can take an item right now,
+  or it can't be sealed, the legacy event goes to everyone.
 - GFS capability **`channel_ring`**: households use the ring and the new
   publish fields only on a GFS that proves it; on another GFS the v_96
   channel behaviour holds.
@@ -356,6 +371,13 @@ Busy global space: 200 member + 10 000 follower households, 2 % watching,
 - Quiet space (50 seats, 20 items/day): ≈ 0.3 GB/day across the server.
 
 v1 (push every item to every seat): ≈ 0.7 TB/day busy.
+
+Mesh space: one `SPACE_ITEM` per v_97 member household per change — the
+same count of envelopes the legacy event took (members × changes), each
+padded to the 1/2 KiB buckets instead of the event's own size; no keepalive
+(households keep the last pin), so a mesh space with 10 member households
+and 5 sharers sends no more than before. A mention adds ≤ 20 notes per new
+item, only to mentioned v_97 households.
 
 ## Privacy (owner sign-offs 1–7, 2026-11-27)
 

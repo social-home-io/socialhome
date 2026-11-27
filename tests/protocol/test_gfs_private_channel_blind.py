@@ -120,6 +120,9 @@ class _Gfs:
     async def refresh_if_stale(self, conn):
         return conn
 
+    async def channel_ring_supported(self, conn):
+        return False
+
     async def member_publish_strict_supported(self, conn):
         return True
 

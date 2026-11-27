@@ -80,3 +80,16 @@ async def test_a_full_queue_never_drops_a_message(monkeypatch):
     clock.t += 61
     await budget.wait_idle()
     assert sorted(sent) == ["m0", "m1", "m2"]
+
+
+async def test_close_sends_every_held_item_at_once(monkeypatch):
+    """Shutting down never waits out a pacing window: what is held goes."""
+    monkeypatch.setattr(mod, "CHAT_PER_MINUTE", 1)
+    monkeypatch.setattr(mod, "LOCATION_INTERVAL_S", 3600.0)
+    budget, sent = SenderBudget(clock=_Clock()), []
+    await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, "m0"))
+    await budget.submit("sp", BUDGET_CHAT, "u", _publisher(sent, "m1"))
+    await budget.submit("sp", BUDGET_LOCATION, "ann", _publisher(sent, "p1"))
+    await budget.submit("sp", BUDGET_LOCATION, "ann", _publisher(sent, "p2"))
+    await asyncio.wait_for(budget.close(), timeout=2)
+    assert sorted(sent) == ["m0", "m1", "p1", "p2"]

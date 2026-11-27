@@ -72,6 +72,9 @@ class _Sink:
         self.claimed.add(msg_id)
         return False
 
+    def replay_id_seen(self, msg_id: str) -> bool:
+        return msg_id in self.claimed
+
     async def dispatch_space_item(self, event) -> bool:
         self.events.append(event)
         return self.verdict
@@ -344,7 +347,7 @@ def _host_dispatch(sink, hosts=(HOST,)) -> SpaceItemDispatch:
         federation=sink,
         writer_certs=_Certs(),  # type: ignore[arg-type]
         own_instance_id="us",
-        acts_as_host=acts,
+        host_signer=acts,
     )
 
 
@@ -407,6 +410,20 @@ async def test_a_malformed_host_statement_is_refused(inner):
     sink = _Sink()
     assert not await _host_dispatch(sink).apply_authority(SPACE, epoch=1, inner=inner())
     assert sink.events == []
+
+
+@pytest.mark.security
+async def test_a_replayed_host_statement_spends_no_budget():
+    """A copy is refused before the origin's budget is charged, so nobody
+    can drain the owner's budget by re-sending one captured statement."""
+    sink = _Sink()
+    d = _host_dispatch(sink)
+    inner = _statement()
+    assert await d.apply_authority(SPACE, epoch=1, inner=inner)
+    spent = sink.budget
+    for _ in range(50):
+        assert not await d.apply_authority(SPACE, epoch=1, inner=inner)
+    assert sink.budget == spent
 
 
 async def test_a_host_statement_is_applied_once():

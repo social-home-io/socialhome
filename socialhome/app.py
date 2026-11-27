@@ -76,7 +76,7 @@ from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import MULTI_MAX_TRANSIENT, FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
-from .federation.host_equivalence import acting_hosts, acts_as_host
+from .federation.host_equivalence import acting_hosts, may_sign_pages
 from .federation.host_hop import HostHop
 from .federation.inbox_reply import inbox_holds_envelope
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
@@ -5462,8 +5462,8 @@ def create_app(config: Config | None = None) -> web.Application:
                     federation=federation_service,
                     writer_certs=writer_certs,
                     own_instance_id=real_instance_id,
-                    acts_as_host=functools.partial(
-                        acts_as_host, space_repo, repos.space_remote_member
+                    host_signer=functools.partial(
+                        may_sign_pages, repos.space_remote_member
                     ),
                 )
             )

@@ -718,6 +718,7 @@ class SpaceTableService(BusPublisherMixin):
                 FederationEventType.SPACE_APP_TABLE,
                 card_wire(table, space_id, announce=announce),
                 only_instances=targets,
+                whole_space=True,
                 min_proto_version=FederationCapability.MIN_FOR_SPACE_APP_TABLES,
             )
         except Exception:

@@ -40,7 +40,7 @@ Publish = Callable[[], Awaitable[None]]
 class SenderBudget:
     """Pace chat and location items per space (see the module docstring)."""
 
-    __slots__ = ("_chat", "_clock", "_pins", "_queues", "_tasks")
+    __slots__ = ("_chat", "_clock", "_closing", "_pins", "_queues", "_tasks")
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
@@ -51,6 +51,8 @@ class SenderBudget:
         #: (space id, person) → (last sent, the newest pin waiting).
         self._pins: dict[tuple[str, str], tuple[float, Publish | None]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        #: Set on :meth:`close`: every held item goes at once, nothing waits.
+        self._closing = asyncio.Event()
 
     def _spawn(self, coro: Awaitable[None]) -> None:
         task = asyncio.ensure_future(coro)
@@ -81,8 +83,15 @@ class SenderBudget:
             self._spawn(self._pin_later(key, last + LOCATION_INTERVAL_S - now))
         return False
 
+    async def _pause(self, seconds: float) -> None:
+        """Wait ``seconds`` — or not at all once :meth:`close` was called."""
+        try:
+            await asyncio.wait_for(self._closing.wait(), timeout=max(0.0, seconds))
+        except TimeoutError:
+            pass
+
     async def _pin_later(self, key: tuple[str, str], delay: float) -> None:
-        await asyncio.sleep(max(0.0, delay))
+        await self._pause(delay)
         _last, waiting = self._pins.get(key, (0.0, None))
         if waiting is None:
             return
@@ -114,8 +123,8 @@ class SenderBudget:
             now = self._clock()
             while sent and now - sent[0] >= 60.0:
                 sent.popleft()
-            if len(sent) >= CHAT_PER_MINUTE:
-                await asyncio.sleep(max(0.05, 60.0 - (now - sent[0])))
+            if len(sent) >= CHAT_PER_MINUTE and not self._closing.is_set():
+                await self._pause(max(0.05, 60.0 - (now - sent[0])))
                 continue
             publish = queue.popleft()
             sent.append(self._clock())
@@ -123,6 +132,11 @@ class SenderBudget:
                 await publish()
             except Exception:
                 log.warning("space item budget: a held item failed", exc_info=True)
+
+    async def close(self) -> None:
+        """Stop pacing: every held item goes now, then return."""
+        self._closing.set()
+        await self.wait_idle()
 
     async def wait_idle(self) -> None:
         """Wait for every held item (tests, graceful stop)."""

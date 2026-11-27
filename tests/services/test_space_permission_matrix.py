@@ -262,6 +262,10 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # Validates a GFS choice against this household's own active
         # connections — a read, no space state, no actor.
         "check_gfs_selection",
+        # v_97 — refuses a global → public / household move while
+        # households reach the space only through a GFS: a read, called by
+        # the approval service after it authorized the proposer.
+        "check_tier_change",
         # Redeem-coordinator hook (owner decision 2026-10-04): a grandfathered
         # pre-0079 invite link just seated a household over the relay, which
         # opts the private space into ``private_gfs``. Self-gates on hosting

@@ -91,6 +91,7 @@ class _Fed:
     space_write_gates = FederationService.space_write_gates
     dispatch_space_item = FederationService.dispatch_space_item
     note_replay_id = FederationService.note_replay_id
+    replay_id_seen = FederationService.replay_id_seen
     item_budget_allows = FederationService.item_budget_allows
     warm_replay_cache = FederationService.warm_replay_cache
 

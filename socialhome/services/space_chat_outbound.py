@@ -186,6 +186,7 @@ class SpaceChatOutbound:
                 event_type,
                 payload,
                 only_instances=targets,
+                whole_space=True,
             )
         except Exception:
             log.exception(

@@ -109,6 +109,9 @@ class _Gfs:
     async def private_channels_supported(self, conn):
         return True
 
+    async def channel_ring_supported(self, conn):
+        return False
+
     async def member_publish_strict_supported(self, conn):
         return True
 

@@ -19,6 +19,7 @@ the household ``presence.updated`` frame upstream. Concretely:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -346,10 +347,13 @@ async def test_no_zone_name_in_federation_payload(env):
     assert "state" not in call["payload"]
 
 
-async def test_a_shared_pin_is_republished_by_the_keepalive(env):
-    """v_97 (owner F3): every 15 minutes the latest pin goes again, so a
-    member opening the map (or a GFS ring keeping pins 15 min) has it."""
-    sp = await env.make_space("sp_office")
+async def _sharing(env, *, space_type=SpaceType.GLOBAL, mode="gps"):
+    """alice shares her location in a space of ``space_type``, with a live
+    position in the presence table, and one pin already sent."""
+    sp = await env.make_space("sp_keep", location_mode=mode)
+    if space_type is not SpaceType.PRIVATE:
+        sp = dataclasses.replace(sp, space_type=space_type)
+        await env.space_repo.save(sp)
     await env.space_repo.save_member(
         SpaceMember(
             space_id=sp.id,
@@ -360,6 +364,16 @@ async def test_a_shared_pin_is_republished_by_the_keepalive(env):
         ),
     )
     await env.space_repo.add_space_instance(sp.id, "remote_instance_a")
+    await SqlitePresenceRepo(env.db).upsert_local(
+        username="alice",
+        entity_id="alice",
+        state="home",
+        zone_name="Office",
+        latitude=47.3769,
+        longitude=8.5417,
+        gps_accuracy_m=12.0,
+        updated_at="2026-04-27T12:00:00+00:00",
+    )
     await env.bus.publish(
         PresenceUpdated(
             username="alice",
@@ -372,11 +386,56 @@ async def test_a_shared_pin_is_republished_by_the_keepalive(env):
         ),
     )
     assert len(env.federation.calls) == 1
+    return sp
+
+
+async def test_a_shared_pin_is_republished_by_the_keepalive(env):
+    """v_97 (owner F3): every 15 minutes the pin goes again in a GFS space
+    (its ring keeps a pin 15 min), the same pin with "here since" kept."""
+    await _sharing(env)
     assert await env.outbound.keepalive() == 1
     first, again = env.federation.calls
     assert again["payload"] == first["payload"]
     await env.outbound.start()
     await env.outbound.stop()
+
+
+async def test_the_keepalive_never_repeats_a_pin_in_a_mesh_space(env):
+    """A mesh space's households keep the last pin: nothing repeats."""
+    await _sharing(env, space_type=SpaceType.PRIVATE)
+    assert await env.outbound.keepalive() == 0
+    assert len(env.federation.calls) == 1
+
+
+@pytest.mark.security
+async def test_the_keepalive_stops_once_the_pin_is_no_longer_shared(env):
+    """Left the space, location turned off, or no live position: the pin is
+    forgotten and never goes again — the keepalive never repeats a place
+    the person no longer shares."""
+    sp = await _sharing(env)
+    member = await env.space_repo.get_member(sp.id, env.alice_uid)
+    await env.space_repo.save_member(
+        dataclasses.replace(member, location_share_enabled=False)
+    )
+    assert await env.outbound.keepalive() == 0
+    # Forgotten: sharing again does not revive the old pin by itself.
+    await env.space_repo.save_member(member)
+    assert await env.outbound.keepalive() == 0
+    assert len(env.federation.calls) == 1
+
+
+@pytest.mark.security
+async def test_the_keepalive_sends_no_coordinates_into_a_zone_only_space(env):
+    """The space switched to zone_only and alice is in no zone: the old gps
+    pin is never repeated there."""
+    sp = await _sharing(env)
+    await env.space_repo.save(
+        dataclasses.replace(
+            sp, features=dataclasses.replace(sp.features, location_mode="zone_only")
+        )
+    )
+    assert await env.outbound.keepalive() == 0
+    assert len(env.federation.calls) == 1
 
 
 # ─── Negative paths ─────────────────────────────────────────────────────

@@ -74,6 +74,8 @@ class _ItemSink(Protocol):
 
     async def note_replay_id(self, msg_id: str) -> bool: ...
 
+    def replay_id_seen(self, msg_id: str) -> bool: ...
+
     def item_budget_allows(self, origin: str) -> bool: ...
 
 
@@ -102,7 +104,7 @@ HostCheck = Callable[["Space", str], Awaitable[bool]]
 class SpaceItemDispatch:
     """Verify an event-shaped space item and apply it as its event."""
 
-    __slots__ = ("_acts_as_host", "_federation", "_own_instance_id", "_writer_certs")
+    __slots__ = ("_federation", "_host_signer", "_own_instance_id", "_writer_certs")
 
     def __init__(
         self,
@@ -110,12 +112,15 @@ class SpaceItemDispatch:
         federation: _ItemSink,
         writer_certs: SpaceWriterCertService,
         own_instance_id: str,
-        acts_as_host: HostCheck | None = None,
+        host_signer: HostCheck | None = None,
     ) -> None:
         self._federation = federation
         self._writer_certs = writer_certs
         self._own_instance_id = own_instance_id
-        self._acts_as_host = acts_as_host
+        #: Who may make a host statement here: the owner or a seed-holding
+        #: admin (``may_sign_pages`` — the legacy handlers' own width; each
+        #: handler then judges its type, owner-only ones on the origin).
+        self._host_signer = host_signer
 
     # ── Apply ────────────────────────────────────────────────────────────
 
@@ -187,9 +192,14 @@ class SpaceItemDispatch:
                 space.id,
             )
             return False
-        # The origin's inbound budget, before the claim: an item refused
-        # here keeps no trace and is taken when it comes again (a ring
-        # re-fetch, another GFS).
+        # A copy is refused before it spends anything (a replayed item must
+        # never drain the origin's budget). Then the origin's inbound
+        # budget, before the claim: an item refused there keeps no trace and
+        # is taken when it comes again (a ring re-fetch, another GFS).
+        replay_key = f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
+        if self._federation.replay_id_seen(replay_key):
+            log.debug("space_item: %s from %s seen before — dropped", item_id, origin)
+            return False
         if not self._federation.item_budget_allows(origin):
             log.warning(
                 "space_item: %s from %s dropped — over its inbound budget",
@@ -201,9 +211,7 @@ class SpaceItemDispatch:
         # but the origin can spend an id, and atomically against the copy
         # arriving on another socket (the check-and-insert has no await
         # before the in-memory mark).
-        if await self._federation.note_replay_id(
-            f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
-        ):
+        if await self._federation.note_replay_id(replay_key):
             log.debug("space_item: %s from %s seen before — dropped", item_id, origin)
             return False
         event = FederationEvent(
@@ -229,7 +237,7 @@ class SpaceItemDispatch:
         ORIGIN household's v2 signature over it verifies (so the household
         that spoke is proven — a delegated admin never passes as the owner
         for an owner-only rule, which the handler judges on
-        ``from_instance``); the origin acts as the space's host here; the
+        ``from_instance``); the origin may speak for the space here (owner or seed-holding admin); the
         signed epoch, space and stamp hold; the id is claimed once. Then
         the same gates and the event's own handler, from that origin."""
         if inner.get(AUTHORITY_KIND_FIELD) != AUTHORITY_KIND_SPACE_EVENT:
@@ -263,20 +271,27 @@ class SpaceItemDispatch:
         ):
             log.warning("space_item: host statement %s out of bounds", item_id)
             return False
-        if self._acts_as_host is None or not await self._acts_as_host(space, origin):
+        if self._host_signer is None or not await self._host_signer(space, origin):
             log.warning(
-                "space_item: host statement %s from %s, which does not act "
-                "as the host of space %s here — dropped",
+                "space_item: host statement %s from %s, which may not speak "
+                "for space %s here — dropped",
                 item_id,
                 origin,
                 space.id,
             )
             return False
-        if not self._federation.item_budget_allows(origin):
+        replay_key = f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
+        if self._federation.replay_id_seen(replay_key):
             return False
-        if await self._federation.note_replay_id(
-            f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
-        ):
+        if not self._federation.item_budget_allows(origin):
+            log.warning(
+                "space_item: host statement %s from %s dropped — over its "
+                "inbound budget",
+                item_id,
+                origin,
+            )
+            return False
+        if await self._federation.note_replay_id(replay_key):
             return False
         event = FederationEvent(
             msg_id=ITEM_MSG_ID_PREFIX + item_id,

@@ -794,6 +794,17 @@ async def test_a_mention_notifies_the_mentioned_household_at_once(world):
     assert sealed.notes[0][1] == sealed.wire()
 
 
+async def test_an_edit_never_mentions_anew(world):
+    """Editing a message that names @ben would ring him twice: no note."""
+    svc = await _gfs_space(world)
+    sealed = await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_CHAT_MESSAGE_UPDATED,
+        {"space_id": SPACE_ID, "author": "x", "content": "@ben lunch at 1"},
+    )
+    assert sealed is not None and sealed.notes == ()
+
+
 async def test_a_v1_carried_type_or_a_narrowed_audience_keeps_its_old_path(world):
     svc = await _gfs_space(world)
     assert (
@@ -869,3 +880,25 @@ async def test_a_mesh_space_host_statement_stays_the_event(world):
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            FederationEventType.SPACE_LOCATION_UPDATED,
+            {"space_id": SPACE_ID, "user_id": "u-a", "mode": "gps"},
+        ),
+        (
+            FederationEventType.SPACE_POLL_VOTE_CAST,
+            {"space_id": SPACE_ID, "post_id": "p1", "voter_user_id": "u-a"},
+        ),
+    ],
+)
+async def test_latest_only_state_keeps_its_event_on_the_mesh(
+    world, event_type, payload
+):
+    """A pin or a poll selection keeps the outbox's one-row-per-key rule
+    on the mesh: never a queued SPACE_ITEM trail."""
+    svc = await _sealing(world)
+    assert await svc.seal_event_item(SPACE_ID, event_type, payload) is None

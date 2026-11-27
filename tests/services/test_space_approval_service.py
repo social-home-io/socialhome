@@ -67,6 +67,7 @@ async def stack(tmp_dir):
     exec_svc.dissolve_space = AsyncMock()
     exec_svc.update_config = AsyncMock()
     exec_svc.apply_approved_admin_action = AsyncMock()
+    exec_svc.check_tier_change = AsyncMock()
     fed = MagicMock()
     fed.send_with_mesh_fallback = AsyncMock()
     fed.broadcast_to_space_members = AsyncMock()

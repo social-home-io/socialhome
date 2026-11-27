@@ -621,6 +621,15 @@ async def test_note_replay_id_is_check_and_insert():
     assert await svc.note_replay_id("invite-bootstrap:n2") is False
 
 
+@pytest.mark.asyncio
+async def test_replay_id_seen_reads_without_claiming():
+    svc, _ = _make_service(federation_repo=InMemoryFederationRepo())
+    assert svc.replay_id_seen("space-item:o:x") is False
+    # Reading claimed nothing: the first claim still wins.
+    assert await svc.note_replay_id("space-item:o:x") is False
+    assert svc.replay_id_seen("space-item:o:x") is True
+
+
 # ─── send_event ───────────────────────────────────────────────────────────
 
 
@@ -1846,6 +1855,66 @@ async def test_broadcast_to_space_members_filters_non_members():
     assert result.attempted == 1
     assert result.succeeded == 1
     assert mock_http.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_real_broadcast_splits_into_one_item_and_the_legacy_event():
+    """v_97 end to end through the REAL ``broadcast_to_space_members``: a
+    v_97 member gets the SPACE_ITEM, an older one the event, and the split's
+    own sends never split again (no recursion)."""
+    import os
+
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    new_inst, _ = _make_remote_instance(
+        km, peer_kp=generate_identity_keypair(), session_key=os.urandom(32)
+    )
+    old_inst, _ = _make_remote_instance(
+        km, peer_kp=generate_identity_keypair(), session_key=os.urandom(32)
+    )
+    await fed_repo.save_instance(new_inst)
+    await fed_repo.save_instance(old_inst)
+    await fed_repo.set_proto_version(new_inst.id, 97)
+    await fed_repo.set_proto_version(old_inst.id, 96)
+    fed_repo.add_space_member("sp", new_inst.id)
+    fed_repo.add_space_member("sp", old_inst.id)
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_http = MagicMock()
+    mock_http.post = MagicMock(return_value=mock_resp)
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=InMemoryOutboxRepo(),
+        key_manager=km,
+        http_client=mock_http,
+    )
+    seals: list[bool] = []
+
+    async def seal(space_id, event_type, payload, *, whole_space):
+        seals.append(whole_space)
+        return SealedItem(space_id=space_id, epoch=1, item="ct")
+
+    svc.attach_item_sealer(seal)
+    real = FederationService.broadcast_to_space_members
+    sent: list[tuple] = []
+
+    async def spy(self, space_id, event_type, payload, **kw):
+        sent.append((event_type, sorted(kw.get("only_instances") or [])))
+        return await real(self, space_id, event_type, payload, **kw)
+
+    with patch.object(FederationService, "broadcast_to_space_members", spy):
+        result = await svc.broadcast_to_space_members(
+            "sp", FederationEventType.SPACE_TASK_CREATED, {"space_id": "sp"}
+        )
+    assert seals == [True]
+    assert sent == [
+        (FederationEventType.SPACE_TASK_CREATED, []),
+        (FederationEventType.SPACE_ITEM, [new_inst.id]),
+        (FederationEventType.SPACE_TASK_CREATED, [old_inst.id]),
+    ]
+    assert (result.attempted, result.succeeded) == (2, 2)
 
 
 @pytest.mark.asyncio
@@ -7476,8 +7545,9 @@ def test_only_a_person_change_the_same_for_everyone_goes_as_an_item():
     assert sends_as_item(E.SPACE_CHAT_MESSAGE_CREATED)
     # A per-peer payload stays the event.
     assert not sends_as_item(E.SPACE_TASK_CREATED, per_peer=lambda *a: None)
-    # Host statements and secrets are never person items.
-    assert not sends_as_item(E.SPACE_MEMBER_BANNED)
+    # Host statements go to the sealer (it rides only a GFS space's
+    # channel); secrets and media never do.
+    assert sends_as_item(E.SPACE_MEMBER_BANNED)
     assert not sends_as_item(E.SPACE_KEY_EXCHANGE_REKEY)
     assert not sends_as_item(E.SPACE_MEDIA_BLOB)
 
@@ -7535,7 +7605,7 @@ async def test_v97_members_get_one_item_and_older_ones_the_event():
     assert item_call == (
         FederationEventType.SPACE_ITEM,
         sealed.wire(),
-        {"only_instances": ["a97", "c97"]},
+        {"only_instances": ["a97", "c97"], "as_item": False},
     )
     assert fed.whole == [True]
     assert legacy_call[0] is FederationEventType.SPACE_TASK_CREATED
@@ -7571,6 +7641,7 @@ async def _gfs_broadcast(sealed, *, only=None):
         legacy_payload=None,
         legacy_below=None,
         only_instances=only,
+        whole_space=only is None,
     )
     return fed
 
@@ -7604,7 +7675,11 @@ async def test_mention_notes_go_to_v97_mentioned_households_only():
     fed = await _gfs_broadcast(sealed)
     notes = [c for c in fed.calls if c[0] is FederationEventType.SPACE_MENTION_NOTE]
     assert notes == [
-        (FederationEventType.SPACE_MENTION_NOTE, note, {"only_instances": ["a97"]})
+        (
+            FederationEventType.SPACE_MENTION_NOTE,
+            note,
+            {"only_instances": ["a97"], "as_item": False},
+        )
     ]
 
 
