@@ -31,7 +31,12 @@ from typing import TYPE_CHECKING, Any
 
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
 from ..space_media_seal import UnsupportedSpaceMediaSuite, require_space_media_suite
-from .gfs_space_media import MEDIA_SCOPES, SUPPORTED_ADDR_SUITES
+from .gfs_space_media import (
+    ADDR_SUITE_SM1P,
+    MEDIA_SCOPES,
+    SUPPORTED_ADDR_SUITES,
+    piece_count,
+)
 from .media_constraints import SPACE_PAGE_MEDIA_PREFIX
 from .space_media_fields import (
     FILE_HASH_RESOURCES,
@@ -76,6 +81,10 @@ MAX_PAGE_DESCRIPTOR_ENTRIES: int = MAX_PAGE_FILES * (1 + MAX_PAGE_SIDES)
 _ENTRY_KEYS: frozenset[str] = frozenset(
     {"blob_id", "suite", "epoch", "size", "scope", "addr_suite"}
 )
+#: v_97 — a file in pieces (``sm1p``) also carries the SHA-256 of the whole
+#: file: ``size`` is then the file's bytes (the piece count follows), and
+#: ``blob_id`` the file's address (each piece's is derived from it).
+_PIECED_ENTRY_KEYS: frozenset[str] = _ENTRY_KEYS | {"sha256"}
 _MAX_EPOCH: int = 2**53
 
 
@@ -106,9 +115,17 @@ class SpaceMediaRef:
     #: The reader's own name for the file (a row only; never on the wire).
     local_name: str = ""
     created_at: str | None = None
+    #: v_97 — the whole file's SHA-256 (a file in pieces only, on the wire;
+    #: a row keeps it as its content name, ``sc-``).
+    sha256: str = ""
+
+    @property
+    def pieced(self) -> bool:
+        """Whether the file is split into pieces (``sm1p``)."""
+        return self.addr_suite == ADDR_SUITE_SM1P
 
     def to_wire(self) -> dict:
-        return {
+        wire = {
             "blob_id": self.blob_id,
             "suite": self.suite,
             "epoch": self.epoch,
@@ -116,6 +133,9 @@ class SpaceMediaRef:
             "scope": self.scope,
             "addr_suite": self.addr_suite,
         }
+        if self.pieced:
+            wire["sha256"] = self.sha256
+        return wire
 
 
 @dataclass(slots=True, frozen=True)
@@ -284,7 +304,8 @@ def parse_media_refs(
     for name, entry in raw.items():
         if name not in allowed or not isinstance(entry, dict):
             continue
-        if set(entry) != _ENTRY_KEYS:
+        pieced = entry.get("addr_suite") == ADDR_SUITE_SM1P
+        if set(entry) != (_PIECED_ENTRY_KEYS if pieced else _ENTRY_KEYS):
             continue
         try:
             suite = require_space_media_suite(entry.get("suite"))
@@ -307,7 +328,15 @@ def parse_media_refs(
         size = entry.get("size")
         if not is_blob_id(blob_id) or not _is_int(epoch, 0, _MAX_EPOCH):
             continue
-        if not _is_int(size, 1, MAX_BLOB_BYTES):
+        sha = entry.get("sha256") if pieced else ""
+        if pieced:
+            try:
+                piece_count(size)
+            except ValueError:
+                continue
+            if not is_blob_id(sha):
+                continue
+        elif not _is_int(size, 1, MAX_BLOB_BYTES):
             continue
         out.append(
             SpaceMediaRef(
@@ -321,6 +350,7 @@ def parse_media_refs(
                 addr_suite=str(addr_suite),
                 item_id=item_id,
                 origin=origin,
+                sha256=str(sha),
             )
         )
     return out

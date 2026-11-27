@@ -42,6 +42,7 @@ import hashlib
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .domain.gfs_space_media import MAX_PIECES
 from .moment_public_media import MAX_MEDIA_BYTES, open_padded, seal_padded
 
 #: The one space media suite: AES-256-GCM over the padded file, deterministic
@@ -59,6 +60,30 @@ _KEY_INFO = b"sh-space-media:v1"
 _NONCE_INFO = b"sh-space-media:v1|nonce|"
 _AAD_PREFIX = b"socialhome/space-media/v1|"
 _NONCE_BYTES = 12
+
+
+def piece_aad_name(filename: str, index: int, count: int) -> str:
+    """The name a PIECE of the file *filename* is sealed under (v_97,
+    ``sm1p``): ``filename#index/count`` — in its AAD and nonce, so a piece
+    can't be moved to another place in its file, into a file of another
+    length, or onto another file. It is also the file name a holder is
+    asked for on demand (:func:`split_piece_name`)."""
+    return f"{filename}#{index}/{count}"
+
+
+def split_piece_name(name: str) -> tuple[str, int, int] | None:
+    """``(filename, index, count)`` of a :func:`piece_aad_name`, or
+    ``None`` for any other name (a whole file's)."""
+    base, sep, rest = name.rpartition("#")
+    if not sep or not base:
+        return None
+    index, slash, count = rest.partition("/")
+    if not slash or not index.isdigit() or not count.isdigit():
+        return None
+    i, n = int(index), int(count)
+    if not 2 <= n <= MAX_PIECES or not 0 <= i < n or rest != f"{i}/{n}":
+        return None
+    return base, i, n
 
 
 class UnsupportedSpaceMediaSuite(ValueError):
@@ -153,7 +178,9 @@ __all__ = [
     "UnsupportedSpaceMediaSuite",
     "derive_space_media_key",
     "open_space_media",
+    "piece_aad_name",
     "require_space_media_suite",
     "seal_space_media",
     "space_media_nonce",
+    "split_piece_name",
 ]
