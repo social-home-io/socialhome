@@ -203,3 +203,35 @@ describe('SpaceGfsNotice — connect / ask an admin', () => {
     expect(link.getAttribute('aria-label')).toBe('space.gfs_notice.connect_aria:{"name":"Club GFS"}')
   })
 })
+
+describe('SpaceGfsNotice — required (v_97, the household must connect)', () => {
+  it('an admin gets one Connect per missing GFS, and nothing to dismiss', () => {
+    const r = render(<SpaceGfsNotice space={space({ gfs_connect_needed: true, name: 'Choir' })} />)
+    const rows = r.getAllByTestId('space-gfs-notice-required')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].textContent).toContain('space.gfs_notice.required:')
+    expect(rows[0].textContent).toContain('Club GFS')
+    expect(r.getByTestId('space-gfs-notice-connect').getAttribute('href'))
+      .toBe(connectGfsPath('https://club.example'))
+    expect(r.queryByTestId('space-gfs-notice-dismiss')).toBeNull()
+  })
+
+  it('anyone else is told to ask a household admin, with no button', () => {
+    setViewer(false)
+    const r = render(<SpaceGfsNotice space={space({ gfs_connect_needed: true, name: 'Choir' })} />)
+    expect(r.getByTestId('space-gfs-notice-required').textContent)
+      .toContain('space.gfs_notice.required_member:')
+    expect(r.queryByTestId('space-gfs-notice-connect')).toBeNull()
+  })
+
+  it('with no GFS to name it points at Connections, under the ingress prefix', () => {
+    base.prefix = '/api/hassio_ingress/tok'
+    const r = render(<SpaceGfsNotice space={space({
+      gfs_connect_needed: true, name: 'Choir', gfs_servers: [TOWN],
+    })} />)
+    expect(r.getByTestId('space-gfs-notice-required').textContent)
+      .toContain('space.gfs_notice.required_any:')
+    expect(r.getByTestId('space-gfs-notice-connect').getAttribute('href'))
+      .toBe('/api/hassio_ingress/tok/connections')
+  })
+})

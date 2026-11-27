@@ -432,6 +432,10 @@ class SpaceDetailView(BaseView):
                 # delegated admin holding the signing seed): a GFS of the
                 # space we aren't connected to is then needed, not optional.
                 "stands_in_for_host": await svc.stands_in_for_host(space),
+                # v_97 — the Connect prompt: a GFS space hosted elsewhere
+                # whose content rides only its channel, while this household
+                # holds no ``channel_ring`` connection to one of its GFSs.
+                "gfs_connect_needed": await self._gfs_connect_needed(space.id),
                 # A local community's area ``{lat, lon, radius_km}`` (4 dp
                 # centre) or null. Only the hosting household holds one; a
                 # member household's stub never has it.
@@ -497,6 +501,10 @@ class SpaceDetailView(BaseView):
                 datetime.now(UTC) + timedelta(seconds=wait)
             ).isoformat()
         return wire
+
+    async def _gfs_connect_needed(self, space_id: str) -> bool:
+        ready = await self.svc(space_service_key).gfs_join_readiness(space_id)
+        return ready.gfs_space and not ready.connected
 
     async def _has_remote_households(self, space_id: str) -> bool:
         moderation = self.request.app.get(space_moderation_service_key)

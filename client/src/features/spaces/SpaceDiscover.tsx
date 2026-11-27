@@ -43,6 +43,7 @@ import {
 } from '@/utils/placePin'
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
+import { askGfsConsent } from '@/components/gfsConsent'
 import {
   approvalSeatsUs, buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeWord, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
@@ -191,13 +192,23 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = t
 
   const isLocal = (e: DirectoryEntry) => e.host_instance_id === 'local' || e.scope === 'household'
 
+  /** A GFS space another household hosts (v_97): the household connects
+   *  to a GFS first — an admin with the person's yes, anyone else asks an
+   *  admin. Cancel or a failed check sends nothing. */
+  const gfsOk = async (e: DirectoryEntry) =>
+    isLocal(e) || await askGfsConsent(e.space_id, e.name)
+
   const act = async (e: DirectoryEntry, a: DiscoverAction) => {
-    if (a === 'request') { setAsking(e); return }
+    if (a === 'request') {
+      if (await gfsOk(e)) setAsking(e)
+      return
+    }
     if (a !== 'join' && a !== 'follow') return
     // A local community another household hosts: the request carries our
     // approximate location — ask first, send nothing without a yes.
     const carries = !isLocal(e) && joinCarriesLocation(e)
     if (carries && !await askLocationConsent(hostLabel(e))) return
+    if (!await gfsOk(e)) return
     setBusy(e.space_id)
     try {
       if (a === 'follow') {

@@ -215,8 +215,11 @@ export default function SpacePublicDetailPage() {
       return
     }
     // ``request`` (approval-required) mode — collect a message.
+    // A GFS space hosted elsewhere (v_97): connected first, with consent.
+    const gfsOk = async () => entry.scope === 'household' || entry.host_instance_id === 'local'
+      || await askGfsConsent(entry.space_id, entry.name)
     if (action === 'request') {
-      setActiveModal(entry)
+      if (await gfsOk()) setActiveModal(entry)
       return
     }
     // A local community another household hosts: the request carries our
@@ -227,8 +230,7 @@ export default function SpacePublicDetailPage() {
     // A GFS space (v_97): its items ride only its channel — the household
     // connects to a GFS first, with the person's consent (an admin), or an
     // admin is asked to. Cancel sends nothing.
-    if ((action === 'join' || action === 'follow')
-      && !await askGfsConsent(entry.space_id, entry.scope, entry.name)) return
+    if ((action === 'join' || action === 'follow') && !await gfsOk()) return
     try {
       if (action === 'follow') {
         // Hosted here: followed at once. Elsewhere: its host approves the

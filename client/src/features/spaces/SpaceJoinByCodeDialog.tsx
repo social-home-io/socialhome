@@ -19,6 +19,7 @@ import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api, ApiError } from '@/api'
 import { askLocationConsent, isApiCode } from '@/components/localConsent'
+import { askGfsConsent } from '@/components/gfsConsent'
 import { addBase } from '@/baseUrl'
 import { instanceConfig } from '@/store/instance'
 import { decodeInviteCode, inviteLinkUrl } from '@/lib/spaceInviteCode'
@@ -143,11 +144,18 @@ export function SpaceJoinByCodeDialog() {
       try {
         r = await post()
       } catch (exc) {
-        // A local community: its household needs our approximate location
-        // with the redeem. Ask, then redeem again with it — never without.
-        if (!isApiCode(exc, 'LOCATION_REQUIRED')) throw exc
-        if (!await askLocationConsent(null)) return
-        r = await post({ share_location: true })
+        if (isApiCode(exc, 'GFS_CONNECTION_REQUIRED') && payload.space_id) {
+          // A GFS space (v_97): connect first, with consent — then redeem
+          // again. Cancel or a failed check sends nothing.
+          if (!await askGfsConsent(payload.space_id, payload.space_display_hint || t('space.join_code.this_space'))) return
+          r = await post()
+        } else {
+          // A local community: its household needs our approximate location
+          // with the redeem. Ask, then redeem again with it — never without.
+          if (!isApiCode(exc, 'LOCATION_REQUIRED')) throw exc
+          if (!await askLocationConsent(null)) return
+          r = await post({ share_location: true })
+        }
       }
       open.value = false
       draft.value = ''

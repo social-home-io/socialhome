@@ -8,6 +8,15 @@ vi.mock('preact-iso', () => ({
   useLocation: () => ({ route: routeMock }),
 }))
 vi.mock('@/api', () => ({ api: { get: vi.fn(), post: vi.fn() } }))
+// v_97 — the GFS consent step (its own tests in gfsConsent.test.ts): yes by
+// default; a test flips it to check that a "no" sends nothing.
+const gfsConsent = vi.hoisted(() => ({ ok: true, calls: [] as string[] }))
+vi.mock('@/components/gfsConsent', () => ({
+  askGfsConsent: async (spaceId: string) => {
+    gfsConsent.calls.push(spaceId)
+    return gfsConsent.ok
+  },
+}))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 const confirmMock = vi.fn()
 vi.mock('@/components/confirm', () => ({ confirmDialog: (...a: unknown[]) => confirmMock(...a) }))
@@ -120,6 +129,29 @@ describe('SpacePublicDetailPage onPrimary', () => {
       )
     })
     expect(container.querySelector('.sh-modal, [role="dialog"]')).toBeNull()
+  })
+
+  it('a GFS space: no to the consent step sends nothing (join and ask)', async () => {
+    gfsConsent.ok = false
+    gfsConsent.calls = []
+    try {
+      cacheDirectoryEntries([
+        entry({
+          host_instance_id: 'remote-1',
+          host_display_name: 'Friends',
+          host_is_paired:    true,
+          scope:             'global',
+          join_mode:         'open',
+        }),
+      ])
+      const { getByText } = await renderPage()
+      await waitFor(() => getByText('Join space'))
+      fireEvent.click(getByText('Join space'))
+      await waitFor(() => expect(gfsConsent.calls).toEqual(['sp-1']))
+      expect(api.post).not.toHaveBeenCalled()
+    } finally {
+      gfsConsent.ok = true
+    }
   })
 
   it('a space that takes no followers says the content is private', async () => {

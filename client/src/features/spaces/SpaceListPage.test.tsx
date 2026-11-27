@@ -4,6 +4,15 @@ const apiGet = vi.fn()
 const apiPost = vi.fn()
 const confirmMock = vi.fn()
 vi.mock('@/components/confirm', () => ({ confirmDialog: (...a: unknown[]) => confirmMock(...a) }))
+// v_97 — the GFS consent step (its own tests in gfsConsent.test.ts): yes by
+// default; a test flips it to check that a "no" sends nothing.
+const gfsConsent = vi.hoisted(() => ({ ok: true, calls: [] as string[] }))
+vi.mock('@/components/gfsConsent', () => ({
+  askGfsConsent: async (spaceId: string) => {
+    gfsConsent.calls.push(spaceId)
+    return gfsConsent.ok
+  },
+}))
 vi.mock('@/api', () => ({
   api: {
     get: (...a: unknown[]) => apiGet(...a),
@@ -674,6 +683,29 @@ describe('SpaceListPage — Discover', () => {
       '/api/public_spaces/gAsk/join-request', { host_instance_id: 'iid-far', message: '' },
     ))
     await r.findByRole('button', { name: 'Requested: HA Schweiz' })
+  })
+
+  it('a GFS space the household may not join yet: no to the consent step opens nothing and sends nothing', async () => {
+    gfsConsent.ok = false
+    gfsConsent.calls = []
+    try {
+      wire({
+        gfs: [{ id: 'g1', status: 'active' }],
+        global: [{
+          space_id: 'gAsk', host_instance_id: 'iid-far', host_display_name: null, host_is_paired: false,
+          name: 'HA Schweiz', description: null, emoji: null, member_count: 0, join_mode: 'request',
+          min_age: 0, allow_subscribers: false, gfs_askable: true,
+        }],
+      })
+      const r = await renderPage('/spaces?discover=global')
+      await r.findByText('HA Schweiz')
+      r.fireEvent.click(r.getByRole('button', { name: 'Ask to join: HA Schweiz' }))
+      await r.waitFor(() => expect(gfsConsent.calls).toEqual(['gAsk']))
+      expect(r.queryByRole('dialog')).toBeNull()
+      expect(apiPost).not.toHaveBeenCalledWith('/api/public_spaces/gAsk/join-request', expect.anything())
+    } finally {
+      gfsConsent.ok = true
+    }
   })
 
   it('opened without a chip, Discover lands on Global when that is where the spaces are', async () => {

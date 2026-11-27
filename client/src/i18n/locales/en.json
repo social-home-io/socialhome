@@ -6768,5 +6768,14 @@
   "space.post.not_sent_detail_hosted": "Not sent yet — goes out when the others are back",
   "space.sync.waiting": "{n} waiting to send",
   "space.sync.waiting_one": "1 waiting to send",
-  "space.sync.hosted_here": "This household hosts the space, so it always has everything."
+  "space.sync.hosted_here": "This household hosts the space, so it always has everything.",
+  "gfs_join.consent.check_failed": "Couldn't check how to join this space. Nothing was sent. Try again.",
+  "gfs_join.consent.not_listed": "Your household is now connected to a GFS, but {name} isn't on it. A household admin can connect a GFS that lists it under Connections.",
+  "error.gfs_connection_required": "This space runs on a GFS your household isn't connected to. Connect first, then join.",
+  "space.join_code.this_space": "This space",
+  "space.gfs_notice.required": "{space} runs on {name}, and your household isn't connected to it. Connect to keep getting its posts.",
+  "space.gfs_notice.required_member": "{space} runs on {name}, and your household isn't connected to it. Ask a household admin to connect it, or new posts stop arriving here.",
+  "space.gfs_notice.required_any": "{space} runs on a GFS your household can't use yet. Connect to one of its GFSs to keep getting its posts.",
+  "space.gfs_notice.required_any_member": "{space} runs on a GFS your household can't use yet. Ask a household admin to connect one, or new posts stop arriving here.",
+  "space.gfs_notice.connect_any_aria": "Connect to a GFS"
 }

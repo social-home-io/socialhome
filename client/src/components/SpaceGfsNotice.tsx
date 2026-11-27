@@ -15,6 +15,14 @@
  *   ``localStorage`` — per person, per space, per GFS — so a GFS the owner
  *   adds later still shows.
  *
+ * - **Required** (v_97, ``gfs_connect_needed``): a GFS space hosted
+ *   elsewhere whose content rides only its channel, and this household holds
+ *   no connection that can carry it to any of its GFSs — so its posts stop
+ *   reaching the household (at once, or when the 14-day window after the
+ *   switch ends). Every listed GFS we aren't on is a row; none can be
+ *   dismissed. With no row to name (no list known, or the GFS we're on
+ *   can't carry it yet) one row points at Connections.
+ *
  * A household admin gets a one-click "Connect" that opens the Connections
  * page's GFS flow aimed at that GFS (``/connections?connect_gfs=…``,
  * anchored on the document base); anyone else gets the "ask a household
@@ -33,6 +41,10 @@ export type GfsNoticeSpace = Pick<Space, 'id' | 'space_type' | 'gfs_servers'> & 
   features?: Space['features'] | null
   gfs_unlisted?: boolean
   stands_in_for_host?: boolean
+  /** v_97 — the household must connect a GFS of this space (see above). */
+  gfs_connect_needed?: boolean
+  /** The space's name, for the Required copy. */
+  name?: string
 }
 
 const KEY = 'sh.space_gfs_notice.dismissed:'
@@ -77,7 +89,56 @@ export function missingGfsServers(space: GfsNoticeSpace): SpaceGfsServer[] {
   return (space.gfs_servers ?? []).filter(g => !g.connected)
 }
 
+/** v_97 — the Required prompt: this household must connect a GFS of the
+ *  space to keep getting it. */
+function RequiredGfsNotice({ space }: { space: GfsNoticeSpace }): JSX.Element {
+  const isAdmin = currentUser.value?.is_admin === true
+  const spaceName = space.name ?? ''
+  const rows: Array<{ key: string; name: string | null; href: string }> =
+    (space.gfs_servers ?? []).filter(g => !g.connected).map(g => ({
+      key: g.inbox_url,
+      name: g.display_name || gfsHost(g.inbox_url),
+      href: connectGfsPath(g.inbox_url),
+    }))
+  if (rows.length === 0) rows.push({ key: '', name: null, href: '/connections' })
+  return (
+    <div class="sh-space-gfs-notice" role="status" data-testid="space-gfs-notice">
+      {rows.map(r => (
+        <div key={r.key}
+             class="sh-space-gfs-notice__row sh-space-gfs-notice__row--needed"
+             data-testid="space-gfs-notice-required">
+          <span class="sh-space-gfs-notice__icon" aria-hidden="true">⚠️</span>
+          <div class="sh-space-gfs-notice__body">
+            <p class="sh-space-gfs-notice__text">
+              {r.name
+                ? t(isAdmin ? 'space.gfs_notice.required' : 'space.gfs_notice.required_member',
+                  { space: spaceName, name: r.name })
+                : t(isAdmin ? 'space.gfs_notice.required_any' : 'space.gfs_notice.required_any_member',
+                  { space: spaceName })}
+            </p>
+            {isAdmin && (
+              <a class="sh-btn sh-btn--primary sh-space-gfs-notice__connect"
+                 href={addBase(r.href)}
+                 aria-label={r.name
+                   ? t('space.gfs_notice.connect_aria', { name: r.name })
+                   : t('space.gfs_notice.connect_any_aria')}
+                 data-testid="space-gfs-notice-connect">
+                {t('space.gfs_notice.connect')}
+              </a>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function SpaceGfsNotice({ space }: { space: GfsNoticeSpace }): JSX.Element | null {
+  if (space.gfs_connect_needed === true) return <RequiredGfsNotice space={space} />
+  return <OptionalGfsNotice space={space} />
+}
+
+function OptionalGfsNotice({ space }: { space: GfsNoticeSpace }): JSX.Element | null {
   const userId = currentUser.value?.user_id ?? null
   const isAdmin = currentUser.value?.is_admin === true
   const needed = space.stands_in_for_host === true

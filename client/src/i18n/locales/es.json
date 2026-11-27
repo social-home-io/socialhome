@@ -6759,5 +6759,14 @@
   "space.post.not_sent_detail_hosted": "Aún no enviado: se enviará cuando vuelvan los demás",
   "space.sync.waiting": "{n} pendientes de enviar",
   "space.sync.waiting_one": "1 pendiente de enviar",
-  "space.sync.hosted_here": "Este hogar aloja el espacio, así que siempre lo tiene todo."
+  "space.sync.hosted_here": "Este hogar aloja el espacio, así que siempre lo tiene todo.",
+  "gfs_join.consent.check_failed": "No se pudo comprobar cómo unirte a este espacio. No se envió nada. Inténtalo de nuevo.",
+  "gfs_join.consent.not_listed": "Tu hogar ya está conectado a un GFS, pero {name} no está en él. Un administrador de tu hogar puede conectar en Conexiones un GFS que lo liste.",
+  "error.gfs_connection_required": "Este espacio funciona en un GFS al que tu hogar no está conectado. Conéctate primero y luego únete.",
+  "space.join_code.this_space": "Este espacio",
+  "space.gfs_notice.required": "{space} funciona en {name}, y tu hogar no está conectado a él. Conéctate para seguir recibiendo sus publicaciones.",
+  "space.gfs_notice.required_member": "{space} funciona en {name}, y tu hogar no está conectado a él. Pide a un administrador de tu hogar que lo conecte, o las publicaciones nuevas dejarán de llegar aquí.",
+  "space.gfs_notice.required_any": "{space} funciona en un GFS que tu hogar aún no puede usar. Conéctate a uno de sus GFS para seguir recibiendo sus publicaciones.",
+  "space.gfs_notice.required_any_member": "{space} funciona en un GFS que tu hogar aún no puede usar. Pide a un administrador de tu hogar que conecte uno, o las publicaciones nuevas dejarán de llegar aquí.",
+  "space.gfs_notice.connect_any_aria": "Conectar a un GFS"
 }

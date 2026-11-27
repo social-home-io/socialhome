@@ -142,6 +142,8 @@ interface SpaceDetail {
   /** This household acts for the host while it's offline (a delegated
    *  admin holding the signing seed) — a missing GFS is then needed. */
   stands_in_for_host?: boolean
+  /** v_97 — connect a GFS of this space to keep getting it. */
+  gfs_connect_needed?: boolean
   /** §D1b — the originating instance. When it differs from
    *  ``instanceConfig.value.instance_id``, this is a stub of a
    *  remote-hosted space and local admin gestures are suppressed. */
@@ -813,6 +815,8 @@ export default function SpaceFeedPage() {
           features: s.features as Space['features'],
           gfs_servers: s.gfs_servers ?? null,
           stands_in_for_host: s.stands_in_for_host,
+          gfs_connect_needed: s.gfs_connect_needed,
+          name: s.name,
         }} />
       )}
 

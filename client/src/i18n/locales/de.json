@@ -6732,5 +6732,14 @@
   "space.post.not_sent_detail_hosted": "Noch nicht gesendet – geht raus, sobald die anderen wieder da sind",
   "space.sync.waiting": "{n} warten auf Versand",
   "space.sync.waiting_one": "1 wartet auf Versand",
-  "space.sync.hosted_here": "Dieser Haushalt ist der Gastgeber des Space und hat deshalb immer alles."
+  "space.sync.hosted_here": "Dieser Haushalt ist der Gastgeber des Space und hat deshalb immer alles.",
+  "gfs_join.consent.check_failed": "Wir konnten nicht prüfen, wie du diesem Space beitrittst. Es wurde nichts gesendet. Versuch es noch einmal.",
+  "gfs_join.consent.not_listed": "Dein Haushalt ist jetzt mit einem GFS verbunden, aber {name} ist dort nicht. Ein Admin deines Haushalts kann unter Verbindungen einen GFS verbinden, der ihn listet.",
+  "error.gfs_connection_required": "Dieser Space läuft über einen GFS, mit dem dein Haushalt nicht verbunden ist. Verbinde ihn zuerst und tritt dann bei.",
+  "space.join_code.this_space": "Dieser Space",
+  "space.gfs_notice.required": "{space} läuft über {name}, und dein Haushalt ist nicht damit verbunden. Verbinde dich, damit seine Beiträge weiter ankommen.",
+  "space.gfs_notice.required_member": "{space} läuft über {name}, und dein Haushalt ist nicht damit verbunden. Bitte einen Admin deines Haushalts, ihn zu verbinden, sonst kommen hier keine neuen Beiträge mehr an.",
+  "space.gfs_notice.required_any": "{space} läuft über einen GFS, den dein Haushalt noch nicht nutzen kann. Verbinde dich mit einem seiner GFS, damit seine Beiträge weiter ankommen.",
+  "space.gfs_notice.required_any_member": "{space} läuft über einen GFS, den dein Haushalt noch nicht nutzen kann. Bitte einen Admin deines Haushalts, einen zu verbinden, sonst kommen hier keine neuen Beiträge mehr an.",
+  "space.gfs_notice.connect_any_aria": "Mit einem GFS verbinden"
 }

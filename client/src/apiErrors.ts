@@ -307,6 +307,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   HOME_NOT_SET: () => t('error.home_not_set'),
   LOCATION_REQUIRED: () => t('error.location_required'),
   JOIN_REQUEST_SENT: () => t('error.join_request_sent'),
+  GFS_CONNECTION_REQUIRED: () => t('error.gfs_connection_required'),
   OUTSIDE_AREA: (_b, p) => (str(p, 'whose') === 'peer'
     ? t('error.outside_area_peer') : t('error.outside_area_own')),
   LOCAL_AREA_RATE_LIMITED: (_b, p) => (str(p, 'whose') === 'peer'

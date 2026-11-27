@@ -31,6 +31,7 @@ from socialhome.domain.space import (
 )
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.routes.spaces import _features_from_body
+from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.space_service import SpaceService
 
 #: The space icon "Home Assistant" as the SPA stores it in ``emoji``
@@ -4514,3 +4515,46 @@ async def test_the_space_detail_says_whether_we_stand_in_for_the_host(client):
     # Without the seed we only forward.
     await repo.clear_space_seed(sid)
     assert await stands_in() is False
+
+
+async def test_the_space_detail_says_when_the_household_must_connect_a_gfs(
+    client, monkeypatch
+):
+    """v_97 — the Connect prompt: a GFS space hosted elsewhere while this
+    household holds no ``channel_ring`` connection to one of its GFSs."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Switching space", "space_type": "private"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+
+    async def needed() -> bool:
+        resp = await client.get(
+            f"/api/spaces/{sid}", headers=_auth(client._admin_token)
+        )
+        assert resp.status == 200, await resp.text()
+        return (await resp.json())["gfs_connect_needed"]
+
+    async def no_ring(self, only=None):
+        return False
+
+    monkeypatch.setattr(GfsConnectionService, "ring_connected", no_ring)
+    # Our own space: its people are on the host.
+    assert await needed() is False
+    await client.app[_db_key].enqueue(
+        "UPDATE spaces SET owner_instance_id='some-other-household' WHERE id=?",
+        (sid,),
+    )
+    # A mesh space hosted elsewhere: nothing to connect.
+    assert await needed() is False
+    await client.app[_db_key].enqueue(
+        "UPDATE spaces SET space_type='global' WHERE id=?", (sid,)
+    )
+    assert await needed() is True
+
+    async def ring(self, only=None):
+        return True
+
+    monkeypatch.setattr(GfsConnectionService, "ring_connected", ring)
+    assert await needed() is False
