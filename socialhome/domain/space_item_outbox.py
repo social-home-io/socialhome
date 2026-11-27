@@ -21,8 +21,18 @@ UNSENT_QUEUE_FULL: str = "queue_full"
 #: Sealing failed (a bug, logged at WARNING): nothing was stored.
 UNSENT_SEAL_FAILED: str = "seal_failed"
 
+#: The item waited so long that receivers would drop it (its signed
+#: stamp is too old): never sent, Discard only.
+UNSENT_TOO_OLD: str = "too_old"
+
 UNSENT_ERRORS: frozenset[str] = frozenset(
-    {UNSENT_REFUSED, UNSENT_TOO_LARGE, UNSENT_QUEUE_FULL, UNSENT_SEAL_FAILED}
+    {
+        UNSENT_REFUSED,
+        UNSENT_TOO_LARGE,
+        UNSENT_QUEUE_FULL,
+        UNSENT_SEAL_FAILED,
+        UNSENT_TOO_OLD,
+    }
 )
 
 #: ``gfs_id`` of an item whose GFS list was empty when it was sealed: it is
@@ -36,6 +46,11 @@ SPACE_QUEUE_MAX_ITEMS: int = 2_000
 #: Bytes of ciphertext one space may hold (2 000 chat items ≈ 5.6 MB; the
 #: rest is room for a few large posts).
 SPACE_QUEUE_MAX_BYTES: int = 32 * 1024 * 1024
+#: Failed items one space keeps WITH their bytes (for Retry); past either
+#: bound a newly failed item keeps no bytes and only counts on its author's
+#: one counter row — a GFS refusing everything can't fill the disk.
+SPACE_FAILED_MAX_ITEMS: int = 200
+SPACE_FAILED_MAX_BYTES: int = 8 * 1024 * 1024
 
 #: Wait before retry *n + 1* of a GFS's head item; the last step repeats
 #: until the GFS accepts — a GFS that is down means waiting (a reconnect
@@ -73,6 +88,10 @@ class QueuedSpaceItem:
     attempts: int = 0
     status: str = "pending"
     error: str | None = None
+    #: Times planned afresh after its GFS stopped serving the space.
+    replans: int = 0
+    #: Another row of the item was accepted (this one only drops).
+    delivered: bool = False
 
     @property
     def bytes(self) -> int:

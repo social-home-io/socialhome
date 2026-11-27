@@ -20,13 +20,13 @@ import { Button } from '@/components/Button'
 export interface UnsentItem {
   item_id: string
   event_type: string
-  error: 'refused' | 'too_large' | 'queue_full' | 'seal_failed' | string
+  error: 'refused' | 'too_large' | 'queue_full' | 'seal_failed' | 'too_old' | string
   created_at: string
   retryable: boolean
   count: number
 }
 
-const REASONS = ['refused', 'too_large', 'queue_full', 'seal_failed'] as const
+const REASONS = ['refused', 'too_large', 'queue_full', 'seal_failed', 'too_old'] as const
 
 /** One line per reason, in a fixed order: "The GFS refused 2." */
 export function unsentReasons(items: UnsentItem[]): string[] {

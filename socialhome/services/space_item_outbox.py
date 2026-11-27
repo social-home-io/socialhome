@@ -35,18 +35,28 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-from ..domain.gfs_channel import MEMBER_PUBLISH_MAX_PAYLOAD_CHARS
+from ..domain.gfs_channel import (
+    MEMBER_PUBLISH_MAX_PAYLOAD_CHARS,
+    RING_CLASS_EPHEMERAL,
+    RING_DURABLE_TTL_S,
+    RING_EPHEMERAL_TTL_S,
+)
 from ..domain.space_item_outbox import (
     UNPLANNED_GFS,
     UNSENT_QUEUE_FULL,
     UNSENT_REFUSED,
     UNSENT_SEAL_FAILED,
     UNSENT_TOO_LARGE,
+    UNSENT_TOO_OLD,
     QueuedSpaceItem,
     UnsentItem,
     backoff_s,
 )
-from ..repositories.space_item_outbox_repo import AbstractSpaceItemOutboxRepo
+from ..repositories.space_item_outbox_repo import (
+    GONE_DROPPED,
+    GONE_EXHAUSTED,
+    AbstractSpaceItemOutboxRepo,
+)
 from .gfs_publish_retry import PublishOutcome
 
 log = logging.getLogger(__name__)
@@ -62,6 +72,14 @@ MAX_REPLANS: int = 3
 #: at most this often.
 FAILED_RETENTION: timedelta = timedelta(days=7)
 FAILED_SWEEP_INTERVAL: timedelta = timedelta(hours=1)
+
+#: How old an item may be when it is first accepted: receivers drop an item
+#: whose signed stamp is older than the ring keeps it (24 h; 15 min for a
+#: live location pin), and a household fetching from the ring later reads
+#: it older still — so a row waiting past half of that is never sent; its
+#: author is told instead (finding 8 of the 10k review).
+MAX_QUEUED_AGE: timedelta = timedelta(seconds=RING_DURABLE_TTL_S // 2)
+MAX_QUEUED_AGE_EPHEMERAL: timedelta = timedelta(seconds=RING_EPHEMERAL_TTL_S // 2)
 
 #: One attempt to put ``row`` on ``row.gfs_id``.
 Sender = Callable[[QueuedSpaceItem], Awaitable[PublishOutcome]]
@@ -295,9 +313,29 @@ class SpaceItemOutbox:
             else:
                 await self._backoff(row, None, whole_gfs=False)
             return True
+        if self._too_old(row) and row.ring_class == RING_CLASS_EPHEMERAL:
+            # A live location pin past its life: the 15-minute keepalive
+            # sends a fresh one — nothing for the person to act on.
+            log.info(
+                "space items: a stale %s of space %s dropped (a fresh one follows)",
+                row.event_type,
+                row.space_id,
+            )
+            await self._repo.delete(row.item_id, row.gfs_id)
+            self._space_changed(row.space_id)
+            return True
+        if self._too_old(row):
+            log.warning(
+                "space items: a %s of space %s waited too long to be sent —"
+                " receivers would drop it; its author is told",
+                row.event_type,
+                row.space_id,
+            )
+            await self._fail(row, UNSENT_TOO_OLD, drop_payload=True)
+            return True
         outcome = await self._sender(row)
         if outcome.kind == "delivered":
-            await self._repo.delete(row.item_id, row.gfs_id)
+            await self._repo.delivered(row.item_id, row.gfs_id)
             self._space_changed(row.space_id)
             return True
         if outcome.kind == "gone":
@@ -325,22 +363,44 @@ class SpaceItemOutbox:
         await self._fail(row, UNSENT_REFUSED)
         return True
 
+    def _too_old(self, row: QueuedSpaceItem) -> bool:
+        """Whether *row* waited past what receivers still take."""
+        try:
+            created = datetime.fromisoformat(row.created_at)
+        except ValueError:
+            return False
+        limit = (
+            MAX_QUEUED_AGE_EPHEMERAL
+            if row.ring_class == RING_CLASS_EPHEMERAL
+            else MAX_QUEUED_AGE
+        )
+        return self._clock() - created > limit
+
     async def _fail(
         self, row: QueuedSpaceItem, error: str, *, drop_payload: bool = False
     ) -> None:
         await self._repo.mark_failed(
-            row.item_id, row.gfs_id, error, drop_payload=drop_payload
+            row, error, drop_payload=drop_payload, now=self._now()
         )
         self._space_changed(row.space_id)
         await self._tell(row.space_id, row.author_user_id)
 
     async def _gone(self, row: QueuedSpaceItem) -> None:
         """*row*'s GFS no longer serves the space. Another row of the item
-        still goes elsewhere: this copy just drops. Its LAST row is planned
-        afresh (the owner's list may name another server by then) — a few
-        times, then its author is told: never a change that silently
-        reaches nobody."""
-        if await self._repo.count_rows(row.item_id) > 1:
+        still goes elsewhere, or the item went out already: this copy just
+        drops. Its LAST row is planned afresh (the owner's list may name
+        another server by then) — a few times, then its author is told:
+        never a change that silently reaches nobody. Decided in one repo
+        transaction, so two GFSs going away together can't both drop it."""
+        outcome = await self._repo.gone(
+            row.item_id,
+            row.gfs_id,
+            max_replans=MAX_REPLANS,
+            next_attempt_at=_iso(
+                self._clock() + timedelta(seconds=backoff_s(row.replans + 1))
+            ),
+        )
+        if outcome == GONE_DROPPED:
             log.info(
                 "space items: GFS %s no longer serves space %s — its copy of a"
                 " %s is dropped",
@@ -348,11 +408,8 @@ class SpaceItemOutbox:
                 row.space_id,
                 row.event_type,
             )
-            await self._repo.delete(row.item_id, row.gfs_id)
             self._space_changed(row.space_id)
-            return
-        attempts = row.attempts + 1
-        if attempts > MAX_REPLANS:
+        elif outcome == GONE_EXHAUSTED:
             log.warning(
                 "space items: no GFS of space %s takes a %s any more — its"
                 " author is told",
@@ -360,15 +417,6 @@ class SpaceItemOutbox:
                 row.event_type,
             )
             await self._fail(row, UNSENT_REFUSED)
-            return
-        await self._repo.replan(
-            row.item_id,
-            row.gfs_id,
-            attempts=attempts,
-            next_attempt_at=_iso(
-                self._clock() + timedelta(seconds=backoff_s(attempts))
-            ),
-        )
 
     async def _backoff(
         self,

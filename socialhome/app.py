@@ -1358,17 +1358,22 @@ def _wire_space_authority_rotation(
 #: (cluster-wide, ``CHANNEL_PUBLISH_MAX_PER_MINUTE`` — this package does not
 #: import the server's); the household reads a channel on one GFS (owner
 #: Q8 A: one seat, failover), and a ring fetch pages 500 items every 20 s —
-#: 1 500 a minute. A frame dropped here keeps the ring cursor before it: it
-#: comes again on the next fetch (a copy from a second GFS is a duplicate
-#: anyway). Space sync heals the rest.
-GFS_CHANNEL_FRAMES_PER_MINUTE: int = 1_500
+#: 1 500 a minute. A household watching the space gets BOTH on one key —
+#: live pushes at the channel's cap and the fetch of what it missed — so
+#: the budget is their sum (2 700) with room to spare: a viewer opening a
+#: busy space that is behind catches up instead of dropping fetched frames
+#: and gapping (10k review, finding 7). A frame dropped here keeps the ring
+#: cursor before it: it comes again on the next fetch (a copy from a second
+#: GFS is a duplicate anyway). Space sync heals the rest.
+GFS_CHANNEL_FRAMES_PER_MINUTE: int = 3_000
 
 #: Channel frames per minute across EVERY channel — the household-wide
 #: ceiling, as for every other relayed frame (``RELAY_ENVELOPE_INBOUND_LIMIT``).
 #: Charged only for a well-formed channel id with room left in its own
 #: budget, so a GFS inventing channel ids mints at most this many 32-hex
-#: per-channel keys a minute. Four active channels at their full rate; at
-#: 100 a second the decrypt + Ed25519 verify stays far below one core.
+#: per-channel keys a minute. Two channels at their full rate (four busy
+#: ones at the live cap); at 100 a second the decrypt + Ed25519 verify stays
+#: far below one core.
 #: Residual: ONE misbehaving GFS can spend this ceiling and so delay the
 #: channel frames of the household's other GFSs (it could already withhold
 #: its own); the ring fetch and space sync heal.
@@ -1379,7 +1384,7 @@ GFS_CHANNEL_BUDGET_PREFIX: str = "gfs_channel:"
 GFS_CHANNEL_BUDGET_ALL: str = "gfs_channel:*"
 
 #: Idle per-channel keys are swept once the limiter holds this many keys:
-#: the household-wide ceiling keeps live channel keys under 3 000, so a sweep
+#: the household-wide ceiling keeps live channel keys under 6 000, so a sweep
 #: runs at most every couple of minutes however many ids a GFS invents.
 GFS_CHANNEL_BUDGET_SWEEP_AT: int = 8192
 

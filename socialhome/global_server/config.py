@@ -372,6 +372,10 @@ class ChannelRingConfig:
         else the defaults), then the ``GFS_CHANNEL_RING_<KEY>`` env vars.
         :class:`ValueError` names the bad key or the broken rule."""
         out = base if base is not None else cls()
+        unknown = sorted(set(table) - set(_CHANNEL_RING_BOUNDS))
+        if unknown:
+            # A typo (``max_byte``) must not silently keep the default.
+            raise ValueError(f"[channel_ring] unknown key(s): {', '.join(unknown)}")
         values: dict[str, object] = {}
         for key, (lo, hi) in _CHANNEL_RING_BOUNDS.items():
             env_key = f"GFS_CHANNEL_RING_{key.upper()}"
@@ -411,10 +415,14 @@ class ChannelRingConfig:
 #: what a household still takes from a ring (24 h durable, 15 min
 #: ephemeral — ``space_item_dispatch``); a ring holds at least one largest
 #: item (MEMBER_PUBLISH_MAX_PAYLOAD_CHARS, 200 KiB) and some history.
+#: A ring must outlast two 15-minute heads pings, or every seat that only
+#: pulls would gap (and run a §25.6 catch-up) on each ping (10k review,
+#: finding 10): ``max_bytes`` holds at least 15 minutes of a channel at its
+#: 4 MiB a minute (60 MiB) and a durable item stays at least 30 minutes.
 _CHANNEL_RING_BOUNDS: dict[str, tuple[int, int]] = {
-    "max_bytes": (1024**2, 4 * 1024**3),
+    "max_bytes": (60 * 1024**2, 4 * 1024**3),
     "max_items": (1_024, 10_000_000),
-    "durable_ttl_seconds": (300, 24 * 3600),
+    "durable_ttl_seconds": (1_800, 24 * 3600),
     "ephemeral_ttl_seconds": (60, 15 * 60),
     "server_max_bytes": (1024**2, 1 << 44),
 }

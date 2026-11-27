@@ -365,3 +365,36 @@ async def test_a_sender_that_raises_backs_off(db, caplog, monkeypatch):
     assert "attempt for space sp failed" in caplog.text
     assert await box.run_once() == 0
     assert mod.BATCH > 0
+
+
+# ── Review of the 10k sizing (Fable, 2026-11-27) ──────────────────────────
+
+
+async def test_a_gfs_down_a_while_never_uses_up_the_replans(db):
+    """Finding 6a: transient failures, then the GFS leaves the owner's list
+    — the item is planned afresh to the replacement, not failed."""
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.transient()] * 3 + [PublishOutcome.gone()]
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m")
+    gfs.plan = ["g9"]
+    for _ in range(8):
+        await box.run_once()
+        clock.advance(601)
+    assert told == []
+    assert gfs.accepted == [("g9", "m")]
+
+
+async def test_an_item_that_waited_too_long_is_shown_never_sent(db):
+    """Finding 8: receivers would drop it — its author is told instead."""
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.transient()]
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m")
+    await box.run_once()
+    clock.advance(13 * 3600)
+    await box.run_once()
+    assert gfs.accepted == []
+    [unsent] = await box.unsent("sp", "anna")
+    assert (unsent.error, unsent.retryable) == ("too_old", False)
+    assert told == [("sp", "anna")]

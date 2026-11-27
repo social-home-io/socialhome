@@ -2254,9 +2254,9 @@ class GfsChannelService:
         never the in-memory one). ``gone`` when that server no longer
         serves the space's channel (not on the owner's list, not named by
         the grant, no ``private_channels``, the connection removed) or the
-        space has no channel here any more; ``permanent`` when we can't
-        publish at the item's epoch any more (our grant for it is gone) or
-        the server refused it for good; ``transient`` while the server is
+        space has no channel here any more; ``stale`` when we can't
+        publish at the item's epoch any more (our grant for it is gone);
+        ``permanent`` when the server refused it for good; ``transient`` while the server is
         down, busy (429, honoured) or of unknown capability."""
         space = await self._spaces.get(row.space_id)
         if space is None or not channel_on(space) or row.payload is None:

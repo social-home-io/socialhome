@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS space_item_outbox (
     payload         TEXT,
     bytes           INTEGER NOT NULL DEFAULT 0,
     attempts        INTEGER NOT NULL DEFAULT 0,
+    -- How often the item's last row was planned afresh after its GFS
+    -- stopped serving the space (apart from ``attempts``: a GFS being down
+    -- a while never uses up the replans).
+    replans         INTEGER NOT NULL DEFAULT 0,
+    -- 1 once another row of the same item was accepted: this copy is then
+    -- never planned afresh (the item went out), only dropped.
+    delivered       INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'failed')),
