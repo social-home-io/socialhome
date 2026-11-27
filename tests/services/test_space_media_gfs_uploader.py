@@ -169,6 +169,9 @@ class _Fed:
     async def relay_media_ok(self, instance):
         return instance.id in self.frames
 
+    async def space_member_supports(self, iid, *, min_version):
+        return self.versions.get(iid, 0) >= min_version
+
 
 class _Crypto:
     async def media_key(self, space_id, *, epoch=None):
@@ -1370,3 +1373,27 @@ async def test_a_piece_whose_file_changed_is_not_sent(tmp_path):
     _write(tmp_path, "v.webm", BIG)
     assert await _upload(u, plan) == ["delivered"] * 3  # done: nothing to send
     assert gfs.puts == []
+
+
+async def test_push_targets_keep_the_push_unless_the_cache_has_the_file(tmp_path):
+    """v_97 — a live item's file it described AND queued for the GFS cache
+    is pushed only to households below v_97 (and to everyone while the
+    space's legacy window is open); any other file to everyone."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"new": OURS, "old": 90}))
+    targets = ["new", "old"]
+    # Nothing described yet: everyone keeps the push.
+    assert await u.push_targets(SPACE, "a.webp", targets) == targets
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    await _upload(u, plan)
+    assert await u.push_targets(SPACE, "a.webp", targets) == ["old"]
+    assert await u.push_targets(SPACE, "b.webp", targets) == targets
+
+    async def window_open(space_id):
+        return True
+
+    u.attach_legacy_window(window_open)
+    assert await u.push_targets(SPACE, "a.webp", targets) == targets

@@ -625,7 +625,7 @@ class GfsMemberPublishService:
             epoch=epoch,
             item=ct,
             via_channel=True,
-            legacy_window=await self._in_legacy_window(space_id),
+            legacy_window=await self.in_legacy_window(space_id),
             # Only a new message / item mentions anew (an edit would ring
             # the same people twice).
             notes=tuple(
@@ -713,7 +713,7 @@ class GfsMemberPublishService:
                 return epoch, ct
         return None
 
-    async def _in_legacy_window(self, space_id: str) -> bool:
+    async def in_legacy_window(self, space_id: str) -> bool:
         """v_97 (owner Q6 A) — for 14 days after this household first put a
         space's change on its CURRENT channel, the legacy event still goes
         to every member; the start is kept in ``instance_config`` per

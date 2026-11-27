@@ -1466,17 +1466,3 @@ async def test_a_young_row_whose_file_arrived_ends_the_checks(tmp_path, monkeypa
     now[0] = 600.0
     await w.drain()
     assert fed.sent == [] and len(refs.recent_asked) == 2
-
-
-async def test_a_gfs_space_never_asks_by_space_media_wanted(tmp_path):
-    """v_97 (owner 2026-11-27): every household of a GFS space takes its
-    files from the GFS cache (a miss there on demand) — never a host or
-    helper push, so no SPACE_MEDIA_WANTED, on a check or a view."""
-    a = _sc("a")
-    refs = _Refs()
-    refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-x", [a])]}
-    fed = _Fed({HOST: V92})
-    w = _wanted(refs=refs, fed=fed, media_dir=tmp_path, spaces=_Spaces(gfs=True))
-    w.applied(SPACE)
-    await w.drain()
-    assert fed.sent == []

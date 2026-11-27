@@ -40,7 +40,6 @@ import aiofiles
 import aiofiles.os
 
 from ..domain.federation import FederationEventType
-from ..domain.federation_capabilities import FederationCapability
 from ..domain.file_hashes import blob_hash_fields, sha256_hex
 from ..domain.media_chunking import split_into_chunks
 from ..domain.media_constraints import is_safe_media_name
@@ -105,9 +104,9 @@ class SpaceMediaSyncService:
 
     __slots__ = (
         "_budget",
+        "_cache_readers",
         "_federation",
         "_federation_repo",
-        "_gfs_space",
         "_held",
         "_interval",
         "_media_dir",
@@ -149,9 +148,12 @@ class SpaceMediaSyncService:
         #: v_80 — who reads the space's pictures from a GFS media cache
         #: instead (:meth:`SpaceMediaGfsUploader.reads_from_gfs`).
         self._relay_readers: _RelayReaders | None = None
-        #: v_97 — whether a space is a GFS space (its files come from the
-        #: GFS cache for every v_97 household: no push).
-        self._gfs_space: Callable[[str], Awaitable[bool]] | None = None
+        #: v_97 — ``(space, file, targets) → targets still pushed``: a
+        #: live item's file it described for the GFS cache reaches its v_97
+        #: households from there (the uploader's :meth:`push_targets`).
+        self._cache_readers: (
+            Callable[[str, str, list[str]], Awaitable[list[str]]] | None
+        ) = None
         #: Bytes of the files the current pass holds (``MAX_INFLIGHT_FILE_BYTES``).
         self._budget = asyncio.Condition()
         self._held = 0
@@ -172,12 +174,16 @@ class SpaceMediaSyncService:
         the file (it fetches it from there then)."""
         self._relay_readers = readers
 
-    def attach_gfs_spaces(self, is_gfs_space: Callable[[str], Awaitable[bool]]) -> None:
-        """v_97 (owner 2026-11-27) — a GFS space's files reach every
-        household through the GFS space media cache: a push to a v_97
-        household of such a space is dropped at send time (an older
-        household keeps it, as it keeps the legacy events)."""
-        self._gfs_space = is_gfs_space
+    def attach_cache_readers(
+        self, readers: Callable[[str, str, list[str]], Awaitable[list[str]]]
+    ) -> None:
+        """v_97 (owner 2026-11-27) — a GFS space's files reach its
+        households through the GFS space media cache: a LIVE item's file the
+        item described for the cache is pushed only to the households that
+        cannot read it there (``SpaceMediaGfsUploader.push_targets``).
+        Catch-up rows, asked-for rows and files no descriptor covers (a
+        comment's picture, a file no GFS takes) keep the push."""
+        self._cache_readers = readers
 
     def attach_federation(self, federation: FederationService) -> None:
         """Wire federation after construction (breaks the boot cycle).
@@ -198,8 +204,13 @@ class SpaceMediaSyncService:
         media_urls: list[str],
         push: bool = False,
         wire_names: Mapping[str, str] | None = None,
+        live: bool = False,
     ) -> None:
         """One outbox row per (media_url, peer) tuple.
+
+        ``live`` (v_97): the files of an item going out now, whose
+        descriptor rides the item — in a GFS space a file it described for
+        the GFS cache is not pushed to a household that reads it there.
 
         ``push`` (v_92): the targets asked for these files
         (``SPACE_MEDIA_WANTED``) — they already missed their GFS cache, so
@@ -235,7 +246,24 @@ class SpaceMediaSyncService:
                     filename,
                 )
                 continue
-            for target in target_instance_ids:
+            targets = list(target_instance_ids)
+            if live and self._cache_readers is not None:
+                try:
+                    targets = await self._cache_readers(space_id, filename, targets)
+                except Exception:
+                    log.warning(
+                        "space-media-sync: cache readers of %s unknown — pushed",
+                        filename,
+                        exc_info=True,
+                    )
+                if len(targets) < len(target_instance_ids):
+                    log.info(
+                        "space-media-sync: %s reaches %d household(s) through"
+                        " the GFS cache — no push to them",
+                        filename,
+                        len(target_instance_ids) - len(targets),
+                    )
+            for target in targets:
                 if not target:
                     continue
                 await self._outbox.enqueue(
@@ -333,12 +361,14 @@ class SpaceMediaSyncService:
         target_instance_ids: list[str],
         media_urls: list[str],
         space_id: str = "",
+        live: bool = False,
     ) -> None:
         await self.enqueue_for_blob(
             space_id=space_id,
             correlation_id=post_id,
             target_instance_ids=target_instance_ids,
             media_urls=media_urls,
+            live=live,
         )
 
     # ── Scheduler loop ────────────────────────────────────────────────
@@ -472,17 +502,6 @@ class SpaceMediaSyncService:
                 target_instance_id=entry.target_instance_id,
             )
             return False
-        if await self._reads_gfs_cache(entry, fed):
-            log.info(
-                "space-media-sync: %s takes %s from the GFS cache — no push",
-                entry.target_instance_id,
-                entry.blob_id,
-            )
-            await self._outbox.delete(
-                blob_id=entry.blob_id,
-                target_instance_id=entry.target_instance_id,
-            )
-            return False
         key = (entry.blob_id, entry.target_instance_id)
         if (
             self._relay_readers is not None
@@ -526,21 +545,6 @@ class SpaceMediaSyncService:
             async with self._budget:
                 self._held -= need
                 self._budget.notify_all()
-
-    async def _reads_gfs_cache(
-        self, entry: SpaceMediaOutboxEntry, fed: FederationService
-    ) -> bool:
-        """Whether the row's target takes the space's files from the GFS
-        cache: a GFS space and a v_97 household — whatever the row is (a
-        live file, a catch-up, an asked-for one)."""
-        if self._gfs_space is None or not entry.space_id:
-            return False
-        if not await self._gfs_space(entry.space_id):
-            return False
-        return await fed.space_member_supports(
-            entry.target_instance_id,
-            min_version=FederationCapability.MIN_FOR_SPACE_ITEMS,
-        )
 
     async def _send_row(
         self, entry: SpaceMediaOutboxEntry, fed: FederationService

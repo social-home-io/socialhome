@@ -462,8 +462,25 @@ class SpaceMediaGfsResponder:
         same rules as a whole file (confined to the space, live in it), its
         manifest describes it (sealed once more on a miss), and the piece
         sits at exactly *blob_id*. The proof the GFS checks it by is kept
-        for the serve."""
+        for the serve. A locator whose file seals to other addresses is
+        remembered (as for a whole file): the same locator with made-up
+        addresses is declined without sealing the file again."""
+        locator = (
+            scope,
+            scope_id,
+            epoch,
+            loc.item_id,
+            loc.origin,
+            loc.filename,
+            "pieces",
+        )
+        known = self._resealed.get(locator)
+        if known is not None and known[0] > _monotonic():
+            file_addresses = known[1]
+            if not any(piece_address(a, index) == blob_id for a in file_addresses):
+                return None, DECLINE_BAD_HINT
         held_any = False
+        addresses: set[str] = set()
         for name in names:
             if not await self._media_refs.confined_to_space(
                 name, space_id
@@ -477,10 +494,14 @@ class SpaceMediaGfsResponder:
                 origin=loc.origin,
                 scope=scope,
                 scope_id=scope_id,
+                # The AAD names the author's file, whatever name we hold it
+                # under (``sc-`` / ``sd-`` / ``sg-``).
+                filename=loc.filename,
             )
             if pieced is None:
                 continue
             held_any = True
+            addresses.add(pieced.address)
             if (
                 len(pieced.manifest) != count
                 or piece_address(pieced.address, index) != blob_id
@@ -494,6 +515,7 @@ class SpaceMediaGfsResponder:
                 origin=loc.origin,
                 index=index,
                 count=count,
+                filename=loc.filename,
             )
             if blob is None:
                 continue
@@ -504,8 +526,12 @@ class SpaceMediaGfsResponder:
             self._proofs.move_to_end(key)
             while len(self._proofs) > 4096:
                 self._proofs.popitem(last=False)
+            self._remember_locator(locator, addresses)
             return blob, ""
-        return None, DECLINE_BAD_HINT if held_any else DECLINE_NOT_HELD
+        if held_any:
+            self._remember_locator(locator, addresses)
+            return None, DECLINE_BAD_HINT
+        return None, DECLINE_NOT_HELD
 
     def _remember_locator(self, locator: tuple, addresses: set[str]) -> None:
         self._resealed[locator] = (

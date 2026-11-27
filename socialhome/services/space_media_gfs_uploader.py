@@ -67,7 +67,7 @@ import os
 import pathlib
 import time
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -287,6 +287,10 @@ def seal_piece_sync(
     )
 
 
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def media_names(urls: Iterable[str | None]) -> list[str]:
     """The local file names *urls* reference (``api/media/<name>``), in
     order, without duplicates; anything else is ignored."""
@@ -319,6 +323,7 @@ class SpaceMediaGfsUploader:
     """Plan and upload a space item's files to the GFSs its readers use."""
 
     __slots__ = (
+        "_cached_files",
         "_channels",
         "_crypto",
         "_described",
@@ -326,6 +331,7 @@ class SpaceMediaGfsUploader:
         "_federation",
         "_federation_repo",
         "_gfs",
+        "_legacy_window",
         "_manifests",
         "_media_refs",
         "_outbox",
@@ -358,6 +364,11 @@ class SpaceMediaGfsUploader:
         self._channels: GfsChannelService | None = None
         #: v_97 — the durable queue every upload waits in.
         self._outbox: SpaceItemOutbox | None = None
+        #: v_97 — (space, file) an item described and queued for the GFS
+        #: cache (:meth:`push_targets`), bounded.
+        self._cached_files: OrderedDict[tuple[str, str], None] = OrderedDict()
+        #: v_97 — whether a space's 14-day legacy window is open.
+        self._legacy_window: Callable[[str], Awaitable[bool]] | None = None
         #: Spaces already warned about lacking any upload authorization.
         self._unauthorized: set[str] = set()
         #: v_97 — file address → its piece manifest (:data:`MAX_MANIFESTS`).
@@ -380,6 +391,32 @@ class SpaceMediaGfsUploader:
         """v_97 — the durable queue uploads wait in (one row per blob or
         piece per GFS; :meth:`deliver` sends one)."""
         self._outbox = outbox
+
+    def attach_legacy_window(self, is_open: Callable[[str], Awaitable[bool]]) -> None:
+        """v_97 — the space's 14-day window: every household still gets
+        the legacy events, so it keeps the push too."""
+        self._legacy_window = is_open
+
+    async def push_targets(
+        self, space_id: str, filename: str, targets: list[str]
+    ) -> list[str]:
+        """Who still needs the household push of a live item's *filename*
+        (v_97, owner 2026-11-27): a file the item described for the GFS
+        cache and that is queued there reaches its v_97 households from the
+        cache — only older ones (and everyone while the space's legacy
+        window is open) keep the push. Any other file — none described, no
+        GFS takes it — goes to everyone."""
+        if (space_id, filename) not in self._cached_files or self._federation is None:
+            return list(targets)
+        if self._legacy_window is not None and await self._legacy_window(space_id):
+            return list(targets)
+        out: list[str] = []
+        for target in targets:
+            if not await self._federation.space_member_supports(
+                target, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
+            ):
+                out.append(target)
+        return out
 
     def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the v_51 channel service: a private space with an opaque
@@ -761,17 +798,30 @@ class SpaceMediaGfsUploader:
         origin: str,
         scope: str,
         scope_id: str,
+        filename: str | None = None,
     ) -> PiecedFile | None:
         """The local file *name* described in pieces as sealed by *origin*
-        for *item_id* (a holder answering a piece on demand) — remembered,
-        else sealed once more. ``None`` without the epoch's key or a pieced
-        size."""
+        for *item_id* under the author's file name *filename* (the AAD's —
+        a holder keeps the file under its own name; default *name*) —
+        remembered, else sealed once more. ``None`` without the epoch's key
+        or a pieced size."""
+        filename = filename or name
         path = media_file_path(self._dir, name)
         stamp = await self._stamp(name)
         current = await self._crypto.media_key(space_id, epoch=epoch)
         if path is None or stamp is None or current is None:
             return None
-        key = (space_id, name, epoch, item_id, origin, scope, scope_id, *stamp)
+        key = (
+            space_id,
+            name,
+            filename,
+            epoch,
+            item_id,
+            origin,
+            scope,
+            scope_id,
+            *stamp,
+        )
         hit = self._pieced.get(key)
         if hit is not None:
             self._pieced.move_to_end(key)
@@ -783,7 +833,7 @@ class SpaceMediaGfsUploader:
             epoch,
             item_id,
             origin,
-            name,
+            filename,
             str(path),
             scope,
             scope_id,
@@ -805,8 +855,10 @@ class SpaceMediaGfsUploader:
         origin: str,
         index: int,
         count: int,
+        filename: str | None = None,
     ) -> bytes | None:
-        """Piece *index* of the local file *name*, sealed again."""
+        """Piece *index* of the local file *name*, sealed again under the
+        author's file name *filename* (default *name*)."""
         path = media_file_path(self._dir, name)
         current = await self._crypto.media_key(space_id, epoch=epoch)
         if path is None or current is None or not await aiofiles.os.path.isfile(path):
@@ -818,7 +870,7 @@ class SpaceMediaGfsUploader:
             epoch,
             item_id,
             origin,
-            name,
+            filename or name,
             str(path),
             index,
             count,
@@ -904,12 +956,32 @@ class SpaceMediaGfsUploader:
             conns = [c for c in conns if await self._gfs.space_media_pieces(c)]
             manifest = self._manifests.get(ref.blob_id)
             if manifest is None:
-                log.warning("space media %s: its pieces are not known", ref.filename)
-                return
+                scoped = await self.scope_of(plan.space_id)
+                pieced = (
+                    await self.manifest_of(
+                        plan.space_id,
+                        ref.filename,
+                        epoch=ref.epoch,
+                        item_id=ref.item_id,
+                        origin=ref.origin,
+                        scope=scoped[0],
+                        scope_id=scoped[1],
+                    )
+                    if scoped is not None
+                    else None
+                )
+                if pieced is None or pieced.address != ref.blob_id:
+                    log.warning(
+                        "space media %s changed since it was described — not uploaded",
+                        ref.filename,
+                    )
+                    return
+                manifest = pieced.manifest
             parts = [(i, piece_address(ref.blob_id, i)) for i in range(len(manifest))]
         else:
             manifest = ()
             parts = [(-1, ref.blob_id)]
+        queued = False
         for index, address in parts:
             gfs_ids = [
                 c.id for c in conns if self._stored.get((c.id, address), 0.0) <= now
@@ -925,6 +997,17 @@ class SpaceMediaGfsUploader:
                 author_user_id=author,
                 gfs_ids=gfs_ids,
             )
+            queued = True
+        if queued or any(
+            self._stored.get((c.id, address), 0.0) > now
+            for c in conns
+            for _i, address in parts
+        ):
+            key = (plan.space_id, ref.filename)
+            self._cached_files[key] = None
+            self._cached_files.move_to_end(key)
+            while len(self._cached_files) > MAX_REMEMBERED:
+                self._cached_files.popitem(last=False)
 
     async def deliver(self, row: QueuedSpaceItem) -> PublishOutcome:
         """One attempt of one queued blob (or piece) on ``row.gfs_id``."""
@@ -945,6 +1028,10 @@ class SpaceMediaGfsUploader:
             ref.pieced and not await self._gfs.space_media_pieces(conn)
         ):
             return PublishOutcome.gone()
+        if not await self.can_upload(row.space_id, scoped=scoped):
+            # No grant yet (it may come): nothing is sealed meanwhile.
+            self._warn_unauthorized(row.space_id)
+            return PublishOutcome.transient()
         if ref.pieced:
             blob_id = piece_address(ref.blob_id, index)
             blob = await self._reseal_piece(ref, index, manifest)
@@ -999,6 +1086,15 @@ class SpaceMediaGfsUploader:
         )
         return PublishOutcome.permanent()
 
+    def _warn_unauthorized(self, space_id: str) -> None:
+        if space_id not in self._unauthorized:
+            self._unauthorized.add(space_id)
+            log.warning(
+                "space media of space %s: this household holds no upload "
+                "authorization — its files are not uploaded",
+                space_id,
+            )
+
     async def _target(self, space_id: str, gfs_id: str) -> GfsConnection | None:
         """The GFS *gfs_id* if it still reads this space's media."""
         conns = await self._media_targets(space_id, followers=True)
@@ -1041,7 +1137,10 @@ class SpaceMediaGfsUploader:
             index=index,
             count=len(manifest),
         )
-        if blob is None or hashlib.sha256(blob).hexdigest() != manifest[index]:
+        if (
+            blob is None
+            or (await asyncio.to_thread(_sha256_hex, blob)) != manifest[index]
+        ):
             log.warning(
                 "space media %s piece %d changed since it was described — not uploaded",
                 ref.filename,
@@ -1206,13 +1305,7 @@ class SpaceMediaGfsUploader:
         )
         auth = await self.authorize(claim, space_id)
         if auth is None:
-            if space_id not in self._unauthorized:
-                self._unauthorized.add(space_id)
-                log.warning(
-                    "space media of space %s: this household holds no upload "
-                    "authorization — its files are not uploaded",
-                    space_id,
-                )
+            self._warn_unauthorized(space_id)
             return _NO_AUTHORIZATION
         return await self._gfs.put_space_media(
             conn,

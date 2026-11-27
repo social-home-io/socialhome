@@ -167,7 +167,7 @@ class _Uploader:
     media_dir: pathlib.Path | None = None
 
     async def manifest_of(
-        self, space_id, name, *, epoch, item_id, origin, scope, scope_id
+        self, space_id, name, *, epoch, item_id, origin, scope, scope_id, filename=None
     ):
         if not (self.media_dir / name).is_file():
             return None
@@ -177,20 +177,22 @@ class _Uploader:
             epoch,
             item_id,
             origin,
-            name,
+            filename or name,
             str(self.media_dir / name),
             scope,
             scope_id,
         )
 
-    async def seal_piece(self, space_id, name, *, epoch, item_id, origin, index, count):
+    async def seal_piece(
+        self, space_id, name, *, epoch, item_id, origin, index, count, filename=None
+    ):
         return seal_piece_sync(
             KEY,
             space_id,
             epoch,
             item_id,
             origin,
-            name,
+            filename or name,
             str(self.media_dir / name),
             index,
             count,
@@ -742,3 +744,63 @@ async def test_a_piece_of_another_index_is_declined(tmp_path):
     # The hint names piece 0, the address is piece 1's.
     await _ask(r, _frame(piece_address(pieced.address, 1), filename="v.webm#0/3"))
     assert gfs.serves[0][2] is None
+
+
+async def test_a_holder_keeping_the_file_under_another_name_serves_its_piece(
+    tmp_path,
+):
+    """Not only the author: a household holding the file under its content
+    name reseals the piece under the AUTHOR's file name (the AAD's)."""
+    size = 2 * PIECE_BYTES + 99
+    _file(tmp_path, "sc-held.webm", size)
+    up = _Uploader()
+    up.media_dir = tmp_path
+    pieced = describe_pieced_sync(
+        KEY,
+        SPACE,
+        4,
+        ITEM,
+        "peer-a",
+        "v.webm",
+        str(tmp_path / "sc-held.webm"),
+        "channel",
+        CHANNEL,
+    )
+    bid = piece_address(pieced.address, 1)
+    gfs = _Gfs()
+    r = _responder(
+        tmp_path,
+        gfs=gfs,
+        uploader=up,
+        refs=_MediaRefs(content={ITEM: ["sc-held.webm"]}),
+    )
+    await _ask(r, _frame(bid, origin="peer-a", filename="v.webm#1/3"))
+    [(_g, _t, blob, _auth)] = gfs.serves
+    assert blob is not None
+    assert check_piece(
+        "channel", CHANNEL, bid, blob, PieceProof.from_header(gfs.proofs[0])
+    )
+
+
+async def test_made_up_piece_addresses_never_reseal_the_file_again(tmp_path):
+    """A key holder sending one locator with many made-up addresses costs
+    one description of the file, then declines from memory."""
+    size = PIECE_BYTES + 99
+    _file(tmp_path, "v.webm", size)
+    up = _Uploader()
+    up.media_dir = tmp_path
+    calls = {"n": 0}
+    real = up.manifest_of
+
+    async def counting(*a, **k):
+        got = await real(*a, **k)
+        calls["n"] += got is not None  # a file actually described
+        return got
+
+    up.manifest_of = counting
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, uploader=up)
+    for _ in range(5):
+        await _ask(r, _frame(os.urandom(32).hex(), filename="v.webm#0/2"))
+    assert calls["n"] == 1
+    assert all(s[2] is None for s in gfs.serves)

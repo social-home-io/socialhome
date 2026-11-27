@@ -633,6 +633,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                         target_instance_ids=targets,
                         media_urls=media_urls,
                         space_id=event.space_id,
+                        live=True,
                     )
                 except Exception:
                     log.exception(
