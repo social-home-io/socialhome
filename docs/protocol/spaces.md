@@ -1896,8 +1896,10 @@ and comments, the chat (read-only, `can_post: false`), zones, the map pins
 and live location shares, proposals, game-table cards, the roster with the
 same fields (presence included), sync pages (pushed like a member's, one
 checksum), the sync status, "Sync now", and media (pushed like a member's;
-a picture it missed it fetches through its GFS's v_83 on-demand path, #1317
-— a transport choice, the same bytes). Every read audience is
+a missed picture is fetched by PATH, never by role: a household with a
+paired or mesh path to the host asks it with `SPACE_MEDIA_WANTED`, one that
+reaches the space only through a GFS uses the v_83 on-demand fetch —
+`FederationService.reaches_host_directly`). Every read audience is
 `SpaceWriterHouseholds(roles=SEAT_ROLES)` and the receiving half
 `holds_seat` (any seat); there is no follower-specific delivery rule.
 The only differences are writes: no chat send, no proposal create / vote,

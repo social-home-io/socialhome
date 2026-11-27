@@ -251,8 +251,13 @@ class _Spaces:
 class _Fed:
     """``space_member_supports`` over fixed household versions."""
 
-    def __init__(self, versions):
+    def __init__(self, versions, *, direct: bool = False):
         self.versions = dict(versions)
+        #: This household reaches the host other than through a GFS (P10).
+        self.direct = direct
+
+    async def reaches_host_directly(self, space_id):
+        return self.direct
 
     async def space_member_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 0) >= min_version
@@ -267,6 +272,7 @@ def _fetcher(
     channel_id=CHANNEL_ID,
     member=False,
     host_version=V92,
+    direct=None,
 ):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
@@ -275,7 +281,11 @@ def _fetcher(
         gfs_repo=_GfsRepo(conns),
         federation_repo=_FedRepo(insts),
         space_repo=_Spaces(channel_id, member=member),
-        federation=_Fed({SPACE_HOST: host_version}),
+        # By default a member reaches the host directly and a follower only
+        # through its GFS — the path, not the role, decides (P10).
+        federation=_Fed(
+            {SPACE_HOST: host_version}, direct=member if direct is None else direct
+        ),
         media_dir=tmp_path,
     )
 

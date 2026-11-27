@@ -153,6 +153,11 @@ class _Fed:
     sent: list[tuple[str, FederationEventType, dict, str | None]] = field(
         default_factory=list
     )
+    #: This household reaches the host other than through a GFS (P10).
+    direct: bool = True
+
+    async def reaches_host_directly(self, space_id):
+        return self.direct
 
     async def space_member_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 0) >= min_version
@@ -315,18 +320,33 @@ async def test_a_name_without_a_space_row_is_not_left_on_cooldown():
     assert [_names(s) for s in fed.sent] == [[a]]
 
 
-async def test_a_name_a_follower_household_skipped_is_not_left_on_cooldown():
+async def test_a_name_a_gfs_reached_household_skipped_is_not_left_on_cooldown():
     a = _sc("a")
-    spaces = _Spaces(role=SpaceRole.SUBSCRIBER)
-    fed = _Fed({HOST: V92})
-    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), spaces=spaces, fed=fed)
+    fed = _Fed({HOST: V92}, direct=False)
+    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed)
     w.schedule(a)
     await w.drain()
-    assert fed.sent == []  # a follower keeps the GFS on-demand path (#1317)
-    spaces.role = SpaceRole.MEMBER  # joined as a member since
+    assert fed.sent == []  # GFS-reached: its GFS on-demand path (v_83)
+    fed.direct = True  # paired with the host since
     w.schedule(a)
     await w.drain()
     assert len(fed.sent) == 1
+
+
+@pytest.mark.parametrize("role", [SpaceRole.MEMBER, SpaceRole.SUBSCRIBER])
+@pytest.mark.parametrize("direct", [True, False])
+async def test_the_ask_is_decided_by_path_never_by_role(role, direct):
+    """P10 (coordinator 2026-11-27): a household with a paired / mesh path
+    to the host asks it with SPACE_MEDIA_WANTED; one that reaches the space
+    only through a GFS fetches there — member or follower alike."""
+    a = _sc("a")
+    fed = _Fed({HOST: V92}, direct=direct)
+    w = _wanted(
+        refs=_Refs({a: [(SPACE, "p1", "t")]}), spaces=_Spaces(role=role), fed=fed
+    )
+    w.schedule(a)
+    await w.drain()
+    assert len(fed.sent) == (1 if direct else 0)
 
 
 async def test_a_name_whose_lookup_failed_is_not_left_on_cooldown():
@@ -1115,10 +1135,12 @@ async def test_a_file_read_from_a_gfs_media_cache_is_not_asked_for(tmp_path):
     assert [_names(s) for s in fed.sent] == [[b]]
 
 
-async def test_a_follower_household_checks_nothing(tmp_path):
+async def test_a_gfs_reached_household_checks_nothing(tmp_path):
+    """P10: by path — a household reaching the space only through a GFS
+    (member or follower) leaves missed files to its GFS on-demand path."""
     refs = _Refs()
     refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-x", [_sc("a")])]}
-    fed = _Fed({HOST: V92})
+    fed = _Fed({HOST: V92}, direct=False)
     w = _wanted(
         refs=refs,
         spaces=_Spaces(role=SpaceRole.SUBSCRIBER),

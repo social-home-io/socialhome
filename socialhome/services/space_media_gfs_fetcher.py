@@ -91,7 +91,6 @@ from ..domain.file_hashes import (
 )
 from ..domain.gfs_space_media import SCOPE_CHANNEL, space_media_address
 from ..domain.media_constraints import is_gfs_space_media_name, is_reserved_media_name
-from ..domain.space import WRITER_ROLES
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
     MAX_PAGE_FILES,
@@ -179,6 +178,12 @@ def _monotonic() -> float:
 
 
 class _MemberVersions(Protocol):
+    """The federation service's version answer (v_92), and whether this
+    household reaches a space's host other than through a GFS (P10: the
+    media fetch path is decided by path, never by role)."""
+
+    async def reaches_host_directly(self, space_id: str) -> bool: ...
+
     async def space_member_supports(
         self, instance_id: str, *, min_version: int
     ) -> bool: ...
@@ -676,21 +681,23 @@ class SpaceMediaGfsFetcher:
         return outcome
 
     async def _asks_its_gfs(self, ref: SpaceMediaRef) -> bool:
-        """v_83 on-demand is a FOLLOWER's path (v_92, #1317 — a transport
-        choice, not a read right: a GFS-reached follower may have no path to
-        a helper, and the GFS cache serves followers; P10 keeps it): a
-        member household asks its host or a helper with
-        ``SPACE_MEDIA_WANTED``
+        """v_83 on-demand is the path of a household that reaches the space
+        only through a GFS (P10: decided by PATH, never by role — member or
+        follower alike): no seat here, or no paired / mesh path to the host
+        (:meth:`FederationService.reaches_host_directly`). A household with
+        such a path asks its host or a helper with ``SPACE_MEDIA_WANTED``
         (:class:`~.space_media_wanted.SpaceMediaWanted`) instead — for an
-        ``sc-`` content name only, the one name that request carries. A
-        member keeps the ask for a file it holds under any other name (an
-        ``sg-`` name taken from the public GFS copy, without a hash map or
-        before v_92), and while the space's host is below v_92 and would
-        answer no such request (rollout)."""
+        ``sc-`` content name only, the one name that request carries. It
+        keeps the ask for a file it holds under any other name (an ``sg-``
+        name taken from the public GFS copy, without a hash map or before
+        v_92), and while the space's host is below v_92 and would answer no
+        such request (rollout)."""
         if not is_space_content_media_name(ref.local_name):
             return True
         space_id = ref.space_id
-        if not await holds_seat(self._spaces, space_id, roles=WRITER_ROLES):
+        if not await holds_seat(self._spaces, space_id):
+            return True
+        if not await self._federation.reaches_host_directly(space_id):
             return True
         space = await self._spaces.get(space_id)
         host = space.owner_instance_id if space is not None else ""

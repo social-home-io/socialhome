@@ -7315,6 +7315,33 @@ async def test_a_delegated_admin_serving_as_host_tries_everyone(monkeypatch):
     assert sorted(tried) == ["gfs-follower", "gfs-member", "mesh-follower"]
 
 
+@pytest.mark.parametrize(
+    ("host", "row_source", "claim", "want"),
+    [
+        (None, None, None, True),  # we host it
+        ("host-x", InstanceSource.MANUAL, None, True),  # paired with the host
+        ("host-x", None, {"host-x": 96}, True),  # the host claimed over the mesh
+        ("host-x", InstanceSource.SPACE_SESSION, None, False),  # only a GFS seat
+        ("host-x", None, None, False),  # no path of our own at all
+    ],
+)
+async def test_reaches_host_directly_is_decided_by_path(host, row_source, claim, want):
+    """P10 (coordinator 2026-11-27): the media fetch path is decided by the
+    path to the host — paired or mesh → ask the host; only a GFS seat →
+    the GFS on-demand fetch — never by role."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = claim or {}
+    if row_source is not None:
+        row, _ = _make_remote_instance(km)
+        await fed_repo.save_instance(
+            dataclasses.replace(row, id="host-x", source=row_source)
+        )
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    svc.attach_space_write_gate(_ChannelSpaces(True, host=host), _Seats(set()))
+    assert await svc.reaches_host_directly("sp") is want
+
+
 async def test_households_with_a_row_go_before_mesh_discoveries(monkeypatch):
     """P10 H1: the households we hold a row for are sent to first; the
     ones that need a mesh discovery come after, whatever their ids."""

@@ -4418,6 +4418,34 @@ class FederationService:
             return frozenset()
         return hosts
 
+    async def reaches_host_directly(self, space_id: str) -> bool:
+        """Does THIS household reach ``space_id``'s host other than through
+        a GFS — a paired row, or a version it claimed over the mesh — or
+        host it itself? The media fetch path is decided by this (P10:
+        by path, never by role): ``False`` (only a channel or relay seat)
+        → the v_83 GFS on-demand fetch; ``True`` → ``SPACE_MEDIA_WANTED``
+        to the host. Fail soft to ``False`` (the GFS path needs nothing of
+        the host)."""
+        try:
+            hosts = await self._hosts_elsewhere(space_id)
+            if not hosts:
+                space = (
+                    await self._space_repo.get(space_id)
+                    if self._space_repo is not None
+                    else None
+                )
+                return space is not None  # we host it (or serve as host)
+            for host in hosts:
+                row = await self._federation_repo.get_instance(host)
+                if row is not None and row.source is not InstanceSource.SPACE_SESSION:
+                    return True
+                claim = await self._federation_repo.get_space_member_version(host)
+                if claim is not None and claim[0] > 0:
+                    return True
+        except Exception:
+            log.debug("host path lookup failed for %s", space_id, exc_info=True)
+        return False
+
     async def _has_row(self, instance_id: str) -> bool:
         """We hold a ``remote_instances`` row for it (fail-soft: yes)."""
         try:

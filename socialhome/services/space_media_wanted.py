@@ -104,7 +104,6 @@ from ..domain.file_hashes import (
     space_content_media_name,
 )
 from ..domain.media_constraints import is_safe_media_name
-from ..domain.space import WRITER_ROLES
 from ..federation.host_equivalence import acting_hosts
 from ..federation.sync.space.file_gate import (
     CatchUpFileGates,
@@ -192,6 +191,8 @@ class _HostContact(Protocol):
 
 
 class _Federation(Protocol):
+    async def reaches_host_directly(self, space_id: str) -> bool: ...
+
     async def space_member_supports(
         self, instance_id: str, *, min_version: int
     ) -> bool: ...
@@ -452,10 +453,9 @@ class SpaceMediaWanted:
         that are not here (see the module docstring, "Without a view");
         the names added."""
         added: set[str] = set()
-        # A follower household fetches through its GFS (#1317, v_83).
-        if self._dir is None or not await holds_seat(
-            self._spaces, space_id, roles=WRITER_ROLES
-        ):
+        # By path, never by role (P10): a household that reaches the space
+        # only through a GFS fetches through it (v_83 on demand).
+        if self._dir is None or not await self._asks_the_host(space_id):
             return added
         wall = self._utcnow()
         cutoff = (wall - timedelta(seconds=SWEEP_MAX_AGE_S)).strftime(_SQL_TIME)
@@ -504,6 +504,13 @@ class SpaceMediaWanted:
             )
         return added
 
+    async def _asks_the_host(self, space_id: str) -> bool:
+        """A seat here AND a paired / mesh path to the host (P10: by path,
+        never by role); else the household fetches through its GFS."""
+        return await holds_seat(
+            self._spaces, space_id
+        ) and await self._federation.reaches_host_directly(space_id)
+
     async def _lookup(self, name: str, per_space: dict[str, dict[str, str]]) -> bool:
         """Add *name* to ``per_space`` for every space this household holds a
         member seat in whose live item shows it; whether it was added."""
@@ -513,8 +520,8 @@ class SpaceMediaWanted:
             for space_id, item_id, _created in rows:
                 if name in per_space.get(space_id, {}):
                     continue
-                if not await holds_seat(self._spaces, space_id, roles=WRITER_ROLES):
-                    continue  # a follower fetches through its GFS (v_83)
+                if not await self._asks_the_host(space_id):
+                    continue  # it fetches through its GFS (v_83)
                 per_space.setdefault(space_id, {})[name] = item_id
                 added = True
             if not added:
