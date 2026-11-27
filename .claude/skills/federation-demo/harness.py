@@ -19278,9 +19278,31 @@ def cmd_members_page_catchup() -> None:
         ),
         timeout=90.0,
     )
+    # The deliverer can only prove buckets it holds unchanged: its verdict
+    # must read a match too before the host goes down. A verdict it formed
+    # before its own first stream landed (the page push can beat the
+    # stream) is redone on its next round — press "Sync now" until then.
+    deadline = time.monotonic() + 120.0
+    next_ask = 0.0
+    while time.monotonic() < deadline:
+        verdict = (_sync_state_of(state, _PC_DLV, space_id) or {}).get("page") or {}
+        if verdict.get("match") is True:
+            break
+        if time.monotonic() >= next_ask:
+            _request(
+                f"{c_url}/api/spaces/{space_id}/sync",
+                token=c["token"],
+                method="POST",
+            )
+            next_ask = time.monotonic() + 25.0
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: the deliverer {_PC_DLV}'s copy never matched the host's page"
+        )
     print(
         f"  both members hold the host's signed page {signed['seq']} ({signed['rows']} rows); "
-        f"{_PC_LAG}'s copy matches it ✓"
+        f"{_PC_LAG}'s and {_PC_DLV}'s copies match it ✓"
     )
 
     a_down = b_down = False
