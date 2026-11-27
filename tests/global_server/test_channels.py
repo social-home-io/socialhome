@@ -59,12 +59,14 @@ from socialhome.global_server.channels import (
     CHANNEL_ANON_PER_NODE_FLOOR,
     CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE,
     CHANNEL_PUBLISH_MAX_PER_MINUTE,
+    CHANNEL_PUBLISH_MAX_PER_MINUTE_LEGACY,
     CHANNEL_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY,
     CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP,
     CHANNEL_ROUTE_MAX_PER_MINUTE_PER_IP,
     FAN_OUT_TARGETS_TTL_S,
     SUBSCRIBE_NOT_YET_RETRY_S,
     ByteBudget,
+    ChannelBusy,
     ChannelRateLimited,
     _is_channel_path,
 )
@@ -1144,3 +1146,101 @@ async def test_a_busy_channel_resolves_its_seats_once_per_few_seconds(gfs) -> No
     real = svc._clock
     svc._clock = lambda: real() + FAN_OUT_TARGETS_TTL_S + 1
     assert len(await svc.audience_targets(gfs.ch.id)) == 3
+
+
+# ── Review of the 10k sizing (Fable, 2026-11-27) ──────────────────────────
+
+
+@pytest.mark.security
+async def test_a_request_the_address_is_refused_never_spends_the_channel(gfs) -> None:
+    """Finding 2: one address past its byte budget must not drain the bytes
+    every writer of the channel shares."""
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    svc._anon_ip_bytes = ByteBudget(2 * len(CT))
+    svc._byte_budget = ByteBudget(3 * len(CT))
+    for _ in range(2):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    for _ in range(20):
+        with pytest.raises(ChannelRateLimited):
+            await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    # The third unit of the channel's bytes is still there for another one.
+    await svc.publish_anon(_anon_req(gfs.ch), client_ip="198.51.100.9")
+
+
+@pytest.mark.security
+async def test_a_busy_refusal_spends_no_budget(gfs, monkeypatch) -> None:
+    await _ready(gfs, epoch=3)
+    svc = gfs.app_[gfs_channel_service_key]
+    svc._byte_budget = ByteBudget(len(CT))
+    fan_out = gfs.app_[gfs_fan_out_key]
+    monkeypatch.setattr(type(fan_out), "has_room", lambda self, key: False)
+    for _ in range(5):
+        with pytest.raises(ChannelBusy):
+            await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+    monkeypatch.setattr(type(fan_out), "has_room", lambda self, key: True)
+    await svc.publish_anon(_anon_req(gfs.ch), client_ip="203.0.113.7")
+
+
+@pytest.mark.security
+async def test_a_channel_with_non_ring_seats_keeps_the_v96_cap(gfs) -> None:
+    """Finding 4: a v_96 seat gets every item pushed (or queued), so the
+    ring sizing never applies while one is seated."""
+    await _ready(gfs, epoch=3)
+    await _seat_many(gfs, 1)  # recently seen, no channel_ring
+    svc = gfs.app_[gfs_channel_service_key]
+    cap = CHANNEL_PUBLISH_MAX_PER_MINUTE_LEGACY
+    for i in range(cap):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip=f"10.{i // 50}.0.{i % 50}")
+    with pytest.raises(ChannelRateLimited):
+        await svc.publish_anon(_anon_req(gfs.ch), client_ip="192.0.2.250")
+    assert cap < CHANNEL_PUBLISH_MAX_PER_MINUTE
+
+
+async def test_a_re_subscribe_never_forces_a_seat_refill(gfs, monkeypatch) -> None:
+    """Finding 3: a seat re-subscribing (hostile, or an epoch wave) can't
+    make every item read every seat again."""
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    svc = gfs.app_[gfs_channel_service_key]
+    repo = svc._channels
+    reads = {"n": 0}
+    real = type(repo).list_targets
+
+    async def counting(self, *args, **kwargs):
+        reads["n"] += 1
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(repo), "list_targets", counting)
+    assert gfs.member.instance_id in await svc.audience_targets(gfs.ch.id)
+    for _ in range(20):
+        await _seat(gfs, gfs.member)
+        await svc.audience_targets(gfs.ch.id)
+    assert reads["n"] == 1
+    # A NEW seat still shows at once.
+    await _seat(gfs, gfs.other)
+    assert gfs.other.instance_id in await svc.audience_targets(gfs.ch.id)
+    assert reads["n"] == 2
+
+
+async def test_a_refill_racing_a_seat_change_is_not_kept(gfs, monkeypatch) -> None:
+    """Finding 12: a refill that read the seats before a change landed must
+    not hide that change for the cache's lifetime."""
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    svc = gfs.app_[gfs_channel_service_key]
+    repo = svc._channels
+    real = type(repo).list_targets
+    raced = {"done": False}
+
+    async def racing(self, *args, **kwargs):
+        got = await real(self, *args, **kwargs)
+        if not raced["done"]:
+            raced["done"] = True
+            await _seat(gfs, gfs.other)  # lands while the refill reads
+        return got
+
+    monkeypatch.setattr(type(repo), "list_targets", racing)
+    first = await svc.audience_targets(gfs.ch.id)
+    assert gfs.other.instance_id not in first
+    assert gfs.other.instance_id in await svc.audience_targets(gfs.ch.id)
