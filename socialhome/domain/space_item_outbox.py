@@ -21,9 +21,25 @@ UNSENT_QUEUE_FULL: str = "queue_full"
 #: Sealing failed (a bug, logged at WARNING): nothing was stored.
 UNSENT_SEAL_FAILED: str = "seal_failed"
 
+#: The item waited so long that receivers would drop it (its signed
+#: stamp is too old): never sent, Discard only.
+UNSENT_TOO_OLD: str = "too_old"
+
 UNSENT_ERRORS: frozenset[str] = frozenset(
-    {UNSENT_REFUSED, UNSENT_TOO_LARGE, UNSENT_QUEUE_FULL, UNSENT_SEAL_FAILED}
+    {
+        UNSENT_REFUSED,
+        UNSENT_TOO_LARGE,
+        UNSENT_QUEUE_FULL,
+        UNSENT_SEAL_FAILED,
+        UNSENT_TOO_OLD,
+    }
 )
+
+#: v_97 — the kind (``event_type``) of a row that uploads one space file
+#: blob (or one piece of a larger file) to one GFS's media cache: the same
+#: durable queue as the items, so a file waits, retries and is shown to its
+#: author exactly like content. Its payload is a locator, never the bytes.
+MEDIA_UPLOAD_ROW: str = "space_media_upload"
 
 #: ``gfs_id`` of an item whose GFS list was empty when it was sealed: it is
 #: planned when it is due.
@@ -36,6 +52,16 @@ SPACE_QUEUE_MAX_ITEMS: int = 2_000
 #: Bytes of ciphertext one space may hold (2 000 chat items ≈ 5.6 MB; the
 #: rest is room for a few large posts).
 SPACE_QUEUE_MAX_BYTES: int = 32 * 1024 * 1024
+#: v_97 — file-upload rows one space may hold waiting (their own bound:
+#: an album of videos never crowds the space's chat out of its queue). A
+#: 200 MiB file is 25 rows per GFS; rows are small locators.
+SPACE_MEDIA_QUEUE_MAX_ITEMS: int = 1_000
+
+#: Failed items one space keeps WITH their bytes (for Retry); past either
+#: bound a newly failed item keeps no bytes and only counts on its author's
+#: one counter row — a GFS refusing everything can't fill the disk.
+SPACE_FAILED_MAX_ITEMS: int = 200
+SPACE_FAILED_MAX_BYTES: int = 8 * 1024 * 1024
 
 #: Wait before retry *n + 1* of a GFS's head item; the last step repeats
 #: until the GFS accepts — a GFS that is down means waiting (a reconnect
@@ -73,6 +99,10 @@ class QueuedSpaceItem:
     attempts: int = 0
     status: str = "pending"
     error: str | None = None
+    #: Times planned afresh after its GFS stopped serving the space.
+    replans: int = 0
+    #: Another row of the item was accepted (this one only drops).
+    delivered: bool = False
 
     @property
     def bytes(self) -> int:

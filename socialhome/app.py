@@ -1358,17 +1358,22 @@ def _wire_space_authority_rotation(
 #: (cluster-wide, ``CHANNEL_PUBLISH_MAX_PER_MINUTE`` — this package does not
 #: import the server's); the household reads a channel on one GFS (owner
 #: Q8 A: one seat, failover), and a ring fetch pages 500 items every 20 s —
-#: 1 500 a minute. A frame dropped here keeps the ring cursor before it: it
-#: comes again on the next fetch (a copy from a second GFS is a duplicate
-#: anyway). Space sync heals the rest.
-GFS_CHANNEL_FRAMES_PER_MINUTE: int = 1_500
+#: 1 500 a minute. A household watching the space gets BOTH on one key —
+#: live pushes at the channel's cap and the fetch of what it missed — so
+#: the budget is their sum (2 700) with room to spare: a viewer opening a
+#: busy space that is behind catches up instead of dropping fetched frames
+#: and gapping (10k review, finding 7). A frame dropped here keeps the ring
+#: cursor before it: it comes again on the next fetch (a copy from a second
+#: GFS is a duplicate anyway). Space sync heals the rest.
+GFS_CHANNEL_FRAMES_PER_MINUTE: int = 3_000
 
 #: Channel frames per minute across EVERY channel — the household-wide
 #: ceiling, as for every other relayed frame (``RELAY_ENVELOPE_INBOUND_LIMIT``).
 #: Charged only for a well-formed channel id with room left in its own
 #: budget, so a GFS inventing channel ids mints at most this many 32-hex
-#: per-channel keys a minute. Four active channels at their full rate; at
-#: 100 a second the decrypt + Ed25519 verify stays far below one core.
+#: per-channel keys a minute. Two channels at their full rate (four busy
+#: ones at the live cap); at 100 a second the decrypt + Ed25519 verify stays
+#: far below one core.
 #: Residual: ONE misbehaving GFS can spend this ceiling and so delay the
 #: channel frames of the household's other GFSs (it could already withhold
 #: its own); the ring fetch and space sync heal.
@@ -1379,7 +1384,7 @@ GFS_CHANNEL_BUDGET_PREFIX: str = "gfs_channel:"
 GFS_CHANNEL_BUDGET_ALL: str = "gfs_channel:*"
 
 #: Idle per-channel keys are swept once the limiter holds this many keys:
-#: the household-wide ceiling keeps live channel keys under 3 000, so a sweep
+#: the household-wide ceiling keeps live channel keys under 6 000, so a sweep
 #: runs at most every couple of minutes however many ids a GFS invents.
 GFS_CHANNEL_BUDGET_SWEEP_AT: int = 8192
 
@@ -5203,9 +5208,16 @@ def create_app(config: Config | None = None) -> web.Application:
         )
 
         async def _tell_unsent(space_id: str, author_user_id: str) -> None:
-            await ws_manager.broadcast_to_user(
-                author_user_id, {"type": "space.unsent", "space_id": space_id}
+            # An item naming nobody is the household admins' to see.
+            users = (
+                [author_user_id]
+                if author_user_id
+                else [u.user_id for u in await user_repo.list_active() if u.is_admin]
             )
+            for user_id in users:
+                await ws_manager.broadcast_to_user(
+                    user_id, {"type": "space.unsent", "space_id": space_id}
+                )
 
         space_item_outbox.attach_notify(_tell_unsent)
         if (item_status := app.get(K.space_sync_status_key)) is not None:
@@ -5925,7 +5937,18 @@ def create_app(config: Config | None = None) -> web.Application:
         # ``media_refs`` (sync line 80); the receiving side keeps them.
         app[K.space_sync_service_key].attach_media_gfs(space_media_uploader)
         app[K.space_sync_receiver_key].attach_gfs_media(space_media_fetcher)
-        await space_media_uploader.start()
+        if (item_outbox := app.get(K.space_item_outbox_key)) is not None:
+            # v_97 — every space file upload waits in the durable item queue
+            # (one row per blob or piece per GFS) and goes from there.
+            space_media_uploader.attach_outbox(item_outbox)
+            item_outbox.attach_media(space_media_uploader.deliver)
+        # v_97 — a live item's file described for the GFS cache is pushed
+        # only to the households that cannot read it there.
+        space_media_sync_service.attach_cache_readers(space_media_uploader.push_targets)
+        if gfs_member_publish is not None:
+            space_media_uploader.attach_legacy_window(
+                gfs_member_publish.in_legacy_window
+            )
         # Late-bind realtime into the federation inbound — the
         # DM_MEDIA_BLOB handler uses it to fan ``dm.media_ready``
         # frames to local participants when the full bytes for a
@@ -6863,8 +6886,6 @@ def create_app(config: Config | None = None) -> web.Application:
         if (wanted := app.get(K.space_media_wanted_key)) is not None:
             await wanted.stop()
         await space_media_sync_service.stop()
-        if (uploader := app.get(K.space_media_gfs_uploader_key)) is not None:
-            await uploader.stop()
         if (fetcher := app.get(K.space_media_gfs_fetcher_key)) is not None:
             await fetcher.stop()
         if (responder := app.get(K.space_media_gfs_responder_key)) is not None:

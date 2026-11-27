@@ -103,10 +103,17 @@ registry `domain/space_item.py::ITEM_SPECS` names which. The inner is
   (`writer_cert.py`), checked against the pinned space key with the scope
   `ITEM_SPECS` names.
 
-The v1 shapes (`post`, `post_edit`, `comment`, … — `POST_SHAPED_ITEM_TYPES`,
-`GENERIC_ITEM_TYPES`) stay on the channel during the v_97 window for the
-types they already carry, so a v_96 seat keeps reading them; v_98 moves them
-to v2.
+**Posts and comments too (owner 2026-11-27).** In a GFS space a post,
+its edits, deletes and reactions, and comments are v2 items like every
+other change: sealed, stored in the durable queue, one delivery path for
+all content. A household no longer puts the v1 shapes (`post`, `post_edit`,
+`comment`, … — `POST_SHAPED_ITEM_TYPES`, `GENERIC_ITEM_TYPES`) on a GFS
+space's channel from memory; a v_96 seat gets the legacy event instead (the
+same rule as every item: households below v_97 and the 14-day window). The
+v1 receive path stays for items from v_96 authors; v_98 removes it. A
+follower's `reader` cert is checked before sealing (the space's follower
+switches, `reader_cert_permits`): what receivers would refuse is shown to
+its author, never sent. The v_60 author profile still rides the v1 path.
 
 ### Host statements stay on the guaranteed path
 
@@ -145,8 +152,14 @@ Moving them onto `item_merge` is a follow-up.
 
 Targeted secrets never become items: rekeys, key shares, writer grants,
 roster snapshots, invites and joins, moderation submissions (to the host),
-reports, DMs, bazaar threads and offers, app sessions, sync streams and
-media blobs keep their per-recipient events.
+reports, DMs, bazaar threads and offers, app sessions and sync streams keep
+their per-recipient events. **Files**: in a mesh space they keep the
+per-household push (`SPACE_MEDIA_BLOB`); in a GFS space every household
+takes them from the GFS space media cache — the item carries the
+`media_refs` descriptor on its one shared payload, the author's uploads
+wait in the durable queue (rows of kind `space_media_upload`), files over
+8 MiB go in proven 8 MiB pieces, and a miss is fetched on demand
+([media.md](./media.md#gfs-spaces-every-household-from-the-cache-v_97)).
 
 ## One receiver: `SpaceItemDispatch`
 
@@ -333,6 +346,13 @@ planned for accepted it (`space_item_outbox`, household migration 0158;
   {space}" with **Try again** / **Discard** (`/api/spaces/{id}/unsent`, the
   `space.unsent` frame). A GFS that no longer serves the space (dropped
   from the owner's list) just loses its copy.
+- **Files** (v_97): the space's file uploads wait in the same table — one
+  row per blob (or 8 MiB piece) per GFS, a small locator (the bytes are
+  sealed again when the row goes), a whole file stored in one go — in their
+  own lane: their own loop, their own bound (1 000 rows per space) and
+  backoff, so an 8 MiB upload never holds the space's chat back and a busy
+  answer to an upload never parks the items. A file that waited past 12 h
+  keeps its locator (Retry seals it again).
 - **Bounded per space**: 2 000 rows / 32 MiB. Past it a new item is refused
   and the author sees "too much is already waiting to go out". Items still
   waiting count in the space's `waiting_to_send`.
@@ -390,9 +410,12 @@ mesh space's households keep the last pin, so nothing repeats there.
 - GFS capability **`channel_ring`**: households use the ring and the new
   publish fields only on a GFS that proves it; on another GFS the v_96
   channel behaviour holds.
-- No household migration. One additive GFS migration (0034).
+- Household migration 0158 (`space_item_outbox`, the durable queue — its
+  `replans` / `delivered` columns were added in place before any release).
+  One additive GFS migration (0034). The GFS's space media cache needs no
+  migration for pieces (`pieces` in its signed `space_media` block).
 - v_98 (a later release, after one window) deletes the legacy fan-out and
-  moves the v1 channel shapes to v2.
+  the v1 receive path.
 
 ## Cost
 
@@ -422,7 +445,7 @@ frame).
 
 | limit | value | where |
 |---|---|---|
-| publishes per channel | 1 200 / min (20 / s) | GFS `CHANNEL_PUBLISH_MAX_PER_MINUTE` |
+| publishes per channel | 1 200 / min (20 / s); 120 / min and 1 MiB / min while the channel still has a seat that does not read the ring (v_96, rollout) | GFS `CHANNEL_PUBLISH_MAX_PER_MINUTE` (`_LEGACY`) |
 | publishes per writer key (epoch) | 1 200 / min | GFS |
 | publishes per client address, per channel | 240 / min (a fifth), per-node floor 60 | GFS |
 | bytes per channel | 4 MiB / min | GFS |
@@ -432,12 +455,12 @@ frame).
 | rings per server | 8 GiB, fair eviction (configurable) | GFS `[channel_ring]` |
 | fan-out backlog | 64 items per channel, 256 per worker | GFS |
 | seats resolved per channel | once per 5 s (not per item) | GFS |
-| channel frames in, per channel | 1 500 / min | household, before decrypt |
+| channel frames in, per channel | 3 000 / min (live 1 200 + fetch 1 500, with room) | household, before decrypt |
 | channel frames in, all channels | 6 000 / min | household |
 | fetch page / interval | 500 items / 20 s | household |
 | chat per person | burst 10, then 1 / s | household sender budget |
 | location per person | 1 / 10 s, latest only | household sender budget |
-| durable item queue per space | 2 000 rows / 32 MiB | household |
+| durable item queue per space | 2 000 rows / 32 MiB waiting; 200 failed rows / 8 MiB kept for Retry (more only count) | household |
 
 The math:
 
@@ -446,11 +469,16 @@ The math:
   (≈ 230 Mbit/s); the 4 MiB/min byte cap bounds large items to the same
   order. One watching household takes at most 1 200 × 2.9 KB ≈ 3.5 MB/min
   (≈ 0.5 Mbit/s).
-- **GFS work per item** does not grow with the seats any more: the seats
-  are read once per 5 s per channel, each node sorts the 10 000 seats with
-  set lookups (≈ 2 ms) and schedules a send only for the sockets it holds
-  that watch (≈ 125 per node of 4). At 20 items/s that is a few % of a
-  core per node.
+- **GFS work per item**: no database read per item — the seats are read
+  once per 5 s per channel (a seat taken or dropped refreshes them; a
+  re-subscribe that changes nothing does not, so no seat can force a
+  read per item) — and each node walks the 10 000 seats with set lookups
+  (≈ 2 ms) and schedules a send only for the sockets it holds that watch
+  (≈ 125 per node of 4). At 20 items/s that is a few % of a core per node.
+- **Rollout.** A v_96 seat reads no ring: it gets every item pushed (or
+  queued while offline). While a channel has one, the v_96 caps hold
+  (120 items, 1 MiB a minute), so 10 000 such seats are never driven at
+  the ring sizing.
 - **Heads pings**: 10 000 × 4 / h × ~120 B ≈ 115 MB/day.
 - **Ring**: busy, 300 × 2.9 KB ≈ 0.9 MB/min → ~4.9 h in 256 MiB; at the
   caps ≥ 64 min (bytes) / ≥ 109 min (items) — always more than four heads
@@ -460,14 +488,26 @@ The math:
 - **Fetch on open**: ≤ 2 000 items behind ≈ 5.8 MB in four pages
   (≈ 60 s); further behind → the last 200 items + the §25.6 catch-up.
 - **Abuse bounds.** One household (one address) gets ≤ 20 % of a
-  channel's items and ≤ 25 % of its bytes: filling a channel takes five
-  addresses (IPv6 per /64), and even then the channel cap bounds the GFS
-  work and every watcher's bandwidth. A GFS can push at most 1 500 frames
-  / min per channel and 6 000 in all into one household before any
-  decrypt (≈ 100 / s of AES-GCM + Ed25519 — far below one core).
+  channel's items (on up to 4 nodes; the per-node floor of 60 lets it
+  reach 40 % on 8 nodes and half the channel from 10) and ≤ 25 % of its
+  bytes: filling a channel takes five addresses (IPv6 per /64), and even
+  then the channel cap bounds the GFS work and every watcher's bandwidth.
+  The address's own limits are checked before the channel's, and a busy
+  (503) answer spends none, so a request refused to one address never
+  spends what every writer shares. A GFS can push at most 3 000 frames /
+  min per channel and 6 000 in all into one household before any decrypt
+  (≈ 100 / s of AES-GCM + Ed25519 — far below one core).
 - **Sender side**: a person sends ≤ 70 chat items in their first minute,
-  60 / min after; four people of a household chatting at that pace stay
-  inside the per-address 240. What waits sits in the durable queue.
+  60 / min after; four people of a household chatting at that steady pace
+  (240 / min) stay inside the per-address 240 — their first-minute bursts
+  together (280) go past it, and the 429 lands those in the durable
+  queue a few seconds later.
+- **Queue rows.** A row waiting past half of what receivers take (12 h;
+  7.5 min for a location pin) is never sent: receivers would drop it. Its
+  author sees "waited too long" (a location pin just drops — the keepalive
+  sends a fresh one). Two GFSs going away together never drop an item's
+  last copy (one transaction), a GFS down a while never uses up the
+  replans, and a copy of an item another GFS already took only drops.
 
 Mesh space: one `SPACE_ITEM` per v_97 member household per change — the
 same count of envelopes the legacy event took (members × changes), each

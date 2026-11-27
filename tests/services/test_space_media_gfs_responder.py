@@ -16,7 +16,11 @@ from socialhome import space_media_hint as hint_mod
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.gfs_space_media import (
     AUTH_CHANNEL,
+    PIECE_BYTES,
+    PieceProof,
     SpaceMediaUploadAuth,
+    check_piece,
+    piece_address,
     space_media_address,
 )
 from socialhome.domain.gfs_space_media_on_demand import (
@@ -32,7 +36,11 @@ from socialhome.services.inbound_media_store import (
     space_direct_media_name,
 )
 from socialhome.services.space_media_gfs_responder import SpaceMediaGfsResponder
-from socialhome.services.space_media_gfs_uploader import seal_and_address_sync
+from socialhome.services.space_media_gfs_uploader import (
+    describe_pieced_sync,
+    seal_and_address_sync,
+    seal_piece_sync,
+)
 from socialhome.space_media_hint import (
     SpaceMediaLocator,
     parse_hint_wire,
@@ -77,13 +85,22 @@ class _Gfs:
         self.status = status
         self.serves: list[tuple[str, str, bytes | None, str | None]] = []
         self.reasons: list[str] = []
+        self.proofs: list[str | None] = []
 
     def known_instance_ids(self, conn):
         return frozenset({"inst-" + conn.id})
 
     async def serve_space_media(
-        self, conn, ticket, blob, *, upload_auth=None, decline_reason="not_held"
+        self,
+        conn,
+        ticket,
+        blob,
+        *,
+        upload_auth=None,
+        decline_reason="not_held",
+        piece_proof=None,
     ):
+        self.proofs.append(piece_proof)
         self.serves.append((conn.id, ticket, blob, upload_auth))
         if blob is None:
             self.reasons.append(decline_reason)
@@ -145,6 +162,41 @@ class _Uploader:
 
     async def remember_stored(self, conn, blob_id):
         self.remembered.append((conn.id, blob_id))
+
+    # v_97 — pieces, as the real uploader computes them (the sync bodies).
+    media_dir: pathlib.Path | None = None
+
+    async def manifest_of(
+        self, space_id, name, *, epoch, item_id, origin, scope, scope_id, filename=None
+    ):
+        if not (self.media_dir / name).is_file():
+            return None
+        return describe_pieced_sync(
+            KEY,
+            space_id,
+            epoch,
+            item_id,
+            origin,
+            filename or name,
+            str(self.media_dir / name),
+            scope,
+            scope_id,
+        )
+
+    async def seal_piece(
+        self, space_id, name, *, epoch, item_id, origin, index, count, filename=None
+    ):
+        return seal_piece_sync(
+            KEY,
+            space_id,
+            epoch,
+            item_id,
+            origin,
+            filename or name,
+            str(self.media_dir / name),
+            index,
+            count,
+        )
 
 
 class _Channels:
@@ -654,3 +706,101 @@ async def test_the_owner_over_its_budget_declines_busy(tmp_path, monkeypatch):
     await _ask(r, _frame(bid))
     await _ask(r, _frame(bid))
     assert gfs.reasons == ["busy"]
+
+
+# ── v_97: a piece of a larger file, on demand ────────────────────────────
+
+
+async def test_a_piece_is_served_with_the_proof_the_gfs_checks(tmp_path):
+    """A GFS asks for one piece of a file over 8 MiB: the holder reseals
+    exactly that piece and sends the manifest proof the GFS verifies."""
+    size = 2 * PIECE_BYTES + 99
+    _file(tmp_path, "v.webm", size)
+    up = _Uploader()
+    up.media_dir = tmp_path
+    pieced = describe_pieced_sync(
+        KEY, SPACE, 4, ITEM, OWN, "v.webm", str(tmp_path / "v.webm"), "channel", CHANNEL
+    )
+    bid = piece_address(pieced.address, 1)
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, uploader=up)
+    await _ask(r, _frame(bid, filename="v.webm#1/3"))
+    [(_g, _t, blob, _auth)] = gfs.serves
+    assert blob is not None
+    proof = PieceProof.from_header(gfs.proofs[0])
+    assert check_piece("channel", CHANNEL, bid, blob, proof)
+
+
+async def test_a_piece_of_another_index_is_declined(tmp_path):
+    size = 2 * PIECE_BYTES + 99
+    _file(tmp_path, "v.webm", size)
+    up = _Uploader()
+    up.media_dir = tmp_path
+    pieced = describe_pieced_sync(
+        KEY, SPACE, 4, ITEM, OWN, "v.webm", str(tmp_path / "v.webm"), "channel", CHANNEL
+    )
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, uploader=up)
+    # The hint names piece 0, the address is piece 1's.
+    await _ask(r, _frame(piece_address(pieced.address, 1), filename="v.webm#0/3"))
+    assert gfs.serves[0][2] is None
+
+
+async def test_a_holder_keeping_the_file_under_another_name_serves_its_piece(
+    tmp_path,
+):
+    """Not only the author: a household holding the file under its content
+    name reseals the piece under the AUTHOR's file name (the AAD's)."""
+    size = 2 * PIECE_BYTES + 99
+    _file(tmp_path, "sc-held.webm", size)
+    up = _Uploader()
+    up.media_dir = tmp_path
+    pieced = describe_pieced_sync(
+        KEY,
+        SPACE,
+        4,
+        ITEM,
+        "peer-a",
+        "v.webm",
+        str(tmp_path / "sc-held.webm"),
+        "channel",
+        CHANNEL,
+    )
+    bid = piece_address(pieced.address, 1)
+    gfs = _Gfs()
+    r = _responder(
+        tmp_path,
+        gfs=gfs,
+        uploader=up,
+        refs=_MediaRefs(content={ITEM: ["sc-held.webm"]}),
+    )
+    await _ask(r, _frame(bid, origin="peer-a", filename="v.webm#1/3"))
+    [(_g, _t, blob, _auth)] = gfs.serves
+    assert blob is not None
+    assert check_piece(
+        "channel", CHANNEL, bid, blob, PieceProof.from_header(gfs.proofs[0])
+    )
+
+
+async def test_made_up_piece_addresses_never_reseal_the_file_again(tmp_path):
+    """A key holder sending one locator with many made-up addresses costs
+    one description of the file, then declines from memory."""
+    size = PIECE_BYTES + 99
+    _file(tmp_path, "v.webm", size)
+    up = _Uploader()
+    up.media_dir = tmp_path
+    calls = {"n": 0}
+    real = up.manifest_of
+
+    async def counting(*a, **k):
+        got = await real(*a, **k)
+        calls["n"] += got is not None  # a file actually described
+        return got
+
+    up.manifest_of = counting
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, uploader=up)
+    for _ in range(5):
+        await _ask(r, _frame(os.urandom(32).hex(), filename="v.webm#0/2"))
+    assert calls["n"] == 1
+    assert all(s[2] is None for s in gfs.serves)

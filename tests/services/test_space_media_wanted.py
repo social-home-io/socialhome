@@ -104,16 +104,23 @@ class _Seat:
 class _Space:
     id: str
     owner_instance_id: str
+    space_type: SpaceType = SpaceType.PRIVATE
+    features: SpaceFeatures = field(default_factory=SpaceFeatures)
 
 
 class _Spaces:
-    def __init__(self, *, role=SpaceRole.MEMBER, host=HOST, members=()):
+    def __init__(self, *, role=SpaceRole.MEMBER, host=HOST, members=(), gfs=False):
         self.role = role
         self.host = host
         self.members = set(members)
+        #: v_97 — a GFS space (global): its files come from the GFS cache.
+        self.gfs = gfs
 
     async def get(self, space_id):
-        return _Space(space_id, self.host) if space_id.startswith("sp-") else None
+        if not space_id.startswith("sp-"):
+            return None
+        kind = SpaceType.GLOBAL if self.gfs else SpaceType.PRIVATE
+        return _Space(space_id, self.host, space_type=kind)
 
     async def list_local_member_user_ids(self, space_id):
         return ["u-me"]

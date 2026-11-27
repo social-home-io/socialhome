@@ -37,6 +37,7 @@ import base64
 import functools
 import hashlib
 import html
+import io
 import json
 import os
 import re
@@ -55,6 +56,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import av
 
 #: The checkout this harness lives in — ``<repo>/.claude/skills/federation-demo``.
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -646,6 +649,25 @@ def _upload_demo_image(base_url: str, *, token: str, label: str) -> str:
     )
     _must(f"media upload({label})", s, up, ok=(200, 201))
     return str(up["url"])
+
+
+def _make_noise_video(seconds: int = 4, width: int = 640, height: int = 360) -> bytes:
+    """A lossless (FFV1, Matroska) video of pure noise: the backend's VP9
+    transcode barely compresses it (~13 MiB for 4 s at 640x360, 15 fps), so
+    the space file it makes is over one 8 MiB blob (``gfs-big-file``)."""
+    buf = io.BytesIO()
+    container = av.open(buf, "w", format="matroska")
+    stream = container.add_stream("ffv1", rate=15)
+    stream.width, stream.height, stream.pix_fmt = width, height, "yuv420p"
+    for _ in range(seconds * 15):
+        frame = av.VideoFrame(width, height, "rgb24")
+        frame.planes[0].update(os.urandom(frame.planes[0].buffer_size))
+        for packet in stream.encode(frame):
+            container.mux(packet)
+    for packet in stream.encode():
+        container.mux(packet)
+    container.close()
+    return buf.getvalue()
 
 
 def _make_noisy_png(width: int, height: int) -> bytes:
@@ -8873,6 +8895,166 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
         _save(state)
         print(f"  {label}: paired with the GFS for this step")
     _wait_for_gfs_ws(info["instance_id"])
+
+
+def cmd_gfs_big_file() -> None:
+    """v_97 (owner 2026-11-27) — a file over 8 MiB in a GFS space reaches
+    every household through the GFS space media cache, in proven 8 MiB
+    pieces, never by the per-household push.
+
+    In a's global space (``gfs-global-channel``): member **b** posts a
+    noise video that transcodes to ~13 MiB (VP9 of noise barely
+    compresses). b's 14-day legacy window (every household still gets the
+    legacy events and the push) is fast-forwarded past its end first. The **paired** owner a and the **GFS-only** follower e
+    each hold ONE ``sm1p`` descriptor row (the file's address, its size,
+    the whole-file checksum as an ``sc-`` content name), fetch the two
+    pieces from the GFS on view and join them byte-identical. b's log shows
+    the piece uploads (durable queue) and its media outbox dropping the
+    push to v_97 households; no household logs a ``SPACE_MEDIA_BLOB`` or a
+    ``space media wanted`` request for it; the GFS holds the two pieces
+    under the channel scope.
+
+    Prereqs: ``gfs-global-channel``."""
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' + 'gfs-global-channel' first")
+    space_id = (state.get("gfs") or {}).get("global_channel_space_id")
+    if not space_id:
+        raise SystemExit("gfs-big-file: run 'gfs-global-channel' first")
+    b = state["instances"]["b"]
+    b_url = f"http://127.0.0.1:{b['port']}"
+    channel = _rows("b", "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,))
+    channel_id = channel[0][0] if channel else ""
+    past = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+    _db_write(
+        "b",
+        [
+            (
+                "INSERT OR REPLACE INTO instance_config(key, value) VALUES(?, ?)",
+                (f"space_items_channel_since:{space_id}:{channel_id}", past),
+            )
+        ],
+    )
+    # Both readers have the space open: their households watch its channel
+    # ring and take the item live (a non-watcher gets a heads ping and
+    # fetches on open).
+    _view_space("a", space_id)
+    _view_space("e", space_id)
+    offs = {x: _log_size(x) for x in ("a", "b", "e")}
+    s, up = _upload_file(
+        f"{b_url}/api/media/upload",
+        token=b["token"],
+        filename="noise.webm",
+        content=_make_noise_video(),
+        content_type="video/webm",
+        timeout=120.0,
+    )
+    up = _must("gfs-big-file: b uploads a noise video", s, up, ok=(200, 201))
+    filename = up["filename"]
+    produced = _instance_dir("b") / "media" / filename
+    deadline = time.time() + 180.0
+    while time.time() < deadline and not produced.is_file():
+        time.sleep(1.0)
+    if not produced.is_file():
+        raise SystemExit("gfs-big-file: b never finished transcoding the video")
+    time.sleep(1.0)
+    data = produced.read_bytes()
+    if len(data) <= 8 * 1024 * 1024:
+        raise SystemExit(
+            f"gfs-big-file: the video is only {len(data)} bytes — one blob, no pieces"
+        )
+    s, post = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "video", "media_url": up["url"], "content": "a big video"},
+    )
+    post = _must("gfs-big-file: b posts the video", s, post, ok=(201,))
+    for reader in ("a", "e"):
+        _await_space_post(state, reader, space_id, post["id"])
+        deadline = time.time() + 90.0
+        refs: list = []
+        while time.time() < deadline and not refs:
+            refs = _rows(
+                reader,
+                "SELECT blob_id, addr_suite, size, local_name FROM space_media_refs"
+                " WHERE filename = ? AND item_id = ?",
+                (filename, post["id"]),
+            )
+            if not refs:
+                time.sleep(0.5)
+        if not refs:
+            raise SystemExit(f"gfs-big-file: {reader} holds no descriptor row")
+        _blob_id, addr_suite, size, local_name = refs[0]
+        if addr_suite != "sm1p" or size != len(data) or not local_name.startswith(
+            "sc-"
+        ):
+            raise SystemExit(
+                f"gfs-big-file: {reader}'s row is {addr_suite!r} / {size} /"
+                f" {local_name!r} — want one sm1p entry of {len(data)} bytes"
+                " under its content name"
+            )
+        r = state["instances"][reader]
+        got: bytes | None = None
+        status = 0
+        deadline = time.time() + 240.0
+        while time.time() < deadline:
+            # A view fetches what is still missing (20 s a view; the pieces
+            # already here are kept, so the next view resumes).
+            status, got = _http_get_bytes(
+                f"http://127.0.0.1:{r['port']}/api/media/{local_name}",
+                token=r["token"],
+                timeout=60.0,
+            )
+            if status == 200 and got == data:
+                break
+            time.sleep(3.0)
+        if status != 200 or got != data:
+            raise SystemExit(
+                f"gfs-big-file: {reader} never got the file byte-identical"
+                f" (HTTP {status}). Check {_log_path(reader)} and"
+                f" {GFS_DIR / 'log.txt'}."
+            )
+        if not _log_lines_matching(reader, "pieces from the GFS", offset=offs[reader]):
+            raise SystemExit(
+                f"gfs-big-file: {reader} holds the file but logged no piece join"
+                " — it came some other way"
+            )
+        print(
+            f"  {reader} joined the {len(data)}-byte video from pieces of the"
+            " GFS cache ✓"
+        )
+    uploads = _log_lines_matching("b", "uploaded blob", offset=offs["b"])
+    if len(uploads) < 2:
+        raise SystemExit(f"gfs-big-file: b logged {len(uploads)} piece uploads, want ≥ 2")
+    for label in ("a", "b", "e"):
+        pushed = _log_lines_matching(label, "SPACE_MEDIA_BLOB", offset=offs[label])
+        asked = _log_lines_matching(label, "space media wanted", offset=offs[label])
+        if any(filename in line or "stored" in line for line in pushed) or asked:
+            raise SystemExit(
+                f"gfs-big-file: {label} used the push / WANTED path for a GFS"
+                f" space's file: {(pushed + asked)[:2]}"
+            )
+    dropped = _log_lines_matching(
+        "b", "through the GFS cache — no push", offset=offs["b"]
+    )
+    if not dropped:
+        raise SystemExit("gfs-big-file: b's media outbox never kept the push back")
+    print("  no SPACE_MEDIA_BLOB / SPACE_MEDIA_WANTED for it anywhere ✓")
+    held = _gfs_rows(
+        "SELECT COUNT(*) FROM gfs_space_media WHERE scope_kind = 'channel'"
+        " AND scope_id = ? AND size > ?",
+        (channel_id, 8 * 1024 * 1024 - 64),
+    )
+    if not held or held[0][0] < 1:
+        raise SystemExit(
+            f"gfs-big-file: the GFS holds no full 8 MiB piece under channel {channel_id!r}"
+        )
+    print(
+        "gfs-big-file: ok (a >8 MiB video in a GFS space reached the paired owner"
+        " and the GFS-only follower through the GFS cache, in proven pieces,"
+        " with no per-household push)"
+    )
 
 
 def cmd_gfs_follower_comment() -> None:
@@ -27492,6 +27674,10 @@ def main() -> None:
         # of a's global space read each other over the space's opaque
         # channel while a is down. Restarts a.
         cmd_gfs_global_channel()
+        # ``gfs-big-file`` (v_97): a 12 MiB file in that GFS space reaches
+        # the paired owner and the GFS-only follower through the GFS cache,
+        # in proven 8 MiB pieces — no per-household push or WANTED.
+        cmd_gfs_big_file()
         # ``gfs-follower-comment`` (v_96, P4): e (GFS follower) comments over
         # the channel under the switch; switch off → one rotation, refused;
         # e's own delete with the switch off reaches a and b.

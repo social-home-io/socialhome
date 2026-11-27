@@ -35,24 +35,36 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-from ..domain.gfs_channel import MEMBER_PUBLISH_MAX_PAYLOAD_CHARS
+from ..domain.gfs_channel import (
+    MEMBER_PUBLISH_MAX_PAYLOAD_CHARS,
+    RING_CLASS_EPHEMERAL,
+    RING_DURABLE_TTL_S,
+    RING_EPHEMERAL_TTL_S,
+)
 from ..domain.space_item_outbox import (
+    MEDIA_UPLOAD_ROW,
     UNPLANNED_GFS,
     UNSENT_QUEUE_FULL,
     UNSENT_REFUSED,
     UNSENT_SEAL_FAILED,
     UNSENT_TOO_LARGE,
+    UNSENT_TOO_OLD,
     QueuedSpaceItem,
     UnsentItem,
     backoff_s,
 )
-from ..repositories.space_item_outbox_repo import AbstractSpaceItemOutboxRepo
+from ..repositories.space_item_outbox_repo import (
+    GONE_DROPPED,
+    GONE_EXHAUSTED,
+    AbstractSpaceItemOutboxRepo,
+)
 from .gfs_publish_retry import PublishOutcome
 
 log = logging.getLogger(__name__)
 
-#: Rows tried per pass.
+#: Rows tried per pass (items; file uploads — up to 8 MiB each).
 BATCH: int = 100
+MEDIA_BATCH: int = 8
 #: Longest sleep between passes when nothing is due sooner.
 IDLE_WAKE_S: float = 60.0
 #: How often an item whose last GFS stopped serving the space is planned
@@ -63,6 +75,18 @@ MAX_REPLANS: int = 3
 FAILED_RETENTION: timedelta = timedelta(days=7)
 FAILED_SWEEP_INTERVAL: timedelta = timedelta(hours=1)
 
+#: How old an item may be when it is first accepted: receivers drop an item
+#: whose signed stamp is older than the ring keeps it (24 h; 15 min for a
+#: live location pin), and a household fetching from the ring later reads
+#: it older still — so a row waiting past half of that is never sent; its
+#: author is told instead (finding 8 of the 10k review).
+MAX_QUEUED_AGE: timedelta = timedelta(seconds=RING_DURABLE_TTL_S // 2)
+MAX_QUEUED_AGE_EPHEMERAL: timedelta = timedelta(seconds=RING_EPHEMERAL_TTL_S // 2)
+
+#: The author of an item that names nobody: shown to the household's
+#: admins.
+NO_AUTHOR: str = ""
+
 #: One attempt to put ``row`` on ``row.gfs_id``.
 Sender = Callable[[QueuedSpaceItem], Awaitable[PublishOutcome]]
 #: The GFS ids a space's item goes to now; ``None`` when the space no longer
@@ -70,6 +94,10 @@ Sender = Callable[[QueuedSpaceItem], Awaitable[PublishOutcome]]
 Planner = Callable[[str], Awaitable[list[str] | None]]
 #: ``(space_id, author_user_id)`` — the author's unsent items changed.
 Notify = Callable[[str, str], Awaitable[None]]
+
+
+def _is_media(row: QueuedSpaceItem) -> bool:
+    return row.event_type == MEDIA_UPLOAD_ROW
 
 
 def _iso(at: datetime) -> str:
@@ -87,6 +115,9 @@ class SpaceItemOutbox:
     __slots__ = (
         "_changed",
         "_clock",
+        "_media_sender",
+        "_media_task",
+        "_media_wake",
         "_notify",
         "_planner",
         "_repo",
@@ -106,18 +137,31 @@ class SpaceItemOutbox:
         self._repo = repo
         self._clock = clock
         self._sender: Sender | None = None
+        #: v_97 — one attempt of a space file upload row (the uploader).
+        self._media_sender: Sender | None = None
         self._planner: Planner | None = None
         self._notify: Notify | None = None
         self._changed: Callable[[str], None] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        #: v_97 — the file-upload lane (its own loop: an 8 MiB upload never
+        #: holds an item back, nor a backlog of uploads hides one).
+        self._media_wake = asyncio.Event()
+        self._media_task: asyncio.Task | None = None
         self._swept_at: datetime | None = None
 
     def attach(self, *, sender: Sender, planner: Planner) -> None:
         """The channel service's one-attempt send and its planner."""
         self._sender = sender
         self._planner = planner
+
+    def attach_media(self, sender: Sender) -> None:
+        """v_97 — the uploader's one-attempt send of a space file blob or
+        piece (rows of kind :data:`~socialhome.domain.space_item_outbox
+        .MEDIA_UPLOAD_ROW`): the same queue, retries and author notice as
+        the items."""
+        self._media_sender = sender
 
     def attach_notify(self, notify: Notify) -> None:
         """Tell the author their unsent items changed (a WS frame)."""
@@ -191,8 +235,59 @@ class SpaceItemOutbox:
             )
             return False
         self._space_changed(space_id)
-        self._wake.set()
+        self._wake_lane(event_type == MEDIA_UPLOAD_ROW)
         return True
+
+    async def queue_media(
+        self,
+        *,
+        space_id: str,
+        epoch: int,
+        parts: list[tuple[str, list[str]]],
+        author_user_id: str,
+    ) -> bool:
+        """v_97 — one space file's upload rows (*parts*: each blob or
+        piece's locator and the GFSs it goes to), stored all or none in one
+        transaction (a file is never half queued). ``False`` — and its
+        author told — when the space's file lane is full."""
+        now = self._clock()
+        rows = [
+            QueuedSpaceItem(
+                item_id=uuid.uuid4().hex,
+                gfs_id=gfs_id,
+                space_id=space_id,
+                epoch=int(epoch),
+                ring_class="durable",
+                event_type=MEDIA_UPLOAD_ROW,
+                author_user_id=author_user_id,
+                payload=payload,
+                next_attempt_at=_iso(now),
+                created_at=_iso(now),
+            )
+            for payload, gfs_ids in parts
+            for gfs_id in dict.fromkeys(gfs_ids)
+        ]
+        if not rows:
+            return True
+        if not await self._repo.add(rows):
+            log.warning(
+                "space items: the file lane of space %s is full — a file was"
+                " not uploaded",
+                space_id,
+            )
+            await self.fail(
+                space_id=space_id,
+                event_type=MEDIA_UPLOAD_ROW,
+                author_user_id=author_user_id,
+                error=UNSENT_QUEUE_FULL,
+            )
+            return False
+        self._space_changed(space_id)
+        self._wake_lane(True)
+        return True
+
+    def _wake_lane(self, media: bool) -> None:
+        (self._media_wake if media else self._wake).set()
 
     async def fail(
         self, *, space_id: str, event_type: str, author_user_id: str, error: str
@@ -210,21 +305,38 @@ class SpaceItemOutbox:
 
     # ── The author's view ────────────────────────────────────────────────
 
-    async def unsent(self, space_id: str, author_user_id: str) -> list[UnsentItem]:
-        return await self._repo.list_failed(space_id, author_user_id)
+    @staticmethod
+    def _authors(user_id: str, admin: bool) -> list[str]:
+        """Whose failed items *user_id* sees: their own, and — for a
+        household admin — the ones that name nobody (an automation's, a
+        task delete's): no item is lost unseen."""
+        return [user_id, NO_AUTHOR] if admin and user_id else [user_id]
 
-    async def retry(self, space_id: str, author_user_id: str) -> int:
-        """Retry the author's failed items that kept their bytes, now."""
-        n = await self._repo.retry_failed(space_id, author_user_id, now=self._now())
+    async def unsent(
+        self, space_id: str, user_id: str, *, admin: bool = False
+    ) -> list[UnsentItem]:
+        out: list[UnsentItem] = []
+        for author in self._authors(user_id, admin):
+            out.extend(await self._repo.list_failed(space_id, author))
+        return out
+
+    async def retry(self, space_id: str, user_id: str, *, admin: bool = False) -> int:
+        """Retry the caller's failed items that kept their bytes, now."""
+        n = 0
+        for author in self._authors(user_id, admin):
+            n += await self._repo.retry_failed(space_id, author, now=self._now())
         if n:
             self._space_changed(space_id)
             self._wake.set()
-        await self._tell(space_id, author_user_id)
+            self._media_wake.set()
+        await self._tell(space_id, user_id)
         return n
 
-    async def discard(self, space_id: str, author_user_id: str) -> int:
-        n = await self._repo.discard_failed(space_id, author_user_id)
-        await self._tell(space_id, author_user_id)
+    async def discard(self, space_id: str, user_id: str, *, admin: bool = False) -> int:
+        n = 0
+        for author in self._authors(user_id, admin):
+            n += await self._repo.discard_failed(space_id, author)
+        await self._tell(space_id, user_id)
         return n
 
     async def waiting(self, space_id: str) -> int:
@@ -237,15 +349,20 @@ class SpaceItemOutbox:
         """*gfs_id* (re)connected: what waits for it goes now."""
         await self._repo.expedite(gfs_id, now=self._now())
         self._wake.set()
+        self._media_wake.set()
 
-    async def run_once(self) -> int:
-        """One pass over the due rows; returns how many were due. Rows of
-        one (GFS, space) go in order; the pairs in parallel, so one space's
-        failing head never holds another space back on the same GFS."""
+    async def run_once(self, *, media: bool = False) -> int:
+        """One pass over one lane's due rows (the items, or *media*: the
+        file uploads); returns how many were due. Rows of one (GFS, space)
+        go in order; the pairs in parallel, so one space's failing head
+        never holds another space back on the same GFS."""
         if self._sender is None or self._planner is None:
             return 0
-        await self._expire_failed()
-        rows = await self._repo.list_due(self._now(), limit=BATCH)
+        if not media:
+            await self._expire_failed()
+        rows = await self._repo.list_due(
+            self._now(), limit=MEDIA_BATCH if media else BATCH, media=media
+        )
         groups: dict[tuple[str, str], list[QueuedSpaceItem]] = {}
         for row in rows:
             groups.setdefault((row.gfs_id, row.space_id), []).append(row)
@@ -291,13 +408,39 @@ class SpaceItemOutbox:
                 await self._fail(row, UNSENT_REFUSED)
             elif planned:
                 await self._repo.expand(row, planned, now=self._now())
-                self._wake.set()
+                self._wake_lane(_is_media(row))
             else:
                 await self._backoff(row, None, whole_gfs=False)
             return True
-        outcome = await self._sender(row)
-        if outcome.kind == "delivered":
+        if self._too_old(row) and row.ring_class == RING_CLASS_EPHEMERAL:
+            # A live location pin past its life: the 15-minute keepalive
+            # sends a fresh one — nothing for the person to act on.
+            log.info(
+                "space items: a stale %s of space %s dropped (a fresh one follows)",
+                row.event_type,
+                row.space_id,
+            )
             await self._repo.delete(row.item_id, row.gfs_id)
+            self._space_changed(row.space_id)
+            return True
+        if self._too_old(row):
+            log.warning(
+                "space items: a %s of space %s waited too long to be sent —"
+                " receivers would drop it; its author is told",
+                row.event_type,
+                row.space_id,
+            )
+            # A file's locator stays (Retry seals it again); an item's
+            # stamp is past what receivers take.
+            await self._fail(row, UNSENT_TOO_OLD, drop_payload=not _is_media(row))
+            return True
+        sender = self._media_sender if _is_media(row) else self._sender
+        if sender is None:
+            await self._backoff(row, None, whole_gfs=False)
+            return False
+        outcome = await sender(row)
+        if outcome.kind == "delivered":
+            await self._repo.delivered(row.item_id, row.gfs_id)
             self._space_changed(row.space_id)
             return True
         if outcome.kind == "gone":
@@ -313,6 +456,8 @@ class SpaceItemOutbox:
             await self._fail(row, UNSENT_SEAL_FAILED, drop_payload=True)
             return True
         if outcome.kind == "transient":
+            # Holds that GFS's other rows of the same lane (an upload's
+            # busy answer never parks the items, nor the reverse).
             await self._backoff(row, outcome.retry_after_s)
             return False
         log.warning(
@@ -325,22 +470,44 @@ class SpaceItemOutbox:
         await self._fail(row, UNSENT_REFUSED)
         return True
 
+    def _too_old(self, row: QueuedSpaceItem) -> bool:
+        """Whether *row* waited past what receivers still take."""
+        try:
+            created = datetime.fromisoformat(row.created_at)
+        except ValueError:
+            return False
+        limit = (
+            MAX_QUEUED_AGE_EPHEMERAL
+            if row.ring_class == RING_CLASS_EPHEMERAL
+            else MAX_QUEUED_AGE
+        )
+        return self._clock() - created > limit
+
     async def _fail(
         self, row: QueuedSpaceItem, error: str, *, drop_payload: bool = False
     ) -> None:
         await self._repo.mark_failed(
-            row.item_id, row.gfs_id, error, drop_payload=drop_payload
+            row, error, drop_payload=drop_payload, now=self._now()
         )
         self._space_changed(row.space_id)
         await self._tell(row.space_id, row.author_user_id)
 
     async def _gone(self, row: QueuedSpaceItem) -> None:
         """*row*'s GFS no longer serves the space. Another row of the item
-        still goes elsewhere: this copy just drops. Its LAST row is planned
-        afresh (the owner's list may name another server by then) — a few
-        times, then its author is told: never a change that silently
-        reaches nobody."""
-        if await self._repo.count_rows(row.item_id) > 1:
+        still goes elsewhere, or the item went out already: this copy just
+        drops. Its LAST row is planned afresh (the owner's list may name
+        another server by then) — a few times, then its author is told:
+        never a change that silently reaches nobody. Decided in one repo
+        transaction, so two GFSs going away together can't both drop it."""
+        outcome = await self._repo.gone(
+            row.item_id,
+            row.gfs_id,
+            max_replans=MAX_REPLANS,
+            next_attempt_at=_iso(
+                self._clock() + timedelta(seconds=backoff_s(row.replans + 1))
+            ),
+        )
+        if outcome == GONE_DROPPED:
             log.info(
                 "space items: GFS %s no longer serves space %s — its copy of a"
                 " %s is dropped",
@@ -348,11 +515,8 @@ class SpaceItemOutbox:
                 row.space_id,
                 row.event_type,
             )
-            await self._repo.delete(row.item_id, row.gfs_id)
             self._space_changed(row.space_id)
-            return
-        attempts = row.attempts + 1
-        if attempts > MAX_REPLANS:
+        elif outcome == GONE_EXHAUSTED:
             log.warning(
                 "space items: no GFS of space %s takes a %s any more — its"
                 " author is told",
@@ -360,15 +524,6 @@ class SpaceItemOutbox:
                 row.event_type,
             )
             await self._fail(row, UNSENT_REFUSED)
-            return
-        await self._repo.replan(
-            row.item_id,
-            row.gfs_id,
-            attempts=attempts,
-            next_attempt_at=_iso(
-                self._clock() + timedelta(seconds=backoff_s(attempts))
-            ),
-        )
 
     async def _backoff(
         self,
@@ -385,7 +540,9 @@ class SpaceItemOutbox:
             row.item_id, row.gfs_id, attempts=attempts, next_attempt_at=until
         )
         if whole_gfs:
-            await self._repo.defer_gfs(row.gfs_id, row.space_id, until=until)
+            await self._repo.defer_gfs(
+                row.gfs_id, row.space_id, until=until, media=_is_media(row)
+            )
 
     # ── Notifications ────────────────────────────────────────────────────
 
@@ -398,7 +555,15 @@ class SpaceItemOutbox:
             log.debug("space items: status refresh failed", exc_info=True)
 
     async def _tell(self, space_id: str, author_user_id: str) -> None:
-        if self._notify is None or not author_user_id:
+        """Tell the author; an item naming nobody goes to the household's
+        admins (the notifier maps :data:`NO_AUTHOR` to them)."""
+        if not author_user_id:
+            log.warning(
+                "space items: an unsent item of space %s names no author — the"
+                " household's admins are shown it",
+                space_id,
+            )
+        if self._notify is None:
             return
         try:
             await self._notify(space_id, author_user_id)
@@ -412,23 +577,31 @@ class SpaceItemOutbox:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="space-item-outbox")
+        self._media_task = asyncio.create_task(
+            self._loop(media=True), name="space-item-outbox-files"
+        )
 
     async def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-        if self._task is not None:
+        self._media_wake.set()
+        for task in (self._task, self._media_task):
+            if task is None:
+                continue
             try:
-                await asyncio.wait_for(self._task, timeout=10.0)
+                await asyncio.wait_for(task, timeout=10.0)
             except TimeoutError, asyncio.CancelledError:
-                self._task.cancel()
-            self._task = None
+                task.cancel()
+        self._task = None
+        self._media_task = None
 
-    async def _loop(self) -> None:
+    async def _loop(self, *, media: bool = False) -> None:
+        wake = self._media_wake if media else self._wake
         while not self._stop.is_set():
-            self._wake.clear()
+            wake.clear()
             due = 0
             try:
-                due = await self.run_once()
+                due = await self.run_once(media=media)
             except Exception:
                 log.warning("space items: a queue pass failed", exc_info=True)
                 try:
@@ -436,14 +609,15 @@ class SpaceItemOutbox:
                 except TimeoutError:
                     pass
                 continue
-            if due >= BATCH or self._stop.is_set():
+            if due >= (MEDIA_BATCH if media else BATCH) or self._stop.is_set():
                 continue
-            await self._sleep()
+            await self._sleep(media=media)
 
-    async def _sleep(self) -> None:
+    async def _sleep(self, *, media: bool = False) -> None:
         wait = IDLE_WAKE_S
+        wake = self._media_wake if media else self._wake
         try:
-            nxt = await self._repo.next_due_at()
+            nxt = await self._repo.next_due_at(media=media)
         except Exception:
             log.debug("space items: next due time unreadable", exc_info=True)
             nxt = None
@@ -456,6 +630,6 @@ class SpaceItemOutbox:
         if wait <= 0.0:
             return
         try:
-            await asyncio.wait_for(self._wake.wait(), timeout=wait)
+            await asyncio.wait_for(wake.wait(), timeout=wait)
         except TimeoutError:
             pass

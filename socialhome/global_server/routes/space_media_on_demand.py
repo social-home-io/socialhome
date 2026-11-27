@@ -34,8 +34,12 @@ import time
 from aiohttp import web
 
 from ...domain.gfs_space_media import (
+    ADDR_SUITE_SM1P,
+    PIECE_PROOF_HEADER,
     SPACE_MEDIA_AUTH_HEADER,
+    InvalidPieceProof,
     InvalidSpaceMediaAuth,
+    PieceProof,
     SpaceMediaUploadAuth,
 )
 from ...domain.gfs_space_media_on_demand import (
@@ -242,6 +246,15 @@ class GfsMediaServeView(GfsBaseView):
             return session
         if session.claimed or session.done.is_set():
             return web.json_response({"error": "already_streaming"}, status=409)
+        raw_proof = self.request.headers.get(PIECE_PROOF_HEADER)
+        proof: PieceProof | None = None
+        if raw_proof is not None:
+            # v_97 — a piece (sm1p): checked against its proof, the same way
+            # as an upload (``routes/space_media.py``).
+            try:
+                proof = PieceProof.from_header(raw_proof)
+            except InvalidPieceProof:
+                return web.json_response({"error": "bad_piece_proof"}, status=422)
         size = self.request.content_length
         try:
             if size is None or size > MAX_BLOB_BYTES:
@@ -258,6 +271,7 @@ class GfsMediaServeView(GfsBaseView):
             svc.quota_refused(session)
             return web.json_response({"error": "scope_stream_quota"}, status=429)
         session.size = size
+        session.proof = proof
         session.started.set()
         try:
             async with asyncio.timeout(SERVE_BODY_DEADLINE_S):
@@ -287,6 +301,12 @@ class GfsMediaServeView(GfsBaseView):
             return False
         try:
             auth = SpaceMediaUploadAuth.from_header(raw)
+            if (auth.claim.addr_suite == ADDR_SUITE_SM1P) != (
+                session.proof is not None
+            ):
+                # As on an upload: a piece's claim says sm1p and carries
+                # its proof; a whole blob's says sm1 and carries none.
+                return False
             await self.svc(K.gfs_space_media_auth_key).authorize_upload(
                 auth,
                 scope_kind=session.scope_kind,
@@ -309,6 +329,7 @@ class GfsMediaServeView(GfsBaseView):
                 expires_at=auth.claim.expires_at,
                 client=self.client_ip(),
                 owner=owner,
+                proof=session.proof,
             )
         except MediaRefused as exc:
             log.info("space media on demand: not stored: %s", exc.reason)

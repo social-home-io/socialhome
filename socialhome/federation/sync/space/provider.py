@@ -229,7 +229,7 @@ class _MediaPlanner(Protocol):
         self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
     ) -> Any: ...
 
-    def upload(self, plan: Any) -> None: ...
+    async def upload(self, plan: Any) -> None: ...
 
 
 class _WithMediaRefs:
@@ -311,7 +311,7 @@ class _WithMediaRefs:
                         self._budget -= 1
                     row = {**row, MEDIA_REFS_FIELD: plan.wire()}
                     if not self._stored_only:
-                        self._media.upload(plan)
+                        await self._media.upload(plan)
             out.append(row)
         return out
 

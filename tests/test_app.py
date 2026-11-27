@@ -584,7 +584,7 @@ async def test_gfs_channel_frames_over_the_per_channel_budget_are_dropped(caplog
     assert len(channels.frames) == GFS_CHANNEL_FRAMES_PER_MINUTE
     # v_97 — a GFS admits 1 200 a minute into a channel; a ring fetch
     # pages 1 500 a minute.
-    assert GFS_CHANNEL_FRAMES_PER_MINUTE == 1_500
+    assert GFS_CHANNEL_FRAMES_PER_MINUTE == 3_000
     warned = [r for r in caplog.records if "over budget" in r.getMessage()]
     assert len(warned) == 1 and warned[0].levelno == logging.WARNING
     await dispatch_gfs_relay_frame(

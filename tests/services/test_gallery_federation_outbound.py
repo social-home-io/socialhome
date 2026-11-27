@@ -533,7 +533,7 @@ class _GalleryMediaGfs:
         self.items: list = []
         self.uploaded: list = []
 
-    async def plan(self, space_id, urls, *, item_id, followers):
+    async def plan(self, space_id, urls, *, item_id, followers, author_user_id=""):
         self.planned.append((space_id, list(urls), followers))
         self.items.append(item_id)
         return _GalleryPlan()
@@ -541,11 +541,11 @@ class _GalleryMediaGfs:
     async def is_relay_reader(self, iid):
         return iid == "peer-2"
 
-    def upload(self, plan):
+    async def upload(self, plan, *, author_user_id=""):
         self.uploaded.append(plan)
 
 
-async def test_a_space_photo_carries_media_refs_for_link_joined_members():
+async def test_a_space_photo_carries_media_refs_for_every_household():
     bus = EventBus()
     fed = _PerPeerFederation()
     fed.members = {"sp-A": ["own-inst", "peer-1", "peer-2"]}
@@ -572,8 +572,9 @@ async def test_a_space_photo_carries_media_refs_for_link_joined_members():
     ]
     assert media.items == ["it-1"]  # sealed for the item itself
     by_target = {t: p for t, _e, p, _s in fed.sent}
+    # v_97 — the descriptor rides the shared copy every household gets.
     assert by_target["peer-2"]["media_refs"] == _GalleryPlan().wire()
-    assert "media_refs" not in by_target["peer-1"]
+    assert by_target["peer-1"]["media_refs"] == _GalleryPlan().wire()
     assert len(media.uploaded) == 1
 
 

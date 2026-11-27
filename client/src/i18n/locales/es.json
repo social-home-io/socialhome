@@ -6264,6 +6264,8 @@
   "space.unsent.reason.queue_full_one": "Un cambio no se envió: ya hay demasiado esperando a salir.",
   "space.unsent.reason.seal_failed": "{n} cambios no se pudieron preparar para enviarlos.",
   "space.unsent.reason.seal_failed_one": "Un cambio no se pudo preparar para enviarlo.",
+  "space.unsent.reason.too_old": "{n} cambios esperaron demasiado para enviarse. Escríbelos de nuevo.",
+  "space.unsent.reason.too_old_one": "Un cambio esperó demasiado para enviarse. Escríbelo de nuevo.",
   "space.unsent.failed": "No ha funcionado. Vuelve a intentarlo en un momento.",
   "spaces.list.needs_you": "{n} cosas te esperan",
   "spaces.list.needs_you_one": "{n} cosa te espera",

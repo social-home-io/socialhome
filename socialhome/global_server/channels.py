@@ -173,6 +173,14 @@ CHANNEL_ANON_MAX_BYTES_PER_MINUTE_PER_ADDRESS: int = (
     CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE // 4
 )
 
+#: v_97 — while a channel still has seats that do NOT read the ring (a
+#: v_96 household during the rollout: every item is pushed to it live, or
+#: queued while it is offline), the v_96 caps hold — 120 items and 1 MiB a
+#: minute — so a channel of 10 000 such seats is never driven at the ring
+#: sizing (1 200 items a minute would be 12 million pushed or queued frames).
+CHANNEL_PUBLISH_MAX_PER_MINUTE_LEGACY: int = 120
+CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE_LEGACY: int = 1024 * 1024
+
 #: v_97 — how long one channel's resolved seats are reused by the fan-out
 #: (seconds): at 20 items a second a 10 000-seat channel would otherwise
 #: read 10 000 rows twice per item. A seat taken or dropped on this node
@@ -251,15 +259,19 @@ class GfsChannelService:
         "_anon_ip_limiter",
         "_anon_seen",
         "_byte_budget",
+        "_changed_at",
         "_channel_limiter",
         "_channels",
         "_clock",
         "_fan_out",
         "_federation",
+        "_legacy_bytes",
+        "_legacy_limiter",
         "_max_channels",
         "_nodes",
         "_register_limiter",
         "_ring",
+        "_seat_changes",
         "_targets",
         "_writer_key_limiter",
     )
@@ -304,10 +316,37 @@ class GfsChannelService:
         self._ring: GfsChannelRing | None = None
         self._byte_budget = ByteBudget(CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE)
         self._anon_ip_bytes = ByteBudget(CHANNEL_ANON_MAX_BYTES_PER_MINUTE_PER_ADDRESS)
+        #: v_97 — the v_96 caps of a channel that still has non-ring seats.
+        self._legacy_limiter = SlidingWindowCounter(
+            CHANNEL_PUBLISH_MAX_PER_MINUTE_LEGACY
+        )
+        self._legacy_bytes = ByteBudget(CHANNEL_PUBLISH_MAX_BYTES_PER_MINUTE_LEGACY)
         #: channel id → (valid until, seats, recently-seen seats).
         self._targets: OrderedDict[str, tuple[float, list[str], set[str]]] = (
             OrderedDict()
         )
+        #: A seat change bumps :attr:`_seat_changes`; each channel keeps the
+        #: number of its last change, so a refill that started before it is
+        #: never stored (it read the seats as they were).
+        self._seat_changes = 0
+        self._changed_at: OrderedDict[str, int] = OrderedDict()
+
+    def _seats_changed(self, channel_id: str) -> None:
+        """A seat of *channel_id* was taken or dropped on this node: the
+        cached seats go, and a refill already reading them is not kept."""
+        self._targets.pop(channel_id, None)
+        self._seat_changes += 1
+        self._changed_at[channel_id] = self._seat_changes
+        self._changed_at.move_to_end(channel_id)
+        while len(self._changed_at) > FAN_OUT_TARGETS_MAX:
+            self._changed_at.popitem(last=False)
+
+    def _cached_seat(self, channel_id: str, instance_id: str) -> bool:
+        """Whether the cached seats of *channel_id* already name
+        *instance_id* (a re-subscribe that changes nothing the fan-out
+        reads)."""
+        hit = self._targets.get(channel_id)
+        return hit is not None and instance_id in hit[1]
 
     def attach_ring(self, ring: GfsChannelRing) -> None:
         """Wire the v_97 channel ring (capability ``channel_ring``)."""
@@ -598,8 +637,9 @@ class GfsChannelService:
                 wait = 0 if ch.epoch is None else ch.step_allowance(epoch, now=now)
                 raise ChannelEpochTooSoon(max(SUBSCRIBE_NOT_YET_RETRY_S, wait))
             raise PermissionError("pass epoch is not open here")
+        held = await self._channels.has_subscription(req.channel_id, inst.instance_id)
         if (
-            not await self._channels.has_subscription(req.channel_id, inst.instance_id)
+            not held
             and await self._channels.count_subscriptions(inst.instance_id)
             >= MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE
         ):
@@ -610,7 +650,12 @@ class GfsChannelService:
             pass_epoch=req.channel_pass.epoch,
             now=now,
         )
-        self._targets.pop(req.channel_id, None)
+        if not (held and self._cached_seat(req.channel_id, inst.instance_id)):
+            # A re-subscribe the cached seats already name changes nothing
+            # the fan-out reads: it never forces a refill (a seat can't
+            # defeat the cache by re-subscribing; an epoch move shows
+            # within the TTL, inside the epoch's grace anyway).
+            self._seats_changed(req.channel_id)
 
     async def unsubscribe(self, req: ChannelUnsubscribeRequest) -> None:
         await self._federation.verify_signed_request(
@@ -618,7 +663,7 @@ class GfsChannelService:
         )
         self._addressed(req.gfs_instance_id, req.gfs_key)
         await self._channels.remove_subscriber(req.channel_id, req.instance_id)
-        self._targets.pop(req.channel_id, None)
+        self._seats_changed(req.channel_id)
 
     # ── Publish ──────────────────────────────────────────────────────────
 
@@ -636,6 +681,7 @@ class GfsChannelService:
         if hit is not None and hit[0] > now:
             self._targets.move_to_end(channel_id)
             return hit[1], hit[2]
+        started = self._seat_changes
         ch = await self._channels.get(channel_id)
         if ch is None:
             self._targets.pop(channel_id, None)
@@ -650,6 +696,10 @@ class GfsChannelService:
             within_s=ENVELOPE_QUEUE_TTL_SECONDS,
             include_ring=self._ring is None,
         )
+        if self._changed_at.get(channel_id, -1) > started:
+            # A seat changed while we read: use what we read this once, but
+            # never keep it — the next item reads the seats afresh.
+            return targets, recent
         self._targets[channel_id] = (now + FAN_OUT_TARGETS_TTL_S, targets, recent)
         self._targets.move_to_end(channel_id)
         while len(self._targets) > FAN_OUT_TARGETS_MAX:
@@ -687,10 +737,34 @@ class GfsChannelService:
             UnsupportedWriterKeySuite,
         ) as exc:
             raise PermissionError(f"writer signature refused: {exc}") from exc
+        now = self._now()
+        if not ch.admits(req.epoch, now=now):
+            raise PermissionError("writer key epoch is not open here")
+        # Whether the channel still has non-ring seats (the v_96 caps) —
+        # read (cached) before the replay check, so nothing awaits between
+        # that check and its record below.
+        _seats, legacy = await self._seats(req.channel_id)
+        digest = SeenPayloadCache.digest(req.to_wire())
+        if self._anon_seen.seen(digest):
+            raise PermissionError("replayed request")
+        if not self._fan_out.has_room(f"ch:{req.channel_id}"):
+            # Refused before the append and before any budget is spent: no
+            # item stored that never goes out, nothing charged for a 503.
+            raise ChannelBusy()
+        # The address's own budgets first, so a request it is refused never
+        # spends what every writer of the channel shares.
+        address = f"{req.channel_id}\x00{client_ip}"
         if not self._allow(
-            self._anon_ip_limiter,
-            f"{req.channel_id}\x00{client_ip}",
-            floor=CHANNEL_ANON_PER_NODE_FLOOR,
+            self._anon_ip_limiter, address, floor=CHANNEL_ANON_PER_NODE_FLOOR
+        ):
+            raise ChannelRateLimited()
+        if not self._anon_ip_bytes.allow(address, len(req.payload), self._node_count()):
+            raise ChannelRateLimited()
+        if legacy and not (
+            self._allow(self._legacy_limiter, req.channel_id)
+            and self._legacy_bytes.allow(
+                req.channel_id, len(req.payload), self._node_count()
+            )
         ):
             raise ChannelRateLimited()
         if not self._allow(self._channel_limiter, req.channel_id):
@@ -699,26 +773,12 @@ class GfsChannelService:
             self._writer_key_limiter, f"{req.channel_id}\x00{req.epoch}"
         ):
             raise ChannelRateLimited()
-        now = self._now()
-        if not ch.admits(req.epoch, now=now):
-            raise PermissionError("writer key epoch is not open here")
-        digest = SeenPayloadCache.digest(req.to_wire())
-        if self._anon_seen.seen(digest):
-            raise PermissionError("replayed request")
         if not self._byte_budget.allow(
             req.channel_id, len(req.payload), self._node_count()
         ):
             # The ring must span several heads intervals: one writer
             # uploading large items must not roll it for everyone.
             raise ChannelRateLimited()
-        if not self._anon_ip_bytes.allow(
-            f"{req.channel_id}\x00{client_ip}", len(req.payload), self._node_count()
-        ):
-            # Nor may one address spend the bytes everyone shares.
-            raise ChannelRateLimited()
-        if not self._fan_out.has_room(f"ch:{req.channel_id}"):
-            # Refused before the append: no item stored that never goes out.
-            raise ChannelBusy()
         # Recorded after the synchronous refusals (a refused request may be
         # sent again) and before the ring append awaits, so two copies of
         # one request on this node can never both be stored.

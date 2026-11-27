@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from socialhome.domain.federation import InstanceSource
 from socialhome.domain.federation_capabilities import FederationCapability
@@ -15,8 +16,13 @@ from socialhome.domain.file_hashes import (
     sha256_hex,
     space_content_media_name,
 )
-from socialhome.domain.gfs_space_media import space_media_address
-from socialhome.domain.space import SpaceRole
+from socialhome.domain.gfs_space_media import (
+    PIECE_BYTES,
+    piece_address,
+    pieced_file_address,
+    space_media_address,
+)
+from socialhome.domain.space import SpaceFeatures, SpaceRole, SpaceType
 from socialhome.domain.space_media_ref import SpaceMediaRef, space_page_media_name
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
 from socialhome.services.inbound_media_store import (
@@ -28,6 +34,7 @@ from socialhome.space_media_hint import open_space_media_hint, parse_hint_wire
 from socialhome.space_media_seal import (
     SPACE_MEDIA_SUITE_AESGCM256_PADDED,
     derive_space_media_key,
+    piece_aad_name,
     seal_space_media,
 )
 
@@ -225,18 +232,30 @@ SPACE_HOST = "host-h"
 class _Space:
     id: str
     owner_instance_id: str
+    space_type: SpaceType = SpaceType.PRIVATE
+    features: SpaceFeatures = field(default_factory=SpaceFeatures)
 
 
 class _Spaces:
     """The reader's own channel id of a private space, and its seat: a
-    follower household by default (v_92: only a follower asks its GFS)."""
+    follower household by default (v_92: only a follower asks its GFS).
+    ``gfs``: a GFS space (v_97 — global): its files come from the GFS cache
+    for everyone."""
 
-    def __init__(self, channel_id: str | None = CHANNEL_ID, *, member: bool = False):
+    def __init__(
+        self,
+        channel_id: str | None = CHANNEL_ID,
+        *,
+        member: bool = False,
+        gfs: bool = False,
+    ):
         self.channel_id = channel_id
         self.role = SpaceRole.MEMBER if member else SpaceRole.SUBSCRIBER
+        self.gfs = gfs
 
     async def get(self, space_id):
-        return _Space(space_id, SPACE_HOST)
+        kind = SpaceType.GLOBAL if self.gfs else SpaceType.PRIVATE
+        return _Space(space_id, SPACE_HOST, space_type=kind)
 
     async def get_gfs_channel(self, space_id):
         return (self.channel_id, "pk") if self.channel_id else None
@@ -273,6 +292,7 @@ def _fetcher(
     member=False,
     host_version=V92,
     direct=None,
+    gfs_space=False,
 ):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
@@ -280,7 +300,7 @@ def _fetcher(
         gfs_service=gfs,
         gfs_repo=_GfsRepo(conns),
         federation_repo=_FedRepo(insts),
-        space_repo=_Spaces(channel_id, member=member),
+        space_repo=_Spaces(channel_id, member=member, gfs=gfs_space),
         # By default a member reaches the host directly and a follower only
         # through its GFS — the path, not the role, decides (P10).
         federation=_Fed(
@@ -1413,3 +1433,149 @@ async def test_a_content_name_without_a_ref_row_is_never_fetched(tmp_path, caplo
         assert await f.ensure_local(_sc("a.webp", b"x")) is False
     assert gfs.fetches == []
     assert caplog.text == ""
+
+
+# ── v_97: files in pieces, and GFS spaces ask their GFS ─────────────────
+
+
+BIG_SIZE = 2 * PIECE_BYTES + 4321
+
+
+def _pieced(name: str, data: bytes):
+    """``(wire entry, {piece address: blob}, [addresses])`` of *data* sealed
+    in pieces by ORIGIN for ITEM, as an author household does."""
+    count = -(-len(data) // PIECE_BYTES)
+    blobs = [
+        _blob(
+            piece_aad_name(name, i, count),
+            data[i * PIECE_BYTES : (i + 1) * PIECE_BYTES],
+        )
+        for i in range(count)
+    ]
+    manifest = [hashlib.sha256(b).hexdigest() for b in blobs]
+    file_addr = pieced_file_address("channel", CHANNEL_ID, manifest)
+    addrs = [piece_address(file_addr, i) for i in range(count)]
+    wire = {
+        name: {
+            "blob_id": file_addr,
+            "suite": SUITE,
+            "epoch": 2,
+            "size": len(data),
+            "scope": "channel",
+            "addr_suite": "sm1p",
+            "sha256": sha256_hex(data),
+        }
+    }
+    return wire, dict(zip(addrs, blobs, strict=True)), addrs
+
+
+async def _recv_pieced(f, wire, *, prefetch=False):
+    loc = await f.localize(
+        SPACE, wire, ["api/media/v.webm"], item_id=ITEM, origin=ORIGIN
+    )
+    await f.keep(loc, prefetch=prefetch)
+    return loc
+
+
+async def test_a_file_in_pieces_is_fetched_and_joined(tmp_path):
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    f = _fetcher(tmp_path, _Gfs(blobs), conns=[_Conn("g", "https://g")])
+    loc = await _recv_pieced(f, wire)
+    # Its content name — the whole file's checksum.
+    assert loc.names == {"v.webm": _sc("v.webm", data)}
+    assert await f.ensure_local(_sc("v.webm", data), timeout_s=30) is True
+    assert (tmp_path / _sc("v.webm", data)).read_bytes() == data
+
+
+async def test_only_the_missing_piece_is_fetched_again(tmp_path):
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, addrs = _pieced("v.webm", data)
+    held = {a: b for a, b in blobs.items() if a != addrs[1]}
+    gfs = _Gfs(held)
+    f = _fetcher(tmp_path, gfs, conns=[_Conn("g", "https://g")])
+    await _recv_pieced(f, wire)
+    name = _sc("v.webm", data)
+    assert await f.ensure_local(name, timeout_s=30) is False
+    # The piece lands on the GFS later; the next view takes only what is
+    # still missing — piece 0 is kept from the first try.
+    gfs.blobs[addrs[1]] = blobs[addrs[1]]
+    f._misses.clear()
+    gfs.fetches.clear()
+    assert await f.ensure_local(name, timeout_s=30) is True
+    assert [b for _u, b in gfs.fetches] == [addrs[1], addrs[2]]
+    assert (tmp_path / name).read_bytes() == data
+
+
+async def test_a_missing_piece_is_asked_for_on_demand_alone(tmp_path):
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, addrs = _pieced("v.webm", data)
+    held = {a: b for a, b in blobs.items() if a != addrs[2]}
+    gfs = _OnDemandGfs(held, served={addrs[2]: blobs[addrs[2]]})
+    f = _fetcher(tmp_path, gfs, conns=[_Conn("g", "https://g")])
+    await _recv_pieced(f, wire)
+    assert await f.ensure_local(_sc("v.webm", data), timeout_s=30) is True
+    assert [b for _u, b, _body in gfs.wanted] == [addrs[2]]
+    # The hint names the piece (the holder reseals exactly that piece).
+    hint = parse_hint_wire(gfs.wanted[0][2]["hint"])
+    loc = open_space_media_hint(
+        hint, media_key=KEY, scope="channel", scope_id=CHANNEL_ID, blob_id=addrs[2]
+    )
+    assert loc.filename == piece_aad_name("v.webm", 2, 3)
+
+
+async def test_a_tampered_piece_is_refused(tmp_path):
+    """A key holder seals other bytes as piece 1 (or moves piece 0 there):
+    it does not open under piece 1's name, nothing is written."""
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, addrs = _pieced("v.webm", data)
+    forged = dict(blobs)
+    forged[addrs[1]] = blobs[addrs[0]]
+    f = _fetcher(tmp_path, _Gfs(forged), conns=[_Conn("g", "https://g")])
+    await _recv_pieced(f, wire)
+    assert await f.ensure_local(_sc("v.webm", data), timeout_s=30) is False
+    assert not (tmp_path / _sc("v.webm", data)).exists()
+
+
+async def test_a_wrong_whole_file_checksum_writes_nothing(tmp_path):
+    """Every piece opens, but the joined file is not what the descriptor's
+    checksum says: every piece is dropped and nothing is written."""
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    other = os.urandom(BIG_SIZE)
+    wire["v.webm"]["sha256"] = sha256_hex(other)
+    gfs = _Gfs(blobs)
+    f = _fetcher(tmp_path, gfs, conns=[_Conn("g", "https://g")])
+    await _recv_pieced(f, wire)
+    name = _sc("v.webm", other)
+    assert await f.ensure_local(name, timeout_s=30) is False
+    assert not (tmp_path / name).exists()
+    assert not (tmp_path / ".partial" / f"pieces-{name}").exists()
+    # The next view does not download the 200 MiB again at once.
+    gfs.fetches.clear()
+    assert await f.ensure_local(name, timeout_s=30) is False
+    assert gfs.fetches == []
+
+
+async def test_a_file_in_pieces_is_never_prefetched(tmp_path):
+    data = os.urandom(PIECE_BYTES + 1)
+    wire, blobs, _addrs = _pieced("v.webp", data)
+    wire = {"v.webm": wire["v.webp"]}
+    gfs = _Gfs(blobs)
+    f = _fetcher(tmp_path, gfs, conns=[_Conn("g", "https://g")])
+    await _recv_pieced(f, wire, prefetch=True)
+    await f.drain()
+    assert gfs.fetches == []
+
+
+async def test_a_gfs_space_member_asks_its_gfs_never_its_host(tmp_path):
+    """v_97 (owner 2026-11-27): a member household of a GFS space — even
+    one that reaches the host directly — takes a missed file from its GFS
+    on demand; no SPACE_MEDIA_WANTED to the host."""
+    data = b"x"
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, member=True, gfs_space=True)
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    assert await f.ensure_local(_sc("a.webp", data)) is True
+    assert len(gfs.wanted) == 1

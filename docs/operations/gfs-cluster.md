@@ -246,17 +246,20 @@ the effective values are advertised in the signed `/gfs/info`
 [channel_ring]
 max_bytes = 268435456           # 256 MiB per channel (oldest dropped past it)
 max_items = 131072              # items per channel
-durable_ttl_seconds = 86400     # 24 h (300 – 86400; households refuse older items)
+durable_ttl_seconds = 86400     # 24 h (1800 – 86400; households refuse older items)
 ephemeral_ttl_seconds = 900     # 15 min, live location pins (60 – 900, ≤ the durable age)
 server_max_bytes = 8589934592   # 8 GiB for every ring together (≥ max_bytes; biggest rings trimmed first)
 ```
 
-A value out of bounds, an ephemeral age above the durable one, or a server
-cap below one ring refuses to start, naming the key. The ring is shared
-by every node (one SQLite file), so these bounds hold cluster-wide; size
-`server_max_bytes` to the disk under `data_dir`. A smaller ring is safe:
-a household whose cursor fell off it hears `channel_gap` and catches up
-from the space's hosts — it only costs that catch-up.
+`max_bytes` takes 60 MiB – 4 GiB (a ring holds at least 15 minutes of a
+channel at its 4 MiB a minute). A value out of bounds, an unknown key
+(a typo never silently keeps the default), an ephemeral age above the
+durable one, or a server cap below one ring refuses to start, naming the
+key. The ring is shared by every node (one SQLite file), so these bounds
+hold cluster-wide; size `server_max_bytes` to the disk under `data_dir`.
+The lower bounds keep a ring longer than two 15-minute heads pings: a
+smaller one would make every seat that only pulls hear `channel_gap` on
+each ping and run a catch-up from the space's hosts.
 
 ## Anonymous mailboxes (GFS redesign PR 1)
 

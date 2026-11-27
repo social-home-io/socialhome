@@ -15,9 +15,11 @@ from socialhome.space_media_seal import (
     UnsupportedSpaceMediaSuite,
     derive_space_media_key,
     open_space_media,
+    piece_aad_name,
     require_space_media_suite,
     seal_space_media,
     space_media_nonce,
+    split_piece_name,
 )
 
 CONTENT_KEY = bytes(range(32))
@@ -141,3 +143,44 @@ def test_malformed_blob_sizes_refused() -> None:
         _open(b"short")
     with pytest.raises(ValueError):
         _open(os.urandom(PAD_BUCKETS[0] + 28 + 1))
+
+
+# ── v_97 pieces ───────────────────────────────────────────────────────────
+
+
+def test_a_piece_name_round_trips():
+    name = piece_aad_name("v.webm", 3, 25)
+    assert name == "v.webm#3/25"
+    assert split_piece_name(name) == ("v.webm", 3, 25)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["v.webm", "#1/2", "v#2/2", "v#0/1", "v#0/26", "v#01/2", "v#a/2", "v#1/"],
+)
+def test_other_names_are_no_piece(name):
+    assert split_piece_name(name) is None
+
+
+def test_a_piece_moved_to_another_place_does_not_open():
+    data = os.urandom(1000)
+    blob = seal_space_media(
+        media_key=KEY,
+        space_id=SPACE,
+        epoch=1,
+        item_id="i",
+        origin="o",
+        filename=piece_aad_name("v.webm", 1, 3),
+        data=data,
+    )
+    for other in (piece_aad_name("v.webm", 2, 3), piece_aad_name("v.webm", 1, 4)):
+        with pytest.raises(InvalidTag):
+            open_space_media(
+                blob=blob,
+                media_key=KEY,
+                space_id=SPACE,
+                epoch=1,
+                item_id="i",
+                origin="o",
+                filename=other,
+            )

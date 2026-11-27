@@ -69,7 +69,12 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from ..domain.gfs_space_media import SCOPE_CHANNEL, space_media_address
+from ..domain.gfs_space_media import (
+    SCOPE_CHANNEL,
+    PieceProof,
+    check_piece,
+    space_media_address,
+)
 from ..domain.gfs_space_media_on_demand import (
     MODE_CACHE,
     MODE_STREAM,
@@ -180,6 +185,9 @@ class MediaSession:
     target: str = ""
     size: int = 0
     buf: bytearray = field(default_factory=bytearray)
+    #: v_97 — the holder's proof that the bytes are a piece (sm1p) at
+    #: ``blob_id``; ``None``: the bytes are their own (sm1) address.
+    proof: PieceProof | None = None
     claimed: bool = False
     verified: bool = False
     failed: bool = False
@@ -517,6 +525,15 @@ class GfsSpaceMediaOnDemand:
         """Whether the whole body sits at the address the readers asked for."""
         if len(session.buf) != session.size:
             return False
+        if session.proof is not None:
+            return await asyncio.to_thread(
+                check_piece,
+                session.scope_kind,
+                session.scope_id,
+                session.blob_id,
+                bytes(session.buf),
+                session.proof,
+            )
         try:
             address = await asyncio.to_thread(
                 space_media_address,

@@ -869,7 +869,9 @@ never get the chunks above:
   ([`discovery.md`](./discovery.md#space-media-cache-on-a-gfs-capability-space_media)),
   not on a household version.
 
-Paired and mesh members keep the `SPACE_MEDIA_BLOB` push above, unchanged.
+Paired and mesh members of a **mesh space** keep the `SPACE_MEDIA_BLOB`
+push above, unchanged. In a **GFS space** (v_97, below) every household
+takes the files from the cache.
 
 **Descriptor.** The item carries, INSIDE its encrypted payload:
 
@@ -959,9 +961,15 @@ transport error, 408 (too slow), 429 (per-scope rate or per-prefix byte
 budget), 503 (busy, or the cache switched off) or another 5xx is retried at
 most 4 times (backoff 30 s, doubling). Because the address binds the scope,
 uploading before the item goes out is not needed for safety; uploads are
-still queued at once. The queue is in
-memory and bounded (2048 uploads): a restart or a full queue loses pending
-uploads (WARNING), and the reader then shows the item without that picture.
+still queued at once. Since v_97 the queue is the **durable item queue**
+(`space_item_outbox`, rows of kind `space_media_upload`; see
+[space-items.md](./space-items.md#the-durable-item-queue-gfs-spaces)): one
+row per blob (or piece) per GFS, a small locator — never the bytes, which
+are sealed again when the row goes (deterministic) — retried with the
+queue's backoff until the GFS takes it, a restart losing nothing; a GFS that
+refuses it for good, or a file too large for every GFS of the space, is
+shown to its author ("Couldn't send"). A file deleted or changed meanwhile
+is not sent.
 
 **Reader** (`SpaceMediaGfsFetcher`). **The file's name is the
 reader's.** Any member can name any file name it has seen, and every member
@@ -1055,11 +1063,104 @@ uploaded (no upload kind names one since v_90). The deterministic nonce reveals 
 was sealed twice under the same key", which the content address shows
 anyway.
 
-**Deferred.** Files over 8 MiB (long videos). A blob the cache evicted or
-expired comes back on view since v_83 (below). Tracked follow-ups: **comment media** and **a seed holder's
+**Files over 8 MiB** go in pieces since v_97 (below). A blob the cache
+evicted or expired comes back on view since v_83 (below). Tracked follow-ups: **comment media** and **a seed holder's
 relayed copy of an approved post** carry no descriptor yet. A private space whose owner left `private_gfs`
 off has no channel: its link-joined members get the files by the push
 (`SPACE_MEDIA_BLOB`), not through a GFS cache.
+
+## GFS spaces: every household from the cache (v_97)
+
+Owner 2026-11-27: in a **GFS space** (a global space, or a private one with
+`private_gfs` on — [space-items.md](./space-items.md)) every household —
+paired, mesh, link-joined, member or follower — takes the space's pictures
+and files from the GFS space media cache. One path:
+
+- **Descriptor on the shared copy.** A post, calendar cover, gallery item
+  or page version carries `media_refs` on the one payload every household
+  reads (so it still goes as ONE space item), not in a per-household copy.
+- **Uploads** go to every GFS the space's channel lives on (plus each
+  link-joined member's), through the durable item queue (above).
+- **No push for what the cache holds.** A live item's file that the item
+  described AND that is queued for the cache
+  (`SpaceMediaGfsUploader.push_targets`) is not pushed to a v_97
+  household; a household below v_97 keeps the push, and so does everyone
+  while the space's 14-day window is open (the households the legacy
+  events are for). Everything else keeps the push: a file no descriptor
+  covers (a comment's picture, a bazaar photo, a file no GFS of the space
+  takes, one not only the space's), a §25.6 catch-up (its records carry a
+  descriptor only for link-joined readers), a file someone asked for.
+- **No `SPACE_MEDIA_WANTED` for a described file.** A file a household
+  reads from the GFS cache (it holds a `space_media_refs` row) is never
+  asked of a host or a helper; a miss in the cache goes through v_83 on
+  demand (below), for members as for followers. A file without a
+  descriptor keeps the `SPACE_MEDIA_WANTED` heal.
+
+Mesh spaces keep the push and `SPACE_MEDIA_WANTED` unchanged.
+
+### Files in pieces (`sm1p`)
+
+A file over one blob (8 MiB), up to the 200 MiB upload cap, is split into
+fixed **8 MiB pieces**. Each piece is sealed like a file (same suite, same
+deterministic nonce rule) under the piece name `filename#i/N` — in its AAD
+and nonce, so a piece can't be moved to another place, into a file of
+another length, or onto another file (`space_media_seal.piece_aad_name`).
+
+- **The item carries ONE entry**: `{blob_id: file address, suite, epoch,
+  size: the file's bytes, scope, addr_suite: "sm1p", sha256: the whole
+  file}` — no piece list; the piece count follows from the size. Each
+  piece's address is derived from the file address and its index; the file
+  address commits to the SHA-256 of every sealed piece, and the GFS checks
+  each piece against it ([discovery.md](./discovery.md#space-media-cache-on-a-gfs-capability-space_media)).
+  An older receiver drops the entry (unknown keys) and shows the item
+  without that file.
+- **Upload**: one durable row per piece per GFS proving `pieces`, each
+  carrying the piece manifest (≤ 25 × 64 hex), all rows of one file stored
+  in one go (never half a file); file uploads run in their own lane of the
+  durable queue — their own loop, bound (1 000 rows per space) and
+  backoff — so an 8 MiB upload never holds a chat message back, and a busy
+  answer defers that GFS's other pieces, not the items. A GFS of the space
+  without `pieces` gets no big file, and with none the author is told
+  ("too large to send") and the file keeps the household push. Past 200
+  MiB nothing goes through a GFS.
+- **Reader**: the file takes its content name (`sc-`, the whole-file
+  checksum; a hash map that names another hash is refused). A view fetches
+  the pieces still missing, one at a time, from its GFS sources; each must
+  open under its piece name and have its piece's length; it is kept in a
+  part directory, so a fetch cut short (the view's 20 s, a restart) resumes
+  with only the missing pieces. A piece no GFS holds is asked for **on
+  demand, alone** (the hint names the piece). When all are here, the joined
+  file must hash to its content name — else every piece is dropped and
+  nothing is written. A file in pieces is **never prefetched**.
+- **Holder** (on demand): any household holding the file — under the
+  author's name or its own (`sc-` / `sd-` / `sg-`) — finds it under the
+  same names and rules as a whole file, describes it in pieces under the
+  AUTHOR's file name (the AAD's; sealed once, remembered by the file's size
+  and mtime) and reseals only the asked piece, sending its proof. A locator
+  whose file seals to other addresses is remembered for 10 minutes, so
+  made-up addresses never make it seal 200 MiB again.
+- **Refused once, not again at once.** A refused file (a piece that does
+  not open, a wrong checksum) enters the view's 5-minute miss memory like
+  a miss. A piece's GET gets 120 s.
+- **Residuals** (follow-ups): the part directory of a file whose last piece
+  never comes stays until the space goes (no total cap); a content-named
+  row is first-describer-wins, so a member who describes a file's checksum
+  first with a junk address makes the file unfetchable until that row goes;
+  one big file can take most of a channel's 256 MiB cache share (the
+  least recently fetched files go first).
+- **Not yet** (follow-up): progressive playback while pieces arrive;
+  a reader with the file in another space still fetches it.
+
+**Cost (a 200 MiB video in a global space, 10 000 followers, 2 GFSs).**
+Upload: 25 pieces × 2 GFSs = 50 PUTs of ~8 MiB = 400 MiB once from the
+author (never per reader); durable rows: 50 × ~2 KiB. A reader who plays
+it: 25 GETs = 200 MiB from the GFS / CDN — only on view, never prefetched;
+200 viewers ≈ 40 GB, CDN-cached. An evicted piece: ≤ `cache_after_requests`
+(3) holder uploads of 8 MiB per piece before it is cached again — only the
+missing piece, never the whole file. The holder's cost per asked piece:
+one 200 MiB reseal the first time (the manifest, then remembered) plus the
+8 MiB piece, inside the holder budgets below (512 MiB / h per GFS, 1 GiB /
+h in all). The descriptor: ~230 B per file per item.
 
 ## Space media on demand (v_83)
 
