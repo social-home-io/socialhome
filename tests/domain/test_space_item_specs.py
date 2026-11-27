@@ -127,7 +127,9 @@ def test_item_spec_lookup():
 
 
 def test_required_scope_covers_v2_types():
-    assert required_scope("space_task_created") == WRITER_SCOPE_WRITE
+    assert required_scope("space_post_created") == WRITER_SCOPE_WRITE
+    # M5 — a task is judged by its own access level: a comment cert.
+    assert required_scope("space_task_created") == WRITER_SCOPE_COMMENT
     assert required_scope("space_comment_created") == WRITER_SCOPE_COMMENT
     assert required_scope("comment") == WRITER_SCOPE_COMMENT
     with pytest.raises(ValueError):
