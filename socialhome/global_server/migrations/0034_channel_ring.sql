@@ -33,7 +33,8 @@
 -- 3. Smallest change: one new table (dropped with its channel: ON DELETE
 --    CASCADE, so unregister and the idle sweeps empty it), three additive
 --    columns on ``gfs_channels`` with defaults (``head_seq`` 0,
---    ``ring_bytes`` 0, ``ring_id`` NULL until the first item), one NOT NULL
+--    ``ring_bytes`` 0, ``durable_floor_seq`` 0, ``ring_id`` NULL until the
+--    first item) and a partial index for the server cap, one NOT NULL
 --    DEFAULT 0 column on ``client_instances``. No backfill, no rewrite.
 --
 -- What it reveals: what the traffic already shows — that a channel had an
@@ -46,6 +47,13 @@
 ALTER TABLE gfs_channels ADD COLUMN head_seq INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gfs_channels ADD COLUMN ring_id TEXT;
 ALTER TABLE gfs_channels ADD COLUMN ring_bytes INTEGER NOT NULL DEFAULT 0;
+-- The highest seq of a DURABLE item the ring dropped (evicted or expired):
+-- a cursor below it missed something that is gone (a gap); an expired
+-- ephemeral item (a location pin) never makes a gap.
+ALTER TABLE gfs_channels ADD COLUMN durable_floor_seq INTEGER NOT NULL DEFAULT 0;
+-- The server cap trims the biggest rings first.
+CREATE INDEX IF NOT EXISTS idx_gfs_channels_ring_bytes
+    ON gfs_channels(ring_bytes) WHERE ring_bytes > 0;
 
 CREATE TABLE IF NOT EXISTS gfs_channel_ring (
     channel_id  TEXT NOT NULL REFERENCES gfs_channels(channel_id) ON DELETE CASCADE,

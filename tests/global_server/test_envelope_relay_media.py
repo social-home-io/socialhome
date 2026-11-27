@@ -47,6 +47,9 @@ class _Registry:
         self.sent.append((instance_id, payload))
         return True
 
+    async def send_direct(self, instance_id, payload) -> bool:
+        return await self.send(instance_id, payload)
+
     async def send_media(self, instance_id, body) -> bool:
         if instance_id not in self.online or instance_id not in self.media:
             return False

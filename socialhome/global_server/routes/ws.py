@@ -86,6 +86,10 @@ log = logging.getLogger(__name__)
 HELLO_TIMEOUT_SECONDS = 5.0
 TIMESTAMP_WINDOW_SECONDS = 300
 
+#: Largest frame a household may send (a hello, a ``channel_watch`` naming
+#: 256 channels, a ``channel_fetch``).
+WS_MAX_INBOUND_BYTES = 64 * 1024
+
 WS_CLOSE_AUTH_FAILED = 4401
 WS_CLOSE_HELLO_TIMEOUT = 4408
 WS_CLOSE_PROTOCOL_VIOLATION = 4400
@@ -128,7 +132,8 @@ class GfsWebSocketView(web.View):
     """``GET /gfs/ws`` — upgrade to a GFS→SH push WebSocket."""
 
     async def get(self) -> web.StreamResponse:
-        ws = web.WebSocketResponse(heartbeat=30.0)
+        # A household sends only its hello and (v_97) small ring frames.
+        ws = web.WebSocketResponse(heartbeat=30.0, max_msg_size=WS_MAX_INBOUND_BYTES)
         await ws.prepare(self.request)
 
         hello = await self._authenticate(ws)
@@ -157,6 +162,9 @@ class GfsWebSocketView(web.View):
         # Remembered past this socket: an offline ring household gets no
         # offline copy of a channel item (it pulls from the ring).
         channel_ring = self.request.app[K.gfs_channel_ring_key]
+        if not ring:
+            # A v_96 socket replacing a ring socket: no heads memory left.
+            channel_ring.forget(instance_id)
         await self.request.app[K.gfs_channel_ring_repo_key].set_channel_ring(
             instance_id, ring
         )
@@ -207,7 +215,11 @@ class GfsWebSocketView(web.View):
                         frame = orjson.loads(msg.data)
                     except orjson.JSONDecodeError:
                         continue
-                    await channel_ring.on_frame(instance_id, frame)
+                    try:
+                        await channel_ring.on_frame(instance_id, frame)
+                    except Exception:
+                        # A ring frame never ends the household's socket.
+                        log.warning("gfs.ws: channel ring frame failed", exc_info=True)
                 elif msg.type == WSMsgType.TEXT:
                     log.debug(
                         "gfs.ws: ignored unexpected TEXT frame from %s (len=%d)",
@@ -232,7 +244,7 @@ class GfsWebSocketView(web.View):
             )
         finally:
             seen_timer.cancel()
-            if ring and registry.is_current(instance_id, ws):
+            if registry.is_current(instance_id, ws):
                 channel_ring.forget(instance_id)
             await registry.unregister(instance_id, ws)
             await fed_repo.upsert_rtc_connection(instance_id, transport="https")

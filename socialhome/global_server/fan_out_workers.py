@@ -132,6 +132,14 @@ class GfsFanOutWorkers:
         digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
         return int.from_bytes(digest, "big") % FAN_OUT_WORKERS
 
+    def has_room(self, key: str) -> bool:
+        """Whether :meth:`submit` would take an item for *key* now."""
+        if self._closing.is_set() or not self._tasks:
+            return False
+        if self._pending.get(key, 0) >= FAN_OUT_BACKLOG_PER_KEY:
+            return False
+        return not self._queues[self._worker_index(key)].full()
+
     def submit(
         self,
         key: str,

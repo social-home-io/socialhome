@@ -30,10 +30,12 @@ from socialhome.domain.gfs_channel import (
 from socialhome.domain.gfs_hello_accepts import ACCEPTS_CHANNEL_RING
 from socialhome.gfs_channel import sign_publish_anon
 from socialhome.global_server import channel_ring as ring_mod
+from socialhome.global_server import channels as channels_mod
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_channel_ring_key,
     gfs_channel_ring_repo_key,
+    gfs_fed_repo_key,
     gfs_ws_registry_key,
 )
 from tests.global_server.test_channels import (  # noqa: F401 — the fixture
@@ -204,7 +206,8 @@ async def test_heads_after_hello_and_then_only_when_moved(gfs) -> None:
     async with gfs.ws_connect("/gfs/ws") as ws:
         await ws.send_json(_ring_hello(gfs.member))
         heads = await _recv(ws)
-        assert heads["type"] == CHANNEL_HEADS_FRAME
+        while heads["type"] != CHANNEL_HEADS_FRAME:
+            heads = await _recv(ws)  # its queued copy from before
         ((head,),) = (heads["heads"],)
         assert head["channel_id"] == gfs.ch.id and head["head_seq"] == 1
         ring = gfs.app_[gfs_channel_ring_key]
@@ -262,11 +265,13 @@ async def _ring_socket(gfs, ws, h) -> None:
     await ws.send_json(_ring_hello(h))
     await _wait_connected(gfs.app_, h.instance_id)
     await asyncio.sleep(0.05)
-    # Drain the initial heads, if any.
-    try:
-        await asyncio.wait_for(ws.receive_json(), timeout=0.2)
-    except TimeoutError:
-        pass
+    # Drain what the hello brings: queued copies from before it read the
+    # ring (the drain is never watch-filtered) and the initial heads.
+    while True:
+        try:
+            await asyncio.wait_for(ws.receive_json(), timeout=0.2)
+        except TimeoutError:
+            return
 
 
 async def test_fetch_returns_what_followed_the_cursor(gfs) -> None:
@@ -449,3 +454,198 @@ async def test_the_ring_loop_stops_cleanly(gfs) -> None:
     await ring.start()
     await ring.stop()
     await ring.stop()
+
+
+# ── Review fixes ─────────────────────────────────────────────────────────
+
+
+async def test_an_expired_tail_ends_the_fetch(gfs) -> None:
+    """The newest item was ephemeral and expired: the page is empty, the
+    answer says ``more: false`` (move the cursor to the head) — never a
+    fetch loop."""
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    await _publish(gfs)
+    await _publish(gfs, ring_class=RING_CLASS_EPHEMERAL)
+    ring = gfs.app_[gfs_channel_ring_key]
+    base = time.time()
+    ring._clock = lambda: base + 16 * 60
+    await ring.sweep()
+    ring._clock = time.time
+    rid = (await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)).ring_id
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await _ring_socket(gfs, ws, gfs.member)
+        (done,) = await _fetch(ws, gfs.ch.id, 1, rid)
+    assert done["type"] == CHANNEL_FETCH_DONE_FRAME
+    assert (done["more"], done["head_seq"]) == (False, 2)
+
+
+async def test_two_copies_of_one_publish_are_stored_once(gfs) -> None:
+    await _ready(gfs)
+    body = _publish_body(gfs.ch)
+    first, second = await asyncio.gather(
+        gfs.post("/gfs/channels/publish-anon", json=body),
+        gfs.post("/gfs/channels/publish-anon", json=body),
+    )
+    assert sorted([first.status, second.status]) == [200, 403]
+    state = await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)
+    assert state.head_seq == 1
+
+
+async def test_push_all_has_its_own_small_budget(gfs) -> None:
+    await _ready(gfs)
+    for _ in range(channels_mod.CHANNEL_PUSH_ALL_MAX_PER_MINUTE):
+        await _publish(gfs, push_all=True)
+    resp = await gfs.post(
+        "/gfs/channels/publish-anon", json=_publish_body(gfs.ch, push_all=True)
+    )
+    assert resp.status == 429
+    # Ordinary items are not charged to it.
+    await _publish(gfs)
+
+
+async def test_watch_changes_are_rate_limited(gfs) -> None:
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    ring = gfs.app_[gfs_channel_ring_key]
+    ring._watch_limiter._limit = 1
+    registry = gfs.app_[gfs_ws_registry_key]
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await _ring_socket(gfs, ws, gfs.member)
+        await ws.send_json({"type": "channel_watch", "unwatch": [gfs.ch.id]})
+        await ws.send_json({"type": "channel_watch", "watch": [gfs.ch.id]})
+        await asyncio.sleep(0.2)
+        assert registry.watching(gfs.member.instance_id) == frozenset()
+
+
+async def test_the_ring_is_bounded_by_count(gfs, monkeypatch) -> None:
+    monkeypatch.setattr(ring_mod, "RING_MAX_ITEMS", 3)
+    await _ready(gfs)
+    for _ in range(5):
+        await _publish(gfs)
+    state = await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)
+    assert (state.oldest_seq, state.head_seq) == (3, 5)
+    assert await gfs.app_[gfs_channel_ring_repo_key].total_bytes() == 3 * len(CT)
+
+
+async def test_the_server_cap_cuts_the_biggest_rings_to_one_level(gfs) -> None:
+    """Fair eviction: the cut is shared — the biggest rings come down to a
+    common level, a ring below it is untouched, never one ring emptied."""
+    await _ready(gfs)
+    big = gfs.ch
+    for _ in range(6):
+        await _publish(gfs)
+    mid = _Channel()
+    gfs.ch = mid
+    await _ready(gfs)
+    for _ in range(4):
+        await _publish(gfs)
+    small = _Channel()
+    gfs.ch = small
+    await _ready(gfs)
+    await _publish(gfs)
+    repo = gfs.app_[gfs_channel_ring_repo_key]
+    # 11 items; cap 7 → 4 must go: big 6 → 3, mid 4 → 3, small untouched.
+    await repo.trim_to_cap(cap=7 * len(CT))
+    assert (await repo.state(big.id)).oldest_seq == 4
+    assert (await repo.state(mid.id)).oldest_seq == 2
+    assert (await repo.state(small.id)).oldest_seq == 1
+    assert await repo.total_bytes() <= 7 * len(CT)
+
+
+async def test_an_expired_ephemeral_item_is_no_gap(gfs) -> None:
+    """A cursor behind an expired location pin missed nothing durable."""
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    await _publish(gfs)
+    await _publish(gfs, ring_class=RING_CLASS_EPHEMERAL)
+    await _publish(gfs)
+    ring = gfs.app_[gfs_channel_ring_key]
+    base = time.time()
+    ring._clock = lambda: base + 16 * 60
+    await ring.sweep()
+    ring._clock = time.time
+    rid = (await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)).ring_id
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await _ring_socket(gfs, ws, gfs.member)
+        *items, done = await _fetch(ws, gfs.ch.id, 1, rid)
+    assert [f["seq"] for f in items] == [3]
+    assert done["type"] == CHANNEL_FETCH_DONE_FRAME
+
+
+async def test_an_expired_durable_item_is_a_gap(gfs) -> None:
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    await _publish(gfs)
+    ring = gfs.app_[gfs_channel_ring_key]
+    base = time.time()
+    ring._clock = lambda: base + 25 * 3600
+    await ring.sweep()
+    ring._clock = time.time
+    await _publish(gfs)
+    rid = (await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)).ring_id
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await _ring_socket(gfs, ws, gfs.member)
+        (gap,) = await _fetch(ws, gfs.ch.id, 0, rid)
+    assert gap["type"] == CHANNEL_GAP_FRAME
+
+
+async def test_a_banned_household_neither_fetches_nor_hears_heads(gfs) -> None:
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    await _publish(gfs)
+    rid = (await gfs.app_[gfs_channel_ring_repo_key].state(gfs.ch.id)).ring_id
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await _ring_socket(gfs, ws, gfs.member)
+        await gfs.app_[gfs_fed_repo_key].set_instance_status(
+            gfs.member.instance_id, "banned"
+        )
+        ring = gfs.app_[gfs_channel_ring_key]
+        await _publish(gfs)
+        assert await ring.send_heads(gfs.member.instance_id, initial=True) == 0
+        await ws.send_json(
+            {
+                "type": "channel_fetch",
+                "channel_id": gfs.ch.id,
+                "since_seq": 0,
+                "ring_id": rid,
+                "req": "r",
+            }
+        )
+        await _nothing(ws)
+
+
+async def test_queued_copies_reach_a_household_that_now_reads_the_ring(gfs) -> None:
+    """Copies queued while it was a v_96 household are delivered on its
+    ring hello (the drain is never watch-filtered)."""
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+    await _publish(gfs)
+    assert len(await _queued(gfs, gfs.member)) == 1
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await ws.send_json(_ring_hello(gfs.member))
+        got = [await _recv(ws), await _recv(ws)]
+    assert {f["type"] for f in got} == {"relay", CHANNEL_HEADS_FRAME}
+    assert await _queued(gfs, gfs.member) == []
+
+
+async def test_a_ring_frame_error_never_closes_the_socket(gfs, monkeypatch) -> None:
+    await _ready(gfs)
+    await _seat(gfs, gfs.member)
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(ring_mod.GfsChannelRing, "_fetch", boom)
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await _ring_socket(gfs, ws, gfs.member)
+        await ws.send_json(
+            {
+                "type": "channel_fetch",
+                "channel_id": gfs.ch.id,
+                "since_seq": 0,
+                "req": "r",
+            }
+        )
+        await asyncio.sleep(0.2)
+        assert not ws.closed

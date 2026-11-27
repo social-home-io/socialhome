@@ -66,6 +66,10 @@ class _FakeRegistry:
         self.sent.append((instance_id, payload))
         return True
 
+    async def send_direct(self, instance_id: str, payload: dict) -> bool:
+        # The drain's path (never watch-filtered); same fake behaviour.
+        return await self.send(instance_id, payload)
+
     def is_connected(self, instance_id: str) -> bool:
         return instance_id in self.online
 

@@ -155,6 +155,15 @@ CHANNEL_ANON_MAX_PER_MINUTE_PER_ADDRESS: int = CHANNEL_PUBLISH_MAX_PER_MINUTE //
 #: refused a busy household's chat; the floor makes it ~32/min cluster-wide.
 CHANNEL_ANON_PER_NODE_FLOOR: int = 8
 
+#: v_97 — ``push_all`` items one channel may publish per minute (cluster-wide,
+#: each node its share). They are the host's statements (roster, bans, roles,
+#: config, moderation outcomes): a handful a day in a busy space. Any writer
+#: can set the flag, so without a bound a member could make every item reach
+#: (and queue for) every seat again — the v_96 cost the ring removes.
+#: Worst case at the cap: 6 × 10 000 seats × ~2.7 KiB ≈ 160 MB/min for one
+#: channel, refused past it.
+CHANNEL_PUSH_ALL_MAX_PER_MINUTE: int = 6
+
 
 #: Live channel rows this server keeps at most — anonymous registration's
 #: server-wide bound (with the per-address limit and the unused-row TTL).
@@ -188,11 +197,6 @@ class ChannelEpochTooSoon(Exception):
         self.retry_after_s = retry_after_s
 
 
-def _open_epochs(ch: GfsChannel, *, now: int) -> set[int]:
-    """The epochs a pass / seat may carry right now."""
-    return ch.open_epochs(now=now)
-
-
 class GfsChannelService:
     """Register, pin, step and relay opaque channels (see module docstring)."""
 
@@ -207,6 +211,7 @@ class GfsChannelService:
         "_federation",
         "_max_channels",
         "_nodes",
+        "_push_all_limiter",
         "_register_limiter",
         "_ring",
         "_writer_key_limiter",
@@ -250,6 +255,7 @@ class GfsChannelService:
         self._anon_seen = SeenPayloadCache(ttl_s=float(2 * CHANNEL_TS_SKEW_S))
         #: v_97 — the channel rings; ``None`` keeps the v_96 behaviour.
         self._ring: GfsChannelRing | None = None
+        self._push_all_limiter = SlidingWindowCounter(CHANNEL_PUSH_ALL_MAX_PER_MINUTE)
 
     def attach_ring(self, ring: GfsChannelRing) -> None:
         """Wire the v_97 channel ring (capability ``channel_ring``)."""
@@ -273,6 +279,9 @@ class GfsChannelService:
         cluster at about L; a balancer that pins a client to one node makes
         it stricter, never looser (:func:`~.public.node_share`)."""
         nodes = self._nodes() if self._nodes is not None else 1
+        # The floor never above this node's share of the channel's own
+        # budget: on a big cluster one address cannot spend it all.
+        floor = min(floor, node_share(self._channel_limiter.limit, nodes))
         share = max(floor, node_share(counter.limit, nodes))
         return counter.allow(key, limit=min(share, counter.limit))
 
@@ -327,7 +336,7 @@ class GfsChannelService:
         fairness (fourth review G1), never a seated member."""
         ch = await self._channel(channel_id)
         if not await self._channels.list_targets(
-            channel_id, _open_epochs(ch, now=self._now())
+            channel_id, ch.open_epochs(now=self._now())
         ):
             raise PermissionError("channel not in use")
 
@@ -523,7 +532,7 @@ class GfsChannelService:
             raise PermissionError(f"pass refused: {exc}") from exc
         now = self._now()
         epoch = req.channel_pass.epoch
-        if epoch not in _open_epochs(ch, now=now):
+        if epoch not in ch.open_epochs(now=now):
             if ch.epoch is None or epoch > ch.epoch + 1:
                 # A valid pass AHEAD of the open epochs (the owner rotated
                 # again while its notice waits out the step bound, or the
@@ -564,7 +573,7 @@ class GfsChannelService:
         if ch is None:
             return []
         return await self._channels.list_targets(
-            channel_id, _open_epochs(ch, now=self._now())
+            channel_id, ch.open_epochs(now=self._now())
         )
 
     def _resolver(self, channel_id: str, *, push_all: bool = False):
@@ -572,7 +581,7 @@ class GfsChannelService:
             ch = await self._channels.get(channel_id)
             if ch is None:
                 return [], set()
-            epochs = _open_epochs(ch, now=self._now())
+            epochs = ch.open_epochs(now=self._now())
             targets = await self._channels.list_targets(channel_id, epochs)
             # v_97 — a household that reads the ring gets no offline copy
             # (it pulls), except of a ``push_all`` item every seat gets.
@@ -629,17 +638,30 @@ class GfsChannelService:
         digest = SeenPayloadCache.digest(req.to_wire())
         if self._anon_seen.seen(digest):
             raise PermissionError("replayed request")
+        # v_97 — recorded before the ring append awaits, so two copies of
+        # one request on this node can never both be stored and fanned out.
+        self._anon_seen.record(digest)
+        if req.push_all and not self._allow(self._push_all_limiter, req.channel_id):
+            # A ``push_all`` item reaches every seat and is queued offline
+            # for each: only the rare host statement needs it, so it has its
+            # own small budget per channel (any writer can set the flag).
+            raise ChannelRateLimited()
         # v_97 — into the channel's ring first: the frame carries its place
         # (``seq`` / ``ring_id``). Without a ring the v_96 frame; a ring
         # field from a household is never honoured by a server without one.
+        if not self._fan_out.has_room(f"ch:{req.channel_id}"):
+            # Refused before the append: no item stored that never goes out.
+            raise ChannelBusy()
         frame = (
             await self._ring.append(req)
             if self._ring is not None
             else req.fan_out_frame()
         )
         # No publisher to exclude: its own echo is dropped by the household.
+        # Room was checked before the append; a ``503`` here (the backlog
+        # filled meanwhile) leaves the item in the ring unpushed — receivers
+        # fetch it, and a retry's copy is dropped by its item id.
         self._submit(req.channel_id, "", frame)
-        self._anon_seen.record(digest)
         await self._channels.touch(req.channel_id, now=now)
 
 

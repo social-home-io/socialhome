@@ -504,6 +504,9 @@ class RingState:
     head_seq: int
     ring_id: str | None
     oldest_seq: int | None
+    #: The highest seq of a durable item the ring dropped (0: none) — a
+    #: cursor below it is a gap; an expired ephemeral item never is.
+    durable_floor: int = 0
 
 
 @dataclass(slots=True, frozen=True)

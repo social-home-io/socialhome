@@ -1439,7 +1439,9 @@ class GfsEnvelopeRelay:
                 frame = queued_relay_push(envelope.sealed)
             else:
                 frame = {"type": ENVELOPE_FRAME_TYPE, "sealed": envelope.sealed}
-            sent = await self._sockets(to_instance).send(to_instance, frame)
+            # Direct: a queued copy is delivered whatever the socket watches
+            # (a ring household's watch filter would otherwise eat it).
+            sent = await self._sockets(to_instance).send_direct(to_instance, frame)
             if not sent:
                 break
             await self._queue_repo.delete(envelope.id)

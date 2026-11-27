@@ -47,7 +47,7 @@ from typing import Any
 import orjson
 from aiohttp import web
 
-from ..domain.gfs_channel import MAX_WATCHED_CHANNELS as _MAX_WATCHED
+from ..domain.gfs_channel import MAX_WATCHED_CHANNELS
 from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.ws_binary_frame import encode_binary_frame
 from .fanout_stats import FanoutStats, frame_kind
@@ -104,10 +104,6 @@ def _write_buffer_size(ws: web.WebSocketResponse) -> int:
 def _dumps(payload: Any) -> bytes:
     """The JSON of every pushed frame (text frames and binary headers)."""
     return orjson.dumps(payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME)
-
-
-#: Channels one ring socket may watch at once (mirrors the wire bound).
-MAX_WATCHED_CHANNELS: int = _MAX_WATCHED
 
 
 class GfsWebSocketRegistry:
@@ -243,6 +239,8 @@ class GfsWebSocketRegistry:
             self._binary.clear()
             self._media_serve.clear()
             self._envelope_media.clear()
+            self._ring.clear()
+            self._watching.clear()
         for ws in sockets:
             if ws.closed:
                 continue
@@ -319,10 +317,18 @@ class GfsWebSocketRegistry:
         """A channel item a ring socket does not take live: it does not
         watch the channel and the item is not ``push_all`` — the ring holds
         it for the household's next fetch."""
-        if instance_id not in self._ring or payload.get("type") != "relay":
+        if (
+            instance_id not in self._ring
+            or instance_id not in self._by_instance
+            or payload.get("type") != "relay"
+        ):
             return False
         channel_id = payload.get("channel_id")
         if not isinstance(channel_id, str) or payload.get("push_all") is True:
+            return False
+        if "seq" not in payload or "ring_id" not in payload:
+            # Not from a ring (an older node in a mixed cluster, a channel
+            # that vanished mid-append): nothing to fetch it from later.
             return False
         return channel_id not in self._watching.get(instance_id, ())
 
@@ -518,3 +524,5 @@ class GfsWebSocketRegistry:
                 self._binary.discard(instance_id)
                 self._media_serve.discard(instance_id)
                 self._envelope_media.discard(instance_id)
+                self._ring.discard(instance_id)
+                self._watching.pop(instance_id, None)

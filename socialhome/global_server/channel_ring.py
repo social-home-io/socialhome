@@ -15,8 +15,11 @@ its hello:
   ``channel_gap`` when its cursor is no longer in the ring.
 
 Every watch and fetch needs a LIVE seat at an open epoch — the same seat a
-push goes to — so the ring tells a household nothing it would not be pushed.
-Nothing here learns a space: the ring is keyed by the random channel id.
+push goes to. A fresh seat may fetch what the ring still holds from before
+it joined (at most 24 h): it holds the content key for those epochs' items
+only if it was a member then, and the join catch-up gives it the history
+anyway. Nothing here learns a space: the ring is keyed by the random
+channel id. Heads name only channels whose ring has an item.
 
 Bounds (owner F1): :data:`RING_MAX_ITEMS` / :data:`RING_MAX_BYTES` per
 channel at insert, :data:`~socialhome.domain.gfs_channel.RING_DURABLE_TTL_S`
@@ -78,16 +81,14 @@ HEADS_PING_INTERVAL_S: float = 15 * 60.0
 SWEEP_INTERVAL_S: float = 60.0
 #: Fetches one socket may make per minute.
 FETCH_MAX_PER_MINUTE: int = 60
+#: Watch changes one socket may make per minute (each may name up to
+#: ``MAX_WATCHED_CHANNELS`` channels, one batched seat read).
+WATCH_MAX_PER_MINUTE: int = 30
 
 #: Frame types a ring socket may send.
 RING_CLIENT_FRAMES: frozenset[str] = frozenset(
     {CHANNEL_WATCH_FRAME, CHANNEL_FETCH_FRAME}
 )
-
-
-def _open_epochs(ch: GfsChannel, *, now: int) -> set[int]:
-    """The epochs a seat may hold to be served now (same rule as a push)."""
-    return ch.open_epochs(now=now)
 
 
 class GfsChannelRing:
@@ -101,6 +102,7 @@ class GfsChannelRing:
         "_ring",
         "_stop",
         "_task",
+        "_watch_limiter",
         "_ws",
     )
 
@@ -117,6 +119,7 @@ class GfsChannelRing:
         self._ws = ws_registry
         self._clock = clock
         self._fetch_limiter = SlidingWindowCounter(FETCH_MAX_PER_MINUTE)
+        self._watch_limiter = SlidingWindowCounter(WATCH_MAX_PER_MINUTE)
         #: What each ring socket was last told, per channel: ``(head, ring_id)``.
         self._last_heads: dict[str, dict[str, tuple[int, str]]] = {}
         self._stop = asyncio.Event()
@@ -157,7 +160,7 @@ class GfsChannelRing:
         ch = await self._channels.get(channel_id)
         if ch is None:
             return False
-        return pass_epoch in _open_epochs(ch, now=self._now())
+        return pass_epoch in ch.open_epochs(now=self._now())
 
     # ── Socket frames ────────────────────────────────────────────────────
 
@@ -175,7 +178,17 @@ class GfsChannelRing:
             log.debug("gfs.ring: malformed %s frame dropped: %s", kind, exc)
 
     async def _watch(self, instance_id: str, req: ChannelWatch) -> None:
-        allowed = [c for c in req.watch if await self.seated(c, instance_id)]
+        if not self._watch_limiter.allow(instance_id):
+            log.debug("gfs.ring: watch rate limit for a socket — dropped")
+            return
+        allowed: list[str] = []
+        if req.watch:
+            now = self._now()
+            seats = await self._ring.seat_epochs(instance_id, req.watch)
+            for channel_id, pass_epoch in seats.items():
+                ch = await self._channels.get(channel_id)
+                if ch is not None and pass_epoch in ch.open_epochs(now=now):
+                    allowed.append(channel_id)
         self._ws.set_watching(instance_id, add=allowed, remove=req.unwatch)
 
     async def _fetch(self, instance_id: str, req: ChannelFetch) -> None:
@@ -202,10 +215,12 @@ class GfsChannelRing:
         oldest = (
             state.oldest_seq if state.oldest_seq is not None else state.head_seq + 1
         )
+        # A gap only when a DURABLE item after the cursor is gone: missing
+        # an expired ephemeral item (a location pin) is no gap.
         if (
             req.ring_id != state.ring_id
             or req.since_seq > state.head_seq
-            or req.since_seq < oldest - 1
+            or req.since_seq < state.durable_floor
         ):
             await self._send(
                 instance_id,
@@ -237,6 +252,9 @@ class GfsChannelRing:
                 instance_id, {"type": RELAY_FRAME_TYPE, **frame}
             ):
                 return
+        # ``more`` only when the page was cut: an empty page under a head
+        # above the cursor means the tail expired (an ephemeral item) —
+        # ``more: false`` tells the household to move its cursor to the head.
         last = items[-1].seq if items else req.since_seq
         await self._send(
             instance_id,
@@ -246,7 +264,7 @@ class GfsChannelRing:
                 "req": req.req,
                 "head_seq": state.head_seq,
                 "ring_id": state.ring_id,
-                "more": last < state.head_seq,
+                "more": bool(items) and last < state.head_seq,
             },
         )
 
@@ -270,7 +288,7 @@ class GfsChannelRing:
             if channel_id not in channels:
                 channels[channel_id] = await self._channels.get(channel_id)
             ch = channels[channel_id]
-            if ch is None or pass_epoch not in _open_epochs(ch, now=now):
+            if ch is None or pass_epoch not in ch.open_epochs(now=now):
                 continue
             current[channel_id] = (head, ring_id)
             if last.get(channel_id) != (head, ring_id):
@@ -297,11 +315,10 @@ class GfsChannelRing:
             durable_before=now - RING_DURABLE_TTL_S,
             ephemeral_before=now - RING_EPHEMERAL_TTL_S,
         )
-        for _ in range(64):  # bounded per sweep
-            excess = await self._ring.total_bytes() - SERVER_MAX_BYTES
-            if excess <= 0:
-                break
-            if await self._ring.trim_largest(excess=excess) <= 0:
+        # Until the server is under its cap (each pass cuts the biggest rings
+        # to one level; bounded so a sweep always ends).
+        for _ in range(64):
+            if await self._ring.trim_to_cap(cap=SERVER_MAX_BYTES) <= 0:
                 break
         return expired
 

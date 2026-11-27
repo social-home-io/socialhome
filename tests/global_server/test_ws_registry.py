@@ -580,7 +580,15 @@ _CH = "a" * 32
 
 
 def _item(**extra) -> dict:
-    return {"type": "relay", "channel_id": _CH, "epoch": 1, "payload": "p", **extra}
+    return {
+        "type": "relay",
+        "channel_id": _CH,
+        "epoch": 1,
+        "payload": "p",
+        "seq": 1,
+        "ring_id": "0" * 16,
+        **extra,
+    }
 
 
 async def test_a_ring_socket_skips_unwatched_items_without_queueing(registry):
@@ -631,3 +639,21 @@ async def test_watching_is_bounded_and_dies_with_the_socket(registry, monkeypatc
     await registry.unregister("inst-1", ws2)
     assert registry.ring_instances() == []
     assert not registry.is_current("inst-1", ws2)
+
+
+async def test_an_item_from_no_ring_always_reaches_a_ring_socket(registry):
+    """A frame without a ring position (an older node in a mixed cluster)
+    can't be fetched later, so the watch filter never drops it."""
+    ws = _FakeWS()
+    await registry.register("inst-1", ws, ring=True)
+    plain = {"type": "relay", "channel_id": _CH, "epoch": 1, "payload": "p"}
+    assert await registry.send("inst-1", plain) is True
+    assert len(ws.sent) == 1
+
+
+async def test_a_closed_ring_socket_is_not_reported_delivered(registry):
+    ws = _FakeWS()
+    await registry.register("inst-1", ws, ring=True)
+    await registry.unregister("inst-1", ws)
+    assert await registry.send("inst-1", _item()) is False
+    assert registry.watching("inst-1") == frozenset()
