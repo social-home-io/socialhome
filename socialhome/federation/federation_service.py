@@ -139,6 +139,7 @@ from .gfs_relay_transport import (
 from .host_equivalence import acting_hosts, serves_as_host
 from .inbound_retry import InboundRetry
 from .inbound_validator import (
+    RESERVED_REPLAY_PREFIXES,
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
@@ -1014,8 +1015,6 @@ class FederationService:
             ),
             make_ban_check(federation_repo=self._federation_repo),
             make_persist_replay(federation_repo=self._federation_repo),
-            # v_97 (M10) — an item's legacy twin in the 14-day window.
-            make_claim_item_twin(note_replay_id=self.note_replay_id),
         ]
         # The post-decrypt gates (deprovisioned author, read-only
         # Follower) run LAST so the replay-id is recorded regardless — if
@@ -1221,6 +1220,11 @@ class FederationService:
                     pending=self._pending_seat_buffer if hold_for_seat else None,
                 ),
             )
+        # v_97 (M10) — an item's legacy twin in the 14-day window: on every
+        # door (the pipeline, a SPACE_ROUTED unwrap, a held event's replay),
+        # LAST — claimed only once every gate passed, so a twin held for a
+        # seat (or refused) never makes its item a "copy".
+        steps.append(make_claim_item_twin(note_replay_id=self.note_replay_id))
         return steps
 
     def space_write_gates(self, *, hold_for_seat: bool = True) -> list[InboundStep]:
@@ -2289,6 +2293,10 @@ class FederationService:
         ``"invite-bootstrap:<nonce>"``) so they can never collide with
         an envelope ``msg_id``.
         """
+        if not msg_id.startswith(RESERVED_REPLAY_PREFIXES):
+            # An envelope id can never collide with one of these (refused
+            # at parse); any other key could.
+            raise ValueError("replay id outside the reserved namespaces")
         if self._replay_cache.seen(msg_id, now=datetime.now(UTC)):
             return True
         await self._federation_repo.insert_replay_id(msg_id)

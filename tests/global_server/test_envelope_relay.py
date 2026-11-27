@@ -18,6 +18,7 @@ import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id
+from socialhome.domain.gfs_channel import RING_CLASS_FIELD
 from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server import ws_registry as ws_registry_mod
 from socialhome.global_server.domain import ClientInstance
@@ -1354,3 +1355,17 @@ async def test_a_ring_seat_that_does_not_watch_costs_no_send(wiring, monkeypatch
     )
     assert reached == 2
     assert [t for t, _p in registry.sent] == ["watcher"]
+
+
+async def test_a_v97_publishers_item_is_never_queued_per_seat(wiring):
+    """M6 — a frame marked ``ring_class`` (a v_97 publisher's item) waits
+    for no offline seat: a ring household fetches it from the ring, a v_96
+    one gets the publisher's legacy event."""
+    _fed, queue_repo, _registry, relay = wiring
+    target = "recipient2home2222222222222222aa"
+    await relay.fan_out_relay(
+        [target], queue_ok={target}, frame={**_item(), RING_CLASS_FIELD: "durable"}
+    )
+    assert await queue_repo.count_for(target) == 0
+    await relay.fan_out_relay([target], queue_ok={target}, frame=_item())
+    assert await queue_repo.count_for(target) == 1

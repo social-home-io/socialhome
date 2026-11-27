@@ -1168,12 +1168,14 @@ class SpaceService(
             return GfsJoinReadiness(gfs_space=False, connected=True)
         sources: list[frozenset[str] | None] = []
         if space is not None and channel_on(space):
+            # A GFS row: the owner's signed list decides (a directory of ours
+            # listing it elsewhere is no seat on one of ITS GFSs).
             sources.append(await self._owner_listed_gfs_ids(space_id))
-        # A directory listing makes it a GFS space even beside a row that
-        # says otherwise (a tier change not synced here yet).
+        # A directory listing makes it a GFS space beside a row that says
+        # otherwise (a tier change not synced here yet).
         listing = (
             await self._public_spaces.get(space_id)
-            if self._public_spaces is not None
+            if self._public_spaces is not None and not sources
             else None
         )
         if listing is not None:

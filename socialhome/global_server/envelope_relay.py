@@ -122,6 +122,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..domain.gfs_channel import RING_CLASS_FIELD
 from ..domain.gfs_mailbox import (
     ENVELOPE_MULTI_PATH,
     MAILBOX_REGISTER_ROUTE,
@@ -1260,7 +1261,12 @@ class GfsEnvelopeRelay:
                 live.append(target)
         results = await asyncio.gather(*(_push(t) for t in live))
         reached = skipped + sum(1 for ok in results if ok)
-        to_queue = [t for t in offline if t in queue_ok]
+        # v_97 — an item a v_97 household published (``ring_class``) is never
+        # queued per seat: a ring household fetches it from the ring, a v_96
+        # one gets the publisher's legacy event (M6).
+        to_queue = (
+            [] if RING_CLASS_FIELD in frame else [t for t in offline if t in queue_ok]
+        )
         if (
             audience is not None
             and self._fan_out is not None

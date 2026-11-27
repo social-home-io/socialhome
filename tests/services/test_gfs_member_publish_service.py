@@ -86,6 +86,8 @@ class _Certs:
         self.holder = holder
         self.scope: str | None = scope
         self.users: list[str] = [AUTHOR]
+        #: A household whose comment set includes a follower (v_96).
+        self.reader = False
 
     async def own_cert(self, space_id, epoch) -> WriterCert | None:
         if self.scope is None:
@@ -96,6 +98,7 @@ class _Certs:
             epoch=epoch,
             instance_pk=self.holder.pk,
             scope=self.scope,
+            reader=self.reader,
         )
         return bind_writer_users(cert, space_seed=SPACE_SEED, user_ids=self.users)
 
@@ -675,9 +678,10 @@ async def test_no_cert_or_too_weak_a_cert_seals_nothing(world):
     svc = await _sealing(world)
     certs = svc._writer_certs
     certs.scope = "comment"
+    # A post needs a write cert (M5: only the post-shaped types do).
     assert (
         await svc.seal_event_item(
-            SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+            SPACE_ID, FederationEventType.SPACE_POST_CREATED, {"space_id": SPACE_ID}
         )
         is None
     )
@@ -1071,3 +1075,21 @@ async def test_latest_only_state_keeps_its_event_on_the_mesh(
     on the mesh: never a queued SPACE_ITEM trail."""
     svc = await _sealing(world)
     assert await svc.seal_event_item(SPACE_ID, event_type, payload) is None
+
+
+async def test_a_reader_flagged_cert_seals_nothing_a_follower_may_not_send(world):
+    """REGRESSION (Fable round 2, M5): a member + follower household holds a
+    reader-flagged comment cert; every receiver drops a chat message under
+    it, so it is never sealed (its author is told) — a comment still is,
+    while the space lets followers comment."""
+    svc = await _sealing(world)
+    svc._writer_certs.scope = "comment"
+    svc._writer_certs.reader = True
+    assert (
+        await svc.seal_event_item(
+            SPACE_ID,
+            FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+            {"space_id": SPACE_ID},
+        )
+        is None
+    )

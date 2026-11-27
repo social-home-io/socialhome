@@ -7,6 +7,7 @@ checks and the dedupe.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import orjson
@@ -127,7 +128,8 @@ async def test_a_valid_item_becomes_its_event_from_the_origin():
     assert event.payload == {"space_id": "sp-1", "task_id": "t-1"}
     assert event.msg_id == ITEM_MSG_ID_PREFIX + "ab" * 16
     assert sink.claimed == {f"space-item:{ORIGIN}:{'ab' * 16}"}
-    assert certs.calls[0]["required_scope"] == "write"
+    # M5 — a task is judged by its own access level: a comment cert.
+    assert certs.calls[0]["required_scope"] == "comment"
     assert certs.calls[0]["author_pk"] == KP.public_key
 
 
@@ -359,16 +361,27 @@ async def test_a_space_item_from_anyone_but_its_origin_is_refused():
 
 
 async def test_epoch_freshness_is_asked_only_of_a_channel_item():
-    """M1 — a mesh ``SPACE_ITEM`` comes from its origin through the durable
-    per-household outbox, which may hold it past a rekey: its epoch need
-    not be fresh (the cert still binds household and epoch, and the roster
-    still decides). A channel item names no household: fresh epochs only."""
+    """M1 — a mesh space's ``SPACE_ITEM`` comes from its origin through the
+    durable per-household outbox, which may hold it past a rekey: its epoch
+    need not be fresh (the cert still binds household and epoch, and the
+    roster still decides). A channel item names no household, and a GFS
+    space's item (a mention note too) is a channel item: fresh only."""
     certs = _Certs()
     d = _dispatch(certs=certs)
     assert await d.apply(SPACE, epoch=1, item_type="space_task_created", inner=_inner())
     assert certs.calls[-1]["require_fresh"] is True
+    # A GFS space's mention note, from its origin: still fresh only.
     assert await d.apply(
         SPACE,
+        epoch=1,
+        item_type="space_task_created",
+        inner=_inner(item_id="ef" * 16),
+        sender=ORIGIN,
+    )
+    assert certs.calls[-1]["require_fresh"] is True
+    mesh = replace(SPACE, space_type=SpaceType.PRIVATE)
+    assert await d.apply(
+        mesh,
         epoch=1,
         item_type="space_task_created",
         inner=_inner(item_id="cd" * 16),

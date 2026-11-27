@@ -189,7 +189,8 @@ Both transports end in `SpacePublicInbound.handle_channel_item(space_id, epoch, 
    the grace) — a `SPACE_ITEM` its origin sent itself through the durable
    per-household outbox may be older (the outbox can hold it past a rekey
    while a member is offline; the cert still binds household and epoch, and
-   the roster still decides); `ts` is no more than 300 s ahead;
+   the roster still decides; a GFS space's items, a mention note included,
+   stay fresh-only); `ts` is no more than 300 s ahead;
 4. a `FederationEvent(event_type, from_instance=origin, space_id, payload=body)`
    is built and run through **the same post-decrypt gates** a federation
    envelope gets (`FederationService.space_write_gates()`: ban, deprovisioned
@@ -426,7 +427,13 @@ last pin, so nothing repeats there.
   payload): the receiver claims that item's replay key with it (the origin
   is the envelope's proven sender, so nobody claims another household's
   item) and applies whichever of the two comes first; the field is
-  stripped before any handler. A v_96 member's legacy event is unchanged.
+  stripped before any handler. The claim is the last of the shared write
+  gates — on every door (the inbox, a DataChannel, a `SPACE_ROUTED` unwrap,
+  a held event's replay) and only once every gate passed, so a copy held
+  for a seat never turns its item into a "copy". An envelope `msg_id` in a
+  replay namespace claimed outside the pipeline (`space-item:`,
+  `gfs-join:`, `invite-bootstrap:`) is refused at parse: nobody can claim
+  another household's item. A v_96 member's legacy event is unchanged.
   A v_97 household in a GFS space with no GFS connection to one of its
   GFSs gets the **Connect prompt** in the space (`GET /api/spaces/{id}`
   `gfs_connect_needed`): one row per listed GFS it isn't on (or one row
@@ -438,7 +445,9 @@ last pin, so nothing repeats there.
   household published (it signed a `ring_class`) with `ring_class`; a
   socket without `channel_ring` in its hello is not pushed such a frame —
   its household gets that publisher's legacy event instead (it could only
-  drop the v2 item). A v_96 publisher's items reach it as before.
+  drop the v2 item) — and such a frame is never queued for an offline
+  seat (a ring household fetches it from the ring). A v_96 publisher's
+  items reach it as before.
 - **Owner seat.** In a GFS space the owner household takes a seat like
   every member (it used to publish only).
 

@@ -506,10 +506,14 @@ class SpaceLocationOutbound:
         if _before(payload.get("updated_at"), start):
             payload = {**payload, "updated_at": start}
         self._last_sent[key] = (said, payload.get("updated_at"))
-        self._pinned[key] = time.monotonic() + KEEPALIVE_S - KEEPALIVE_TICK_S
+        due = time.monotonic() + KEEPALIVE_S - KEEPALIVE_TICK_S
         await self._broadcast_local(space_id, payload)
         if unchanged and not force:
+            # Nothing went out: the pin stays due when it was (a sharer at
+            # rest sends a same-place fix every minute).
+            self._pinned.setdefault(key, due)
             return
+        self._pinned[key] = due
         await self._fan_out_federation(space_id, payload)
 
     async def keepalive(self, *, now: float | None = None) -> int:
@@ -539,6 +543,9 @@ class SpaceLocationOutbound:
                 self._pinned.pop(key, None)
                 continue
             if fresh is _MESH:
+                # A mesh space keeps the last pin: nothing to repeat (a new
+                # position tracks it again).
+                self._pinned.pop(key, None)
                 continue
             assert isinstance(fresh, dict)
             # Same place: the same pin, "here since" kept. Moved: the new

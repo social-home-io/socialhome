@@ -48,6 +48,7 @@ from ..domain.space_item import (
     item_spec,
     item_stamp,
 )
+from ..services.gfs_channel_service import channel_on
 from ..services.space_item_author import (
     UnsupportedItemAuthorSigSuite,
     verify_signed_event_item,
@@ -207,8 +208,9 @@ class SpaceItemDispatch:
             # durable per-household outbox, which may hold it past a rekey
             # (an offline member): any epoch whose key we hold, the cert
             # still bound to it, the roster still deciding. A channel item
-            # names no household: a fresh epoch only.
-            require_fresh=sender is None,
+            # names no household, and a GFS space's items (a mention note
+            # too) are channel items: a fresh epoch only.
+            require_fresh=sender is None or channel_on(space),
         ):
             log.warning(
                 "space_item: writer cert refused for %s (%s) from %s in space %s",

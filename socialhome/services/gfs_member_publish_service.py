@@ -680,6 +680,15 @@ class GfsMemberPublishService:
                 )
             if cert is None or not scope_permits(cert.scope, needed):
                 return None
+            if cert.reader:
+                # A household whose comment set includes a follower holds a
+                # reader-flagged cert: receivers take only what a follower
+                # may send under it — never seal what everyone drops.
+                space = await self._spaces.get(space_id)
+                if space is None or not reader_cert_permits(
+                    cert, event_type.value, space.features
+                ):
+                    return None
             inner = build_signed_event_item(
                 item_type=event_type.value,
                 item_id=secrets.token_hex(16),

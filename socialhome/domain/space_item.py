@@ -40,6 +40,7 @@ Pure module — no I/O.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -375,13 +376,12 @@ def item_replay_key(origin_instance_id: str, item_id: str) -> str:
     return f"{ITEM_REPLAY_PREFIX}{origin_instance_id}:{item_id}"
 
 
+_ITEM_ID_RE = re.compile(r"[0-9a-f]{1,64}")
+
+
 def valid_item_id(value: object) -> str | None:
     """An item id as an origin mints it (hex, ≤ 64 chars), else ``None``."""
-    if not isinstance(value, str) or not 0 < len(value) <= 64:
-        return None
-    try:
-        int(value, 16)
-    except ValueError:
+    if not isinstance(value, str) or _ITEM_ID_RE.fullmatch(value) is None:
         return None
     return value
 

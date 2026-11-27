@@ -82,6 +82,7 @@ from ..domain.pairing_events import (
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
 from ..domain.space_item import (
+    ITEM_REPLAY_PREFIX,
     ITEM_SPECS,
     LEGACY_TWIN_FIELD,
     item_replay_key,
@@ -429,6 +430,19 @@ class _InboxInstance:
 # ─── Individual steps ────────────────────────────────────────────────────
 
 
+#: The replay-cache namespaces of ids claimed OUTSIDE the envelope pipeline
+#: (:meth:`FederationService.note_replay_id`): an item's ``(origin, id)``, a
+#: GFS join request's nonce, an invite bootstrap's nonce. The cache is keyed
+#: by the raw string, so an envelope ``msg_id`` in one of them is refused —
+#: otherwise any signed sender could claim another household's item (or its
+#: legacy twin) at a receiver before it arrives.
+RESERVED_REPLAY_PREFIXES: tuple[str, ...] = (
+    ITEM_REPLAY_PREFIX,
+    "gfs-join:",
+    "invite-bootstrap:",
+)
+
+
 def make_parse_json(*, loads) -> InboundStep:
     """Step 1: parse raw bytes → envelope dict."""
 
@@ -468,6 +482,8 @@ def make_parse_json(*, loads) -> InboundStep:
                 raise WrongTypeError(f"{str_field} must be a string")
         if not isinstance(ctx.envelope["signatures"], dict):
             raise WrongTypeError("signatures must be a dict keyed by algorithm")
+        if ctx.envelope["msg_id"].startswith(RESERVED_REPLAY_PREFIXES):
+            raise ValueError("msg_id in a reserved replay namespace")
 
         # Validate event_type early — reject unknown types before burning
         # CPU on instance lookup / crypto. Matches original §24.11 order.

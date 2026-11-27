@@ -7744,3 +7744,10 @@ async def test_a_narrowed_audience_is_never_the_whole_space():
     ((event_type, _p, kw),) = fed.calls
     assert event_type is FederationEventType.SPACE_ITEM
     assert kw["only_instances"] == ["a97"]
+
+
+async def test_note_replay_id_takes_only_reserved_namespaces():
+    """A key an envelope ``msg_id`` could also be is refused outright."""
+    svc = object.__new__(FederationService)
+    with pytest.raises(ValueError):
+        await FederationService.note_replay_id(svc, "plain-uuid-like-id")

@@ -110,6 +110,7 @@ from ..domain.space import (
     normalize_join_mode,
 )
 from ..domain.space_place import place_pin_of, place_pin_wire
+from ..federation.gfs_relay_transport import normalize_gfs_base
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..gfs_client_status import (
     CLIENT_STATUSES,
@@ -2621,11 +2622,11 @@ class GfsConnectionService:
         """v_97 — whether this household's active connection to the GFS at
         ``gfs_url`` (its base URL, as an invite link names it) proves
         ``channel_ring``."""
-        want = gfs_url.rstrip("/")
+        want = normalize_gfs_base(gfs_url)
         ids = {
             c.id
             for c in await self._repo.list_active()
-            if (c.inbox_url or "").rstrip("/") == want
+            if normalize_gfs_base(c.inbox_url or "") == want
         }
         return bool(ids) and await self.ring_connected(only=ids)
 

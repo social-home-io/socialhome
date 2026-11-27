@@ -1251,7 +1251,11 @@ async def test_the_space_writer_gate_is_a_step_in_the_shipped_pipeline():
         lookup_step=_noop_step,
     )
     names = [getattr(s, "__name__", "") for s in steps]
-    assert names[-2:] == ["check_space_archived", "check_space_writer"]
+    assert names[-3:] == [
+        "check_space_archived",
+        "check_space_writer",
+        "claim_item_twin",
+    ]
     assert names.index("persist_replay") < names.index("check_space_archived")
 
 
@@ -1266,7 +1270,12 @@ async def test_the_mesh_gate_set_carries_both_the_ban_and_writer_checks():
         getattr(s, "__name__", "")
         for s in owner.post_decrypt_gate_steps(include_ban_check=True)
     ]
-    assert names == ["ban_check", "check_space_archived", "check_space_writer"]
+    assert names == [
+        "ban_check",
+        "check_space_archived",
+        "check_space_writer",
+        "claim_item_twin",
+    ]
 
 
 async def _noop_step(ctx):
@@ -2920,3 +2929,28 @@ async def test_a_type_that_is_no_item_claims_nothing():
     )
     await step(ctx)
     assert replay.seen == set()
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "msg_id",
+    [
+        item_replay_key("origin-b", "ab" * 16),
+        "gfs-join:nonce",
+        "invite-bootstrap:nonce",
+    ],
+)
+async def test_an_envelope_id_in_a_reserved_replay_namespace_is_refused(msg_id):
+    """REGRESSION (Fable round 2): the replay cache is keyed by the raw
+    string, so an envelope whose ``msg_id`` is another household's item key
+    would make every receiver drop that item (and its legacy twin)."""
+    ctx = InboundContext(raw_body=orjson.dumps(_minimal_envelope(msg_id=msg_id)))
+    with pytest.raises(ValueError, match="reserved"):
+        await make_parse_json(loads=_loads)(ctx)
+
+
+def test_the_twin_claim_is_the_last_shared_gate():
+    """M10 — the twin claim runs on every door (pipeline, SPACE_ROUTED
+    unwrap, held-event replay) and only after every gate passed."""
+    steps = FederationService.space_write_gates(_StubPipelineOwner())
+    assert steps[-1].__name__ == "claim_item_twin"

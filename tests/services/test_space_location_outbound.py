@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+import socialhome.services.space_location_outbound as location_outbound_mod
 from socialhome.crypto import (
     derive_instance_id,
     derive_user_id,
@@ -1533,3 +1534,29 @@ async def test_a_remote_members_stop_takes_the_pin_off_open_maps(env):
         "user_id": "u-remote",
         "instance_id": "peer.home",
     }
+
+
+async def test_a_sharer_at_rest_still_repeats_every_window(env, monkeypatch):
+    """REGRESSION (Fable round 2): a same-place fix every minute sends
+    nothing, and must not push the pin's due time on — else a person at
+    rest is never repeated and drops off the map in a GFS space."""
+    await _sharing(env)
+    t0 = time.monotonic()
+    clock = {"t": t0}
+    monkeypatch.setattr(location_outbound_mod.time, "monotonic", lambda: clock["t"])
+    sent = 0
+    for minute in range(1, 61):
+        clock["t"] = t0 + minute * 60
+        await env.bus.publish(
+            PresenceUpdated(
+                username="alice",
+                state="zone",
+                zone_name="Office",
+                latitude=47.3769,
+                longitude=8.5417,
+                gps_accuracy_m=12.0,
+                updated_at="2026-04-27T12:00:00+00:00",
+            ),
+        )
+        sent += await env.outbound.keepalive()
+    assert sent >= 3

@@ -45,6 +45,7 @@ from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server import domain as gfs_domain
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
+    gfs_channel_ring_repo_key,
     gfs_envelope_queue_repo_key,
     gfs_fan_out_key,
     gfs_fed_repo_key,
@@ -2698,8 +2699,14 @@ async def test_the_durable_queue_delivers_one_attempt_through_the_channel(env):
     assert await env.other.svc.planned_gfs_ids(SPACE_ID) == ["conn-1"]
     outcome = await env.other.svc.deliver_item(_queued_row("conn-1"))
     assert outcome.kind == "delivered"
-    [frame] = [q.sealed for q in await _queued(env, env.member)]
-    assert frame["payload"] == "cXVldWVk"
+    # In the channel's ring — never queued per offline seat (M6: a ring
+    # household fetches it, a v_96 one gets the publisher's legacy event).
+    assert await _queued(env, env.member) == []
+    channel_id = env.owner.spaces.channels[SPACE_ID][0]
+    [item] = await env.app[gfs_channel_ring_repo_key].fetch(
+        channel_id, after_seq=0, max_items=10, max_bytes=1 << 20
+    )
+    assert item.payload == "cXVldWVk"
 
 
 async def test_the_durable_queue_hears_gone_for_a_server_that_no_longer_serves(env):
