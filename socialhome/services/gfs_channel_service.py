@@ -2375,6 +2375,18 @@ class GfsChannelService:
             # epoch's, or (a delegated admin whose own rekey is still going
             # out) the one before. Reading only: no seat is taken here.
             grant = await self._delegate_grant(space_id)
+            if grant is None:
+                # The OWNER holds no grant: it reads with the publish-only
+                # one it derives from its seed (the same channel offset).
+                # Without it, the owner never took an item from its own
+                # channel — every other household's content reached it only
+                # by the legacy event (v_97 review: posts after the window).
+                epoch = await self._crypto.get_current_epoch(space_id)
+                grant = (
+                    await self._publisher_grant(space_id, epoch)
+                    if epoch is not None
+                    else None
+                )
             if grant is None or grant.channel_id != item.channel_id:
                 continue
             content_epoch = item.epoch - grant.epoch_offset
