@@ -81,6 +81,10 @@ FAILED_SWEEP_INTERVAL: timedelta = timedelta(hours=1)
 MAX_QUEUED_AGE: timedelta = timedelta(seconds=RING_DURABLE_TTL_S // 2)
 MAX_QUEUED_AGE_EPHEMERAL: timedelta = timedelta(seconds=RING_EPHEMERAL_TTL_S // 2)
 
+#: The author of an item that names nobody: shown to the household's
+#: admins.
+NO_AUTHOR: str = ""
+
 #: One attempt to put ``row`` on ``row.gfs_id``.
 Sender = Callable[[QueuedSpaceItem], Awaitable[PublishOutcome]]
 #: The GFS ids a space's item goes to now; ``None`` when the space no longer
@@ -228,21 +232,37 @@ class SpaceItemOutbox:
 
     # ── The author's view ────────────────────────────────────────────────
 
-    async def unsent(self, space_id: str, author_user_id: str) -> list[UnsentItem]:
-        return await self._repo.list_failed(space_id, author_user_id)
+    @staticmethod
+    def _authors(user_id: str, admin: bool) -> list[str]:
+        """Whose failed items *user_id* sees: their own, and — for a
+        household admin — the ones that name nobody (an automation's, a
+        task delete's): no item is lost unseen."""
+        return [user_id, NO_AUTHOR] if admin and user_id else [user_id]
 
-    async def retry(self, space_id: str, author_user_id: str) -> int:
-        """Retry the author's failed items that kept their bytes, now."""
-        n = await self._repo.retry_failed(space_id, author_user_id, now=self._now())
+    async def unsent(
+        self, space_id: str, user_id: str, *, admin: bool = False
+    ) -> list[UnsentItem]:
+        out: list[UnsentItem] = []
+        for author in self._authors(user_id, admin):
+            out.extend(await self._repo.list_failed(space_id, author))
+        return out
+
+    async def retry(self, space_id: str, user_id: str, *, admin: bool = False) -> int:
+        """Retry the caller's failed items that kept their bytes, now."""
+        n = 0
+        for author in self._authors(user_id, admin):
+            n += await self._repo.retry_failed(space_id, author, now=self._now())
         if n:
             self._space_changed(space_id)
             self._wake.set()
-        await self._tell(space_id, author_user_id)
+        await self._tell(space_id, user_id)
         return n
 
-    async def discard(self, space_id: str, author_user_id: str) -> int:
-        n = await self._repo.discard_failed(space_id, author_user_id)
-        await self._tell(space_id, author_user_id)
+    async def discard(self, space_id: str, user_id: str, *, admin: bool = False) -> int:
+        n = 0
+        for author in self._authors(user_id, admin):
+            n += await self._repo.discard_failed(space_id, author)
+        await self._tell(space_id, user_id)
         return n
 
     async def waiting(self, space_id: str) -> int:
@@ -446,7 +466,15 @@ class SpaceItemOutbox:
             log.debug("space items: status refresh failed", exc_info=True)
 
     async def _tell(self, space_id: str, author_user_id: str) -> None:
-        if self._notify is None or not author_user_id:
+        """Tell the author; an item naming nobody goes to the household's
+        admins (the notifier maps :data:`NO_AUTHOR` to them)."""
+        if not author_user_id:
+            log.warning(
+                "space items: an unsent item of space %s names no author — the"
+                " household's admins are shown it",
+                space_id,
+            )
+        if self._notify is None:
             return
         try:
             await self._notify(space_id, author_user_id)

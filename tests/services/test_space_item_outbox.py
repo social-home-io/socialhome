@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -398,3 +399,21 @@ async def test_an_item_that_waited_too_long_is_shown_never_sent(db):
     [unsent] = await box.unsent("sp", "anna")
     assert (unsent.error, unsent.retryable) == ("too_old", False)
     assert told == [("sp", "anna")]
+
+
+async def test_an_item_naming_nobody_is_told_to_the_admins(db, caplog):
+    """Finding 9: an item with no named author still surfaces — logged at
+    WARNING and handed to the notifier with no author (the app sends it to
+    the household's admins)."""
+
+    caplog.set_level(logging.WARNING)
+    clock, gfs, told = _Clock(), _Gfs(), []
+    gfs.answers["g1"] = [PublishOutcome.permanent()]
+    box = _outbox(db, clock, gfs, told)
+    await _queue(box, "m", author="")
+    await box.run_once()
+    assert told == [("sp", "")]
+    assert any("names no author" in r.getMessage() for r in caplog.records)
+    assert await box.unsent("sp", "ben") == []
+    [item] = await box.unsent("sp", "admin", admin=True)
+    assert item.error == "refused"

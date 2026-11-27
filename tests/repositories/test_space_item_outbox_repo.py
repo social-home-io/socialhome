@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 
 import pytest
@@ -212,7 +213,6 @@ async def test_the_schema_refuses_a_pending_row_without_bytes(db):
 async def test_two_gfss_going_away_together_never_drop_the_last_copy(repo):
     """Finding 1: both rows answer ``gone`` in one pass (in parallel) — one
     copy must stay (planned afresh), never none."""
-    import asyncio
 
     await repo.add([_row("a", gfs_id="g1"), _row("a", gfs_id="g2")])
     outcomes = await asyncio.gather(

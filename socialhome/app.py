@@ -5208,9 +5208,16 @@ def create_app(config: Config | None = None) -> web.Application:
         )
 
         async def _tell_unsent(space_id: str, author_user_id: str) -> None:
-            await ws_manager.broadcast_to_user(
-                author_user_id, {"type": "space.unsent", "space_id": space_id}
+            # An item naming nobody is the household admins' to see.
+            users = (
+                [author_user_id]
+                if author_user_id
+                else [u.user_id for u in await user_repo.list_active() if u.is_admin]
             )
+            for user_id in users:
+                await ws_manager.broadcast_to_user(
+                    user_id, {"type": "space.unsent", "space_id": space_id}
+                )
 
         space_item_outbox.attach_notify(_tell_unsent)
         if (item_status := app.get(K.space_sync_status_key)) is not None:
