@@ -31,6 +31,17 @@ describe('ConfirmDialog', () => {
     expect(fn).toHaveBeenCalledOnce()
   })
 
+  it('a notice has one button and no cancel', () => {
+    const fn = vi.fn()
+    const { getByText, queryByText } = render(
+      <ConfirmDialog open={true} title="T" message="M" notice confirmLabel="OK"
+        onConfirm={fn} onCancel={() => {}} />
+    )
+    expect(queryByText('Cancel')).toBeNull()
+    fireEvent.click(getByText('OK'))
+    expect(fn).toHaveBeenCalled()
+  })
+
   it('calls onCancel when cancel clicked', () => {
     const fn = vi.fn()
     const { getByText } = render(

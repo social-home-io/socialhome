@@ -47,7 +47,7 @@ export async function askGfsConsent(
     await confirmDialog(t('gfs_join.consent.ask_admin', { name: spaceName }), {
       title: t('gfs_join.consent.title'),
       confirmLabel: t('gfs_join.consent.ok'),
-      cancelLabel: t('common.close'),
+      notice: true,
     })
     return false
   }

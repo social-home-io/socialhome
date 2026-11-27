@@ -30,6 +30,8 @@ interface ConfirmOpts {
   cancelLabel?: string
   /** When true, the confirm button uses the danger variant. */
   destructive?: boolean
+  /** A notice: only the confirm button (which then just closes it). */
+  notice?: boolean
 }
 
 interface PendingConfirm extends ConfirmOpts {
@@ -75,6 +77,7 @@ export function ConfirmDialogHost() {
       confirmLabel={p.confirmLabel}
       cancelLabel={p.cancelLabel}
       destructive={p.destructive}
+      notice={p.notice}
       onConfirm={() => close(true)}
       onCancel={() => close(false)}
     />

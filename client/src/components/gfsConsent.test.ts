@@ -51,6 +51,8 @@ describe('askGfsConsent', () => {
     confirm.mockResolvedValueOnce(true)
     expect(await askGfsConsent('sp', 'global', 'Choir')).toBe(false)
     expect(post).not.toHaveBeenCalled()
+    // A notice: one way out, no Cancel next to OK.
+    expect(confirm.mock.calls[0][1]).toMatchObject({ notice: true })
   })
 
   it('a failed preflight never blocks the join', async () => {
