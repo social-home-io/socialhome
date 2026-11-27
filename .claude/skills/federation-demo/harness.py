@@ -8944,9 +8944,9 @@ def cmd_gfs_big_file() -> None:
     s, up = _upload_file(
         f"{b_url}/api/media/upload",
         token=b["token"],
-        filename="noise.mkv",
+        filename="noise.webm",
         content=_make_noise_video(),
-        content_type="video/x-matroska",
+        content_type="video/webm",
         timeout=120.0,
     )
     up = _must("gfs-big-file: b uploads a noise video", s, up, ok=(200, 201))
