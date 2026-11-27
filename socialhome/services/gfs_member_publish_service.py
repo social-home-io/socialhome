@@ -45,8 +45,10 @@ import orjson
 
 from ..domain.federation import FederationEventType, GfsConnection
 from ..domain.federation_retention import supersede_key
+from ..domain.gfs_channel import RING_CLASS_DURABLE
 from ..domain.space import SpaceFeatures, SpaceType
 from ..domain.space_item import (
+    BUDGET_CONTENT,
     EVENT_ITEM_SIZE_BUCKETS,
     ITEM_SIZE_BUCKETS,
     ITEM_SPECS,
@@ -494,9 +496,14 @@ class GfsMemberPublishService:
         if not on_channel:
             return SealedItem(space_id=space_id, epoch=epoch, item=ct)
         spec = ITEM_SPECS[event_type.value]
+        # A location "off" must outlive the pin it removes: kept like any
+        # durable item (a household that fetches later still sees it) and
+        # never held behind the pin pacing.
+        off = payload.get("mode") == "off"
+        ring_class = RING_CLASS_DURABLE if off else spec.ring_class
         await self._budget.submit(
             space_id,
-            spec.budget,
+            BUDGET_CONTENT if off else spec.budget,
             str(
                 payload.get("user_id")
                 or payload.get("author_user_id")
@@ -504,7 +511,7 @@ class GfsMemberPublishService:
                 or ""
             ),
             functools.partial(
-                self._publish_channel_item, space_id, epoch, ct, spec.ring_class
+                self._publish_channel_item, space_id, epoch, ct, ring_class
             ),
         )
         wire = {"space_id": space_id, "epoch": epoch, "item": ct}
@@ -583,11 +590,14 @@ class GfsMemberPublishService:
 
     async def _in_legacy_window(self, space_id: str) -> bool:
         """v_97 (owner Q6 A) — for 14 days after this household first put a
-        space's change on its channel, the legacy event still goes to every
-        member; the start is kept in ``instance_config``."""
+        space's change on its CURRENT channel, the legacy event still goes
+        to every member; the start is kept in ``instance_config`` per
+        channel, so a space that left the GFS and came back (a fresh
+        channel) gets a fresh window."""
         if self._config is None:
             return False
-        key = LEGACY_WINDOW_KEY_PREFIX + space_id
+        stored = await self._spaces.get_gfs_channel(space_id)
+        key = f"{LEGACY_WINDOW_KEY_PREFIX}{space_id}:{stored[0] if stored else ''}"
         now = datetime.now(UTC)
         raw = await self._config.get(key)
         if raw is None:

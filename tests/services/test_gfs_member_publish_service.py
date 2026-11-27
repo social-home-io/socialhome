@@ -107,9 +107,13 @@ class _Certs:
 @dataclass
 class _Spaces:
     spaces: dict[str, Space] = field(default_factory=dict)
+    channels: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     async def get(self, space_id):
         return self.spaces.get(space_id)
+
+    async def get_gfs_channel(self, space_id):
+        return self.channels.get(space_id, ("c" * 32, "pk"))
 
 
 class _Conns:
@@ -770,14 +774,52 @@ async def test_a_gfs_space_change_goes_on_its_channel_with_its_ring_class(world)
     assert sealed.legacy_window
 
 
+@pytest.mark.security
+async def test_a_location_off_is_durable_and_never_held(world):
+    """The "off" must outlive the pin it removes: a household that fetches
+    later still sees it, so the pin never stays on its map."""
+    svc = await _gfs_space(world)
+    await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        {
+            "space_id": SPACE_ID,
+            "user_id": "anna",
+            "mode": "gps",
+            "lat": 1.0,
+            "lon": 2.0,
+        },
+    )
+    # Right after a pin: still goes at once (no pin pacing for an "off").
+    await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_LOCATION_UPDATED,
+        {"space_id": SPACE_ID, "user_id": "anna", "mode": "off"},
+    )
+    assert world["channels"].ring_classes == ["ephemeral", "durable"]
+
+
 async def test_the_legacy_window_closes_after_fourteen_days(world):
     svc = await _gfs_space(world)
     old = (datetime.now(UTC) - LEGACY_WINDOW - timedelta(seconds=1)).isoformat()
-    svc._config.data[LEGACY_WINDOW_KEY_PREFIX + SPACE_ID] = old
+    svc._config.data[f"{LEGACY_WINDOW_KEY_PREFIX}{SPACE_ID}:{'c' * 32}"] = old
     sealed = await svc.seal_event_item(
         SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
     )
     assert sealed.via_channel and not sealed.legacy_window
+
+
+async def test_a_fresh_channel_opens_a_fresh_legacy_window(world):
+    """private_gfs ON, OFF, ON again (a new channel): members without a
+    seat yet get the legacy event again for 14 days."""
+    svc = await _gfs_space(world)
+    old = (datetime.now(UTC) - LEGACY_WINDOW - timedelta(seconds=1)).isoformat()
+    svc._config.data[f"{LEGACY_WINDOW_KEY_PREFIX}{SPACE_ID}:{'c' * 32}"] = old
+    world["spaces"].channels[SPACE_ID] = ("d" * 32, "pk")
+    sealed = await svc.seal_event_item(
+        SPACE_ID, FederationEventType.SPACE_TASK_CREATED, {"space_id": SPACE_ID}
+    )
+    assert sealed.via_channel and sealed.legacy_window
 
 
 async def test_a_mention_notifies_the_mentioned_household_at_once(world):

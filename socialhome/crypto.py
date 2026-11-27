@@ -1069,17 +1069,6 @@ class ReplayCache:
         self._seen[msg_id] = current
         return False
 
-    def contains(self, msg_id: str, *, now: datetime | None = None) -> bool:
-        """Read-only :meth:`seen`: whether ``msg_id`` is inside the window,
-        recording nothing."""
-        current = now if now is not None else datetime.now(UTC)
-        stamp = self._seen.get(msg_id)
-        if stamp is None:
-            return False
-        if stamp.tzinfo is None:  # warmed from the table (naive UTC)
-            stamp = stamp.replace(tzinfo=UTC)
-        return stamp >= current - self._window
-
     def forget(self, msg_id: str) -> None:
         """Drop one id recorded by :meth:`seen` — for an envelope that then
         hit an internal error before its id was persisted, so the sender's

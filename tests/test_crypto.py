@@ -355,18 +355,6 @@ def test_replay_cache_seen_twice():
     assert rc.seen("x") is True
 
 
-def test_replay_cache_contains_reads_without_recording():
-    rc = ReplayCache(window=timedelta(hours=1))
-    assert rc.contains("x") is False
-    assert rc.seen("x") is False
-    assert rc.contains("x") is True
-    # Outside the window it is gone.
-    assert rc.contains("x", now=datetime.now(UTC) + timedelta(hours=2)) is False
-    # A row warmed from the table is naive UTC.
-    rc.load([("w", datetime.now(UTC).replace(tzinfo=None).isoformat())])
-    assert rc.contains("w") is True
-
-
 def test_replay_cache_different_ids_independent():
     """Seeing ID 'a' does not mark ID 'b' as seen."""
     rc = ReplayCache()

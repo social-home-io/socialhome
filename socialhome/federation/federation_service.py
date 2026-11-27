@@ -144,7 +144,6 @@ from .inbound_validator import (
     InboundPipeline,
     InboundStep,
     _InboxInstance,
-    charge_instance_budget,
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
@@ -1221,15 +1220,6 @@ class FederationService:
             )
         return steps
 
-    def item_budget_allows(self, origin: str) -> bool:
-        """v_97 — spend one unit of ``origin``'s per-household inbound budget
-        (§24.11 step 5a, the bucket its envelopes spend) for a space item:
-        an item is no cheaper a way in. Charged BEFORE the item's id is
-        claimed, so an item refused here is taken when it comes again."""
-        if self._inbound_limiter is None:
-            return True
-        return charge_instance_budget(self._inbound_limiter, origin, media=False)
-
     def space_write_gates(self, *, hold_for_seat: bool = True) -> list[InboundStep]:
         """The gates every space write that skipped the §24.11 pipeline
         runs before its handler — ban (the ORIGIN's), deprovisioned author,
@@ -2279,12 +2269,6 @@ class FederationService:
             within_hours=int(REPLAY_CACHE_WINDOW.total_seconds() // 3600),
         )
         self._replay_cache.load(entries)
-
-    def replay_id_seen(self, msg_id: str) -> bool:
-        """Whether ``msg_id`` was claimed inside the replay window — read
-        only, so a copy is refused before it spends any budget (§24.11: "a
-        replay is refused there, never charged")."""
-        return self._replay_cache.contains(msg_id, now=datetime.now(UTC))
 
     async def note_replay_id(self, msg_id: str) -> bool:
         """Check-and-insert one id against the shared replay cache.
@@ -4229,9 +4213,20 @@ class FederationService:
             if only_instances is None
             else [iid for iid in members if iid in only_instances]
         )
-        sealed = await self._item_sealer(
-            space_id, event_type, payload, whole_space=whole_space
-        )
+        try:
+            sealed = await self._item_sealer(
+                space_id, event_type, payload, whole_space=whole_space
+            )
+        except Exception:
+            # Never a change that reaches nobody: whatever the sealer hit,
+            # the legacy event goes to the whole audience.
+            log.warning(
+                "space item: sealing %s for space %s failed — the event goes as before",
+                event_type.value,
+                space_id,
+                exc_info=True,
+            )
+            return None
         if sealed is None:
             return None
         items_to: list[str] = []

@@ -2587,9 +2587,11 @@ async def test_a_channel_item_that_beats_its_rekey_lands_once_the_key_does(item_
 class _RecordingDispatch:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.senders: list = []
 
-    async def apply(self, space, *, epoch, item_type, inner) -> bool:
+    async def apply(self, space, *, epoch, item_type, inner, sender=None) -> bool:
         self.calls.append((space.id, epoch, item_type, inner))
+        self.senders.append(sender)
         return True
 
 
@@ -2605,6 +2607,8 @@ async def test_an_event_shaped_item_reaches_the_item_dispatch(item_env):
     assert got["body"] == {"task_id": "t"}
     # Nothing went down the v1 path.
     assert await item_env["post_repo"].get("post-1") is None
+    # A channel frame names no household: no sender to compare.
+    assert dispatch.senders == [None]
 
 
 async def test_an_event_shaped_item_without_a_dispatch_is_dropped(item_env):
@@ -2668,6 +2672,9 @@ async def test_space_item_and_mention_note_take_the_channel_door(item_env, event
     payload = {"space_id": "sp-1", "epoch": frame["epoch"], "item": frame["payload"]}
     await handler(_item_event(event_type, payload))
     assert [c[2] for c in dispatch.calls] == ["space_task_created"]
+    # The envelope's sender goes along: the receiver requires it to be the
+    # item's origin (nobody forwards another household's item).
+    assert dispatch.senders == ["peer"]
 
 
 @pytest.mark.parametrize(

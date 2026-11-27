@@ -897,6 +897,16 @@ async def test_the_owner_takes_its_own_seat(env):
     assert await repo.has_subscription(channel_id, owner_id)
 
 
+async def test_the_owner_is_seated_when_its_channel_opens(env):
+    """No rotation needed: the owner's host reads its GFS space from the
+    channel as soon as the channel is created, announced and handed out."""
+    channel_id = await _channel_ready(env)
+    await env.owner.svc.distribute(SPACE_ID)
+    assert await env.app[gfs_channel_repo_key].has_subscription(
+        channel_id, env.owner.h.instance_id
+    )
+
+
 async def test_ring_connections_name_the_channel_and_its_ring_servers(env):
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member)

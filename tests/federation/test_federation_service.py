@@ -621,15 +621,6 @@ async def test_note_replay_id_is_check_and_insert():
     assert await svc.note_replay_id("invite-bootstrap:n2") is False
 
 
-@pytest.mark.asyncio
-async def test_replay_id_seen_reads_without_claiming():
-    svc, _ = _make_service(federation_repo=InMemoryFederationRepo())
-    assert svc.replay_id_seen("space-item:o:x") is False
-    # Reading claimed nothing: the first claim still wins.
-    assert await svc.note_replay_id("space-item:o:x") is False
-    assert svc.replay_id_seen("space-item:o:x") is True
-
-
 # ─── send_event ───────────────────────────────────────────────────────────
 
 
@@ -7620,6 +7611,27 @@ async def test_v97_members_get_one_item_and_older_ones_the_event():
     assert legacy_call[2]["only_instances"] == ["b96"]
     assert legacy_call[2]["legacy_payload"] == {"old": 1}
     assert (result.attempted, result.succeeded) == (3, 3)
+
+
+async def test_a_sealer_that_raises_falls_back_to_the_event():
+    fed = _ItemFed(["a97"], {"a97"}, None)
+
+    async def boom(*a, **kw):
+        raise ValueError("unserialisable payload")
+
+    fed._item_sealer = boom
+    assert (
+        await fed._broadcast_as_item(
+            "sp",
+            FederationEventType.SPACE_TASK_CREATED,
+            {},
+            min_proto_version=None,
+            legacy_payload=None,
+            legacy_below=None,
+        )
+        is None
+    )
+    assert fed.calls == []
 
 
 async def test_without_a_seal_the_caller_sends_the_event_to_everyone():

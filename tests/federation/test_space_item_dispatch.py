@@ -60,20 +60,12 @@ class _Sink:
         self.events: list = []
         self.verdict = verdict
         self.claimed: set[str] = set()
-        self.budget = 10**6
-
-    def item_budget_allows(self, origin: str) -> bool:
-        self.budget -= 1
-        return self.budget >= 0
 
     async def note_replay_id(self, msg_id: str) -> bool:
         if msg_id in self.claimed:
             return True
         self.claimed.add(msg_id)
         return False
-
-    def replay_id_seen(self, msg_id: str) -> bool:
-        return msg_id in self.claimed
 
     async def dispatch_space_item(self, event) -> bool:
         self.events.append(event)
@@ -304,15 +296,23 @@ def test_parse_event_item_takes_only_v2_types():
     assert parse_event_item(b"not json") is None
 
 
-async def test_an_item_over_budget_keeps_no_trace_and_is_taken_later():
-    sink = _Sink()
-    sink.budget = 0
-    d = _dispatch(sink)
-    inner = _inner()
-    assert not await _apply(d, inner)
-    assert sink.claimed == set()
-    sink.budget = 10
-    assert await _apply(d, inner)
+@pytest.mark.security
+async def test_a_pin_is_never_accepted_long_after_it_was_made():
+    """A GFS holding a pin back can't bring it onto a map long after the
+    person moved on or stopped sharing — an "off" is kept as long as any."""
+    from socialhome.federation.space_item_dispatch import MAX_EPHEMERAL_ITEM_AGE_S
+
+    old = (
+        datetime.now(UTC) - timedelta(seconds=MAX_EPHEMERAL_ITEM_AGE_S + 60)
+    ).isoformat()
+    kind = "space_location_updated"
+    for body, ok in (
+        ({"space_id": "sp-1", "user_id": "u", "mode": "gps"}, False),
+        ({"space_id": "sp-1", "user_id": "u", "mode": "off"}, True),
+    ):
+        sink = _Sink()
+        inner = _inner(item_type=kind, ts=old, body=body)
+        assert await _apply(_dispatch(sink), inner, item_type=kind) is ok
 
 
 # ── Host statements are no space item (owner 2026-11-27, option A) ───────
@@ -342,14 +342,17 @@ async def test_a_host_statement_dressed_as_an_item_is_refused(item_type):
 
 
 @pytest.mark.security
-async def test_a_replayed_item_spends_no_budget():
-    """A copy is refused before the origin's budget is charged, so nobody
-    can drain a household's budget by re-sending one captured item."""
+async def test_a_space_item_from_anyone_but_its_origin_is_refused():
+    """A SPACE_ITEM comes from its origin only: a member can't forward
+    another household's (narrowed) item to the households its author left
+    out."""
     sink = _Sink()
     d = _dispatch(sink)
     inner = _inner()
-    assert await _apply(d, inner)
-    spent = sink.budget
-    for _ in range(50):
-        assert not await _apply(d, inner)
-    assert sink.budget == spent
+    assert not await d.apply(
+        SPACE, epoch=1, item_type="space_task_created", inner=inner, sender="relay"
+    )
+    assert sink.events == [] and sink.claimed == set()
+    assert await d.apply(
+        SPACE, epoch=1, item_type="space_task_created", inner=inner, sender=ORIGIN
+    )

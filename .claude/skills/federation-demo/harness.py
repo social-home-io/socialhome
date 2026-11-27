@@ -4649,6 +4649,29 @@ def cmd_gfs_space_bans() -> None:
     print(f"{step}: ok (person + household bans hold on link, follow and GFS paths)")
 
 
+def _view_space(label: str, space_id: str) -> None:
+    """v_97 — a person of ``label`` opens ``space_id``: the SPA's
+    ``space.viewing`` frame on the household WebSocket, so the household
+    watches the space's channel ring for the next ~2 minutes (live items
+    instead of a heads ping and a fetch on open)."""
+    import asyncio
+
+    import aiohttp
+
+    state = _load()
+    inst = state["instances"][label]
+    url = f"ws://127.0.0.1:{inst['port']}/api/ws?token={inst['token']}"
+
+    async def _run() -> None:
+        async with aiohttp.ClientSession() as http:
+            ws = await http.ws_connect(url)
+            await ws.send_json({"type": "space.viewing", "data": {"space_id": space_id}})
+            await asyncio.sleep(1.0)
+            await ws.close()
+
+    asyncio.run(_run())
+
+
 def cmd_gfs_global_channel() -> None:
     """v_96 (P3) — a GLOBAL space reaches its members and followers over the
     space's opaque channel, even with the host offline.
@@ -4773,16 +4796,19 @@ def cmd_gfs_global_channel() -> None:
             lambda r: bool(r) and r[0][0] == channel_id,
             what=f"{label} never took its channel grant",
         )
-    want = {b["instance_id"], e["instance_id"]}
-    seats = _poll_gfs_rows(
+    # v_97 (owner sign-off 3) — the owner a takes a seat like every member.
+    want = {a["instance_id"], b["instance_id"], e["instance_id"]}
+    _poll_gfs_rows(
         "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id = ?",
         (channel_id,),
         lambda r: want <= {x[0] for x in r},
-        what="b and e never both took their seats on the channel",
+        what="a, b and e never all took their seats on the channel",
     )
-    if a["instance_id"] in {x[0] for x in seats}:
-        raise SystemExit("gfs-global-channel: the owner a holds a seat")
-    print(f"  channel {channel_id[:8]}…: member b and follower e seated, a not ✓")
+    print(f"  channel {channel_id[:8]}…: owner a, member b and follower e seated ✓")
+    # v_97 — e has the space open, so its household watches the channel's
+    # ring and takes items live (a household that does not watch gets a
+    # heads ping and fetches on open).
+    _view_space("e", space_id)
 
     # 3. Host offline; b posts; e gets it over the channel, once. b's FIRST
     # post in the space also publishes b's author profile (v_60) on the
@@ -4885,8 +4911,9 @@ def cmd_gfs_global_channel() -> None:
     print("  a's catch-up added no channel copy; b never tried to reach e ✓")
 
     # 6. The owner's own post reaches e over the channel (Q4: it publishes
-    #    into its own channel, holding no seat).
+    #    into its own channel; since v_97 it also holds a seat).
     _wait_for_gfs_ws(a["instance_id"], timeout=120.0)
+    _view_space("e", space_id)
     e_off = _log_size("e")
     own = f"The owner posts into its own channel — {time.time_ns()}"
     st, apost = _request(
@@ -4907,7 +4934,7 @@ def cmd_gfs_global_channel() -> None:
         "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
     ):
         raise SystemExit("gfs-global-channel: a's own post never came over the channel")
-    print("  a's own post reached e over the channel (a holds no seat) ✓")
+    print("  a's own post reached e over the channel ✓")
 
     # 7. A member's photo reaches the follower through the GFS media cache,
     #    under the channel scope (``gfs-media-on-demand`` expires it later).

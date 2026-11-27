@@ -232,7 +232,9 @@ class SpacePublicInbound:
                 event.from_instance,
             )
             return
-        await self.handle_channel_item(space_id, epoch=epoch, payload=item)
+        await self.handle_channel_item(
+            space_id, epoch=epoch, payload=item, sender=event.from_instance
+        )
 
     def attach_item_dispatch(self, dispatch: SpaceItemDispatch) -> None:
         """Wire the v_97 event-shaped item receiver."""
@@ -297,7 +299,7 @@ class SpacePublicInbound:
         self._own_instance_id = own_instance_id
 
     async def handle_channel_item(
-        self, space_id: str, *, epoch: int, payload: str
+        self, space_id: str, *, epoch: int, payload: str, sender: str | None = None
     ) -> None:
         """An item relayed through a space's opaque channel (v_51 private,
         v_96 global) — the only GFS-borne space content this household
@@ -314,6 +316,9 @@ class SpacePublicInbound:
                 "event_type": SPACE_ITEM_EVENT_TYPE,
                 "epoch": epoch,
                 "payload": payload,
+                # v_97 — the household a SPACE_ITEM envelope came from (never
+                # set for a channel frame, which names no household).
+                "sender": sender,
             }
         )
 
@@ -582,7 +587,11 @@ class SpacePublicInbound:
             # host's own write still land) and the event's own handler.
             if self._item_dispatch is not None:
                 await self._item_dispatch.apply(
-                    space, epoch=epoch, item_type=event_item[0], inner=event_item[1]
+                    space,
+                    epoch=epoch,
+                    item_type=event_item[0],
+                    inner=event_item[1],
+                    sender=frame.get("sender"),
                 )
             return
         if archive_refusal(space, "") is not None:

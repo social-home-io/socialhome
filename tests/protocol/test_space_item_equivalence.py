@@ -45,13 +45,11 @@ from socialhome.domain.space import (
 from socialhome.domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
-    INSTANCE_INBOUND_LIMIT,
     InboundContext,
     make_ban_check,
     run_post_decrypt_gates,
 )
 from socialhome.federation.space_item_dispatch import SpaceItemDispatch
-from socialhome.rate_limiter import RateLimiter
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
@@ -91,8 +89,6 @@ class _Fed:
     space_write_gates = FederationService.space_write_gates
     dispatch_space_item = FederationService.dispatch_space_item
     note_replay_id = FederationService.note_replay_id
-    replay_id_seen = FederationService.replay_id_seen
-    item_budget_allows = FederationService.item_budget_allows
     warm_replay_cache = FederationService.warm_replay_cache
 
     def __init__(self, federation_repo, space_repo, members) -> None:
@@ -418,24 +414,3 @@ async def test_a_follower_reaction_passes_both_ways_only_while_allowed(world):
         False,
         False,
     )
-
-
-async def test_the_origin_spends_its_own_inbound_budget(world):
-    """An item spends the origin's per-household budget (the bucket its
-    envelopes spend); another origin is not affected; refused over budget,
-    the same item is taken once there is room again."""
-    fed, dispatch, spaces, members = world
-    fed._inbound_limiter = RateLimiter()
-    a, b = _Household("u-a"), _Household("u-b")
-    for who in (a, b):
-        await _seat(members, who, SpaceRole.MEMBER.value)
-    space = await spaces.get(SPACE_ID)
-    for _ in range(INSTANCE_INBOUND_LIMIT):
-        assert fed.item_budget_allows(a.id)
-    inner = _item(E.SPACE_TASK_CREATED, a, _cert(a, WRITER_SCOPE_WRITE))
-    kind = E.SPACE_TASK_CREATED.value
-    assert not await dispatch.apply(space, epoch=EPOCH, item_type=kind, inner=inner)
-    other = _item(E.SPACE_TASK_CREATED, b, _cert(b, WRITER_SCOPE_WRITE))
-    assert await dispatch.apply(space, epoch=EPOCH, item_type=kind, inner=other)
-    fed._inbound_limiter = RateLimiter()
-    assert await dispatch.apply(space, epoch=EPOCH, item_type=kind, inner=inner)

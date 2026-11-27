@@ -177,10 +177,13 @@ Both transports end in `SpacePublicInbound.handle_channel_item(space_id, epoch, 
 2. parse; a v1 shape goes to the existing v1 path unchanged;
 3. a v2 inner: drop our own echo; the type must be in `ITEM_SPECS` (no
    host statement is); the signed `space_id` must be this space; `origin` derives
-   from `author_pk`; the author signature verifies; a seen `item_id` is
-   dropped here, before the origin's inbound budget is charged (an item
-   reaches us from several GFSs and from the ring after a live push; a
-   replay never drains a budget); the writer cert verifies
+   from `author_pk`; a `SPACE_ITEM` must come from its origin (nobody
+   forwards another household's item); the author signature verifies; a
+   seen `item_id` is dropped (an item reaches us from several GFSs and from
+   the ring after a live push). No budget of its own: a channel item spent
+   the channel's inbound budget (refused there, it is not taken and comes
+   again on the next fetch), a `SPACE_ITEM` its envelope's — the origin's;
+   the writer cert verifies
    for this space, the item's epoch (fresh: newest or previous within the
    grace), `author_pk` and the spec's scope; `ts` is no more than 300 s
    ahead;

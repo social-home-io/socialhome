@@ -37,8 +37,13 @@ from typing import TYPE_CHECKING, Protocol
 import orjson
 
 from ..domain.federation import FederationEvent, FederationEventType
-from ..domain.gfs_channel import RING_DURABLE_TTL_S
+from ..domain.gfs_channel import (
+    RING_CLASS_EPHEMERAL,
+    RING_DURABLE_TTL_S,
+    RING_EPHEMERAL_TTL_S,
+)
 from ..domain.space_item import (
+    ItemSpec,
     item_spec,
     item_stamp,
 )
@@ -58,6 +63,19 @@ log = logging.getLogger(__name__)
 #: durable replay cache keeps a claimed id longer (asserted in the tests),
 #: so every item still accepted is one whose copies are refused.
 MAX_ITEM_AGE_S: int = RING_DURABLE_TTL_S
+#: An ``ephemeral`` item (a live location pin) is never older than its
+#: ring life plus clock skew: nobody (a GFS holding it back) can bring a pin
+#: back long after the person moved on or stopped sharing.
+MAX_EPHEMERAL_ITEM_AGE_S: int = RING_EPHEMERAL_TTL_S + 300
+
+
+def max_item_age_s(spec: ItemSpec, body: dict) -> int:
+    """How old ``body``'s item may be: an ephemeral one only minutes, but a
+    location "off" (which rides the ring as ``durable``) as long as any."""
+    if spec.ring_class == RING_CLASS_EPHEMERAL and body.get("mode") != "off":
+        return MAX_EPHEMERAL_ITEM_AGE_S
+    return MAX_ITEM_AGE_S
+
 
 #: The replay-cache namespace of a claimed item.
 ITEM_REPLAY_PREFIX: str = "space-item:"
@@ -70,10 +88,6 @@ class _ItemSink(Protocol):
     async def dispatch_space_item(self, event: FederationEvent) -> bool: ...
 
     async def note_replay_id(self, msg_id: str) -> bool: ...
-
-    def replay_id_seen(self, msg_id: str) -> bool: ...
-
-    def item_budget_allows(self, origin: str) -> bool: ...
 
 
 def parse_event_item(plaintext: bytes) -> tuple[str, dict] | None:
@@ -116,7 +130,13 @@ class SpaceItemDispatch:
     # ── Apply ────────────────────────────────────────────────────────────
 
     async def apply(
-        self, space: Space, *, epoch: int, item_type: str, inner: dict
+        self,
+        space: Space,
+        *,
+        epoch: int,
+        item_type: str,
+        inner: dict,
+        sender: str | None = None,
     ) -> bool:
         """Verify an event-shaped person item of ``space`` sealed at
         ``epoch`` and dispatch it. ``True`` when its handler ran; ``False``
@@ -131,6 +151,17 @@ class SpaceItemDispatch:
         origin = str(inner.get("origin_instance_id") or "")
         if origin and origin == self._own_instance_id:
             return False  # our own echo off the channel
+        if sender is not None and sender != origin:
+            # A ``SPACE_ITEM`` comes from its origin only: nobody forwards
+            # another household's item (a narrowed one would otherwise
+            # reach the households its author left out).
+            log.warning(
+                "space_item: %s sent by %s, not its origin %s — dropped",
+                item_type,
+                sender,
+                origin,
+            )
+            return False
         try:
             signed = verify_signed_event_item(inner)
         except UnsupportedItemAuthorSigSuite as exc:
@@ -160,7 +191,7 @@ class SpaceItemDispatch:
         ts = str(inner["ts"])
         stamp = item_stamp(ts)
         if stamp is None or stamp < datetime.now(UTC) - timedelta(
-            seconds=MAX_ITEM_AGE_S
+            seconds=max_item_age_s(spec, body)
         ):
             log.warning(
                 "space_item: %s has a bad, future or too old stamp — dropped", item_id
@@ -183,25 +214,12 @@ class SpaceItemDispatch:
                 space.id,
             )
             return False
-        # A copy is refused before it spends anything (a replayed item must
-        # never drain the origin's budget). Then the origin's inbound
-        # budget, before the claim: an item refused there keeps no trace and
-        # is taken when it comes again (a ring re-fetch, another GFS).
-        replay_key = f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
-        if self._federation.replay_id_seen(replay_key):
-            log.debug("space_item: %s from %s seen before — dropped", item_id, origin)
-            return False
-        if not self._federation.item_budget_allows(origin):
-            log.warning(
-                "space_item: %s from %s dropped — over its inbound budget",
-                item_id,
-                origin,
-            )
-            return False
         # Claimed only now — after the signature and the cert — so nobody
-        # but the origin can spend an id, and atomically against the copy
-        # arriving on another socket (the check-and-insert has no await
-        # before the in-memory mark).
+        # but the origin can spend an id. No budget is charged here: a
+        # channel item already spent the channel's inbound budget (refused
+        # there, it is not taken and comes again on the next fetch), and a
+        # SPACE_ITEM envelope spent its sender's — which is the origin.
+        replay_key = f"{ITEM_REPLAY_PREFIX}{origin}:{item_id}"
         if await self._federation.note_replay_id(replay_key):
             log.debug("space_item: %s from %s seen before — dropped", item_id, origin)
             return False

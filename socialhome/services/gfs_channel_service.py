@@ -1003,6 +1003,15 @@ class GfsChannelService:
         grant (v_51 peers only) — after a channel was created outside a
         rotation. ``also`` names a household whose ``space_instances`` row
         may not have landed yet (the seat that triggered the creation)."""
+        # v_97 (owner sign-off 3) — the owner reads its GFS space from the
+        # channel like every member: its seat, right after the notice that
+        # opened the channel (a rotation seats it in ``on_rotation``).
+        space = await self._spaces.get(space_id)
+        if space is not None and space.owner_instance_id == self._own_instance_id:
+            try:
+                await self.subscribe(space_id)
+            except Exception:
+                log.exception("gfs.channel: the owner's seat failed")
         sender = getattr(self._space_service, "send_roster_snapshot", None)
         if sender is None:
             return 0
