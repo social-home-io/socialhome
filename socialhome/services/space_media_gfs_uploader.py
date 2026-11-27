@@ -69,7 +69,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiofiles
 import aiofiles.os
@@ -138,6 +138,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+class _DescribeFetcher(Protocol):
+    async def ensure_local(self, filename: str, *, timeout_s: float) -> bool: ...
+
+    def fetching(self, filename: str) -> bool: ...
+
+
 #: Files described per item: the largest descriptor any item carries (a
 #: page version with its open sides; a post shows ≤ 10 pictures + a file +
 #: a card).
@@ -166,6 +173,14 @@ MAX_DESCRIBED: int = 16_384
 #: v_97 — lazy catch-up streams describing (sealing) at once on this
 #: household; the rest wait their turn (one worker thread each).
 MAX_DESCRIBING_STREAMS: int = 2
+
+#: v_97 — a file this household holds only as a GFS descriptor (never
+#: fetched: a video or file nobody viewed here) is fetched before it is
+#: described again — at most this many such fetches per space at once (the
+#: rest wait), each waited for at most :data:`DESCRIBE_FETCH_WAIT_S` (the
+#: fetch goes on in the background). Owner 2026-11-27: no loss.
+MAX_DESCRIBE_FETCHES_PER_SPACE: int = 2
+DESCRIBE_FETCH_WAIT_S: float = 20.0
 
 _STATUS_STORED = frozenset({200, 201})
 
@@ -331,6 +346,10 @@ class SpaceMediaPlan:
     #: v_97 — described only, never uploaded (a catch-up's older files:
     #: a reader fetches on view, a miss on demand from a holder, v_83).
     lazy: bool = False
+    #: v_97 — files still on their way here from the GFS (held only as a
+    #: descriptor, fetch running): not described yet. A catch-up holds such
+    #: a record back for its next stream.
+    pending: tuple[str, ...] = ()
 
     def wire(self) -> dict[str, dict]:
         """The ``media_refs`` descriptor."""
@@ -348,6 +367,8 @@ class SpaceMediaGfsUploader:
         "_dir",
         "_federation",
         "_federation_repo",
+        "_fetcher",
+        "_fetching",
         "_gfs",
         "_legacy_window",
         "_manifests",
@@ -401,9 +422,19 @@ class SpaceMediaGfsUploader:
         #: v_97 — caps the lazy catch-up sealing at once
         #: (:data:`MAX_DESCRIBING_STREAMS`).
         self._describing = asyncio.Semaphore(MAX_DESCRIBING_STREAMS)
+        #: v_97 — fetches a file before describing it (:meth:`attach_fetcher`)
+        #: and their per-space cap.
+        self._fetcher: _DescribeFetcher | None = None
+        self._fetching: dict[str, asyncio.Semaphore] = {}
 
     def attach_federation(self, federation: FederationService) -> None:
         self._federation = federation
+
+    def attach_fetcher(self, fetcher: _DescribeFetcher) -> None:
+        """Wire the GFS space media fetcher: a file this household holds
+        only as a descriptor is fetched before it is described again (a
+        host releasing an approved item, a catch-up, a re-sent held item)."""
+        self._fetcher = fetcher
 
     def attach_outbox(self, outbox: SpaceItemOutbox) -> None:
         """v_97 — the durable queue uploads wait in (one row per blob or
@@ -642,14 +673,19 @@ class SpaceMediaGfsUploader:
         pieces on demand, as it would an upload). At most
         :data:`MAX_DESCRIBING_STREAMS` describe at once (each seals in one
         worker thread); the rest wait."""
+        pending: list[str] = []
         async with self._describing:
             refs = await self._describe_names(
-                space_id, names, item_id, pieces=MAX_PIECED_FILE_BYTES
+                space_id, names, item_id, pieces=MAX_PIECED_FILE_BYTES, pending=pending
             )
-        if not refs:
+        if not refs and not pending:
             return None
         return SpaceMediaPlan(
-            space_id=space_id, refs=tuple(refs), targets=(), lazy=True
+            space_id=space_id,
+            refs=tuple(refs),
+            targets=(),
+            lazy=True,
+            pending=tuple(pending),
         )
 
     async def _plan(
@@ -719,6 +755,7 @@ class SpaceMediaGfsUploader:
         scoped: tuple[str, str] | None = None,
         pieces: int = 0,
         author: str = "",
+        pending: list[str] | None = None,
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
         household — the household a reader authenticates as delivering the
@@ -727,7 +764,9 @@ class SpaceMediaGfsUploader:
         never seal — only entries described before (every uploaded blob
         was). ``pieces``: a GFS of the plan keeps pieces, so a file over one
         blob is described in pieces (v_97); otherwise — or past 200 MiB — it
-        is not described and *author* is told."""
+        is not described and *author* is told. A file held here only as
+        a GFS descriptor is fetched first (:meth:`_fetch_first`); one still
+        on its way is added to *pending*."""
         origin = self._federation.own_instance_id if self._federation else ""
         if not origin or not item_id:
             return []
@@ -745,6 +784,10 @@ class SpaceMediaGfsUploader:
             if not await self._space_file(space_id, name):
                 continue
             stamp = await self._stamp(name)
+            if stamp is None and not cached_only:
+                stamp = await self._fetch_first(space_id, name)
+                if stamp is None and pending is not None and self._still_fetching(name):
+                    pending.append(name)
             if stamp is None:
                 continue
             cache_key = (space_id, epoch, scope, scope_id, item_id, name, *stamp)
@@ -991,6 +1034,26 @@ class SpaceMediaGfsUploader:
         if is_reserved_media_name(name):
             return False
         return await self._media_refs.confined_to_space(name, space_id)
+
+    async def _fetch_first(self, space_id: str, name: str) -> tuple[int, int] | None:
+        """``(size, mtime_ns)`` of *name* once fetched from the GFS — a file
+        this household holds only as a descriptor (v_97, owner: no loss).
+        At most :data:`MAX_DESCRIBE_FETCHES_PER_SPACE` per space at once,
+        each waited for at most :data:`DESCRIBE_FETCH_WAIT_S`; ``None``
+        when it is not here by then (or no GFS holds it)."""
+        if self._fetcher is None:
+            return None
+        gate = self._fetching.setdefault(
+            space_id, asyncio.Semaphore(MAX_DESCRIBE_FETCHES_PER_SPACE)
+        )
+        async with gate:
+            got = await self._fetcher.ensure_local(
+                name, timeout_s=DESCRIBE_FETCH_WAIT_S
+            )
+        return await self._stamp(name) if got else None
+
+    def _still_fetching(self, name: str) -> bool:
+        return self._fetcher is not None and self._fetcher.fetching(name)
 
     async def _stamp(self, name: str) -> tuple[int, int] | None:
         """``(size, mtime_ns)`` of a local media file, or ``None``."""

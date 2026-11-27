@@ -2024,6 +2024,8 @@ async def test_a_member_household_streams_only_its_own_peoples_content(
 
 
 class _ReaderPlan:
+    pending: tuple[str, ...] = ()
+
     def __init__(self, urls):
         self.urls = list(urls)
 
@@ -2702,6 +2704,41 @@ async def test_a_paired_v97_requester_of_a_gfs_space_gets_every_descriptor(encod
     assert "media_refs" in posts["p-1"]
     assert uploader.stored_asks == []
     assert len(uploader.uploaded) >= 1
+
+
+async def test_a_record_whose_file_is_still_on_its_way_waits_for_the_next_stream(
+    encoder,
+):
+    """v_97 (owner: no loss) — a file the provider holds only as a GFS
+    descriptor is fetched before it is described; while that fetch runs, a
+    cache-only reader never gets the record without a descriptor (it would
+    ask for the file): the record is held back and the stream is not clean,
+    so the watermark stays and the next stream sends it, described."""
+
+    class _Pending(_ReaderPlan):
+        lazy = True
+        pending = ("a.webp",)
+
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-b"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        return _Pending(urls) if item_id == "p-1" else _ReaderPlan(urls)
+
+    uploader.plan_for_reader = plan_for_reader
+    svc = _media_provider(encoder, uploader)
+    svc._exporters["posts"] = _FakeExporter(
+        "posts",
+        [
+            {"id": "p-1", "author": "u-1", "image_urls": ["api/media/a.webp"]},
+            {"id": "p-2", "author": "u-1", "image_urls": ["api/media/b.webp"]},
+        ],
+    )
+    session = _FakeSession(requester="peer-b")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    assert [r["id"] for r in _streamed_records(session, "posts")] == ["p-2"]
+    assert session.stream_clean is False
 
 
 async def test_a_bazaar_record_is_described_for_its_wrapper_post(encoder):

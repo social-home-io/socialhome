@@ -1595,3 +1595,27 @@ async def test_part_directories_stay_under_their_cap(tmp_path, monkeypatch):
     await _recv_pieced(f, wire)
     assert await f.ensure_local(_sc("v.webm", data), timeout_s=30) is True
     assert not old.exists()
+
+
+async def test_the_host_prefetches_every_file_of_a_held_submission(tmp_path):
+    """v_97 — ``prefetch_all`` (the space's host keeping a submission it
+    will release) fetches a file in pieces too, which a plain keep never
+    prefetches; ``fetching`` tells a fetch still running."""
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    f = _fetcher(tmp_path, _Gfs(blobs), conns=[_Conn("g", "https://g")])
+    loc = await f.localize(
+        SPACE, wire, ["api/media/v.webm"], item_id=ITEM, origin=ORIGIN
+    )
+    name = _sc("v.webm", data)
+    await f.keep(loc)
+    while f._tasks:
+        await asyncio.gather(*list(f._tasks))
+    assert not (tmp_path / name).exists()
+    await f.keep(loc, prefetch_all=True)
+    while f._tasks:
+        await asyncio.gather(*list(f._tasks))
+    assert (tmp_path / name).read_bytes() == data
+    assert not f.fetching(name)
+    f._inflight[(name, True)] = None  # a fetch running now
+    assert f.fetching(name)

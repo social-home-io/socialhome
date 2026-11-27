@@ -1603,3 +1603,75 @@ async def test_a_page_version_with_open_sides_is_described_whole(tmp_path):
         SPACE, [f"api/media/{n}" for n in names], "paired", item_id=ITEM
     )
     assert plan is not None and len(plan.refs) == 40
+
+
+class _DescribeFetcher:
+    """Fetches a file held only as a GFS descriptor: ``arrive`` lands it,
+    anything else stays on its way (``running``)."""
+
+    def __init__(self, media_dir, arrive=(), running=()):
+        self.dir = media_dir
+        self.arrive = set(arrive)
+        self.running = set(running)
+        self.asked: list[str] = []
+        self.at_once = 0
+        self.peak = 0
+
+    async def ensure_local(self, filename, *, timeout_s):
+        self.asked.append(filename)
+        self.at_once += 1
+        self.peak = max(self.peak, self.at_once)
+        await asyncio.sleep(0.01)
+        self.at_once -= 1
+        if filename in self.arrive:
+            (self.dir / filename).write_bytes(b"x" * 10)
+            return True
+        return False
+
+    def fetching(self, filename):
+        return filename in self.running
+
+
+async def test_a_file_held_only_as_a_descriptor_is_fetched_before_it_is_described(
+    tmp_path,
+):
+    """v_97 (owner: no loss) — a household republishing a file it holds only
+    as a GFS descriptor (a video nobody viewed here) fetches it first, then
+    describes it; a file whose fetch is still running is ``pending`` in a
+    lazy plan (a catch-up holds its record back), one no GFS holds is
+    neither."""
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS}))
+    fetcher = _DescribeFetcher(tmp_path, arrive={"v.webm"}, running={"slow.webm"})
+    u.attach_fetcher(fetcher)
+    plan = await u.plan(SPACE, ["api/media/v.webm"], item_id=ITEM, followers=False)
+    assert plan is not None and [r.filename for r in plan.refs] == ["v.webm"]
+    lazy = await u.plan_for_reader(
+        SPACE,
+        ["api/media/slow.webm", "api/media/gone.webm"],
+        "paired",
+        item_id=ITEM,
+    )
+    assert lazy is not None and lazy.refs == () and lazy.pending == ("slow.webm",)
+    gone = await u.plan_for_reader(
+        SPACE, ["api/media/gone.webm"], "paired", item_id=ITEM
+    )
+    assert gone is None
+
+
+async def test_fetches_to_describe_are_capped_per_space(tmp_path):
+    """One republish can't start unbounded downloads: at most
+    MAX_DESCRIBE_FETCHES_PER_SPACE fetch-to-describe at once per space."""
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    fetcher = _DescribeFetcher(tmp_path)
+    u.attach_fetcher(fetcher)
+    await asyncio.gather(
+        *(
+            u.plan(SPACE, [f"api/media/m{i}.webm"], item_id=f"i-{i}", followers=False)
+            for i in range(6)
+        )
+    )
+    assert len(fetcher.asked) == 6
+    assert fetcher.peak == up_mod.MAX_DESCRIBE_FETCHES_PER_SPACE

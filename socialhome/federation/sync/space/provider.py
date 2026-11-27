@@ -265,6 +265,7 @@ class _WithMediaRefs:
         "_media",
         "_requester",
         "_stored_only",
+        "deferred",
         "resource",
     )
 
@@ -284,6 +285,10 @@ class _WithMediaRefs:
         self._lazy = lazy and not stored_only
         self._budget = MAX_CATCHUP_MEDIA_RECORDS
         self.resource = inner.resource
+        #: v_97 — a record held back: a file it shows is still on its way
+        #: here from the GFS. The stream then keeps the requester's
+        #: watermark, so the next one sends the record, described.
+        self.deferred = False
 
     async def _add(
         self, space_id: str, rows: list[dict[str, Any]]
@@ -328,6 +333,11 @@ class _WithMediaRefs:
                 elif not self._stored_only:
                     # Every described record costs a seal and an upload.
                     self._budget -= 1
+                if self._lazy and plan is not None and plan.pending:
+                    # Never without a descriptor to a cache-only reader (it
+                    # would ask for the file): the next stream sends it.
+                    self.deferred = True
+                    continue
                 if plan is not None:
                     if self._stored_only:
                         # Only a descriptor that goes out spends the budget.
@@ -1085,6 +1095,10 @@ class SpaceSyncService:
                         # discovery window warms the cache right after this.
                         self._close_session(sync_id)
                         return
+                if getattr(exporter, "deferred", False):
+                    # v_97 — a record held back (a file still on its way
+                    # here): the watermark stays, the next stream sends it.
+                    any_failure = True
             # v_95: the bucket listings the BEGIN asked for, right before
             # the sentinel (the requester classifies on it, after this
             # stream's rows are applied).

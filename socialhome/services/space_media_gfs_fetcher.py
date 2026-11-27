@@ -540,10 +540,16 @@ class SpaceMediaGfsFetcher:
             return True
 
     async def keep(
-        self, loc: SpaceMediaLocalization, *, prefetch: bool = True
+        self,
+        loc: SpaceMediaLocalization,
+        *,
+        prefetch: bool = True,
+        prefetch_all: bool = False,
     ) -> list[SpaceMediaRef]:
         """Keep *loc*'s new rows — call it once the item is stored — and
-        prefetch their pictures. Never raises."""
+        prefetch their pictures (*prefetch_all*: every file, a file in
+        pieces too — the space's host holding a submission it will
+        release, v_97). Never raises."""
         if not loc.refs:
             return []
         try:
@@ -554,7 +560,9 @@ class SpaceMediaGfsFetcher:
         for ref in loc.refs:
             # A newer epoch may have moved the row: ask the GFS again.
             self._misses.pop(ref.local_name, None)
-            if prefetch and not ref.pieced and _is_picture(ref.local_name):
+            if prefetch_all or (
+                prefetch and not ref.pieced and _is_picture(ref.local_name)
+            ):
                 self._prefetch(ref.local_name, ref.space_id)
         return list(loc.refs)
 
@@ -602,6 +610,11 @@ class SpaceMediaGfsFetcher:
             while len(self._misses) > MAX_MISSES_REMEMBERED:
                 self._misses.popitem(last=False)
         return outcome == _STORED
+
+    def fetching(self, filename: str) -> bool:
+        """Whether a fetch of *filename* is running now (v_97: a catch-up
+        holds a record back for its next stream while it is)."""
+        return any(name == filename for name, _want in self._inflight)
 
     def _fetch_task(self, filename: str, *, want: bool = False) -> asyncio.Task[str]:
         key = (filename, want)

@@ -2979,6 +2979,9 @@ def _build_space_media_gfs(
         # A file this household reads from a GFS media cache is fetched
         # there (prefetch / on view), never asked for by the file check.
         wanted.attach_gfs_refs(repos.space_media_ref.get)
+    # v_97 — a file held here only as a descriptor is fetched before it is
+    # described again (no loss for a cache-only household).
+    uploader.attach_fetcher(fetcher)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
     app[K.space_media_gfs_responder_key] = responder
