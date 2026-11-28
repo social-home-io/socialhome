@@ -998,12 +998,13 @@ counts only when the record creates the item here or comes from the host's
 stream: a member household streaming an item held here can't attach its
 blobs to it. A link card's thumbnail is cached per URL and backs posts in
 other spaces and the feed; those references don't keep it from a space's
-readers (`confined_to_space`). It prefetches pictures on arrival (3 at a
-time, ≤ 200 waiting and ≤ 20 per space; a prefetch that finds the blob on
-no GFS — the item usually outruns the author's upload — tries again after
-10 s and 60 s, unless the space's last 5 prefetches all found nothing:
-then it tries once until one lands); anything else — or a picture past the
-backlog — is fetched when first viewed: `GET /api/media/{local_name}` checks who may open the file
+readers (`confined_to_space`). It keeps the files its source calls for on
+arrival (the per-source table under "GFS spaces" below; 3 at a time, ≤ 1 000
+waiting, ≤ 1 GiB and ≤ 200 per space; a prefetch that finds the blob on no
+GFS — the item usually outruns the author's upload — tries again after 10 s
+and 60 s, unless the space's last 5 prefetches all found nothing: then it
+tries once until one lands); anything else — or a file past the backlog —
+is fetched when first viewed: `GET /api/media/{local_name}` checks who may open the file
 first, then asks the fetcher; concurrent viewers share one fetch, each waits
 at most 20 s, and a file no GFS held is not asked for again on a view for
 5 minutes. At most 6 fetches run at once. A fetch tries this household's
@@ -1090,10 +1091,11 @@ the push.
 - **Every other path describes too.** A page proposal to a cache-only
   host; a moderation submission to a cache-only reviewer household (only
   that household's copy carries the descriptor; uploaded at once through
-  the durable queue; the space's host prefetches every file of a held
-  submission, as it will release it); a §25.6 catch-up to a cache-only
-  requester (lazy: described from our copy, never uploaded); a
-  `SPACE_SYNC_RESUME` replay (lazy too).
+  the durable queue; the household acting as the space's host keeps every
+  file of a held submission, as it will release it); a §25.6 catch-up to
+  a cache-only requester (lazy: described from our copy, never uploaded),
+  the rows of a verified sync-page fetch (`__rows__`) to one too, through
+  the same describing path; a `SPACE_SYNC_RESUME` replay (lazy too).
 - **The lazy catch-up describes every record** — no record or byte budget
   falls back to asking. The cost is CPU only: one seal (AES-GCM + SHA-256)
   per file per stream, in a worker thread, at most 2 describing streams per
@@ -1112,13 +1114,23 @@ the push.
   each waited for at most 20 s (the fetch goes on). A catch-up holds a
   record back while its file is still on its way (the stream is not clean,
   so the requester's watermark stays and the next stream sends it,
-  described); a replay leaves such a row to the catch-up. A cache-only
-  household never gets an item with files and no descriptor.
-- **A file named elsewhere gets a copy of its own.** At post, comment,
-  listing and space event creation, a file another place already
+  described); a replay leaves such a row to the catch-up. A file **no GFS
+  holds** right now is held back the same way, for 5 streams of that
+  requester (`MAX_DESCRIBE_MISS_STREAMS`); after that its record goes
+  without the file, with a WARNING, so a lost blob never stalls a
+  household's catch-up. A `REQUEST_MORE` slice that holds a record back
+  keeps the stream unclean too (`held_back`), before or after the
+  sentinel. A cache-only household never otherwise gets an item with files
+  and no descriptor.
+- **A file named elsewhere gets a copy of its own.** At post (a file
+  post's file too), comment, listing and space event creation, a space
+  event's cover edit and a page's create, edit or conflict resolution (its
+  cover and the files its body adds) — always after the write's gate, and
+  only in a GFS space — a file another place already
   references (another space, the household feed, a DM) is given a copy
   local to this space — a new name, the same bytes (a hard link where the
-  file system allows; `MediaRefGuard.space_copies`) — and the item names
+  file system allows, else written whole under a temporary name and
+  renamed; `MediaRefGuard.space_copies`) — and the item names
   the copy, so it is this space's own (`confined_to_space`) on every path.
   The cache holds it once per space it is posted to, as it would two
   uploads.
@@ -1135,12 +1147,68 @@ the push.
   space keeps media (or this household holds no upload authorization):
   its author sees "Couldn't send" (`refused`); a file over 8 MiB with no
   GFS keeping pieces, or over 200 MiB: "too large to send".
+- **The host keeps every file** (owner 2026-11-28). Every household acting
+  as the space's host (its owner, and a delegated admin household that
+  serves as host — `serves_as_host`) fetches EVERY described file on
+  arrival — videos and files in pieces too, the one exception to "big files
+  are fetched on view" — so it stays the space's long-term holder after the
+  GFS cache let a blob go (v_83 on demand then asks it). A bounded
+  background queue: 2 fetches at once, at most 4 096 files / 4 GiB waiting
+  (past it a WARNING; the file is fetched when someone views it); a file no
+  GFS holds yet (a long video's pieces still uploading) is asked for again
+  after 30 s, 5 min and 30 min, then a WARNING. The queue is memory only: a
+  file still queued at a restart is fetched on its first view. The host
+  never evicts a synced file and has no storage opt-out.
+- **Every household keeps what people are likely to open** (owner
+  2026-11-28, one rule for members and followers alike —
+  `domain/space_media_sync.py`):
+
+  | Source | Kept without a view |
+  |---|---|
+  | An item that arrives live | always |
+  | Gallery albums and items | always, catch-up included |
+  | A page's current version (and its open sides) | always |
+  | Posts and comments from a catch-up | within 7 days of creation |
+  | Calendar covers | while the event (or its series) is upcoming |
+  | Bazaar photos | while the listing is active |
+  | A held submission (reviewer households) | its pictures |
+  | Page history, old posts, old comments | on view only |
+
+  Every kept file is at most **50 MiB** (`SYNC_MAX_FILE_BYTES`, every space
+  size); a larger file (pieces) is fetched on view, and kept by the host.
+  Up to 3 such fetches at once, a catch-up's at most 1 (live content
+  first), ≤ 1 000 files / 1 GiB / 200 per space waiting.
+- **Storage for synced space files.** Per space, a household keeps at most
+  its storage setting of synced files (Admin › Storage, `PUT
+  /api/admin/storage/quota {space_sync_bytes}`, `space_sync_max_bytes` in
+  the config; default **2 GiB**, 0 = only what is opened). Past it
+  (`SpaceMediaGfsFetcher.sweep`, at most every 10 min per space, after a
+  synced file landed) never-viewed files go first (oldest first), then the
+  least recently viewed (`space_media_refs.viewed_at`, stamped at most once
+  a day per file by `GET /api/media`); never a file viewed in the last 30
+  days, one this household delivered, one being fetched, or anything on a
+  household acting as host. The row stays, so a view fetches the file
+  again (GFS cache, else v_83 on demand from any holder). With the host
+  plus every syncing household holding a file, even a space where most
+  households set 0 keeps it reachable.
+- **Cost of keeping files** (owner 2026-11-28, CDN-cacheable): GFS egress
+  per new item ≈ households that open the space in its window × bytes.
+  A 10 000-seat space (~3 000 households opening it in a week): a 0.4 MB
+  picture ≈ 1.2 GB, a 30 MB video ≈ **90 GB**; a 50-household space: 16 MB
+  and 1.2 GB. Storage per household of a busy 10 000-seat space ≈ 100–400
+  MB a day until its 2 GiB budget, of a 50-household space ≈ 10–70 MB a day.
 - **Residual: a held submission's file evicted before review.** The
   review queue shows a submission's picture count, never the pictures; the
-  host prefetches them on arrival. A file the GFS evicted before the host
+  host keeps them on arrival. A file the GFS evicted before the host
   fetched it (the host offline past the cache's TTL) is not uploaded again
   by the submitter (no retry cycle for submissions): the released item
   shows it missing. Documented, not fixed (coordinator 1A).
+- **Residual (H3d): a release within the describe wait.** A host that
+  releases an approved item (or replays one) while the file it now
+  describes is still being fetched (up to 20 s) sends the item without
+  that file; with the host keeping every file on arrival this needs a
+  submission approved within seconds of arriving. Accepted (owner
+  2026-11-28).
 
 `tests/protocol/test_gfs_space_media_cache_only.py` pins the rule across
 every path: each module that queues a push names the test proving a
@@ -1181,7 +1249,9 @@ another length, or onto another file (`space_media_seal.piece_aad_name`).
   with only the missing pieces. A piece no GFS holds is asked for **on
   demand, alone** (the hint names the piece). When all are here, the joined
   file must hash to its content name — else every piece is dropped and
-  nothing is written. A file in pieces is **never prefetched**.
+  nothing is written. A file in pieces is fetched on view only — unless it
+  is at most 50 MiB and its source is kept (above) — and always by the
+  household acting as the space's host.
 - **Holder** (on demand): any household holding the file — under the
   author's name or its own (`sc-` / `sd-` / `sg-`) — finds it under the
   same names and rules as a whole file, describes it in pieces under the
