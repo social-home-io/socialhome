@@ -232,9 +232,12 @@ async def test_the_gate_fails_closed():
     assert not await shares_a_seated_space(_Broken(set()), _Seats(set()), "peer")
 
 
-async def test_a7_a_view_asks_the_acting_hosts_only(tmp_path):
-    """Fable A7: a person looking at a file never tells its author — a
-    view asks only the households acting as the space's host."""
+async def test_a7_a_view_asks_the_author_after_the_acting_hosts(tmp_path):
+    """Owner 2026-11-28 (A7): a view the GFS cache missed may ask the
+    household that delivered the item too — people inside the space may
+    learn who fetched a file from them; outside stays hidden. The acting
+    hosts first, then the delivering household."""
     fed = _Fed(tmp_path, links={AUTHOR}, delivers={AUTHOR})
-    assert not await _direct(tmp_path, fed).fetch(_ref(), view=True)
-    assert AUTHOR not in fed.opened
+    assert await _direct(tmp_path, fed).fetch(_ref())
+    assert fed.opened == [HOST, AUTHOR]
+    assert [to for to, _p in fed.sent] == [AUTHOR]

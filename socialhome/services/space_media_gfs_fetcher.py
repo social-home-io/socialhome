@@ -306,7 +306,7 @@ class _ChannelRing(Protocol):
 
 
 class _DirectSource(Protocol):
-    async def fetch(self, ref: SpaceMediaRef, *, view: bool = False) -> bool: ...
+    async def fetch(self, ref: SpaceMediaRef) -> bool: ...
 
 
 class _SyncStorage(Protocol):
@@ -990,7 +990,7 @@ class SpaceMediaGfsFetcher:
             async with self._fetch_sem:
                 outcome = await self._fetch(filename)
         if outcome == _MISS and want and not single:
-            if await self._direct_for(filename, view=True):
+            if await self._direct_for(filename):
                 outcome = _STORED
             else:
                 async with self._fetch_sem:
@@ -1448,7 +1448,7 @@ class SpaceMediaGfsFetcher:
             )
         return outcome
 
-    async def _direct_for(self, filename: str, *, view: bool = False) -> bool:
+    async def _direct_for(self, filename: str) -> bool:
         """Owner 2026-11-28 — a file for one reader straight from a
         household that holds it, over a direct link (never re-uploaded
         into the GFS cache for one reader). Whether it is here now. A file
@@ -1459,7 +1459,7 @@ class SpaceMediaGfsFetcher:
         path = media_file_path(self._dir, filename)
         if ref is None or path is None or ref.pieced:
             return False
-        if await self._direct.fetch(ref, view=view):
+        if await self._direct.fetch(ref):
             return await aiofiles.os.path.isfile(path)
         return False
 

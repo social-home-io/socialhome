@@ -1693,7 +1693,15 @@ address. The owner changed that for feature parity with paired households:
   line. No shared seat (a moment follower, a household that left or was
   removed), no link. A link is opened on demand only (never by an ordinary
   send), closed again when idle for 10 minutes, and at most 8 such links
-  are kept.
+  are kept. Any shared seat qualifies — not only the acting hosts (owner
+  2026-11-28, review A8): a household seated with us in a shared space may
+  open one, within those caps.
+- **Members may learn who fetched a file from them** (owner 2026-11-28,
+  review A7: "it's fine to trust people inside the space as long as
+  outside is hidden"). A view the GFS cache missed asks the acting hosts
+  first, then the household that delivered the item — so that household
+  can learn which household opened its file, and its IP. Nobody outside
+  the space learns either.
 - **What it carries.** Anything a paired link does: once up, events
   between the two ride it before the relay. Its first use is the owner's
   media routing (2026-11-28): a file only one reader wants (a catch-up, a
