@@ -195,7 +195,8 @@ RELAY_FORWARD_MAX_PER_FRAME: int = 64
 #: Max bytes of forwarded items (their canonical JSON) in one frame. The
 #: receiver reads ``/cluster/sync`` under aiohttp's 1 MiB ``client_max_size``;
 #: the ids and notices that share the frame take at most ~75 KiB, so 768 KiB
-#: of items always fits. One item is at most a 256 KiB publish body.
+#: of items always fits. One item is at most a channel publish body
+#: (``CHANNEL_PUBLISH_MAX_BODY_BYTES``, 720 KiB), so it always fits alone.
 RELAY_FORWARD_MAX_FRAME_BYTES: int = 768 * 1024
 
 #: Max items, and their bytes, waiting for the next flush. Past either the new

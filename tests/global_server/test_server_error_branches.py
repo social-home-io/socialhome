@@ -702,7 +702,9 @@ async def test_admin_audit_ip_ignores_forwarded_for_from_untrusted_peer(tmp_dir)
 
 async def test_channel_publish_rejects_oversized_declared_body(client):
     """A ``Content-Length`` over the cap is a 413 BEFORE the body is read."""
-    from socialhome.global_server.public import PUBLISH_MAX_BODY_BYTES
+    from socialhome.domain.gfs_channel import (
+        CHANNEL_PUBLISH_MAX_BODY_BYTES as PUBLISH_MAX_BODY_BYTES,
+    )
 
     oversized = b"x" * (PUBLISH_MAX_BODY_BYTES + 1)
     resp = await client.post(
@@ -715,7 +717,9 @@ async def test_channel_publish_rejects_oversized_declared_body(client):
 
 async def test_channel_publish_rejects_oversized_chunked_body(client):
     """A chunked body has no ``Content-Length`` — the read itself is bounded."""
-    from socialhome.global_server.public import PUBLISH_MAX_BODY_BYTES
+    from socialhome.domain.gfs_channel import (
+        CHANNEL_PUBLISH_MAX_BODY_BYTES as PUBLISH_MAX_BODY_BYTES,
+    )
 
     async def _chunks():
         for _ in range((PUBLISH_MAX_BODY_BYTES // 4096) + 2):

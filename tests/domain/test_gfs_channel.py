@@ -5,9 +5,14 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 
+import orjson
 import pytest
 
-from socialhome.crypto import ed25519_public_key
+from socialhome.crypto import (
+    b64url_encode,
+    ed25519_public_key,
+    generate_identity_keypair,
+)
 from socialhome.domain import gfs_channel as _gc
 from socialhome.domain.gfs_channel import (
     CHANNEL_FRAME_KEYS,
@@ -26,6 +31,9 @@ from socialhome.domain.gfs_channel import (
     channel_frame,
     valid_channel_id,
 )
+from socialhome.domain.relay_media_frame import RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+from socialhome.domain.space_item import EVENT_ITEM_SIZE_BUCKETS
+from socialhome.domain.writer_cert import WriterCert
 from socialhome.gfs_channel import (
     derive_channel_seed,
     issue_channel_pass,
@@ -35,6 +43,10 @@ from socialhome.gfs_channel import (
     sign_register,
     sign_unregister,
 )
+from socialhome.global_server.cluster_relay import RELAY_FORWARD_MAX_FRAME_BYTES
+from socialhome.services.gfs_member_publish_service import build_item_plaintext
+from socialhome.services.space_item_author import build_signed_event_item
+from socialhome.services.space_writer_cert_service import WRITER_CERT_FIELD
 
 CID = new_channel_id()
 SEED = derive_channel_seed(os.urandom(32), "s", CID)
@@ -285,3 +297,54 @@ def test_ring_frame_and_position():
     assert _gc.ChannelHead.from_wire(head.to_wire()) == head
     with pytest.raises(_gc.InvalidChannelWire):
         _gc.ChannelHead.from_wire("x")
+
+
+def test_the_largest_live_event_fits_one_channel_item_and_one_publish():
+    """Regression (members-mesh-restart, members-parity): a page up to the
+    size every space allows (``RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES``) must
+    travel in a GFS space, where the channel is its only path (v_97).
+    Signed, its writer cert inside (with a household's worth of users),
+    sealed under AES-GCM and base64url'd, it fits one channel item, the
+    GFS's publish body and one cluster forward frame."""
+    keys = generate_identity_keypair()
+    body = {"id": "p" * 32, "space_id": "s" * 32, "title": "t" * 200, "content": ""}
+    body["content"] = "x" * (
+        RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - len(orjson.dumps(body))
+    )
+    assert len(orjson.dumps(body)) == RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+    inner = build_signed_event_item(
+        item_type="space_page_created",
+        item_id="i" * 32,
+        space_id="s" * 32,
+        epoch=2**31,
+        origin_instance_id="o" * 32,
+        identity_seed=keys.private_key,
+        identity_pk=keys.public_key,
+        ts="2026-11-28T12:00:00.000000+00:00",
+        body=body,
+    )
+    inner[WRITER_CERT_FIELD] = WriterCert(
+        cert_suite="ed25519",
+        space_id="s" * 32,
+        epoch=2**31,
+        instance_pk="k" * 64,
+        scope="write",
+        issued_at=2**40,
+        cert_sig="g" * 88,
+        writer_user_ids=tuple(f"{i:064d}" for i in range(64)),
+        users_sig="g" * 88,
+        users_sig_suite="ed25519",
+    ).to_wire()
+    plaintext = build_item_plaintext(
+        "space_page_created", inner, buckets=EVENT_ITEM_SIZE_BUCKETS
+    )
+    # SpaceContentEncryption.encrypt: b64url(nonce) ":" b64url(ct + tag).
+    chars = (
+        len(b64url_encode(b"\0" * 12))
+        + 1
+        + len(b64url_encode(b"\0" * (len(plaintext) + 16)))
+    )
+    assert chars <= _gc.MEMBER_PUBLISH_MAX_PAYLOAD_CHARS
+    assert _gc.MEMBER_PUBLISH_MAX_PAYLOAD_CHARS < _gc.CHANNEL_PUBLISH_MAX_BODY_BYTES
+    # One forwarded item (its payload and a few small fields) per frame.
+    assert _gc.CHANNEL_PUBLISH_MAX_BODY_BYTES <= RELAY_FORWARD_MAX_FRAME_BYTES

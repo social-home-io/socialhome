@@ -108,11 +108,18 @@ RING_EPHEMERAL_TTL_S: int = 15 * 60
 MIN_NONCE_CHARS: int = 16
 MAX_NONCE_CHARS: int = 64
 
-#: Upper bound on a channel item's ciphertext string (chars). A post's
-#: AES-GCM ciphertext base64-expanded is ~55 KiB at the post-length cap;
-#: media bytes ride separate blobs. Sits under the GFS body cap with room for
-#: the signature fields.
-MEMBER_PUBLISH_MAX_PAYLOAD_CHARS: int = 200 * 1024
+#: Upper bound on a channel item's ciphertext string (chars). In a GFS
+#: space the channel is every content change's only path (v_97), so it
+#: carries the largest live event any space allows — a page, up to
+#: ``relay_media_frame.RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`` (~504 KiB) —
+#: signed, its writer cert inside, sealed and base64url'd: ~679 KiB. A
+#: post is ~55 KiB at its length cap; media bytes ride separate blobs.
+MEMBER_PUBLISH_MAX_PAYLOAD_CHARS: int = 704 * 1024
+
+#: The GFS's body cap for ``POST /gfs/channels/publish-anon``: one largest
+#: item plus its signature fields. Under the GFS's 1 MiB request cap and
+#: one cluster forward frame (``cluster_relay.RELAY_FORWARD_MAX_FRAME_BYTES``).
+CHANNEL_PUBLISH_MAX_BODY_BYTES: int = MEMBER_PUBLISH_MAX_PAYLOAD_CHARS + 16 * 1024
 
 #: Suite of the channel key — of ``channel_pk`` and of every statement it
 #: signs (registration, notice, unregister, pass, writer key cert).

@@ -414,7 +414,7 @@ class ChannelRingConfig:
 #: The ``[channel_ring]`` keys and their inclusive bounds. The ages stop at
 #: what a household still takes from a ring (24 h durable, 15 min
 #: ephemeral — ``space_item_dispatch``); a ring holds at least one largest
-#: item (MEMBER_PUBLISH_MAX_PAYLOAD_CHARS, 200 KiB) and some history.
+#: item (MEMBER_PUBLISH_MAX_PAYLOAD_CHARS, 704 KiB) and some history.
 #: A ring must outlast two 15-minute heads pings, or every seat that only
 #: pulls would gap (and run a §25.6 catch-up) on each ping (10k review,
 #: finding 10): ``max_bytes`` holds at least 15 minutes of a channel at its

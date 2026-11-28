@@ -26689,32 +26689,32 @@ def _check_members_parity(state: dict, failures: list[str]) -> None:
                     )
 
 
-#: ``members-mesh-restart``: the page's text, 450 KiB — over the 64 KiB up to
-#: which the mesh used to keep an event for its one retransmit, and over the
-#: ~433 KB a §25.6 sync record can be on one mesh hop, so only the live
-#: event's retransmit can bring it to the restarted member.
+#: ``members-mesh-restart``: the page's text, 450 KiB — over the 200 KiB a
+#: channel item could be before v_97 carried every live event there, and
+#: over the ~433 KB a §25.6 sync record can be on one mesh hop, so only the
+#: live item can bring it to the restarted member.
 _MESH_RESTART_PAGE_BYTES: int = 450 * 1024
 
 
 @_offline_step
 def cmd_members_mesh_restart() -> None:
-    """A large space event reaches a mesh-only member that restarts.
+    """A large space event reaches a member a reaches only over the mesh,
+    after that member restarts.
 
     Prereqs: the gfs chain through ``gfs-member-mesh``, before
     ``members-parity`` (a hosts the link-joined space, d is a member reached
     over the mesh through b; ``members-parity`` ends by seating d with a).
 
-    1. a posts in the space and d must show it: a holds a fresh route to d,
-       sealed to d's ephemeral key.
-    2. d is killed. a creates a 450 KiB page: sealed to d's old key, taken
-       by b, which delivers it once d is back. d is respawned.
-    3. The restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``); a
-       must retransmit the page to d (asserted in a's log) and d must show
-       it (title + sha256 of its text).
+    1. a posts in the space and d must show it.
+    2. d is killed. a creates a 450 KiB page. d is respawned.
+    3. The space is a GFS space (v_97): the page went on its channel, the
+       only path for its content — the GFS ring holds one more item of at
+       least 450 KiB. d opens the space, pulls what it missed from the
+       ring, and must show the page (title + sha256 of its text).
 
-    Fails on a build that kept only events up to 64 KiB for the retransmit:
-    the page is too large for one §25.6 sync record over the mesh, so
-    nothing else brings it to d.
+    Fails on a build whose channel item cap is under the largest page a
+    space allows (it was 200 KiB): the page is refused at seal time and
+    nothing brings it to anyone.
     """
     state = _load()
     space_id = (state or {}).get("gfs_invite_space_id")
@@ -26744,7 +26744,8 @@ def cmd_members_mesh_restart() -> None:
     # 2. d away while a creates the page.
     text = secrets.token_hex(_MESH_RESTART_PAGE_BYTES // 2)
     title = f"Mesh restart, large page {tag}"
-    a_log = _log_size("a")
+    big_sql = "SELECT COUNT(*) FROM gfs_channel_ring WHERE bytes >= ?"
+    big_before = _gfs_rows(big_sql, (_MESH_RESTART_PAGE_BYTES,))[0][0]
     _kill_household("d", d)
     try:
         s, page = _inst_request(
@@ -26758,7 +26759,15 @@ def cmd_members_mesh_restart() -> None:
     finally:
         _respawn(state, "d")
 
-    # 3. d nacks, a retransmits, d holds the page.
+    # 3. On the channel; d opens the space and holds the page.
+    _poll(
+        f"{step}: the GFS ring holds the 450 KiB page",
+        lambda: _gfs_rows(big_sql, (_MESH_RESTART_PAGE_BYTES,))[0][0] > big_before,
+        timeout=120.0,
+        interval=3.0,
+    )
+    print("  the page went on the space's channel (the GFS ring holds it) ✓")
+    _view_space("d", space_id)
     want = {
         "exists": True,
         "title": title,
@@ -26771,23 +26780,7 @@ def cmd_members_mesh_restart() -> None:
         return _db_page_view("d", page["id"]) == want
 
     _poll(f"{step}: d shows the 450 KiB page", _d_page, timeout=240.0, interval=3.0)
-    print("  d shows the 450 KiB page (title + sha256) ✓")
-    resent = [
-        line
-        for line in _log_lines_matching(
-            "a", "retransmitted space_page_created", offset=a_log
-        )
-        if d["instance_id"] in line
-    ]
-    if not resent:
-        raise SystemExit(
-            f"{step}: d shows the page, but a's log has no retransmit of it to "
-            f"{d['instance_id']} — the check did not exercise the mesh's nack "
-            f"(see {_log_path('a')})"
-        )
-    print(
-        f"  a retransmitted the page to d after d's nack ✓ ({resent[0].strip()[:120]})"
-    )
+    print("  d opened the space and shows the 450 KiB page (title + sha256) ✓")
     print(f"{step}: ok")
 
 

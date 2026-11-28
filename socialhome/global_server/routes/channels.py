@@ -26,6 +26,7 @@ from typing import Any
 from aiohttp import web
 
 from ...domain.gfs_channel import (
+    CHANNEL_PUBLISH_MAX_BODY_BYTES,
     ChannelEpochNotice,
     ChannelPublishAnonRequest,
     ChannelRegisterRequest,
@@ -41,7 +42,6 @@ from ..channels import (
     ChannelPinned,
     ChannelRateLimited,
 )
-from ..public import PUBLISH_MAX_BODY_BYTES
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
@@ -145,7 +145,9 @@ class ChannelUnsubscribeView(_ChannelView):
 class ChannelPublishAnonView(_ChannelView):
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_channel_service_key)
-        req = await self._parse(ChannelPublishAnonRequest, PUBLISH_MAX_BODY_BYTES)
+        req = await self._parse(
+            ChannelPublishAnonRequest, CHANNEL_PUBLISH_MAX_BODY_BYTES
+        )
         try:
             await svc.publish_anon(req, client_ip=self.client_bucket())
         except ChannelRateLimited:

@@ -355,8 +355,10 @@ planned for accepted it (`space_item_outbox`, household migration 0158;
 `services/space_item_outbox.py`).
 
 - **At seal time** the item is sealed, checked against the largest payload
-  a GFS takes (200 KiB of ciphertext — larger is refused there and then, the
-  author told), and stored as one row per planned GFS (the owner's signed
+  a GFS takes (704 KiB of ciphertext, `MEMBER_PUBLISH_MAX_PAYLOAD_CHARS`:
+  the largest live event any space allows — a page up to ~504 KiB — sealed,
+  ~679 KiB; the GFS takes a publish body up to 720 KiB. Larger is refused
+  there and then, the author told), and stored as one row per planned GFS (the owner's signed
   list ∩ the grant; none yet, e.g. no grant: one row planned when due). It
   survives a restart.
 - **Per GFS, until accepted.** A transient answer (down, timeout, 5xx, 429)
