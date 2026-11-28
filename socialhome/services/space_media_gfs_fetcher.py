@@ -724,13 +724,15 @@ class SpaceMediaGfsFetcher:
         *,
         prefetch: bool = True,
         hint: SyncHint | None = None,
+        archive: bool = False,
     ) -> list[SpaceMediaRef]:
         """Keep *loc*'s new rows — call it once the item is stored — and
         sync the files the per-source policy keeps for *hint* (``None``: an
         item that arrived live), as the storage settings allow. The acting
         host of a GFS space archives every file instead, a file in pieces
-        too (v_97, owner 2026-11-28) — a submission it holds for review too,
-        which it releases once approved. Never raises."""
+        too (v_97, owner 2026-11-28); *archive* asks for that in any space
+        (a submission the host holds for review, which it releases once
+        approved, Fable M9). Never raises."""
         if not loc.refs:
             return []
         try:
@@ -746,7 +748,7 @@ class SpaceMediaGfsFetcher:
             self._misses.pop(ref.local_name, None)
             if ref.space_id not in archives:
                 archives[ref.space_id] = await self._archives(ref.space_id)
-            if archives[ref.space_id]:
+            if archive or archives[ref.space_id]:
                 self._archive(ref.local_name, ref.size)
             elif (
                 prefetch

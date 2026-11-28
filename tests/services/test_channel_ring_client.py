@@ -526,3 +526,26 @@ async def test_a_delegated_admin_acting_as_host_always_watches(world):
     assert [f["since_seq"] for f in _fetches(world)] == [10]
     await world.client.on_frame(_heads(900, "f" * 16), gfs_id=GFS)
     assert world.sync.calls == ["sp-1"]
+
+
+async def test_m10_the_host_role_is_read_once_a_minute(world):
+    """Fable M10: every watch update reads the host role of every channel
+    space — remembered for HOST_ROLE_TTL_S, then read again (a role that
+    changed is picked up within a minute)."""
+    reads: list[str] = []
+    real = world.spaces.get
+
+    async def counting(space_id):
+        reads.append(space_id)
+        return await real(space_id)
+
+    world.spaces.get = counting
+    world.spaces.owner = OWN
+    for _ in range(3):
+        await world.client.on_frame({"type": RING_CONNECTED_FRAME}, gfs_id=GFS)
+    assert len(reads) == 1
+    world.spaces.owner = "someone-else"
+    world.clock.t += mod.HOST_ROLE_TTL_S
+    await world.client.tick()
+    assert len(reads) == 2
+    assert _watches(world)[-1]["unwatch"] == [CH]

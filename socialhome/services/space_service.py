@@ -9905,11 +9905,15 @@ class SpaceService(
         media_url = optional_local_media_ref(media_url)
         image_urls_tuple = require_local_media_refs(image_urls_tuple)
         file_url = file_meta.url if file_meta is not None else None
-        await self._require_openable_media(
-            (media_url, file_url, *image_urls_tuple),
-            user_id=author_user_id,
-            field="image_urls",
-        )
+        # Each reference refused under its own field (Fable M7).
+        for refs, field in (
+            ((media_url,), "media_url"),
+            ((file_url,), "file_meta"),
+            (image_urls_tuple, "image_urls"),
+        ):
+            await self._require_openable_media(
+                refs, user_id=author_user_id, field=field
+            )
         clean_attachments = self._post_attachments.validate(post_type, attachments)
         # ``posts_access`` is enforced on EVERY household from its own copy
         # of the features — the host and each member household's stub

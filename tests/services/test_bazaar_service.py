@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -562,3 +563,42 @@ async def test_a_declined_high_bid_neither_sets_the_floor_nor_wins(env):
     await env.svc.expire_due()
     listing = await env.repo.get_listing(pid)
     assert (listing.winner_user_id, listing.winning_price) == ("u-other", low.amount)
+
+
+async def test_m7_a_listing_refused_for_its_price_makes_no_photo_copy(env):
+    """Review 2A / Fable M7 — the photos' copies for the space are made
+    after every check: a listing refused for its price fields copies
+    nothing."""
+
+    class _Space:
+        features = SimpleNamespace(bazaar=True)
+
+    class _Spaces(_SeatedSpaces):
+        async def get_space(self, space_id):
+            return _Space()
+
+    class _Guard:
+        def __init__(self) -> None:
+            self.copied: list = []
+
+        async def require_openable(self, refs, *, user_id, field="media_url"):
+            return None
+
+        async def space_copies(self, refs, *, space_id):
+            self.copied.append(list(refs))
+            return lambda v: v
+
+    guard = _Guard()
+    env.svc.attach_spaces(_Spaces())
+    env.svc.attach_media_guard(guard)
+    with pytest.raises(ValueError):
+        await env.svc.create_listing(
+            space_id=_DEFAULT_SPACE_ID,
+            seller_user_id="u-seller",
+            mode="fixed",
+            title="Bike",
+            currency="EUR",
+            image_urls=("api/media/shared.webp",),
+            price=None,
+        )
+    assert guard.copied == []

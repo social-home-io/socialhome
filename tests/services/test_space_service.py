@@ -13479,3 +13479,54 @@ async def test_no_role_change_promotes_a_follower(stack):
     assert (await stack.space_repo.get_member(space.id, fan.user_id)).role == (
         SpaceRole.SUBSCRIBER
     )
+
+
+class _FileCopyGuard:
+    """Fable M7 — lets every file be named and gives ``shared.pdf`` a copy
+    of its own for the space; records each refusal label it is asked for."""
+
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+
+    async def require_openable(self, refs, *, user_id, field="media_url"):
+        self.fields.append(field)
+
+    async def space_copies(self, refs, *, space_id):
+        def rename(value):
+            if value and "shared.pdf" in value:
+                return value.replace("shared.pdf", "own-shared.pdf")
+            return value
+
+        return rename
+
+
+async def test_m7_a_file_posts_file_gets_a_copy_of_its_own(stack):
+    """Review H3e / Fable M7 — a FILE post's file named elsewhere too gets
+    a copy local to the space: the stored ``file_meta.url`` names the copy,
+    and each reference is checked under its own field label."""
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+    )
+    guard = _FileCopyGuard()
+    svc.attach_media_guard(guard)  # type: ignore[arg-type]
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    p = await svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.FILE,
+        content="the plan",
+        file_meta=FileMeta(
+            url="api/media/shared.pdf",
+            mime_type="application/pdf",
+            original_name="plan.pdf",
+            size_bytes=10,
+        ),
+    )
+    assert p.file_meta is not None
+    assert p.file_meta.url == "api/media/own-shared.pdf"
+    assert set(guard.fields) >= {"file_meta"}

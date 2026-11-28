@@ -118,6 +118,7 @@ from ..domain.space_media_fields import sanitize_moderation_payload
 from ..domain.space_media_ref import MEDIA_REFS_FIELD, SpaceMediaLocalization
 from ..domain.space_media_sync import SyncHint, SyncSource
 from ..federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
+from ..federation.host_equivalence import serves_as_host
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
     SPACE_PAGE_KIND,
@@ -997,8 +998,15 @@ class SpaceModerationFederation(FileHashesMixin, SpaceMediaRefsMixin):
             # (the fetcher's ``serves_as_host`` check), which releases the
             # item once approved and must hold what it then describes.
             if self._gfs_media is not None:
+                # Fable M9: in ANY space (a mesh space's link-joined
+                # submitter too), the household acting as host keeps every
+                # file of the held item, a video too — it describes them
+                # once it approves.
+                hosting = space is not None and await serves_as_host(
+                    self._spaces, space, own_instance_id=self._own
+                )
                 await self._gfs_media.keep(
-                    gfs_files, hint=SyncHint(SyncSource.MODERATION)
+                    gfs_files, hint=SyncHint(SyncSource.MODERATION), archive=hosting
                 )
             log.info(
                 "moderation: holding %s %s item %s from %s for review",

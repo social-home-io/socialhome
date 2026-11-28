@@ -309,6 +309,8 @@ class _GfsFetcher:
         self.localized: list[dict] = []
         self.kept: list = []
         self.hints: list = []
+        #: Fable M9 — whether each keep asked for every file (the host).
+        self.archived: list[bool] = []
 
     async def localize(self, space_id, raw, urls, *, item_id, origin, hashes=None):
         self.localized.append({"raw": raw, "item_id": item_id, "origin": origin})
@@ -329,9 +331,10 @@ class _GfsFetcher:
             refs=tuple(local for name, local in added.items() if name in described)
         )
 
-    async def keep(self, loc, *, hint=None):
+    async def keep(self, loc, *, hint=None, archive=False):
         self.kept.append(loc)
         self.hints.append(hint)
+        self.archived.append(archive)
 
 
 async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
@@ -428,8 +431,10 @@ async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
     # acting as the space's host, which releases the item once approved).
     (loc,) = fetcher.kept
     assert loc.refs == (a_here,)
-    # A reviewer household syncs a held submission's pictures only.
+    # A reviewer household syncs a held submission's pictures only; the
+    # household acting as host keeps every file, in any space (Fable M9).
     assert [h.source for h in fetcher.hints] == [SyncSource.MODERATION]
+    assert fetcher.archived == [True]
 
 
 async def test_a_held_calendar_events_cover_goes_to_the_reviewers():

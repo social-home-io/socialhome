@@ -473,6 +473,20 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             ContentAction.CREATE,
             approved_by is None,
         )
+        if decision is not AccessDecision.QUEUE:
+            # Fable M6: refused for its size before any copy is made (the
+            # copies' names are as long as any file name; checked again
+            # below on the page as stored).
+            await self._require_size(
+                new_page(
+                    title=clean_title,
+                    content=body,
+                    created_by=actor_user_id,
+                    space_id=space_id,
+                    cover_image_url=cover,
+                    page_id=page_id,
+                )
+            )
         cover, own_body = await self._own_page_files(
             space_id, cover, body, (cover, *media_refs_in_markdown(body))
         )
@@ -608,6 +622,10 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             if ref and media_basename(ref) not in shown
         ]
         if added:
+            # Fable M6: refused for its size before any copy is made.
+            await self._require_size(
+                replace(page, **patch, last_editor_user_id=actor_user_id), was=page
+            )
             own_cover, own_body = await self._own_page_files(
                 space_id, patch.get("cover_image_url"), patch.get("content"), added
             )

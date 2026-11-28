@@ -77,6 +77,8 @@ log = logging.getLogger(__name__)
 
 #: How long a channel stays watched after the last ``space.viewing``.
 WATCH_LINGER_S: float = 120.0
+#: How long a space's host role is remembered (Fable M10).
+HOST_ROLE_TTL_S: float = 60.0
 #: A cursor this far behind the head is not fetched item by item: the
 #: household skips to the recent window and runs the §25.6 catch-up.
 MAX_BEHIND_ITEMS: int = 2000
@@ -140,6 +142,7 @@ class ChannelRingClient:
         "_dirty",
         "_fetching",
         "_heads",
+        "_host_role",
         "_known",
         "_loaded",
         "_next_page",
@@ -189,6 +192,10 @@ class ChannelRingClient:
         self._known: dict[str, tuple[float, dict[str, list[str]]]] = {}
         #: space id → last ``space.viewing``.
         self._viewed: dict[str, float] = {}
+        #: space → (clock, whether we act as its host): read at most once
+        #: per :data:`HOST_ROLE_TTL_S` (Fable M10 — every watch update reads
+        #: it for every channel space).
+        self._host_role: dict[str, tuple[float, bool]] = {}
         #: gfs id → the channels we told that GFS we watch.
         self._watched: dict[str, set[str]] = {}
         #: Spaces whose badge is on, and when "New activity" last went out.
@@ -535,11 +542,18 @@ class ChannelRingClient:
     async def _hosts(self, space_id: str) -> bool:
         """Whether this household acts as the space's host — its owner or a
         delegated admin household (:func:`serves_as_host`): the host always
-        watches (owner F5) and fetches at each ping."""
+        watches (owner F5) and fetches at each ping. Remembered for
+        :data:`HOST_ROLE_TTL_S`."""
+        now = self._clock()
+        held = self._host_role.get(space_id)
+        if held is not None and now - held[0] < HOST_ROLE_TTL_S:
+            return held[1]
         space = await self._spaces.get(space_id)
-        return await serves_as_host(
+        role = await serves_as_host(
             self._spaces, space, own_instance_id=self._own_instance_id
         )
+        self._host_role[space_id] = (now, role)
+        return role
 
     async def _owns(self, space_id: str) -> bool:
         """Whether this household OWNS the space: only the owner has no

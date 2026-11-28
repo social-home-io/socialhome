@@ -240,6 +240,16 @@ class _MediaPlanner(Protocol):
     async def upload(self, plan: Any) -> None: ...
 
 
+def _note_held_back(session: SyncSessionRecord, exporter: object) -> None:
+    """v_97 (review M3, Fable M1) — a record held back (a file still on its
+    way here): the watermark stays and the next stream sends it. Marked as
+    soon as the slice defers one — before its next chunk or the sentinel
+    goes, not only once the slice ended."""
+    if getattr(exporter, "deferred", False):
+        session.held_back = True
+        session.stream_clean = False
+
+
 class _WithMediaRefs:
     """v_80 — a resource streamed to a member household seated from an
     invite link whose GFS keeps a space media cache: each record that shows
@@ -1745,6 +1755,7 @@ class SpaceSyncService:
                 next_index=_allocator(session) if indexed else None,
                 max_record_bytes=await self._record_limit(session),
             ):
+                _note_held_back(session, exporter)
                 if _stopped(session):
                     return
                 result = await self._send(session, envelope)
@@ -1759,12 +1770,7 @@ class SpaceSyncService:
                 resource,
             )
         finally:
-            if getattr(exporter, "deferred", False):
-                # v_97 (review M3) — a record held back (a file still on
-                # its way here): the watermark stays and the next stream
-                # sends it, whether the sentinel went before or after.
-                session.held_back = True
-                session.stream_clean = False
+            _note_held_back(session, exporter)
 
     async def _send(self, session, envelope: dict[str, Any]) -> DeliveryResult:
         """Serialise and dispatch one envelope to the requester.

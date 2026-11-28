@@ -7,9 +7,10 @@ from dataclasses import replace
 import pytest
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.errors import InvalidMediaRefError, SpaceItemTooLargeError
 from socialhome.domain.events import PageCreated, PageDeleted, PageUpdated
 from socialhome.domain.page_version import version_hash
+from socialhome.domain.relay_media_frame import SPACE_PAGE_ITEM_MAX_BYTES
 from socialhome.domain.space import (
     AccessAdminOnlyError,
     ContentAction,
@@ -1022,3 +1023,27 @@ async def test_a_pages_cover_and_body_files_named_elsewhere_get_copies(env):
     assert "api/media/shared.webp" not in edited.content
     # The edit asks only for the file it adds, not the page's own.
     assert guard.asked[-1] == ("sp-a", ["api/media/shared.webp"])
+
+
+async def test_m6_an_oversized_page_makes_no_copies(env):
+    """Fable M6: a page refused for its size makes no copy of the files it
+    names — the size is judged before any copy is written."""
+    guard = _CopyGuard()
+    env.svc.attach_media_guard(guard)  # type: ignore[arg-type]
+    huge = "x" * (SPACE_PAGE_ITEM_MAX_BYTES + 1) + "\n![p](api/media/shared.webp)"
+    with pytest.raises(SpaceItemTooLargeError):
+        await env.svc.create(
+            "sp-a",
+            actor_user_id="u-owner",
+            title="T",
+            content=huge,
+            cover_image_url="api/media/shared.webp",
+        )
+    assert guard.asked == []
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="hi"
+    )
+    guard.asked.clear()
+    with pytest.raises(SpaceItemTooLargeError):
+        await env.svc.update("sp-a", page.id, actor_user_id="u-owner", content=huge)
+    assert guard.asked == []

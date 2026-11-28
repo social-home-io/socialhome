@@ -45,6 +45,9 @@ def test_posts_and_comments_sync_while_new(source):
     )
     # Age unknown: an old catch-up record, on view.
     assert not _syncs(SyncHint(source))
+    # Fable M11: a stamp from the future is not "new" (skew allowed).
+    assert _syncs(SyncHint(source, created_at=NOW + timedelta(minutes=4)))
+    assert not _syncs(SyncHint(source, created_at=NOW + timedelta(days=30)))
 
 
 @pytest.mark.parametrize("source", [SyncSource.CALENDAR, SyncSource.BAZAAR])

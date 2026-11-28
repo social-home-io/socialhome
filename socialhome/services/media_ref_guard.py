@@ -47,8 +47,8 @@ import aiofiles.os
 
 from ..domain.errors import InvalidMediaRefError
 from ..domain.media_constraints import SPACE_PAGE_MEDIA_PREFIX
-from ..domain.space import SpaceType
 from ..media.cleanup import media_basename
+from .gfs_channel_service import channel_on
 from .inbound_media_store import media_file_path
 
 if TYPE_CHECKING:
@@ -92,13 +92,7 @@ class MediaRefGuard:
         if self._spaces is None:
             return True
         space = await self._spaces.get(space_id)
-        return space is not None and (
-            space.space_type is SpaceType.GLOBAL
-            or (
-                space.space_type is SpaceType.PRIVATE
-                and bool(getattr(space.features, "private_gfs", False))
-            )
-        )
+        return space is not None and channel_on(space)
 
     async def space_copies(
         self, refs: Iterable[str | None], *, space_id: str

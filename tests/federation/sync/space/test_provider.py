@@ -2962,3 +2962,41 @@ async def test_a_verified_fetch_describes_its_rows_for_a_cache_only_requester(
     ]
     assert "media_refs" in rows[0]["row"]
     assert "media_refs" not in rows[1]["row"]
+
+
+async def test_m1_a_slice_marks_held_back_as_soon_as_it_defers(provider):
+    """Fable M1: the session is marked unclean when the slice defers a
+    record, before its next chunk goes — not only once the slice ended (a
+    sentinel judged in between would read a clean stream)."""
+    session = _FakeSession()
+    seen: list[bool] = []
+
+    class _Deferring:
+        deferred = False
+        resource = "posts"
+
+    exporter = _Deferring()
+
+    class _Chunks:
+        async def build_chunks(self, **kw):
+            exporter.deferred = True
+            yield {"sync_id": "sync-x", "resource": "posts", "seq": 0}
+
+    cls = type(provider)
+    real_send = cls._send
+
+    async def send(self, s, envelope):
+        seen.append(getattr(s, "held_back", False))
+        return await real_send(self, s, envelope)
+
+    async def exporter_for(self, resource, s):
+        return exporter
+
+    with (
+        patch.object(provider, "_builder", _Chunks()),
+        patch.object(cls, "_send", send),
+        patch.object(cls, "_exporter_for", exporter_for),
+    ):
+        await provider.stream_request_more(session, {"resource": "posts"})
+    assert seen == [True]
+    assert session.stream_clean is False

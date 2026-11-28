@@ -44,6 +44,9 @@ SYNC_MAX_FILE_BYTES: int = 50 * 1024 * 1024
 #: How long a post's or comment's files stay "new" (synced on catch-up).
 LIVE_WINDOW: timedelta = timedelta(days=7)
 
+#: How far ahead of this household's clock an item's stamp may be.
+MAX_CLOCK_SKEW: timedelta = timedelta(minutes=5)
+
 #: The default storage for one space's synced files on a household.
 DEFAULT_SPACE_SYNC_BYTES: int = 2 * 1024 * 1024 * 1024
 
@@ -99,7 +102,13 @@ def syncs(hint: SyncHint, *, size: int, name: str, now: datetime) -> bool:
         case SyncSource.LIVE | SyncSource.GALLERY | SyncSource.PAGE:
             return True
         case SyncSource.POST | SyncSource.COMMENT:
-            return hint.created_at is not None and now - hint.created_at <= LIVE_WINDOW
+            # A stamp ahead of the clock (past the allowed skew) is not "new":
+            # an author's clock can't make old content sync (Fable M11).
+            return (
+                hint.created_at is not None
+                and hint.created_at <= now + MAX_CLOCK_SKEW
+                and now - hint.created_at <= LIVE_WINDOW
+            )
         case SyncSource.CALENDAR | SyncSource.BAZAAR:
             return hint.until is None or hint.until >= now
         case SyncSource.MODERATION:

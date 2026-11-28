@@ -710,6 +710,11 @@ async def test_a_photo_listed_in_another_space_gets_a_copy_of_its_own(client):
     (media / "bike.webp").write_bytes(b"bike-pixels")
     first = await _seed_space(client, "space-one")
     second = await _seed_space(client, "space-two")
+    # Only a space whose files travel through a GFS gets copies (review
+    # H3e): both are global.
+    await client._db.enqueue(
+        "UPDATE spaces SET space_type='global' WHERE id IN (?, ?)", (first, second)
+    )
 
     async def _list(space_id):
         r = await client.post(
