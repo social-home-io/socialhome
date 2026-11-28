@@ -142,3 +142,11 @@ async def test_a_view_is_stamped_and_listed_per_space(repo) -> None:
     held = await repo.get("sg-a.webp")
     assert held is not None and held.viewed_at is not None
     await repo.mark_viewed("nope.webp")  # no row: nothing happens
+
+
+async def test_list_space_ids_names_each_space_with_a_row_once(repo) -> None:
+    assert await repo.list_space_ids() == []
+    await repo.save_many(
+        [_ref("sg-a.webp"), _ref("sg-b.webp"), _ref("sg-c.webp", space_id="sp-2")]
+    )
+    assert await repo.list_space_ids() == ["sp-1", "sp-2"]

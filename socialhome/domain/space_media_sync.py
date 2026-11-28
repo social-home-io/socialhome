@@ -23,9 +23,11 @@ MODERATION          pictures only (a reviewer's held submission)
 Every synced file is at most :data:`SYNC_MAX_FILE_BYTES`; a larger one (a
 long video in pieces) is fetched on view, and kept by the host. A
 household's synced files of one space are bounded by its storage setting
-(:data:`DEFAULT_SPACE_SYNC_BYTES`, 0 = only what it opens); past it the
-least recently viewed synced file goes first, never one viewed within
-:data:`VIEWED_KEEP`.
+(:data:`DEFAULT_SPACE_SYNC_BYTES`, 0 = only what it opens), all spaces'
+together by :data:`DEFAULT_SPACE_SYNC_TOTAL_BYTES`, and all of them by the
+household quota's free space; past a cap the least recently viewed synced
+file goes first, never one viewed within :data:`VIEWED_KEEP` — except for
+the household's own upload, which always wins.
 """
 
 from __future__ import annotations
@@ -44,6 +46,11 @@ LIVE_WINDOW: timedelta = timedelta(days=7)
 
 #: The default storage for one space's synced files on a household.
 DEFAULT_SPACE_SYNC_BYTES: int = 2 * 1024 * 1024 * 1024
+
+#: The default storage for the synced files of every space together (owner
+#: 2026-11-28). Synced files also only ever use the household quota's FREE
+#: space: the household's own uploads evict them.
+DEFAULT_SPACE_SYNC_TOTAL_BYTES: int = 8 * 1024 * 1024 * 1024
 
 #: A file viewed this recently is never evicted for the budget.
 VIEWED_KEEP: timedelta = timedelta(days=30)

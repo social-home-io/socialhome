@@ -3912,6 +3912,8 @@ def create_app(config: Config | None = None) -> web.Application:
         media_path=config.media_path,
         quota_bytes=config.max_storage_bytes,
         space_sync_bytes=config.space_sync_max_bytes,
+        # Owner 2026-11-28: an admin's storage settings survive a restart.
+        settings_repo=repos.instance_config,
     )
 
     # ── Backup (HA-mode only) ─────────────────────────────────────────────
@@ -4933,6 +4935,8 @@ def create_app(config: Config | None = None) -> web.Application:
         repos.gfs_connection.attach_key_manager(key_manager)
         # The dashboard's tablet-cookie key is stored wrapped under it too.
         dashboard.settings.attach_key_manager(key_manager)
+        # Owner 2026-11-28 — the admin's saved storage settings.
+        await storage_quota.load()
 
         # 2. Identity bootstrap — generates row on first start, returns
         #    decrypted seed + public key + derived instance_id. When the
@@ -5934,7 +5938,15 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # Owner 2026-11-28 — "Storage for synced space files", the
         # household's storage setting (0 = only what it opens).
-        space_media_fetcher.attach_sync_budget(lambda: storage_quota.space_sync_bytes)
+        # Synced files stay within the storage settings and the quota's
+        # free space; the household's own upload evicts them first.
+        space_media_fetcher.attach_storage(storage_quota)
+        storage_quota.attach_synced_files(
+            evict=space_media_fetcher.evict_for_upload,
+            changed=space_media_fetcher.settings_changed,
+        )
+        # Fable I6 — the host archive scan (at start, then every 15 min).
+        await space_media_fetcher.start()
         if gfs_channels is not None:
             # A private space with an opaque channel uploads under its
             # channel scope (the GFS never learns the space).

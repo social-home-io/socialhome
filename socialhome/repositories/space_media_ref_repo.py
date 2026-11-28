@@ -24,6 +24,8 @@ class AbstractSpaceMediaRefRepo(Protocol):
 
     async def list_for_space(self, space_id: str) -> list[SpaceMediaRef]: ...
 
+    async def list_space_ids(self) -> list[str]: ...
+
     async def mark_viewed(self, local_name: str) -> None: ...
 
     async def list_for_item(
@@ -102,6 +104,14 @@ class SqliteSpaceMediaRefRepo:
             (space_id,),
         )
         return [_row(r) for r in rows]
+
+    async def list_space_ids(self) -> list[str]:
+        """Every space with a row (the synced-files storage, the host
+        archive scan)."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT space_id FROM space_media_refs ORDER BY space_id"
+        )
+        return [str(r["space_id"]) for r in rows]
 
     async def mark_viewed(self, local_name: str) -> None:
         """Stamp *local_name* as viewed now (UTC, migration 0159)."""

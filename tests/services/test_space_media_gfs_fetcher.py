@@ -153,10 +153,31 @@ class _Refs:
     async def list_for_space(self, space_id):
         return [r for r in self.rows.values() if r.space_id == space_id]
 
+    async def list_space_ids(self):
+        return sorted({r.space_id for r in self.rows.values()})
+
     async def mark_viewed(self, local_name):
         row = self.rows.get(local_name)
         if row is not None:
             self.rows[local_name] = replace(row, viewed_at="2026-11-28 12:00:00")
+
+
+class _Storage:
+    """The household's storage settings (StorageQuotaService)."""
+
+    def __init__(self, per_space=2 * 1024**3, total=8 * 1024**3, free=None):
+        self.space_sync_bytes = per_space
+        self.space_sync_total_bytes = total
+        self.free = free
+        self.stored: list[int] = []
+
+    async def free_for_sync(self):
+        return self.free
+
+    def note_stored(self, size):
+        self.stored.append(size)
+        if self.free is not None:
+            self.free -= size
 
 
 class _Crypto:
@@ -311,7 +332,7 @@ def _fetcher(
     gfs_space=False,
     host=False,
 ):
-    return SpaceMediaGfsFetcher(
+    f = SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
         space_crypto=_Crypto(),
         gfs_service=gfs,
@@ -327,6 +348,8 @@ def _fetcher(
         ),
         media_dir=tmp_path,
     )
+    f.attach_storage(_Storage())
+    return f
 
 
 async def test_receive_stores_the_items_own_refs(tmp_path):
@@ -1690,11 +1713,11 @@ async def test_the_host_archive_is_bounded_by_bytes(tmp_path, monkeypatch, caplo
         gfs_space=True,
         host=True,
     )
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         await _recv_pieced(f, wire)
         await _settle(f)
     assert not (tmp_path / _sc("v.webm", data)).exists()
-    assert "archive" in caplog.text
+    assert "archive full" in caplog.text
 
 
 async def test_the_host_archive_runs_a_bounded_number_at_once(tmp_path, monkeypatch):
@@ -1731,22 +1754,72 @@ async def test_the_host_archive_runs_a_bounded_number_at_once(tmp_path, monkeypa
     assert len(list(tmp_path.glob("sg-*"))) == 4
 
 
-async def test_the_host_archive_retries_a_miss_then_warns(
-    tmp_path, monkeypatch, caplog
-):
-    """A file no GFS holds yet (its upload still running) is asked for
-    again after HOST_ARCHIVE_RETRY_DELAYS_S; after the last, a WARNING."""
-    monkeypatch.setattr(fetch_mod, "HOST_ARCHIVE_RETRY_DELAYS_S", (0.0, 0.0))
+async def test_the_host_archive_scan_catches_up_a_miss(tmp_path, monkeypatch, caplog):
+    """Fable I6 — a file no GFS held yet (its upload still running) is not
+    retried by a sleeping task per file: the next archive scan queues the
+    hosted space's rows without a file again. After
+    HOST_ARCHIVE_MISSES_BEFORE_BACKOFF scans in a row it is asked for only
+    every HOST_ARCHIVE_BACKOFF_SCANS-th scan, with one WARNING."""
+    monkeypatch.setattr(fetch_mod, "HOST_ARCHIVE_MISSES_BEFORE_BACKOFF", 2)
+    monkeypatch.setattr(fetch_mod, "HOST_ARCHIVE_BACKOFF_SCANS", 3)
+    gfs = _Gfs({})
+    f = _fetcher(
+        tmp_path,
+        gfs,
+        conns=[_Conn("g", "https://g")],
+        insts=(),
+        gfs_space=True,
+        host=True,
+    )
+    blob = _blob("v.webm", b"y" * 10)
+    await _recv(f, SPACE, _wire("v.webm", blob), ["api/media/v.webm"])
+    await _settle(f)
+    assert len(gfs.fetches) == 1
+    assert not f._timers  # nothing sleeps per file
+    with caplog.at_level("WARNING"):
+        assert await f.archive_scan() == 1  # scan 1: the second miss
+        await _settle(f)
+    assert "holds no copy" in caplog.text
+    asked = len(gfs.fetches)
+    assert await f.archive_scan() == 0  # scan 2: backed off
+    gfs.blobs[_addr(blob)] = blob
+    assert await f.archive_scan() == 1  # scan 3: every 3rd
+    await _settle(f)
+    assert len(gfs.fetches) == asked + 1
+    assert (tmp_path / _L("v.webm")).read_bytes() == b"y" * 10
+    assert await f.archive_scan() == 0  # held: nothing to do
+
+
+async def test_the_host_archive_scan_is_bounded_per_space(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch_mod, "MAX_HOST_ARCHIVE_PER_SCAN", 2)
     gfs = _Gfs({})
     f = _fetcher(
         tmp_path, gfs, conns=[_Conn("g", "https://g")], gfs_space=True, host=True
     )
+    for i in range(5):
+        name = f"v{i}.webm"
+        await _recv(
+            f,
+            SPACE,
+            _wire(name, _blob(name, b"x")),
+            [f"api/media/{name}"],
+            prefetch=False,
+        )
+    assert await f.archive_scan() == 2
+
+
+async def test_the_host_archive_keeps_within_the_quotas_free_space(tmp_path, caplog):
     blob = _blob("v.webm", b"y" * 10)
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(
+        tmp_path, gfs, conns=[_Conn("g", "https://g")], gfs_space=True, host=True
+    )
+    f.attach_storage(_Storage(free=5))
     with caplog.at_level("WARNING"):
         await _recv(f, SPACE, _wire("v.webm", blob), ["api/media/v.webm"])
         await _settle(f)
-    assert [u for u, _b in gfs.fetches].count("https://g") == 3
-    assert "holds no copy" in caplog.text
+    assert gfs.fetches == []
+    assert "quota is full" in caplog.text
 
 
 async def test_a_delegated_admin_acting_as_host_keeps_every_file(tmp_path):
@@ -1811,7 +1884,7 @@ async def test_a_zero_budget_syncs_nothing_but_the_host_keeps_all(tmp_path):
     blob = _blob("a.webp", b"x")
     gfs = _Gfs({_addr(blob): blob})
     f = _fetcher(tmp_path, gfs)
-    f.attach_sync_budget(lambda: 0)
+    f.attach_storage(_Storage(per_space=0))
     await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
     await asyncio.wait_for(f.drain(), timeout=5)
     assert gfs.fetches == []
@@ -1819,7 +1892,7 @@ async def test_a_zero_budget_syncs_nothing_but_the_host_keeps_all(tmp_path):
     host = _fetcher(
         tmp_path / "h", gfs, conns=[_Conn("g", "https://g")], gfs_space=True, host=True
     )
-    host.attach_sync_budget(lambda: 0)
+    host.attach_storage(_Storage(per_space=0))
     await _recv(host, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
     await asyncio.wait_for(host.drain(), timeout=5)
     assert (tmp_path / "h" / _L("a.webp")).read_bytes() == b"x"
@@ -1871,26 +1944,26 @@ def _ago(days):
 async def test_the_budget_evicts_the_least_recently_viewed_synced_file(tmp_path):
     """Past the space's budget, synced files never viewed go first (oldest
     first), then the least recently viewed; a file viewed within 30 days
-    and one this household delivered itself never go."""
+    never goes (Fable M2: the household's own files have no row at all)."""
     f = _fetcher(tmp_path, _Gfs({}))
-    f.attach_sync_budget(lambda: 250)
+    f.attach_storage(_Storage(per_space=150))
     never_old = _held(f, tmp_path, "a.webp", item_id="1", size=100, age_days=9)
     never_new = _held(f, tmp_path, "b.webp", item_id="2", size=100, age_days=1)
     viewed_old = _held(f, tmp_path, "c.webp", item_id="3", size=100, viewed=_ago(60))
     viewed_new = _held(f, tmp_path, "d.webp", item_id="4", size=100, viewed=_ago(2))
-    own = _held(f, tmp_path, "e.webp", item_id="5", size=100, origin="me")
+    (tmp_path / "own.webp").write_bytes(b"o" * 500)
     await f.sweep(SPACE)
     left = {p.name for p in tmp_path.iterdir()}
     assert never_old not in left and never_new not in left
     assert viewed_old not in left
-    assert {viewed_new, own} <= left
+    assert {viewed_new, "own.webp"} <= left
     # The rows stay: a view fetches the file again.
     assert never_old in f._refs.rows
 
 
 async def test_the_host_never_evicts(tmp_path):
     f = _fetcher(tmp_path, _Gfs({}), gfs_space=True, host=True)
-    f.attach_sync_budget(lambda: 10)
+    f.attach_storage(_Storage(per_space=10))
     name = _held(f, tmp_path, "a.webp", item_id="1", size=100)
     await f.sweep(SPACE)
     assert (tmp_path / name).exists()
@@ -1911,4 +1984,159 @@ async def test_a_view_is_stamped_once_a_day(tmp_path):
     await f.note_viewed(name)
     await f.note_viewed("not-a-space-file.webp")
     assert calls == [name]
+    assert f._refs.rows[name].viewed_at is not None
+
+
+# ── Fable I3/I4/I7/I8 — the synced-files storage ──────────────────────────
+
+
+async def test_no_room_means_no_fetch_and_no_churn(tmp_path):
+    """Fable I3: files viewed lately fill the space's storage — a new sync
+    is not fetched only to be evicted again; it waits for a view."""
+    blob = _blob("a.webp", b"x" * 10)
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    f.attach_storage(_Storage(per_space=len(blob) + 100))
+    _held(f, tmp_path, "c.webp", item_id="3", size=100, viewed=_ago(1))
+    _held(f, tmp_path, "d.webp", item_id="4", size=45, viewed=_ago(2))
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert gfs.fetches == []
+    assert len(list(tmp_path.glob("sg-*"))) == 2
+
+
+async def test_room_is_made_from_never_viewed_files_first(tmp_path):
+    """A new sync takes the place of an old never-viewed one (LRU), before
+    the fetch — the space stays within its storage throughout."""
+    blob = _blob("a.webp", b"x" * 10)
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    f.attach_storage(_Storage(per_space=len(blob) + 100))
+    old = _held(f, tmp_path, "c.webp", item_id="3", size=100, age_days=5)
+    seen = _held(f, tmp_path, "d.webp", item_id="4", size=45, viewed=_ago(2))
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    left = {p.name for p in tmp_path.iterdir()}
+    assert old not in left and seen in left and _L("a.webp") in left
+
+
+async def test_the_total_cap_and_the_quotas_free_space_bound_syncs(tmp_path):
+    """Owner 2026-11-28 (I4): all spaces' synced files together stay within
+    the total cap, and every synced file within the quota's free space."""
+    blob = _blob("a.webp", b"x" * 10)
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    f.attach_storage(_Storage(total=len(blob) + 50))
+    _held(f, tmp_path, "c.webp", item_id="3", size=100, viewed=_ago(1))
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert gfs.fetches == []
+    (tmp_path / "q").mkdir()
+    g = _fetcher(tmp_path / "q", gfs)
+    storage = _Storage(free=len(blob) - 1)
+    g.attach_storage(storage)
+    await _recv(g, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(g.drain(), timeout=5)
+    assert gfs.fetches == []
+    storage.free = 10_000
+    await _recv(g, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(g.drain(), timeout=5)
+    assert storage.stored == [len(blob)]
+
+
+async def test_an_upload_evicts_synced_files_even_viewed_ones(tmp_path):
+    """Owner 2026-11-28: the household's own upload always wins — even a
+    file viewed yesterday goes, oldest view first; one being fetched
+    stays."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    a = _held(f, tmp_path, "a.webp", item_id="1", size=100, viewed=_ago(1))
+    b = _held(f, tmp_path, "b.webp", item_id="2", size=100, viewed=_ago(3))
+    assert await f.evict_for_upload(50) == 100
+    left = {p.name for p in tmp_path.iterdir()}
+    assert a in left and b not in left
+
+
+async def test_a_sweep_never_evicts_on_a_host_role_it_cannot_read(tmp_path):
+    """Fable I7: a failed host-role read means "maybe the host" — skip."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    f.attach_storage(_Storage(per_space=0))
+    name = _held(f, tmp_path, "a.webp", item_id="1", size=100)
+
+    async def broken(space_id):
+        raise RuntimeError("db gone")
+
+    f._spaces.get = broken
+    assert await f.sweep(SPACE) == 0
+    assert (tmp_path / name).exists()
+
+
+async def test_a_lower_setting_sweeps_at_once(tmp_path):
+    """Fable I3: a new storage setting applies now, not at the next sync;
+    with 0 ("only what I open") the never-viewed files go."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    old = _held(f, tmp_path, "a.webp", item_id="1", size=100)
+    seen = _held(f, tmp_path, "b.webp", item_id="2", size=100, viewed=_ago(1))
+    f.attach_storage(_Storage(per_space=0))
+    f.settings_changed()
+    await asyncio.wait_for(f.drain(), timeout=5)
+    left = {p.name for p in tmp_path.iterdir()}
+    assert old not in left and seen in left
+
+
+async def test_a_catch_up_backlog_never_takes_a_live_items_slot(tmp_path, monkeypatch):
+    """Fable I8: an old gallery's syncs wait in their own backlog — a full
+    one leaves the live item's sync untouched; per space, the waiting bytes
+    are bounded too."""
+    monkeypatch.setattr(fetch_mod, "MAX_PREFETCH_PER_SPACE", 1)
+    f = _fetcher(tmp_path, _Gfs({}, delay=0.05))
+    f._prefetch("old-1", SPACE, 10, catch_up=True)
+    f._prefetch("old-2", SPACE, 10, catch_up=True)  # catch-up full
+    f._prefetch("live", SPACE, 10)
+    assert f._backlogs[True].pending == 1
+    assert f._backlogs[False].pending == 1
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert f._backlogs[True].pending == f._backlogs[False].pending == 0
+    monkeypatch.setattr(fetch_mod, "MAX_PREFETCH_PER_SPACE", 10)
+    monkeypatch.setattr(fetch_mod, "MAX_PREFETCH_BYTES_PER_SPACE", 15)
+    f._prefetch("big-1", SPACE, 10)
+    f._prefetch("big-2", SPACE, 10)
+    assert f._backlogs[False].pending == 1
+    await asyncio.wait_for(f.drain(), timeout=5)
+
+
+async def test_a_retry_waits_without_holding_the_catch_up_slot(tmp_path, monkeypatch):
+    """Fable I8: a miss's wait before the next try holds no semaphore."""
+    monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", (0.2,))
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({})
+    f = _fetcher(tmp_path, gfs)
+    await _recv(
+        f,
+        SPACE,
+        _wire("a.webp", blob),
+        ["api/media/a.webp"],
+        hint=SyncHint(SyncSource.GALLERY, created_at=datetime(2020, 1, 1, tzinfo=UTC)),
+    )
+    await asyncio.sleep(0.05)
+    assert len(gfs.fetches) == 1
+    assert not f._catch_up_sem.locked()
+    await asyncio.wait_for(f.drain(), timeout=5)
+
+
+async def test_a_failed_view_stamp_is_tried_again(tmp_path):
+    """Fable M5: the view is remembered only once it was stamped."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    name = _held(f, tmp_path, "a.webp", item_id="1", size=10)
+    real = f._refs.mark_viewed
+    fail = [True]
+
+    async def flaky(local_name):
+        if fail.pop():
+            raise RuntimeError("busy")
+        await real(local_name)
+
+    f._refs.mark_viewed = flaky
+    fail.insert(0, False)
+    await f.note_viewed(name)
+    await f.note_viewed(name)
     assert f._refs.rows[name].viewed_at is not None

@@ -27,15 +27,23 @@ This service:
   comments, upcoming events, active listings — each at most 50 MiB), at
   most :data:`PREFETCH_CONCURRENCY` at a time (a catch-up's at most one, so
   live content goes first), :data:`MAX_PREFETCH_PENDING` files and
-  :data:`MAX_PREFETCH_BYTES` waiting and :data:`MAX_PREFETCH_PER_SPACE` of
-  one space (the rest are fetched when viewed); a space whose last
-  :data:`MAX_SPACE_PREFETCH_MISSES` prefetches found nothing tries once,
-  without retries. A space's synced files are bounded by the household's
-  storage setting (:meth:`attach_sync_budget`, default 2 GiB per space, 0 =
-  only what it opens): :meth:`sweep` deletes the least recently viewed
-  first (``space_media_refs.viewed_at``, migration 0159) — never one viewed
-  within 30 days, one this household delivered, or anything on a household
-  acting as the space's host; the row stays, so a view fetches it again;
+  :data:`MAX_PREFETCH_BYTES` waiting and :data:`MAX_PREFETCH_PER_SPACE`
+  files / :data:`MAX_PREFETCH_BYTES_PER_SPACE` bytes of one space (the
+  rest are fetched when viewed) — a catch-up's syncs wait in a backlog of
+  their own with the same bounds, so an old gallery never takes a live
+  item's slot; a space whose last :data:`MAX_SPACE_PREFETCH_MISSES`
+  prefetches found nothing tries once, without retries. Synced files are
+  bounded by the household's storage settings (:meth:`attach_storage`,
+  owner 2026-11-28): per space (default 2 GiB, 0 = only what it opens),
+  every space's together, and the household quota's FREE space — a file is
+  synced only when it fits (after making room by the rules below), and the
+  household's own upload evicts synced files first
+  (:meth:`evict_for_upload`). :meth:`sweep` deletes the least recently
+  viewed first (``space_media_refs.viewed_at``, migration 0159) — never one
+  viewed within 30 days (except for an upload), nor anything on a household
+  acting as the space's host; the row stays, so a view fetches it again.
+  The household's own files have no ``space_media_refs`` row: never
+  counted, never evicted;
 * **archives** on the acting host of a GFS space (v_97, owner 2026-11-28):
   the household that owns the space (or a delegated admin household that
   acts as its host) fetches EVERY described file on arrival — videos and
@@ -44,9 +52,13 @@ This service:
   cache let the blobs go. A bounded background queue
   (:data:`HOST_ARCHIVE_CONCURRENCY` at a time, at most
   :data:`MAX_HOST_ARCHIVE_PENDING` files and :data:`MAX_HOST_ARCHIVE_BYTES`
-  waiting); a file no GFS holds yet is asked for again after
-  :data:`HOST_ARCHIVE_RETRY_DELAYS_S`, then a WARNING. A file past the
-  bounds, or still queued at a restart, is fetched when someone views it;
+  waiting); every :data:`HOST_ARCHIVE_SCAN_S` (and at start) the hosted
+  spaces' rows without a file are queued again, at most
+  :data:`MAX_HOST_ARCHIVE_PER_SCAN` per space — so a miss (an upload still
+  running), a full queue or a restart is caught up by the next scan; a file
+  missed :data:`HOST_ARCHIVE_MISSES_BEFORE_BACKOFF` scans in a row is asked
+  for only every :data:`HOST_ARCHIVE_BACKOFF_SCANS` th scan, with one
+  WARNING. The archive also keeps within the quota's free space;
 * **fetches on view** (:meth:`SpaceMediaGfsFetcher.ensure_local`, called by
   ``GET /api/media/{filename}`` for a missing file): concurrent requests for
   one file share one fetch, bounded by a timeout.
@@ -106,8 +118,8 @@ import pathlib
 import time
 import uuid
 from collections import OrderedDict, deque
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import replace
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -141,7 +153,6 @@ from ..domain.space_media_ref import (
     space_page_media_name,
 )
 from ..domain.space_media_sync import (
-    DEFAULT_SPACE_SYNC_BYTES,
     LIVE_HINT,
     VIEWED_KEEP,
     SyncHint,
@@ -197,8 +208,11 @@ MAX_PREFETCH_PER_SPACE: int = 200
 #: Bytes the synced files waiting may add up to (owner 2026-11-28: files up
 #: to 50 MiB are synced, not only pictures).
 MAX_PREFETCH_BYTES: int = 1024 * 1024 * 1024
+#: Bytes one space's waiting syncs may add up to (Fable I8).
+MAX_PREFETCH_BYTES_PER_SPACE: int = 256 * 1024 * 1024
 #: A catch-up's syncs (old records: a gallery, upcoming events) run at most
-#: this many at once — live content goes first.
+#: this many at once — live content goes first — and wait in a backlog of
+#: their own (the same bounds), never in a live item's slot (Fable I8).
 CATCH_UP_SYNC_CONCURRENCY: int = 1
 
 #: A space's synced files are checked against the budget at most this often.
@@ -222,7 +236,14 @@ MAX_SPACE_PREFETCH_MISSES: int = 5
 HOST_ARCHIVE_CONCURRENCY: int = 2
 MAX_HOST_ARCHIVE_PENDING: int = 4096
 MAX_HOST_ARCHIVE_BYTES: int = 4 * 1024 * 1024 * 1024
-HOST_ARCHIVE_RETRY_DELAYS_S: tuple[float, ...] = (30.0, 300.0, 1800.0)
+#: Fable I6 — the hosted spaces' rows without a file are queued again this
+#: often (and at start), at most this many per space per scan; a file that
+#: missed this many scans in a row is asked for only every n-th scan.
+HOST_ARCHIVE_SCAN_S: float = 900.0
+MAX_HOST_ARCHIVE_PER_SCAN: int = 512
+HOST_ARCHIVE_MISSES_BEFORE_BACKOFF: int = 3
+HOST_ARCHIVE_BACKOFF_SCANS: int = 8
+MAX_HOST_ARCHIVE_MISSES_REMEMBERED: int = 16_384
 
 #: GFS fetches running at once, views and prefetches together.
 MAX_CONCURRENT_FETCHES: int = 6
@@ -284,15 +305,66 @@ class _ChannelRing(Protocol):
     ) -> tuple[str, list[GfsConnection]] | None: ...
 
 
+class _SyncStorage(Protocol):
+    """The household's storage settings (``StorageQuotaService``)."""
+
+    @property
+    def space_sync_bytes(self) -> int: ...
+
+    @property
+    def space_sync_total_bytes(self) -> int: ...
+
+    async def free_for_sync(self) -> int | None: ...
+
+    def note_stored(self, size: int) -> None: ...
+
+
+@dataclass(slots=True)
+class _Backlog:
+    """Syncs waiting (Fable I8): files and bytes, in all and per space."""
+
+    pending: int = 0
+    bytes: int = 0
+    by_space: dict[str, list[int]] = field(default_factory=dict)
+
+    def admits(self, space_id: str, size: int) -> bool:
+        count, held = self.by_space.get(space_id, (0, 0))
+        return (
+            self.pending < MAX_PREFETCH_PENDING
+            and self.bytes + size <= MAX_PREFETCH_BYTES
+            and count < MAX_PREFETCH_PER_SPACE
+            and held + size <= MAX_PREFETCH_BYTES_PER_SPACE
+        )
+
+    def add(self, space_id: str, size: int) -> None:
+        self.pending += 1
+        self.bytes += size
+        entry = self.by_space.setdefault(space_id, [0, 0])
+        entry[0] += 1
+        entry[1] += size
+
+    def done(self, space_id: str, size: int) -> None:
+        self.pending -= 1
+        self.bytes -= size
+        entry = self.by_space.get(space_id)
+        if entry is not None:
+            entry[0] -= 1
+            entry[1] -= size
+            if entry[0] <= 0:
+                self.by_space.pop(space_id, None)
+
+
 class SpaceMediaGfsFetcher:
     """Keep ``media_refs`` and turn them into local files."""
 
     __slots__ = (
         "_active_parts",
         "_archive_bytes",
+        "_archive_misses",
         "_archive_queue",
+        "_archive_scans",
         "_archive_workers",
-        "_budget",
+        "_backlogs",
         "_catch_up_sem",
         "_channels",
         "_crypto",
@@ -302,18 +374,20 @@ class SpaceMediaGfsFetcher:
         "_fetch_sem",
         "_gfs",
         "_gfs_repo",
+        "_held",
         "_inflight",
         "_misses",
         "_pages",
-        "_prefetch_by_space",
-        "_prefetch_bytes",
-        "_prefetch_pending",
         "_prefetch_sem",
         "_refs",
         "_space_misses",
         "_spaces",
+        "_stop",
+        "_storage",
+        "_sweep_due",
         "_swept",
         "_tasks",
+        "_timers",
         "_viewed",
     )
 
@@ -344,17 +418,23 @@ class SpaceMediaGfsFetcher:
         self._inflight: dict[tuple[str, bool], asyncio.Task[str]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._prefetch_sem = asyncio.Semaphore(PREFETCH_CONCURRENCY)
-        self._prefetch_pending = 0
-        self._prefetch_bytes = 0
         self._catch_up_sem = asyncio.Semaphore(CATCH_UP_SYNC_CONCURRENCY)
-        #: The household's storage for one space's synced files.
-        self._budget: Callable[[], int] = lambda: DEFAULT_SPACE_SYNC_BYTES
-        #: space → monotonic time of its last budget sweep.
+        #: Syncs waiting: live items' (False) and a catch-up's (True).
+        self._backlogs = {False: _Backlog(), True: _Backlog()}
+        #: The household's storage settings (none: nothing is synced).
+        self._storage: _SyncStorage | None = None
+        #: space → bytes of its synced files on disk (spaces this household
+        #: hosts are not counted); ``None`` until first counted.
+        self._held: dict[str, int] | None = None
+        #: space → monotonic time of its last budget sweep, and the spaces
+        #: with a trailing sweep scheduled.
         self._swept: dict[str, float] = {}
+        self._sweep_due: set[str] = set()
+        #: Trailing sweeps waiting out their interval (cancelled on stop).
+        self._timers: set[asyncio.Task] = set()
         #: local name → monotonic time its view was last stamped.
         self._viewed: OrderedDict[str, float] = OrderedDict()
         #: Prefetches waiting per space (:data:`MAX_PREFETCH_PER_SPACE`).
-        self._prefetch_by_space: dict[str, int] = {}
         #: Every GFS fetch, views and prefetches alike.
         self._fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
         #: local name → monotonic time until which a view doesn't ask again.
@@ -370,14 +450,32 @@ class SpaceMediaGfsFetcher:
         self._active_parts: set[pathlib.Path] = set()
         #: v_97 — the acting host's archive queue: (local name, size,
         #: attempts so far), the bytes waiting in it and its workers.
-        self._archive_queue: deque[tuple[str, int, int]] = deque()
+        self._archive_queue: deque[tuple[str, int]] = deque()
         self._archive_bytes = 0
         self._archive_workers = 0
+        #: local name → scans in a row its archive fetch missed; scans run.
+        self._archive_misses: OrderedDict[str, int] = OrderedDict()
+        self._archive_scans = 0
+        self._stop = asyncio.Event()
 
-    def attach_sync_budget(self, budget: Callable[[], int]) -> None:
-        """The household's storage for one space's synced files, in bytes
-        (the storage settings; 0 = only what it opens)."""
-        self._budget = budget
+    def attach_storage(self, storage: _SyncStorage) -> None:
+        """The household's storage settings (owner 2026-11-28): synced
+        files per space and in all, within the quota's free space."""
+        self._storage = storage
+
+    async def start(self) -> None:
+        """Run the host archive scan (Fable I6): at start, then every
+        :data:`HOST_ARCHIVE_SCAN_S`."""
+        self._stop.clear()
+        task = asyncio.create_task(self._archive_loop())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _archive_loop(self) -> None:
+        while not self._stop.is_set():
+            await self.archive_scan()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=HOST_ARCHIVE_SCAN_S)
 
     def attach_channels(self, channels: _ChannelRing) -> None:
         """v_97 — a GFS space's files come only from the GFS cache: the
@@ -629,10 +727,10 @@ class SpaceMediaGfsFetcher:
     ) -> list[SpaceMediaRef]:
         """Keep *loc*'s new rows — call it once the item is stored — and
         sync the files the per-source policy keeps for *hint* (``None``: an
-        item that arrived live). The acting host of a GFS space archives
-        every file instead, a file in pieces too (v_97, owner 2026-11-28) —
-        a submission it holds for review too, which it releases once
-        approved. Never raises."""
+        item that arrived live), as the storage settings allow. The acting
+        host of a GFS space archives every file instead, a file in pieces
+        too (v_97, owner 2026-11-28) — a submission it holds for review too,
+        which it releases once approved. Never raises."""
         if not loc.refs:
             return []
         try:
@@ -643,7 +741,6 @@ class SpaceMediaGfsFetcher:
         archives: dict[str, bool] = {}
         hint = hint or LIVE_HINT
         now = datetime.now(UTC)
-        budget = self._budget()
         for ref in loc.refs:
             # A newer epoch may have moved the row: ask the GFS again.
             self._misses.pop(ref.local_name, None)
@@ -653,7 +750,9 @@ class SpaceMediaGfsFetcher:
                 self._archive(ref.local_name, ref.size)
             elif (
                 prefetch
-                and budget > 0
+                and self._storage is not None
+                and self._storage.space_sync_bytes > 0
+                and self._storage.space_sync_total_bytes > 0
                 and syncs(hint, size=ref.size, name=ref.filename, now=now)
             ):
                 self._prefetch(
@@ -667,79 +766,124 @@ class SpaceMediaGfsFetcher:
     async def _archives(self, space_id: str) -> bool:
         """Whether this household keeps every file of *space_id*: it acts
         as the host of a GFS space (:func:`serves_as_host`). ``False`` on a
-        read failure — the plain prefetch then."""
+        read failure — the plain prefetch then (a sweep uses
+        :meth:`_archives_or_raise`: never evicts on a guess, Fable I7)."""
         try:
-            space = await self._spaces.get(space_id)
-            if space is None or not channel_on(space):
-                return False
-            own = str(getattr(self._federation, "own_instance_id", "") or "")
-            return await serves_as_host(self._spaces, space, own_instance_id=own)
+            return await self._archives_or_raise(space_id)
         except Exception:
             log.warning("space %s: host role not read", space_id, exc_info=True)
             return False
 
-    def _archive(self, filename: str, size: int, attempts: int = 0) -> None:
-        """Queue *filename* for the host's archive (bounded; never raises)."""
+    async def _archives_or_raise(self, space_id: str) -> bool:
+        space = await self._spaces.get(space_id)
+        if space is None or not channel_on(space):
+            return False
+        own = str(getattr(self._federation, "own_instance_id", "") or "")
+        return await serves_as_host(self._spaces, space, own_instance_id=own)
+
+    def _archive(self, filename: str, size: int) -> bool:
+        """Queue *filename* for the host's archive (bounded; never raises).
+        Whether it was queued."""
+        if any(name == filename for name, _size in self._archive_queue):
+            return True
         if (
             len(self._archive_queue) >= MAX_HOST_ARCHIVE_PENDING
             or self._archive_bytes + max(size, 0) > MAX_HOST_ARCHIVE_BYTES
         ):
-            log.warning(
+            log.info(
                 "space media host archive full (%d files, %d bytes waiting) — "
-                "%s is fetched when someone views it",
+                "%s waits for the next scan",
                 len(self._archive_queue),
                 self._archive_bytes,
                 filename,
             )
-            return
-        self._archive_queue.append((filename, max(size, 0), attempts))
+            return False
+        self._archive_queue.append((filename, max(size, 0)))
         self._archive_bytes += max(size, 0)
         if self._archive_workers < HOST_ARCHIVE_CONCURRENCY:
             self._archive_workers += 1
             task = asyncio.create_task(self._archive_worker())
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+        return True
 
     async def _archive_worker(self) -> None:
         try:
             while self._archive_queue:
-                filename, size, attempts = self._archive_queue.popleft()
+                filename, size = self._archive_queue.popleft()
                 self._archive_bytes -= size
                 try:
+                    if not await self._fits_quota(size):
+                        log.warning(
+                            "space media %s: the household quota is full — the "
+                            "host archive waits for room",
+                            filename,
+                        )
+                        continue
                     outcome = await self._fetch_task(filename)
                 except Exception:
                     log.warning(
                         "space media archive of %s failed", filename, exc_info=True
                     )
                     continue
-                if outcome != _MISS:
-                    continue
-                if attempts < len(HOST_ARCHIVE_RETRY_DELAYS_S):
-                    task = asyncio.create_task(
-                        self._archive_later(
-                            filename,
-                            size,
-                            attempts + 1,
-                            HOST_ARCHIVE_RETRY_DELAYS_S[attempts],
-                        )
-                    )
-                    self._tasks.add(task)
-                    task.add_done_callback(self._tasks.discard)
-                else:
-                    log.warning(
-                        "space media %s: the space's host holds no copy — no GFS "
-                        "held it after %d tries; fetched when someone views it",
-                        filename,
-                        attempts + 1,
-                    )
+                self._note_archive_outcome(filename, outcome)
         finally:
             self._archive_workers -= 1
 
-    async def _archive_later(
-        self, filename: str, size: int, attempts: int, delay: float
-    ) -> None:
-        await asyncio.sleep(delay)
-        self._archive(filename, size, attempts)
+    def _note_archive_outcome(self, filename: str, outcome: str) -> None:
+        if outcome != _MISS:
+            self._archive_misses.pop(filename, None)
+            return
+        missed = self._archive_misses.pop(filename, 0) + 1
+        self._archive_misses[filename] = missed
+        while len(self._archive_misses) > MAX_HOST_ARCHIVE_MISSES_REMEMBERED:
+            self._archive_misses.popitem(last=False)
+        if missed == HOST_ARCHIVE_MISSES_BEFORE_BACKOFF:
+            log.warning(
+                "space media %s: the space's host holds no copy — no source "
+                "held it in %d scans; asked for less often now",
+                filename,
+                missed,
+            )
+
+    async def archive_scan(self) -> int:
+        """Queue the hosted spaces' files that are not here (Fable I6: a
+        miss, a full queue or a restart is caught up here), at most
+        :data:`MAX_HOST_ARCHIVE_PER_SCAN` per space. Returns how many were
+        queued. Never raises."""
+        self._archive_scans += 1
+        queued = 0
+        try:
+            space_ids = await self._refs.list_space_ids()
+        except Exception:
+            log.warning("space media host archive scan failed", exc_info=True)
+            return 0
+        for space_id in space_ids:
+            if not await self._archives(space_id):
+                continue
+            try:
+                rows = await self._refs.list_for_space(space_id)
+            except Exception:
+                log.warning("space %s: archive rows not read", space_id, exc_info=True)
+                continue
+            per_space = 0
+            for ref in rows:
+                if per_space >= MAX_HOST_ARCHIVE_PER_SCAN:
+                    break
+                path = media_file_path(self._dir, ref.local_name)
+                if path is None or await aiofiles.os.path.isfile(path):
+                    continue
+                missed = self._archive_misses.get(ref.local_name, 0)
+                if (
+                    missed >= HOST_ARCHIVE_MISSES_BEFORE_BACKOFF
+                    and self._archive_scans % HOST_ARCHIVE_BACKOFF_SCANS
+                ):
+                    continue
+                if not self._archive(ref.local_name, ref.size):
+                    return queued
+                per_space += 1
+                queued += 1
+        return queued
 
     # ── Fetching ─────────────────────────────────────────────────────────
 
@@ -807,25 +951,32 @@ class SpaceMediaGfsFetcher:
         return task
 
     async def _fetch_bounded(self, filename: str, *, want: bool = False) -> str:
+        path = media_file_path(self._dir, filename)
+        here = path is not None and await aiofiles.os.path.isfile(path)
         async with self._fetch_sem:
-            return await self._fetch(filename, want=want)
+            outcome = await self._fetch(filename, want=want)
+        if outcome == _STORED and not here:
+            # A new file here: the synced-files storage counts it (a view's
+            # too) and sweeps if it went past a cap.
+            ref = await self._refs.get(filename)
+            if ref is not None:
+                self._note_stored(ref.space_id, max(ref.size, 0))
+                self._sweep_soon(ref.space_id)
+        return outcome
 
     def _prefetch(
         self, filename: str, space_id: str, size: int = 0, *, catch_up: bool = False
     ) -> None:
         size = max(size, 0)
-        if (
-            self._prefetch_pending >= MAX_PREFETCH_PENDING
-            or self._prefetch_bytes + size > MAX_PREFETCH_BYTES
-            or self._prefetch_by_space.get(space_id, 0) >= MAX_PREFETCH_PER_SPACE
-        ):
+        backlog = self._backlogs[catch_up]
+        if not backlog.admits(space_id, size):
             log.info(
-                "space media prefetch backlog full — %s waits for a view", filename
+                "space media %s backlog full — %s waits for a view",
+                "catch-up" if catch_up else "prefetch",
+                filename,
             )
             return
-        self._prefetch_pending += 1
-        self._prefetch_bytes += size
-        self._prefetch_by_space[space_id] = self._prefetch_by_space.get(space_id, 0) + 1
+        backlog.add(space_id, size)
         task = asyncio.create_task(
             self._prefetch_one(filename, space_id, size, catch_up=catch_up)
         )
@@ -835,33 +986,38 @@ class SpaceMediaGfsFetcher:
     async def _prefetch_one(
         self, filename: str, space_id: str, size: int, *, catch_up: bool
     ) -> None:
+        backlog = self._backlogs[catch_up]
         try:
-            async with contextlib.AsyncExitStack() as stack:
-                if catch_up:
-                    # Behind live content: one catch-up sync at a time.
-                    await stack.enter_async_context(self._catch_up_sem)
-                async with self._prefetch_sem:
+            delays = (
+                PREFETCH_RETRY_DELAYS_S
+                if self._space_misses.get(space_id, 0) < MAX_SPACE_PREFETCH_MISSES
+                else ()
+            )
+            outcome = _MISS
+            for attempt in range(len(delays) + 1):
+                if attempt:
+                    # Fable I8: the wait between tries holds no slot.
+                    await asyncio.sleep(delays[attempt - 1])
+                async with contextlib.AsyncExitStack() as stack:
+                    if catch_up:
+                        # Behind live content: one catch-up sync at a time.
+                        await stack.enter_async_context(self._catch_up_sem)
+                    await stack.enter_async_context(self._prefetch_sem)
+                    if not await self._make_room(space_id, size):
+                        log.debug(
+                            "space media %s: no room in the synced-files "
+                            "storage — fetched when viewed",
+                            filename,
+                        )
+                        return
                     outcome = await self._fetch_task(filename)
-                if self._space_misses.get(space_id, 0) < MAX_SPACE_PREFETCH_MISSES:
-                    for delay in PREFETCH_RETRY_DELAYS_S:
-                        if outcome != _MISS:
-                            break
-                        await asyncio.sleep(delay)
-                        async with self._prefetch_sem:
-                            outcome = await self._fetch_task(filename)
+                if outcome != _MISS:
+                    break
             self._count_space_miss(space_id, outcome)
-            if outcome == _STORED:
-                self._sweep_soon(space_id)
         except Exception:  # pragma: no cover - defensive
             log.warning("space media prefetch of %s failed", filename, exc_info=True)
         finally:
-            self._prefetch_pending -= 1
-            self._prefetch_bytes -= size
-            left = self._prefetch_by_space.get(space_id, 1) - 1
-            if left > 0:
-                self._prefetch_by_space[space_id] = left
-            else:
-                self._prefetch_by_space.pop(space_id, None)
+            backlog.done(space_id, size)
 
     # ── The synced-files budget ──────────────────────────────────────────
 
@@ -879,70 +1035,221 @@ class SpaceMediaGfsFetcher:
         last = self._viewed.get(filename)
         if last is not None and now - last < VIEW_STAMP_INTERVAL_S:
             return
+        try:
+            await self._refs.mark_viewed(filename)
+        except Exception:
+            # Not remembered: the next view stamps it (Fable M5).
+            log.warning("space media %s: view not stamped", filename, exc_info=True)
+            return
         self._viewed[filename] = now
         self._viewed.move_to_end(filename)
         while len(self._viewed) > MAX_VIEW_STAMPS_REMEMBERED:
             self._viewed.popitem(last=False)
-        try:
-            await self._refs.mark_viewed(filename)
-        except Exception:
-            log.warning("space media %s: view not stamped", filename, exc_info=True)
 
-    def _sweep_soon(self, space_id: str) -> None:
-        last = self._swept.get(space_id)
-        if last is not None and _monotonic() - last < SWEEP_INTERVAL_S:
-            return
-        self._swept[space_id] = _monotonic()
-        task = asyncio.create_task(self.sweep(space_id))
+    async def _ledger(self) -> dict[str, int]:
+        """space → bytes of its synced files on disk, counted once (every
+        space with a row; hosted spaces are not counted), then kept by
+        :meth:`_note_stored` and the sweeps."""
+        if self._held is None:
+            held: dict[str, int] = {}
+            for space_id in await self._refs.list_space_ids():
+                if await self._archives_or_raise(space_id):
+                    continue
+                files = await self._files_of(space_id)
+                held[space_id] = sum(size for _ref, _path, size in files)
+            self._held = held
+        return self._held
+
+    async def _files_of(
+        self, space_id: str
+    ) -> list[tuple[SpaceMediaRef, pathlib.Path, int]]:
+        """*space_id*'s rows whose file is here, with its size."""
+        out: list[tuple[SpaceMediaRef, pathlib.Path, int]] = []
+        for ref in await self._refs.list_for_space(space_id):
+            path = media_file_path(self._dir, ref.local_name)
+            if path is None:
+                continue
+            try:
+                size = (await aiofiles.os.stat(path)).st_size
+            except OSError:
+                continue
+            out.append((ref, path, size))
+        return out
+
+    async def _fits_quota(self, size: int) -> bool:
+        """Whether *size* more bytes fit the household quota's free space
+        (synced files only ever use free space, owner 2026-11-28)."""
+        if self._storage is None:
+            return True
+        free = await self._storage.free_for_sync()
+        return free is None or size <= free
+
+    async def _make_room(self, space_id: str, size: int) -> bool:
+        """Whether a synced file of *size* bytes fits now — the space's
+        storage, every space's together and the quota's free space — after
+        evicting what the budget rules let go (Fable I3: never fetch a file
+        only to evict it). ``False`` on any read failure."""
+        storage = self._storage
+        if storage is None:
+            return False
+        try:
+            per_space = storage.space_sync_bytes
+            total_cap = storage.space_sync_total_bytes
+            if size > per_space or size > total_cap:
+                return False
+            held = await self._ledger()
+            if held.get(space_id, 0) + size > per_space:
+                await self.sweep(space_id, need=size)
+                if held.get(space_id, 0) + size > per_space:
+                    return False
+            over = sum(held.values()) + size - total_cap
+            if over > 0:
+                await self._evict(over, keep_viewed=True)
+                if sum(held.values()) + size > total_cap:
+                    return False
+            free = await storage.free_for_sync()
+            if free is not None and size > free:
+                await self._evict(size - free, keep_viewed=True)
+                free = await storage.free_for_sync()
+                if free is not None and size > free:
+                    return False
+            return True
+        except Exception:
+            log.warning(
+                "space %s: synced-files storage not read", space_id, exc_info=True
+            )
+            return False
+
+    def _note_stored(self, space_id: str, size: int) -> None:
+        if self._held is not None and space_id in self._held:
+            self._held[space_id] += size
+        if self._storage is not None:
+            self._storage.note_stored(size)
+
+    def settings_changed(self) -> None:
+        """The storage settings changed: count again and sweep every space
+        to the new caps at once (Fable I3)."""
+        self._held = None
+        task = asyncio.create_task(self.sweep_all())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def sweep(self, space_id: str) -> int:
-        """Bring *space_id*'s synced files within the household's budget:
-        never-viewed files first (oldest first), then the least recently
-        viewed — never one viewed within :data:`VIEWED_KEEP`, one this
-        household delivered itself, one being fetched, nor anything on a
-        household acting as the space's host. The rows stay (a view fetches
-        the file again). Returns the bytes freed. Never raises."""
+    async def sweep_all(self) -> int:
+        """Every space to its storage, then all of them to the total cap and
+        the quota's free space. Returns the bytes freed. Never raises."""
+        freed = 0
         try:
-            if await self._archives(space_id):
-                return 0
-            budget = max(self._budget(), 0)
-            held: list[tuple[SpaceMediaRef, pathlib.Path, int]] = []
-            total = 0
-            for ref in await self._refs.list_for_space(space_id):
-                path = media_file_path(self._dir, ref.local_name)
-                if path is None:
-                    continue
-                try:
-                    size = (await aiofiles.os.stat(path)).st_size
-                except OSError:
-                    continue
-                total += size
-                held.append((ref, path, size))
-            if total <= budget:
-                return 0
-            now = datetime.now(UTC)
-            own = str(getattr(self._federation, "own_instance_id", "") or "")
+            held = await self._ledger()
+            for space_id in list(held):
+                freed += await self.sweep(space_id)
+            storage = self._storage
+            if storage is not None:
+                over = sum(held.values()) - storage.space_sync_total_bytes
+                if over > 0:
+                    freed += await self._evict(over, keep_viewed=True)
+        except Exception:
+            log.warning("synced space files not swept", exc_info=True)
+        return freed
 
-            def order(item: tuple[SpaceMediaRef, pathlib.Path, int]) -> tuple:
-                viewed = parse_moment(item[0].viewed_at)
-                arrived = parse_moment(item[0].created_at) or now
-                return (viewed is not None, viewed or arrived)
+    async def evict_for_upload(self, need: int) -> int:
+        """Owner 2026-11-28 — the household's own upload always wins: free
+        at least *need* bytes of synced files (a file viewed lately too),
+        oldest view first. Returns the bytes freed."""
+        try:
+            return await self._evict(need, keep_viewed=False)
+        except Exception:
+            log.warning("synced space files not evicted", exc_info=True)
+            return 0
 
-            freed = 0
-            for ref, path, size in sorted(held, key=order):
-                if total - freed <= budget:
-                    break
-                viewed = parse_moment(ref.viewed_at)
-                if (
-                    (viewed is not None and now - viewed < VIEWED_KEEP)
-                    or (own and ref.origin == own)
-                    or self.fetching(ref.local_name)
-                ):
-                    continue
-                await remove_quietly(path)
-                freed += size
+    async def _evict(self, need: int, *, keep_viewed: bool) -> int:
+        """Free *need* bytes across every counted space, by :func:`_order`."""
+        held = await self._ledger()
+        files: list[tuple[SpaceMediaRef, pathlib.Path, int]] = []
+        for space_id in list(held):
+            files.extend(await self._files_of(space_id))
+        return await self._remove(files, need, keep_viewed=keep_viewed)
+
+    async def _remove(
+        self,
+        files: list[tuple[SpaceMediaRef, pathlib.Path, int]],
+        need: int,
+        *,
+        keep_viewed: bool,
+    ) -> int:
+        now = datetime.now(UTC)
+        freed = 0
+        for ref, path, size in sorted(files, key=lambda f: _order(f[0], now)):
+            if freed >= need:
+                break
+            if self.fetching(ref.local_name):
+                continue
+            # Fable M3: the row as it is now (a view since the listing).
+            current = await self._refs.get(ref.local_name)
+            if current is None:
+                continue
+            viewed = parse_moment(current.viewed_at)
+            if keep_viewed and viewed is not None and now - viewed < VIEWED_KEEP:
+                continue
+            await remove_quietly(path)
+            freed += size
+            if self._held is not None and ref.space_id in self._held:
+                self._held[ref.space_id] = max(0, self._held[ref.space_id] - size)
+        return freed
+
+    def _sweep_soon(self, space_id: str) -> None:
+        """Sweep *space_id* now, or — swept within :data:`SWEEP_INTERVAL_S`
+        — once that interval is over (a trailing sweep, Fable I3)."""
+        if space_id in self._sweep_due:
+            return
+        last = self._swept.get(space_id)
+        wait = 0.0 if last is None else SWEEP_INTERVAL_S - (_monotonic() - last)
+        self._sweep_due.add(space_id)
+        task = asyncio.create_task(self._sweep_later(space_id, max(wait, 0.0)))
+        # A trailing sweep's wait is not work :meth:`drain` waits for.
+        tasks = self._tasks if wait <= 0 else self._timers
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    async def _sweep_later(self, space_id: str, wait: float) -> None:
+        try:
+            if wait > 0:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), timeout=wait)
+                if self._stop.is_set():
+                    return
+            await self.sweep(space_id)
+        finally:
+            self._sweep_due.discard(space_id)
+
+    async def sweep(self, space_id: str, *, need: int = 0) -> int:
+        """Bring *space_id*'s synced files within its storage (with *need*
+        bytes more to fit): never-viewed files first (oldest first), then
+        the least recently viewed — never one viewed within
+        :data:`VIEWED_KEEP`, one being fetched, nor anything on a household
+        acting as the space's host (or when that is unknown, Fable I7). The
+        rows stay (a view fetches the file again). Returns the bytes freed.
+        Never raises."""
+        self._swept[space_id] = _monotonic()
+        try:
+            if await self._archives_or_raise(space_id):
+                return 0
+        except Exception:
+            log.warning(
+                "space %s: host role not read — synced files not swept",
+                space_id,
+                exc_info=True,
+            )
+            return 0
+        try:
+            budget = self._storage.space_sync_bytes if self._storage else 0
+            files = await self._files_of(space_id)
+            total = sum(size for _ref, _path, size in files)
+            if self._held is not None:
+                self._held[space_id] = total
+            over = total + need - budget
+            if over <= 0:
+                return 0
+            freed = await self._remove(files, over, keep_viewed=True)
             if freed:
                 log.info(
                     "space media of space %s: %d bytes of synced files removed"
@@ -971,6 +1278,9 @@ class SpaceMediaGfsFetcher:
 
     async def stop(self) -> None:
         """Let running fetches finish (bounded), then cancel the rest."""
+        self._stop.set()
+        for timer in list(self._timers):
+            timer.cancel()
         if not self._tasks:
             return
         _done, pending = await asyncio.wait(list(self._tasks), timeout=5.0)
@@ -1424,6 +1734,14 @@ class SpaceMediaGfsFetcher:
             space_id=space_id,
             sha256=sha256,
         )
+
+
+def _order(ref: SpaceMediaRef, now: datetime) -> tuple:
+    """Eviction order: never-viewed files first (oldest first), then the
+    least recently viewed."""
+    viewed = parse_moment(ref.viewed_at)
+    arrived = parse_moment(ref.created_at) or now
+    return (viewed is not None, viewed or arrived)
 
 
 def _over_cap_part_dirs(

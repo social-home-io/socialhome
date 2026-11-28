@@ -14,7 +14,13 @@ The service:
   GET /api/storage/usage endpoint;
 * exposes :meth:`check_can_store` which raises
   :class:`StorageQuotaExceeded` when an upload would push the
-  household over the configured cap.
+  household over the configured cap — after evicting synced space files
+  first (owner 2026-11-28: they only use the quota's free space, and the
+  household's own upload always wins; :meth:`attach_synced_files`);
+* holds the storage settings — the quota, the storage for one GFS space's
+  synced files and their total cap across spaces — and keeps an admin's
+  change in the instance config (``storage.settings``), so it survives a
+  restart (:meth:`load`, :meth:`update`).
 
 The check is best-effort — it's a guard rail, not a security boundary.
 A user racing two simultaneous uploads can technically exceed the cap
@@ -26,12 +32,39 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from ..domain.space_media_sync import DEFAULT_SPACE_SYNC_BYTES
+import orjson
+
+from ..domain.space_media_sync import (
+    DEFAULT_SPACE_SYNC_BYTES,
+    DEFAULT_SPACE_SYNC_TOTAL_BYTES,
+)
+
+if TYPE_CHECKING:
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 
 log = logging.getLogger(__name__)
+
+#: The ``instance_config`` key the admin's storage settings live under.
+STORAGE_SETTINGS_KEY = "storage.settings"
+
+#: The settings it holds (each an int >= 0; 0 = no quota / sync only what
+#: is opened / no synced files at all).
+SETTINGS_FIELDS: tuple[str, ...] = (
+    "quota_bytes",
+    "space_sync_bytes",
+    "space_sync_total_bytes",
+)
+
+#: How old the media directory's size may be when a sync asks for the
+#: quota's free space (a walk of the whole directory; uploads always
+#: measure afresh).
+FREE_FOR_SYNC_MAX_AGE_S: float = 30.0
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────
@@ -66,9 +99,20 @@ class StorageUsage:
 
 
 class StorageQuotaService:
-    """Per-household storage usage + quota enforcement."""
+    """Per-household storage usage + quota enforcement, and the storage
+    settings (persisted in the instance config when *settings_repo* is
+    given)."""
 
-    __slots__ = ("_media_path", "_quota_bytes", "_space_sync_bytes")
+    __slots__ = (
+        "_changed",
+        "_evict",
+        "_free_cache",
+        "_media_path",
+        "_quota_bytes",
+        "_settings",
+        "_space_sync_bytes",
+        "_space_sync_total_bytes",
+    )
 
     def __init__(
         self,
@@ -76,10 +120,77 @@ class StorageQuotaService:
         media_path: str | Path,
         quota_bytes: int,
         space_sync_bytes: int = DEFAULT_SPACE_SYNC_BYTES,
+        space_sync_total_bytes: int = DEFAULT_SPACE_SYNC_TOTAL_BYTES,
+        settings_repo: AbstractInstanceConfigRepo | None = None,
     ) -> None:
         self._media_path = Path(media_path)
-        self._quota_bytes = quota_bytes
+        self._quota_bytes = max(int(quota_bytes), 0)
         self._space_sync_bytes = max(int(space_sync_bytes), 0)
+        self._space_sync_total_bytes = max(int(space_sync_total_bytes), 0)
+        self._settings = settings_repo
+        self._evict: Callable[[int], Awaitable[int]] | None = None
+        self._changed: Callable[[], None] | None = None
+        #: (monotonic time, media dir bytes) of the last walk for a sync.
+        self._free_cache: tuple[float, int] | None = None
+
+    def attach_synced_files(
+        self,
+        *,
+        evict: Callable[[int], Awaitable[int]],
+        changed: Callable[[], None],
+    ) -> None:
+        """The synced space files (owner 2026-11-28): *evict* frees at
+        least the bytes asked for if it can (returns the bytes freed) — an
+        upload that would not fit evicts them first; *changed* is told
+        when a setting changed (a lower cap applies at once)."""
+        self._evict = evict
+        self._changed = changed
+
+    async def load(self) -> None:
+        """Take the admin's saved settings from the instance config (a value
+        that does not read as an int >= 0 keeps the configured default)."""
+        if self._settings is None:
+            return
+        try:
+            raw = await self._settings.get(STORAGE_SETTINGS_KEY)
+            saved = orjson.loads(raw) if raw else {}
+        except Exception:
+            log.warning("storage settings not read — the defaults apply", exc_info=True)
+            return
+        if not isinstance(saved, dict):
+            return
+        for field in SETTINGS_FIELDS:
+            value = saved.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                setattr(self, "_" + field, value)
+
+    async def update(
+        self,
+        *,
+        quota_bytes: int | None = None,
+        space_sync_bytes: int | None = None,
+        space_sync_total_bytes: int | None = None,
+    ) -> None:
+        """Change the given settings (``<= 0`` = 0) and keep all three in
+        the instance config; the synced files are told (a lower cap sweeps
+        at once)."""
+        for field, value in (
+            ("quota_bytes", quota_bytes),
+            ("space_sync_bytes", space_sync_bytes),
+            ("space_sync_total_bytes", space_sync_total_bytes),
+        ):
+            if value is not None:
+                setattr(self, "_" + field, max(int(value), 0))
+        self._free_cache = None
+        if self._settings is not None:
+            await self._settings.set(
+                STORAGE_SETTINGS_KEY,
+                orjson.dumps(
+                    {f: getattr(self, "_" + f) for f in SETTINGS_FIELDS}
+                ).decode(),
+            )
+        if self._changed is not None:
+            self._changed()
 
     @property
     def space_sync_bytes(self) -> int:
@@ -88,10 +199,15 @@ class StorageQuotaService:
         it opens."""
         return self._space_sync_bytes
 
+    @property
+    def space_sync_total_bytes(self) -> int:
+        """Storage for the synced files of every GFS space together (owner
+        2026-11-28). 0 = no synced files."""
+        return self._space_sync_total_bytes
+
     def set_space_sync_bytes(self, value: int) -> None:
-        """Mutate the synced-files storage at runtime, like
-        :meth:`set_quota_bytes` (process-local; ``value <= 0`` = only what
-        the household opens)."""
+        """Set the synced-files storage in this process only (tests; an
+        admin goes through :meth:`update`)."""
         self._space_sync_bytes = int(value) if value > 0 else 0
 
     @property
@@ -99,13 +215,31 @@ class StorageQuotaService:
         return self._quota_bytes
 
     def set_quota_bytes(self, value: int) -> None:
-        """Mutate the cap at runtime. ``value <= 0`` disables enforcement.
-
-        Admin-only callers (see :class:`StorageQuotaView`). The change
-        is process-local — operators who want persistence should reload
-        the app with the new :class:`Config` value.
-        """
+        """Set the cap in this process only (tests; an admin goes through
+        :meth:`update`, which keeps it). ``value <= 0`` disables
+        enforcement."""
         self._quota_bytes = int(value) if value > 0 else 0
+        self._free_cache = None
+
+    async def free_for_sync(self) -> int | None:
+        """The quota's free space a synced file may use (``None``: no
+        quota). The directory's size may be up to
+        :data:`FREE_FOR_SYNC_MAX_AGE_S` old — a sync's headroom check, not
+        an upload's."""
+        if self._quota_bytes <= 0:
+            return None
+        now = time.monotonic()
+        cached = self._free_cache
+        if cached is None or now - cached[0] > FREE_FOR_SYNC_MAX_AGE_S:
+            cached = (now, await self.current_usage_bytes())
+            self._free_cache = cached
+        return max(0, self._quota_bytes - cached[1])
+
+    def note_stored(self, size: int) -> None:
+        """A synced file of *size* bytes was written: the cached size used
+        by :meth:`free_for_sync` grows with it until the next walk."""
+        if self._free_cache is not None and size > 0:
+            self._free_cache = (self._free_cache[0], self._free_cache[1] + size)
 
     # ─── Usage ────────────────────────────────────────────────────────────
 
@@ -153,6 +287,18 @@ class StorageQuotaService:
         if additional_bytes <= 0:
             return
         used = await self.current_usage_bytes()
+        over = used + additional_bytes - self._quota_bytes
+        if over > 0 and self._evict is not None:
+            # Owner 2026-11-28: the household's own upload wins — synced
+            # space files make room first.
+            try:
+                freed = await self._evict(over)
+            except Exception:
+                log.warning("synced space files not evicted", exc_info=True)
+                freed = 0
+            if freed > 0:
+                self._free_cache = None
+                used = await self.current_usage_bytes()
         if used + additional_bytes > self._quota_bytes:
             available = max(0, self._quota_bytes - used)
             raise StorageQuotaExceeded(additional_bytes, available)
