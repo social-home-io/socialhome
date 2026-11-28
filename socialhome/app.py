@@ -462,7 +462,11 @@ from .services.space_gfs_needed_service import SpaceGfsNeededService
 from .services.space_item_outbox import SpaceItemOutbox
 from .services.space_listing_counts_service import SpaceListingCountsService
 from .services.space_location_outbound import SpaceLocationOutbound
-from .services.space_media_direct import SpaceMediaDirect, shares_a_seated_space
+from .services.space_media_direct import (
+    SeatLinkReaper,
+    SpaceMediaDirect,
+    shares_a_seated_space,
+)
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
@@ -5967,6 +5971,10 @@ def create_app(config: Config | None = None) -> web.Application:
             )
 
         federation_service.attach_direct_link_gate(_shares_a_seated_space)
+        # Idle direct links with seats close after 10 min (either side).
+        seat_link_reaper = SeatLinkReaper(federation_service)
+        app[K.seat_link_reaper_key] = seat_link_reaper
+        await seat_link_reaper.start()
         if gfs_channels is not None:
             # A private space with an opaque channel uploads under its
             # channel scope (the GFS never learns the space).
@@ -6959,6 +6967,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await space_media_sync_service.stop()
         if (fetcher := app.get(K.space_media_gfs_fetcher_key)) is not None:
             await fetcher.stop()
+        if (reaper := app.get(K.seat_link_reaper_key)) is not None:
+            await reaper.stop()
         if (responder := app.get(K.space_media_gfs_responder_key)) is not None:
             await responder.stop()
         await media_transcode_service.stop()

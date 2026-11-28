@@ -237,3 +237,38 @@ async def test_free_for_sync_is_the_quotas_free_space(media_dir):
         await StorageQuotaService(media_path=media_dir, quota_bytes=0).free_for_sync()
         is None
     )
+
+
+async def test_b1_an_upload_over_the_whole_quota_evicts_nothing(media_dir):
+    svc = StorageQuotaService(media_path=media_dir, quota_bytes=1000)
+    asked: list[int] = []
+
+    async def evict(need):
+        asked.append(need)
+        return 0
+
+    svc.attach_synced_files(evict=evict, changed=lambda: None)
+    with pytest.raises(StorageQuotaExceeded):
+        await svc.check_can_store(5000)
+    assert asked == []
+
+
+async def test_b9_a_setting_that_was_not_kept_is_not_applied(media_dir):
+    class _Broken(_Config):
+        async def set(self, key, value):
+            raise RuntimeError("disk full")
+
+    svc = StorageQuotaService(
+        media_path=media_dir, quota_bytes=1000, settings_repo=_Broken()
+    )
+    with pytest.raises(RuntimeError):
+        await svc.update(quota_bytes=5)
+    assert svc.quota_bytes == 1000
+
+
+async def test_note_freed_shrinks_the_cached_size(media_dir):
+    _write(media_dir, "own.webp", 600)
+    svc = StorageQuotaService(media_path=media_dir, quota_bytes=1000)
+    assert await svc.free_for_sync() == 400
+    svc.note_freed(100)
+    assert await svc.free_for_sync() == 500

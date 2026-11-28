@@ -9057,6 +9057,299 @@ def cmd_gfs_big_file() -> None:
     )
 
 
+
+def _space_feed_ids(label: str, space_id: str) -> set[str]:
+    """The post ids ``label``'s feed of ``space_id`` shows now."""
+    inst = _load()["instances"][label]
+    s, body = _request(
+        f"http://127.0.0.1:{inst['port']}/api/spaces/{space_id}/feed",
+        token=inst["token"],
+    )
+    if s != 200:
+        return set()
+    feed = body if isinstance(body, list) else (body.get("posts") or [])
+    return {str(p.get("id")) for p in feed}
+
+
+def _gfs_restart_keeping_state() -> None:
+    """Restart the GFS on its data dir (the ring survives) and wait until
+    every household's socket is back."""
+    offset = _gfs_log_size()
+    kept = dict(_load().get("gfs") or {})
+    cmd_gfs_down()
+    cmd_gfs_up()
+    fresh = _load()
+    fresh["gfs"] = {**kept, **(fresh.get("gfs") or {})}
+    _save(fresh)
+    for label in ("a", "b", "e"):
+        _wait_for_gfs_ws_since(
+            fresh["instances"][label]["instance_id"], offset=offset, timeout=120.0
+        )
+
+
+def cmd_gfs_channel_flows() -> None:
+    """v_97 (space items v2: push to watchers, pull for everyone else) —
+    the paths ``gfs-global-channel`` does not walk, in a's global space
+    (a owner and host, b member, e GFS-only follower):
+
+    1. **A mention reaches a household that is not watching.** Nobody of
+       e has the space open (past the 2-minute linger); b posts
+       "@<e's person>" — e gets the item at once as a ``SPACE_MENTION_NOTE``
+       in its GFS mailbox (no view, no heads ping) and a mention
+       notification.
+    2. **A non-watcher is pinged, then fetches; the cursor survives a GFS
+       restart.** b posts again: e (not watching) gets nothing live. The
+       GFS restarts on its data dir; e's socket comes back, the initial
+       heads tell it the channel moved (a badge), still nothing fetched.
+       e opens the space: it fetches since its cursor — the post lands, and
+       no ``gap`` is logged (the ring and the cursor both survived).
+    3. **A gap triggers the catch-up.** e is stopped, its stored cursor is
+       pointed at a ring that does not exist, e comes back: the heads show
+       another ring → e logs the gap and runs the §25.6 catch-up from its
+       host.
+
+    (The host offline with a watcher receiving live is ``gfs-global-channel``
+    step 3.) Prereqs: ``gfs-global-channel``."""
+    step = "gfs-channel-flows"
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' + 'gfs-global-channel' first")
+    space_id = (state.get("gfs") or {}).get("global_channel_space_id")
+    if not space_id:
+        raise SystemExit(f"{step}: run 'gfs-global-channel' first")
+    b, e = state["instances"]["b"], state["instances"]["e"]
+    b_url, e_url = f"http://127.0.0.1:{b['port']}", f"http://127.0.0.1:{e['port']}"
+    # b's 14-day legacy window (every household also gets the legacy event)
+    # fast-forwarded past its end, as in ``gfs-big-file``: only the channel
+    # (and the mention note) carry b's items now.
+    channel = _rows("b", "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,))
+    past = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+    _db_write(
+        "b",
+        [
+            (
+                "INSERT OR REPLACE INTO instance_config(key, value) VALUES(?, ?)",
+                (
+                    f"space_items_channel_since:{space_id}:"
+                    f"{channel[0][0] if channel else ''}",
+                    past,
+                ),
+            )
+        ],
+    )
+    print("  waiting 140 s: nobody of e watches the space any more (linger)")
+    time.sleep(140.0)
+
+    # 1. The mention note.
+    s, me = _request(f"{e_url}/api/me", token=e["token"])
+    e_name = _must(f"{step}: e's person", s, me, ok=(200,))["username"]
+    s, post = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": f"@{e_name} look at this {time.time_ns()}"},
+    )
+    mention_id = _must(f"{step}: b mentions e", s, post, ok=(201,))["id"]
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline and mention_id not in _space_feed_ids(
+        "e", space_id
+    ):
+        time.sleep(1.0)
+    if mention_id not in _space_feed_ids("e", space_id):
+        raise SystemExit(f"{step}: the mention never reached e while it was not watching")
+    s, notes = _request(f"{e_url}/api/notifications", token=e["token"])
+    rows = notes if isinstance(notes, list) else (notes or {}).get("items") or []
+    if not any("mention" in str(n.get("type", "")) for n in rows):
+        raise SystemExit(f"{step}: e has no mention notification: {rows[:3]!r}")
+    print("  1. mention note: e (not watching) got the post and a notification ✓")
+
+    # 2. A non-watcher: nothing live; the GFS restarts; heads; open → fetch.
+    e_off = _log_size("e")
+    s, post = _request(
+        f"{b_url}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": f"while e looks away {time.time_ns()}"},
+    )
+    quiet_id = _must(f"{step}: b posts", s, post, ok=(201,))["id"]
+    time.sleep(10.0)
+    if quiet_id in _space_feed_ids("e", space_id):
+        raise SystemExit(f"{step}: e got a post live though nobody of it watched")
+    _gfs_restart_keeping_state()
+    time.sleep(5.0)
+    if quiet_id in _space_feed_ids("e", space_id):
+        raise SystemExit(f"{step}: e fetched at the heads ping without a view")
+    _view_space("e", space_id)
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline and quiet_id not in _space_feed_ids(
+        "e", space_id
+    ):
+        time.sleep(1.0)
+    if quiet_id not in _space_feed_ids("e", space_id):
+        raise SystemExit(f"{step}: e never fetched the post on open")
+    if _log_lines_matching("e", "channel ring: gap", offset=e_off):
+        raise SystemExit(f"{step}: the GFS restart cost e a gap — its cursor was lost")
+    print("  2. non-watcher: nothing live, heads after the GFS restart, fetched on open, no gap ✓")
+
+    # 3. A gap: e's cursor names a ring that does not exist.
+    gfs_rows = _rows(
+        "e",
+        "SELECT key, value FROM instance_config WHERE key LIKE 'channel_ring_cursors:%'",
+        (),
+    )
+    if not gfs_rows:
+        raise SystemExit(f"{step}: e stored no ring cursor")
+    _kill_household("e", e)
+    writes = []
+    for key, value in gfs_rows:
+        body = json.loads(value)
+        body = {ch: ["ffffffffffffffff", seq] for ch, (_rid, seq) in body.items()}
+        writes.append(
+            (
+                "UPDATE instance_config SET value = ? WHERE key = ?",
+                (json.dumps(body), key),
+            )
+        )
+    _db_write("e", writes)
+    e_off = _log_size("e")
+    _respawn(state, "e")
+    if not _await_log_lines("e", "channel ring: gap", offset=e_off, timeout=90.0):
+        raise SystemExit(f"{step}: e never noticed the gap")
+    print("  3. gap: e saw another ring and ran the §25.6 catch-up ✓")
+    print(f"{step}: ok (mention note, ping then fetch across a GFS restart, gap catch-up)")
+
+
+def cmd_gfs_direct_catchup() -> None:
+    """Owner 2026-11-28 (media routing; principle change: households met
+    through a GFS may connect directly) — an old gallery file reaches the
+    GFS-only follower e straight from the host over a WebRTC link signalled
+    through the GFS, and the GFS cache is not touched.
+
+    1. a (host) adds an album + picture in its global space; e (GFS only,
+       paired with nobody) gets the item and its file (live: the cache).
+    2. The file goes from e (an old file e no longer holds) and e's §25.6
+       watermark for a is cleared — the next sync is a full catch-up.
+    3. e syncs: the gallery record's file is a catch-up sync — one reader —
+       so e asks a holder DIRECTLY: e opens a WebRTC link to a (its
+       offer / answer / ICE as sealed events through the GFS relay; a takes
+       them only from a household seated with it in a shared space), sends
+       one SPACE_MEDIA_WANTED over it, and a's SPACE_MEDIA_BLOB comes back
+       as binary frames on ``fed-media-v1``.
+    4. e holds the file again, byte-identical, and logged "fetched directly
+       from <a>"; the GFS logged no fetch of that blob and stores no new
+       blob (nothing was re-uploaded for one reader).
+
+    Prereqs: ``gfs-global-channel``."""
+    step = "gfs-direct-catchup"
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' + 'gfs-global-channel' first")
+    space_id = (state.get("gfs") or {}).get("global_channel_space_id")
+    if not space_id:
+        raise SystemExit(f"{step}: run 'gfs-global-channel' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+
+    # 1. a's album + picture; e gets it live.
+    s, album = _request(
+        f"{a_url}/api/spaces/{space_id}/gallery/albums",
+        token=a["token"],
+        method="POST",
+        body={"name": "Old photos", "description": "for the newcomer"},
+    )
+    album_id = _must(f"{step}: a creates an album", s, album, ok=(201,))["id"]
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.new("RGB", (48, 48), color=(200, 120, 30))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    boundary = "----sh-demo-direct-boundary"
+    body = (
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="old.png"\r\n'
+            "Content-Type: image/png\r\n\r\n"
+        ).encode()
+        + buf.getvalue()
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    req = urllib.request.Request(
+        f"{a_url}/api/gallery/albums/{album_id}/items",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {a['token']}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        item = json.loads(resp.read())
+    item_id = item["id"]
+    deadline = time.monotonic() + 90.0
+    held: list = []
+    while time.monotonic() < deadline:
+        held = _rows(
+            "e",
+            "SELECT local_name, blob_id FROM space_media_refs WHERE item_id = ?"
+            " AND local_name LIKE 'sc-%'",
+            (item_id,),
+        )
+        if held and all(
+            (_instance_dir("e") / "media" / name).is_file() for name, _b in held
+        ):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: e never held the gallery item's files under content names: {held!r}"
+        )
+    files = {name: (_instance_dir("e") / "media" / name).read_bytes() for name, _b in held}
+    print(f"  1. a's gallery item {item_id[:8]}… reached e with {len(files)} file(s)")
+
+    # 2. An old file e no longer holds; a full catch-up next.
+    for name in files:
+        (_instance_dir("e") / "media" / name).unlink()
+    _db_write(
+        "e",
+        [
+            (
+                "UPDATE space_instances SET applied_seq = NULL WHERE space_id = ?"
+                " AND instance_id = ?",
+                (space_id, a["instance_id"]),
+            )
+        ],
+    )
+    blobs_before = sum(1 for p in (GFS_DIR / "space_media").rglob("*") if p.is_file())
+    e_off, gfs_off = _log_size("e"), _gfs_log_size()
+
+    # 3. e syncs: the gallery's files come direct.
+    s, out = _request(f"{e_url}/api/spaces/{space_id}/sync", token=e["token"], method="POST")
+    _must(f"{step}: e asks for a sync", s, out, ok=(200, 202))
+    deadline = time.monotonic() + 240.0
+    while time.monotonic() < deadline and not all(
+        (_instance_dir("e") / "media" / name).is_file() for name in files
+    ):
+        time.sleep(2.0)
+    for name, data in files.items():
+        path = _instance_dir("e") / "media" / name
+        if not path.is_file() or path.read_bytes() != data:
+            raise SystemExit(f"{step}: e never got {name} back")
+    direct = _log_lines_matching("e", "fetched directly from", offset=e_off)
+    if not any(a["instance_id"] in line for line in direct):
+        raise SystemExit(f"{step}: e's file did not come directly from a: {direct!r}")
+    for _name, blob_id in held:
+        if _gfs_log_lines_matching(blob_id, offset=gfs_off):
+            raise SystemExit(f"{step}: the GFS was asked for blob {blob_id[:12]}…")
+    blobs_after = sum(1 for p in (GFS_DIR / "space_media").rglob("*") if p.is_file())
+    if blobs_after > blobs_before:
+        raise SystemExit(f"{step}: the GFS stores {blobs_after - blobs_before} new file(s)")
+    print("  3. e's old gallery file came over a direct WebRTC link from a ✓")
+    print("  4. the GFS was not asked and stores nothing new ✓")
+    print(f"{step}: ok (one reader's old file: direct, the GFS cache untouched)")
+
+
 def cmd_gfs_follower_comment() -> None:
     """v_96 P4 — a GFS-reached follower comments like a member, over the
     global space's opaque channel, under the switch; its own comment's
@@ -27678,6 +27971,14 @@ def main() -> None:
         # the paired owner and the GFS-only follower through the GFS cache,
         # in proven 8 MiB pieces — no per-household push or WANTED.
         cmd_gfs_big_file()
+        # ``gfs-channel-flows`` (v_97): a mention reaches a non-watcher; a
+        # non-watcher is pinged then fetches across a GFS restart; a gap
+        # runs the catch-up.
+        cmd_gfs_channel_flows()
+        # ``gfs-direct-catchup`` (owner 2026-11-28): an old gallery file
+        # reaches the GFS-only follower e straight from the host over a
+        # WebRTC link signalled through the GFS; the GFS cache untouched.
+        cmd_gfs_direct_catchup()
         # ``gfs-follower-comment`` (v_96, P4): e (GFS follower) comments over
         # the channel under the switch; switch off → one rotation, refused;
         # e's own delete with the switch off reaches a and b.

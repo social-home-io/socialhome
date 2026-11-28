@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -136,19 +137,62 @@ async def test_we_never_ask_ourselves(tmp_path):
     assert OWN not in fed.opened
 
 
-async def test_idle_links_and_links_past_the_cap_are_closed(tmp_path, monkeypatch):
-    """A link opened for files is closed once idle (and the oldest past
-    MAX_SEAT_LINKS) — :meth:`close_seat_link` leaves a paired link."""
-    monkeypatch.setattr(mod, "MAX_SEAT_LINKS", 1)
-    fed = _Fed(tmp_path, links={HOST, AUTHOR}, delivers={AUTHOR})
+async def test_a_holder_that_failed_is_not_asked_again_for_a_while(tmp_path):
+    """Fable A6: a holder whose link did not come up (or that delivered
+    nothing) costs one wait — later files skip it until the backoff ends."""
+    fed = _Fed(tmp_path, links={AUTHOR}, delivers={AUTHOR})
     d = _direct(tmp_path, fed)
-    assert await d.fetch(_ref())  # host asked (no file), then the author
-    assert fed.closed == [HOST]
-    monkeypatch.setattr(mod, "LINK_IDLE_S", 0.0)
+    assert await d.fetch(_ref())
     (tmp_path / NAME).unlink()
-    fed.links.clear()
-    await d.fetch(_ref())
-    assert fed.closed == [HOST, AUTHOR]
+    assert await d.fetch(_ref())
+    assert fed.opened == [HOST, AUTHOR, AUTHOR]
+
+
+async def test_a_holders_budget_for_us_is_never_overrun(tmp_path, monkeypatch):
+    """Fable A6: past the provider's budget (files per window) the holder
+    would drop the request unanswered — it is not asked."""
+    monkeypatch.setattr(mod, "HOLDER_FILES_PER_WINDOW", 1)
+    fed = _Fed(tmp_path, links={HOST}, delivers={HOST})
+    d = _direct(tmp_path, fed)
+    assert await d.fetch(_ref())
+    (tmp_path / NAME).unlink()
+    assert not await d.fetch(_ref())
+    assert len(fed.sent) == 1
+
+
+async def test_a_file_larger_than_its_blob_is_dropped(tmp_path):
+    """Fable A11: the delivered file may not be larger than the sealed
+    blob the sync policy and the storage judged."""
+
+    class _Big(_Fed):
+        async def send_event(
+            self, *, to_instance_id, event_type, payload, space_id=None
+        ):
+            for f in payload["files"]:
+                (self.dir / f["name"]).write_bytes(b"x" * 1000)
+            return _Result(ok=True)
+
+    fed = _Big(tmp_path, links={HOST})
+    assert not await _direct(tmp_path, fed).fetch(_ref())
+    assert not (tmp_path / NAME).exists()
+
+
+async def test_the_reaper_closes_idle_links_on_its_schedule(monkeypatch):
+    """Fable A3/A4: idle seat links are reaped by a scheduler (the _stop
+    event lifecycle), not only after a fetch."""
+    monkeypatch.setattr(mod, "REAP_INTERVAL_S", 0.01)
+    calls: list[float] = []
+
+    class _F:
+        async def reap_seat_links(self, *, idle_s):
+            calls.append(idle_s)
+            return 1
+
+    reaper = mod.SeatLinkReaper(_F())
+    await reaper.start()
+    await asyncio.sleep(0.05)
+    await reaper.stop()
+    assert calls and calls[0] == mod.LINK_IDLE_S
 
 
 class _Seats:

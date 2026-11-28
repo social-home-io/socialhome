@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 from ..crypto import b64url_encode
 from ..domain.federation import (
     DELIVERY_ERROR_QUEUED,
+    RTC_SIGNAL_EVENT_TYPES,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     DeliveryResult,
     FederationEventType,
@@ -201,6 +202,9 @@ class HostHop:
         if (
             inner_type not in SPACE_SESSION_ALLOWED_EVENT_TYPES
             or inner_type is FederationEventType.SPACE_ROUTED
+            # Fable A1: a direct link is signalled between the two ends
+            # themselves (their relay), never through a host.
+            or inner_type in RTC_SIGNAL_EVENT_TYPES
         ):
             log.info("host hop: an inner %r is not seat vocabulary", inner_type.value)
             return False

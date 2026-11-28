@@ -170,6 +170,7 @@ class _Storage:
         self.space_sync_total_bytes = total
         self.free = free
         self.stored: list[int] = []
+        self.freed: list[int] = []
 
     async def free_for_sync(self):
         return self.free
@@ -178,6 +179,11 @@ class _Storage:
         self.stored.append(size)
         if self.free is not None:
             self.free -= size
+
+    def note_freed(self, size):
+        self.freed.append(size)
+        if self.free is not None:
+            self.free += size
 
 
 class _Crypto:
@@ -2256,3 +2262,36 @@ async def test_the_host_archive_scan_fetches_direct(tmp_path):
     await _settle(f)
     assert direct.asked == [_L("v.webm")]
     assert len(gfs.fetches) == asked
+
+
+async def test_b1_an_upload_that_would_not_fit_anyway_evicts_nothing(tmp_path):
+    """Fable B1: eviction for an upload is all or nothing — a declared size
+    the synced files can't make room for removes none of them."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    a = _held(f, tmp_path, "a.webp", item_id="1", size=100)
+    assert await f.evict_for_upload(10_000) == 0
+    assert (tmp_path / a).exists()
+    assert await f.evict_for_upload(50) == 100
+    assert not (tmp_path / a).exists()
+
+
+async def test_b2_a_space_hosted_since_the_count_is_never_evicted(tmp_path):
+    """Fable B2: the host role is read again at eviction — a household that
+    became the space's host after the count keeps every file."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    name = _held(f, tmp_path, "a.webp", item_id="1", size=100)
+    await f._ledger()
+    f._federation.own_instance_id = SPACE_HOST  # now it acts as host
+    f._spaces.gfs = True
+    assert await f.evict_for_upload(50) == 0
+    assert (tmp_path / name).exists()
+
+
+async def test_b3_evicted_bytes_are_free_at_once(tmp_path):
+    """Fable B3: what an eviction frees is told to the storage service."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    storage = _Storage(free=0)
+    f.attach_storage(storage)
+    _held(f, tmp_path, "a.webp", item_id="1", size=100)
+    await f.evict_for_upload(50)
+    assert storage.freed == [100]

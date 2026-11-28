@@ -3611,3 +3611,27 @@ async def test_open_link_starts_the_handshake_once():
     await t.open_link(inst)
     assert t._peers[inst.id] is first
     await t.close_all()
+
+
+async def test_a5_a_spent_seat_link_is_dialled_again():
+    """Fable A5: a link the other side closed is replaced on demand (once
+    per backoff floor), never waited on until it times out."""
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        gfs_relay=_RecordingRelay(),
+        signaling_send=_FakeSignaler(),
+    )
+    t.mark_ice_primed()
+    inst = _link_joined_instance()
+    await t.open_link(inst)
+    first = t._peers[inst.id]
+    first.close(announce=False)
+    assert first.is_spent
+    await t.open_link(inst)
+    second = t._peers[inst.id]
+    assert second is not first and t.has_peer(inst.id)
+    second.close(announce=False)
+    await t.open_link(inst)  # inside the floor: left as it is
+    assert t._peers[inst.id] is second
+    await t.close_all()

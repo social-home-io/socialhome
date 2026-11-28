@@ -68,6 +68,8 @@ gallery_service_key: AppKey = AppKey("gallery_service")
 #: and the fetcher (reader; ``GET /api/media/{name}`` fetch-on-view).
 space_media_gfs_uploader_key: AppKey = AppKey("space_media_gfs_uploader")
 space_media_gfs_fetcher_key: AppKey = AppKey("space_media_gfs_fetcher")
+#: v_97 — closes idle direct links with households met through a GFS.
+seat_link_reaper_key: AppKey = AppKey("seat_link_reaper")
 space_media_gfs_responder_key: AppKey = AppKey("space_media_gfs_responder")
 #: v_92 — asks the host (then a trusted helper) for a space file this member
 #: household misses (``GET /api/media/{name}`` miss, ``SPACE_MEDIA_WANTED``).

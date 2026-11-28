@@ -23,6 +23,9 @@ from socialhome.domain.events import (
     SpaceSyncDeferred,
 )
 from socialhome.domain.federation import (
+    MULTI_EVENT_TYPES,
+    MULTI_SEND_EXCLUDED_EVENT_TYPES,
+    RTC_SIGNAL_EVENT_TYPES,
     FederationEventType,
     InstanceSource,
     PairingStatus,
@@ -2722,6 +2725,7 @@ def _seat_peer(
         return shares
 
     svc._direct_link_gate = gate
+    svc._seat_links = {}
 
     async def supports(self, iid, *, min_version):
         return version >= min_version
@@ -2797,3 +2801,47 @@ async def test_only_a_seats_link_is_closed_when_idle(svc, monkeypatch):
     _seat_peer(svc, monkeypatch)
     await svc.close_seat_link("peer-1")
     svc._transport.close_peer.assert_awaited_once_with("peer-1")
+
+
+async def test_a2_rtc_from_a_household_without_a_confirmed_row_is_refused(svc):
+    """Fable A2: no row (a routed inner from a stranger) — no peer."""
+    svc._federation_repo.get_instance = AsyncMock(return_value=None)
+    svc._transport = MagicMock()
+    svc._transport.on_rtc_offer = AsyncMock()
+    ev = _event(FederationEventType.FEDERATION_RTC_OFFER, {"sdp": "x"})
+    ev.event_type = FederationEventType.FEDERATION_RTC_OFFER
+    await svc._handle_transport_event(ev)
+    svc._transport.on_rtc_offer.assert_not_awaited()
+
+
+def test_a1_rtc_signalling_never_rides_a_multi_frame():
+    """Fable A1: a link is negotiated pairwise — one multi frame must never
+    make every receiver open a PeerConnection."""
+    assert RTC_SIGNAL_EVENT_TYPES <= MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert not RTC_SIGNAL_EVENT_TYPES & MULTI_EVENT_TYPES
+
+
+async def test_a3_seat_links_are_capped_and_reaped_both_sides(svc, monkeypatch):
+    """Fable A3/A4: an OFFER taken from a seat counts as a link here too;
+    past MAX_SEAT_LINKS the least recently used closes; the reaper closes
+    an idle one and one whose household is no longer seated with us."""
+    monkeypatch.setattr(fed_mod, "MAX_SEAT_LINKS", 2)
+    _seat_peer(svc, monkeypatch)
+    svc._seat_links = {}
+    svc._transport = MagicMock()
+    svc._transport.on_rtc_offer = AsyncMock()
+    svc._transport.close_peer = AsyncMock()
+    for iid in ("s1", "s2", "s3"):
+        ev = _event(FederationEventType.FEDERATION_RTC_OFFER, {"sdp": "x"})
+        ev.event_type = FederationEventType.FEDERATION_RTC_OFFER
+        ev.from_instance = iid
+        await svc._handle_transport_event(ev)
+    assert list(svc._seat_links) == ["s2", "s3"]
+    svc._transport.close_peer.assert_awaited_once_with("s1")
+    svc._seat_links["s2"] -= 10_000  # idle
+    links = dict(svc._seat_links)
+    asked = _seat_peer(svc, monkeypatch, shares=False)  # s3 no longer seated
+    svc._seat_links = links
+    assert await svc.reap_seat_links(idle_s=600) == 2
+    assert svc._seat_links == {}
+    assert asked == ["s3"]

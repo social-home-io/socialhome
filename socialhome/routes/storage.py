@@ -5,7 +5,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from .. import app_keys as K
-from ..services.storage_quota_service import SETTINGS_FIELDS
+from ..services.storage_quota_service import MAX_SETTING_BYTES, SETTINGS_FIELDS
 from .base import BaseView
 
 
@@ -57,9 +57,9 @@ class StorageQuotaView(BaseView):
                     {"error": f"{field} must be a whole number of bytes"},
                     status=422,
                 )
-            if raw < 0:
+            if not 0 <= raw <= MAX_SETTING_BYTES:
                 return web.json_response(
-                    {"error": f"{field} must be >= 0"},
+                    {"error": f"{field} must be between 0 and {MAX_SETTING_BYTES}"},
                     status=422,
                 )
             values[field] = raw

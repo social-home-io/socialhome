@@ -256,6 +256,8 @@ log = logging.getLogger(__name__)
 #: How often :meth:`FederationService.open_direct_link` looks whether the
 #: link came up.
 DIRECT_LINK_POLL_S: float = 0.2
+#: v_97 — direct links with seats kept at once (either side opened them).
+MAX_SEAT_LINKS: int = 8
 
 #: A writer seat's role values (a household holding none only follows).
 _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
@@ -545,6 +547,7 @@ class FederationService:
         "_route_service",
         "_routed_handler",
         "_rtc_inbound_pipeline",
+        "_seat_links",
         "_seat_send_locks",
         "_sig_suite",
         "_space_applied",
@@ -626,6 +629,9 @@ class FederationService:
         self._space_remote_member_repo = None
         #: v_97 — may a household met through a GFS hold a link with us.
         self._direct_link_gate: Callable[[str], Awaitable[bool]] | None = None
+        #: v_97 — direct links with seats, either side opened: household
+        #: → monotonic time last used (Fable A3/A4).
+        self._seat_links: dict[str, float] = {}
         self._pending_seat_buffer: PendingSeatBuffer | None = None
         #: Hear writes the archived-space gate refused (v_48 pages answer a
         #: member's proposal ``refused/archived``).
@@ -5508,6 +5514,9 @@ class FederationService:
         :class:`~socialhome.federation.media_framing.UnsupportedMediaAeadSuite`)
         on any validation failure so the transport logs + drops the frame.
         """
+        if instance_id in self._seat_links:
+            # Inbound use keeps a seat's link from the idle close (A4).
+            self._seat_links[instance_id] = time.monotonic()
         ctx = await self.validate_inbound_rtc(instance_id, header_bytes)
         return await self._finish_media_frame(ctx, payload_bytes, wire_frame_suite=None)
 
@@ -5993,14 +6002,49 @@ class FederationService:
             ):
                 return False
             await transport.open_link(inst)
+            if not transport.has_peer(instance_id):
+                return False  # suppressed after a failure: nothing to wait on
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
                 if transport.is_media_ready(instance_id):
+                    if inst.source is InstanceSource.SPACE_SESSION:
+                        await self._use_seat_link(instance_id)
                     return True
                 await asyncio.sleep(DIRECT_LINK_POLL_S)
         except Exception:
             log.warning("direct link to %s not opened", instance_id, exc_info=True)
         return False
+
+    async def _use_seat_link(self, instance_id: str) -> None:
+        """A seat's link was used now; past :data:`MAX_SEAT_LINKS` the least
+        recently used one is closed (either side opened it)."""
+        self._seat_links.pop(instance_id, None)
+        self._seat_links[instance_id] = time.monotonic()
+        while len(self._seat_links) > MAX_SEAT_LINKS:
+            oldest = next(iter(self._seat_links))
+            self._seat_links.pop(oldest, None)
+            await self.close_seat_link(oldest)
+
+    async def reap_seat_links(self, *, idle_s: float) -> int:
+        """Close every seat link idle past *idle_s*, and every one whose
+        household is no longer seated with us (left, removed, banned —
+        the gate read again). Returns how many were closed."""
+        closed = 0
+        now = time.monotonic()
+        for instance_id, used in list(self._seat_links.items()):
+            keep = now - used < idle_s
+            if keep:
+                try:
+                    keep = await self._may_link_seat(instance_id)
+                except Exception:
+                    log.debug("seat link %s: gate not read", instance_id, exc_info=True)
+                    keep = False
+            if keep:
+                continue
+            self._seat_links.pop(instance_id, None)
+            await self.close_seat_link(instance_id)
+            closed += 1
+        return closed
 
     async def close_seat_link(self, instance_id: str) -> None:
         """Close the direct link to a household met through a GFS (one
@@ -6031,10 +6075,17 @@ class FederationService:
         if self._transport is None:
             return
         inst = await self._federation_repo.get_instance(event.from_instance)
-        if (
-            inst is not None
-            and inst.source is InstanceSource.SPACE_SESSION
-            and not await self._may_link_seat(event.from_instance)
+        if inst is None or inst.status is not PairingStatus.CONFIRMED:
+            # Fable A2: a link only with a household we hold a confirmed
+            # row for (a routed inner from a stranger never mints a peer).
+            log.info(
+                "fed RTC %s from %s refused: no confirmed row",
+                event.event_type.value,
+                event.from_instance,
+            )
+            return
+        if inst.source is InstanceSource.SPACE_SESSION and not (
+            await self._may_link_seat(event.from_instance)
         ):
             log.info(
                 "fed RTC %s from seat %s refused: no shared seated space",
@@ -6042,6 +6093,12 @@ class FederationService:
                 event.from_instance,
             )
             return
+        if (
+            inst.source is InstanceSource.SPACE_SESSION
+            and event.event_type is FederationEventType.FEDERATION_RTC_OFFER
+        ):
+            # Counted (cap, idle close, removal) on the answering side too.
+            await self._use_seat_link(event.from_instance)
         match event.event_type:
             case FederationEventType.FEDERATION_RTC_OFFER:
                 await self._transport.on_rtc_offer(

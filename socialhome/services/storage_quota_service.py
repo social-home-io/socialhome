@@ -61,6 +61,10 @@ SETTINGS_FIELDS: tuple[str, ...] = (
     "space_sync_total_bytes",
 )
 
+#: The largest value a storage setting takes (1 PiB; the route refuses
+#: more, Fable B9).
+MAX_SETTING_BYTES: int = 1 << 50
+
 #: How old the media directory's size may be when a sync asks for the
 #: quota's free space (a walk of the whole directory; uploads always
 #: measure afresh).
@@ -174,21 +178,22 @@ class StorageQuotaService:
         """Change the given settings (``<= 0`` = 0) and keep all three in
         the instance config; the synced files are told (a lower cap sweeps
         at once)."""
+        values = {f: getattr(self, "_" + f) for f in SETTINGS_FIELDS}
         for field, value in (
             ("quota_bytes", quota_bytes),
             ("space_sync_bytes", space_sync_bytes),
             ("space_sync_total_bytes", space_sync_total_bytes),
         ):
             if value is not None:
-                setattr(self, "_" + field, max(int(value), 0))
-        self._free_cache = None
+                values[field] = min(max(int(value), 0), MAX_SETTING_BYTES)
         if self._settings is not None:
+            # Kept first (Fable B9): a failed write changes nothing.
             await self._settings.set(
-                STORAGE_SETTINGS_KEY,
-                orjson.dumps(
-                    {f: getattr(self, "_" + f) for f in SETTINGS_FIELDS}
-                ).decode(),
+                STORAGE_SETTINGS_KEY, orjson.dumps(values).decode()
             )
+        for field, value in values.items():
+            setattr(self, "_" + field, value)
+        self._free_cache = None
         if self._changed is not None:
             self._changed()
 
@@ -234,6 +239,15 @@ class StorageQuotaService:
             cached = (now, await self.current_usage_bytes())
             self._free_cache = cached
         return max(0, self._quota_bytes - cached[1])
+
+    def note_freed(self, size: int) -> None:
+        """A synced file of *size* bytes was removed (Fable B3: the next
+        sync sees the room at once, not after the cache ages)."""
+        if self._free_cache is not None and size > 0:
+            self._free_cache = (
+                self._free_cache[0],
+                max(0, self._free_cache[1] - size),
+            )
 
     def note_stored(self, size: int) -> None:
         """A synced file of *size* bytes was written: the cached size used
@@ -288,7 +302,11 @@ class StorageQuotaService:
             return
         used = await self.current_usage_bytes()
         over = used + additional_bytes - self._quota_bytes
-        if over > 0 and self._evict is not None:
+        if (
+            over > 0
+            and additional_bytes <= self._quota_bytes
+            and self._evict is not None
+        ):
             # Owner 2026-11-28: the household's own upload wins — synced
             # space files make room first.
             try:

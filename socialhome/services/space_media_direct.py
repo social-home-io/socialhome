@@ -53,7 +53,6 @@ import asyncio
 import logging
 import pathlib
 import time
-from collections import OrderedDict
 from typing import TYPE_CHECKING, Protocol
 
 import aiofiles.os
@@ -61,7 +60,7 @@ import aiofiles.os
 from ..domain.federation import FederationEventType
 from ..domain.file_hashes import is_space_content_media_name
 from ..federation.host_equivalence import acting_hosts
-from .inbound_media_store import media_file_path
+from .inbound_media_store import media_file_path, remove_quietly
 
 if TYPE_CHECKING:
     from ..domain.space_media_ref import SpaceMediaRef
@@ -77,10 +76,20 @@ DIRECT_POLL_S: float = 0.5
 #: Holders asked per file, direct fetches at once (one per space).
 MAX_DIRECT_HOLDERS: int = 3
 MAX_DIRECT_AT_ONCE: int = 2
-#: A link opened here to a household met through a GFS: closed once idle
-#: this long; at most this many kept.
+#: A holder that delivered nothing is not asked again for this long
+#: (Fable A6: a dead or silent holder costs one wait, not one per file).
+HOLDER_BACKOFF_S: float = 900.0
+#: What one holder ships one requester per space and window (the
+#: ``SPACE_MEDIA_WANTED`` provider's budget, ``SpaceFileBudget``): past it
+#: the holder drops the request unanswered, so it is not asked.
+HOLDER_FILES_PER_WINDOW: int = 50
+HOLDER_BYTES_PER_WINDOW: int = 32 * 1024 * 1024
+HOLDER_WINDOW_S: float = 1800.0
+MAX_TRACKED_HOLDERS: int = 4096
+#: A direct link with a household met through a GFS is closed once idle
+#: this long (``FederationService.reap_seat_links``; at most
+#: ``MAX_SEAT_LINKS`` kept, either side).
 LINK_IDLE_S: float = 600.0
-MAX_SEAT_LINKS: int = 8
 
 
 class _Result(Protocol):
@@ -93,8 +102,6 @@ class _Federation(Protocol):
     def own_instance_id(self) -> str: ...
 
     async def open_direct_link(self, instance_id: str, *, timeout_s: float) -> bool: ...
-
-    async def close_seat_link(self, instance_id: str) -> None: ...
 
     async def send_event(
         self,
@@ -131,9 +138,10 @@ class SpaceMediaDirect:
     """Fetch one file of a space from a household that holds it."""
 
     __slots__ = (
+        "_asked",
         "_dir",
+        "_failed",
         "_fed",
-        "_opened",
         "_running",
         "_seats",
         "_sem",
@@ -155,8 +163,10 @@ class SpaceMediaDirect:
         self._sem = asyncio.Semaphore(MAX_DIRECT_AT_ONCE)
         #: Spaces with a direct fetch running (one each).
         self._running: dict[str, asyncio.Lock] = {}
-        #: household → monotonic time this service last used its link.
-        self._opened: OrderedDict[str, float] = OrderedDict()
+        #: holder → monotonic time until which it is not asked (A6).
+        self._failed: dict[str, float] = {}
+        #: (holder, space) → (window start, files, bytes) asked of it.
+        self._asked: dict[tuple[str, str], tuple[float, int, int]] = {}
 
     async def fetch(self, ref: SpaceMediaRef) -> bool:
         """Whether *ref*'s file is here now, fetched from a holder over a
@@ -184,8 +194,6 @@ class SpaceMediaDirect:
                 "space media %s: direct fetch failed", ref.local_name, exc_info=True
             )
             return False
-        finally:
-            await self._close_idle()
 
     async def _holders(self, ref: SpaceMediaRef) -> list[str]:
         """Who may ship it: the acting hosts (owner first), then the
@@ -206,16 +214,47 @@ class SpaceMediaDirect:
                 out.append(iid)
         return out
 
+    def _may_ask(self, holder: str, ref: SpaceMediaRef) -> bool:
+        """Not a holder that just failed, nor one whose budget for us in
+        this space is spent (it would drop the request unanswered)."""
+        now = time.monotonic()
+        if self._failed.get(holder, 0.0) > now:
+            return False
+        start, files, size = self._asked.get((holder, ref.space_id), (now, 0, 0))
+        if now - start > HOLDER_WINDOW_S:
+            return True
+        return (
+            files < HOLDER_FILES_PER_WINDOW
+            and size + max(ref.size, 0) <= HOLDER_BYTES_PER_WINDOW
+        )
+
+    def _count_ask(self, holder: str, ref: SpaceMediaRef) -> None:
+        now = time.monotonic()
+        key = (holder, ref.space_id)
+        start, files, size = self._asked.get(key, (now, 0, 0))
+        if now - start > HOLDER_WINDOW_S:
+            start, files, size = now, 0, 0
+        self._asked[key] = (start, files + 1, size + max(ref.size, 0))
+        while len(self._asked) > MAX_TRACKED_HOLDERS:
+            self._asked.pop(next(iter(self._asked)))
+
+    def _fail(self, holder: str) -> None:
+        self._failed[holder] = time.monotonic() + HOLDER_BACKOFF_S
+        while len(self._failed) > MAX_TRACKED_HOLDERS:
+            self._failed.pop(next(iter(self._failed)))
+
     async def _from(self, holder: str, ref: SpaceMediaRef, path: pathlib.Path) -> bool:
+        if not self._may_ask(holder, ref):
+            return False
         if not await self._fed.open_direct_link(holder, timeout_s=DIRECT_LINK_WAIT_S):
             log.info(
                 "space media %s: no direct link to %s — next holder",
                 ref.local_name,
                 holder,
             )
+            self._fail(holder)
             return False
-        self._opened[holder] = time.monotonic()
-        self._opened.move_to_end(holder)
+        self._count_ask(holder, ref)
         result = await self._fed.send_event(
             to_instance_id=holder,
             event_type=FederationEventType.SPACE_MEDIA_WANTED,
@@ -226,11 +265,13 @@ class SpaceMediaDirect:
             space_id=ref.space_id,
         )
         if not result.ok:
+            self._fail(holder)
             return False
         deadline = time.monotonic() + DIRECT_FILE_WAIT_S
         while time.monotonic() < deadline:
             if await aiofiles.os.path.isfile(path):
-                self._opened[holder] = time.monotonic()
+                if not await self._fits(ref, path):
+                    return False
                 log.info(
                     "space media %s (%s of %s): fetched directly from %s",
                     ref.local_name,
@@ -246,22 +287,73 @@ class SpaceMediaDirect:
             holder,
             DIRECT_FILE_WAIT_S,
         )
+        self._fail(holder)
         return False
 
-    async def _close_idle(self) -> None:
-        """Close the links this service opened that sat idle, and the
-        oldest past :data:`MAX_SEAT_LINKS` (a paired household's link is
-        never closed here: :meth:`close_seat_link` leaves it)."""
-        now = time.monotonic()
-        while self._opened:
-            holder, used = next(iter(self._opened.items()))
-            if now - used < LINK_IDLE_S and len(self._opened) <= MAX_SEAT_LINKS:
-                break
-            self._opened.popitem(last=False)
+    async def _fits(self, ref: SpaceMediaRef, path: pathlib.Path) -> bool:
+        """Fable A11: the file is no larger than its sealed blob (the size
+        the sync policy and the storage judged); else it goes again."""
+        try:
+            size = (await aiofiles.os.stat(path)).st_size
+        except OSError:
+            return False
+        if size <= max(ref.size, 0):
+            return True
+        log.warning(
+            "space media %s: %d bytes delivered for a %d-byte blob — dropped",
+            ref.local_name,
+            size,
+            ref.size,
+        )
+        await remove_quietly(path)
+        return False
+
+
+class _Reaper(Protocol):
+    async def reap_seat_links(self, *, idle_s: float) -> int: ...
+
+
+#: How often idle seat links are looked for.
+REAP_INTERVAL_S: float = 60.0
+
+
+class SeatLinkReaper:
+    """Close idle direct links with households met through a GFS, and
+    those no longer seated with us (Fable A3/A4), every
+    :data:`REAP_INTERVAL_S` — the ``_stop`` event lifecycle."""
+
+    __slots__ = ("_fed", "_stop", "_task")
+
+    def __init__(self, federation: _Reaper) -> None:
+        self._fed = federation
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    async def start(self) -> None:
+        self._stop.clear()
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop(), name="seat-link-reaper")
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            await self._task
+            self._task = None
+
+    async def _loop(self) -> None:
+        while not self._stop.is_set():
             try:
-                await self._fed.close_seat_link(holder)
+                await asyncio.wait_for(self._stop.wait(), timeout=REAP_INTERVAL_S)
+            except TimeoutError:
+                pass
+            if self._stop.is_set():
+                return
+            try:
+                closed = await self._fed.reap_seat_links(idle_s=LINK_IDLE_S)
+                if closed:
+                    log.info("direct links: %d idle or unseated link(s) closed", closed)
             except Exception:
-                log.debug("link to %s not closed", holder, exc_info=True)
+                log.warning("direct links: reaping failed", exc_info=True)
 
 
 __all__ = [
@@ -270,7 +362,8 @@ __all__ = [
     "LINK_IDLE_S",
     "MAX_DIRECT_AT_ONCE",
     "MAX_DIRECT_HOLDERS",
-    "MAX_SEAT_LINKS",
+    "REAP_INTERVAL_S",
+    "SeatLinkReaper",
     "SpaceMediaDirect",
     "shares_a_seated_space",
 ]

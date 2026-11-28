@@ -2645,9 +2645,26 @@ class FederationTransport:
         travels sealed through the GFS relay like any of its events). A
         link already there, or one suppressed after a failure, is left
         alone; whether it comes up is :meth:`is_media_ready`."""
-        if instance.id in self._peers or self._rtc_suppressed(instance.id):
+        if self._rtc_suppressed(instance.id):
             return
+        peer = self._peers.get(instance.id)
+        if peer is not None:
+            # Fable A5: a link the other side closed is dialled again
+            # (at most once per backoff floor), never waited on.
+            if not peer.is_spent or self._within_floor(
+                self._last_spent_rebuild_at, instance.id
+            ):
+                return
+            self._last_spent_rebuild_at[instance.id] = time.monotonic()
+            async with self._lock:
+                if self._peers.get(instance.id) is peer:
+                    del self._peers[instance.id]
+            peer.close()
         await self._ensure_handshake(instance)
+
+    def has_peer(self, instance_id: str) -> bool:
+        """Whether a PeerConnection to *instance_id* exists (up or coming)."""
+        return instance_id in self._peers
 
     def is_media_ready(self, instance_id: str) -> bool:
         peer = self._peers.get(instance_id)

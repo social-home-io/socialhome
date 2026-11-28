@@ -674,6 +674,15 @@ STRUCTURAL_EVENTS: frozenset[FederationEventType] = frozenset(
 #: only fires when the envelope carries a ``space_id``, and the handlers
 #: themselves are membership-gated. This list is about the *class* of
 #: traffic a link-joined household is entitled to emit at all.
+#: The WebRTC signalling of the federation link (pairwise negotiation).
+RTC_SIGNAL_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.FEDERATION_RTC_OFFER,
+        FederationEventType.FEDERATION_RTC_ANSWER,
+        FederationEventType.FEDERATION_RTC_ICE,
+    }
+)
+
 SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
     {
         #: Peers exchange their protocol version on every startup; without
@@ -929,6 +938,11 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
     {
         #: v_97 — a mention note is for the mentioned household only.
         FederationEventType.SPACE_MENTION_NOTE,
+        #: v_97 (Fable A1) — a direct link is negotiated pairwise: one multi
+        #: frame must never make every receiver open a PeerConnection.
+        FederationEventType.FEDERATION_RTC_OFFER,
+        FederationEventType.FEDERATION_RTC_ANSWER,
+        FederationEventType.FEDERATION_RTC_ICE,
         # ── Single recipient by design ──
         #: The host's member directory and a member's card: per-household
         #: (the directory is filtered per recipient, the card goes to the

@@ -322,6 +322,8 @@ class _SyncStorage(Protocol):
 
     def note_stored(self, size: int) -> None: ...
 
+    def note_freed(self, size: int) -> None: ...
+
 
 @dataclass(slots=True)
 class _Backlog:
@@ -979,13 +981,25 @@ class SpaceMediaGfsFetcher:
     ) -> str:
         path = media_file_path(self._dir, filename)
         here = path is not None and await aiofiles.os.path.isfile(path)
-        async with self._fetch_sem:
-            outcome = await self._fetch(filename, want=want, single=single)
+        # Owner 2026-11-28 routing. A holder is asked OUTSIDE the fetch
+        # slots (Fable A6: a slow holder never holds up the cache).
+        outcome = _MISS
+        if single and await self._direct_for(filename):
+            outcome = _STORED
+        if outcome != _STORED:
+            async with self._fetch_sem:
+                outcome = await self._fetch(filename)
+        if outcome == _MISS and want and not single:
+            if await self._direct_for(filename):
+                outcome = _STORED
+            else:
+                async with self._fetch_sem:
+                    outcome = await self._fetch(filename, want=True, cache=False)
         if outcome == _STORED and not here:
             # A new file here: the synced-files storage counts it (a view's
             # too) and sweeps if it went past a cap.
             ref = await self._refs.get(filename)
-            if ref is not None:
+            if ref is not None and await self._counts(ref.space_id):
                 self._note_stored(ref.space_id, max(ref.size, 0))
                 self._sweep_soon(ref.space_id)
         return outcome
@@ -1079,12 +1093,27 @@ class SpaceMediaGfsFetcher:
         if self._held is None:
             held: dict[str, int] = {}
             for space_id in await self._refs.list_space_ids():
-                if await self._archives_or_raise(space_id):
+                if not await self._counts(space_id):
                     continue
                 files = await self._files_of(space_id)
                 held[space_id] = sum(size for _ref, _path, size in files)
             self._held = held
         return self._held
+
+    async def _counts(self, space_id: str) -> bool:
+        """Whether *space_id*'s files are synced files (counted, evictable):
+        not when this household acts as its host — nor when that can't be
+        read (Fable B2/B8: never evict on a guess; the space is skipped,
+        the others still count)."""
+        try:
+            return not await self._archives_or_raise(space_id)
+        except Exception:
+            log.warning(
+                "space %s: host role not read — its files are left alone",
+                space_id,
+                exc_info=True,
+            )
+            return False
 
     async def _files_of(
         self, space_id: str
@@ -1147,8 +1176,8 @@ class SpaceMediaGfsFetcher:
             return False
 
     def _note_stored(self, space_id: str, size: int) -> None:
-        if self._held is not None and space_id in self._held:
-            self._held[space_id] += size
+        if self._held is not None:
+            self._held[space_id] = self._held.get(space_id, 0) + size
         if self._storage is not None:
             self._storage.note_stored(size)
 
@@ -1182,17 +1211,40 @@ class SpaceMediaGfsFetcher:
         at least *need* bytes of synced files (a file viewed lately too),
         oldest view first. Returns the bytes freed."""
         try:
-            return await self._evict(need, keep_viewed=False)
+            return await self._evict(need, keep_viewed=False, all_or_nothing=True)
         except Exception:
             log.warning("synced space files not evicted", exc_info=True)
             return 0
 
-    async def _evict(self, need: int, *, keep_viewed: bool) -> int:
-        """Free *need* bytes across every counted space, by :func:`_order`."""
+    async def _evict(
+        self, need: int, *, keep_viewed: bool, all_or_nothing: bool = False
+    ) -> int:
+        """Free *need* bytes across every counted space, by :func:`_order`.
+        A space this household acts as host of NOW is skipped (Fable B2: the
+        role may have changed since the count). *all_or_nothing*: evict only
+        when the evictable files cover *need* (an upload that would not fit
+        anyway evicts nothing, Fable B1)."""
         held = await self._ledger()
         files: list[tuple[SpaceMediaRef, pathlib.Path, int]] = []
         for space_id in list(held):
+            if not await self._counts(space_id):
+                held.pop(space_id, None)
+                continue
             files.extend(await self._files_of(space_id))
+        if all_or_nothing:
+            now = datetime.now(UTC)
+            evictable = sum(
+                size
+                for ref, _path, size in files
+                if not self.fetching(ref.local_name)
+                and not (
+                    keep_viewed
+                    and (viewed := parse_moment(ref.viewed_at)) is not None
+                    and now - viewed < VIEWED_KEEP
+                )
+            )
+            if evictable < need:
+                return 0
         return await self._remove(files, need, keep_viewed=keep_viewed)
 
     async def _remove(
@@ -1218,6 +1270,8 @@ class SpaceMediaGfsFetcher:
                 continue
             await remove_quietly(path)
             freed += size
+            if self._storage is not None:
+                self._storage.note_freed(size)
             if self._held is not None and ref.space_id in self._held:
                 self._held[ref.space_id] = max(0, self._held[ref.space_id] - size)
         return freed
@@ -1314,7 +1368,7 @@ class SpaceMediaGfsFetcher:
             task.cancel()
 
     async def _fetch(
-        self, filename: str, *, want: bool = False, single: bool = False
+        self, filename: str, *, want: bool = False, cache: bool = True
     ) -> str:
         """One fetch: ``stored`` (the file is here now), ``miss`` (no GFS
         holds the blob — yet) or ``refused`` (anything else: unknown
@@ -1364,15 +1418,13 @@ class SpaceMediaGfsFetcher:
                 ref.space_id,
             )
             return _REFUSED
-        if single and not ref.pieced and await self._direct_fetch(ref, path):
-            return _STORED
         sources = await self._sources(ref.space_id)
         if ref.pieced:
             return await self._fetch_pieced(
                 ref, scope_id, current[1], path, sources, want
             )
         outcome = _MISS
-        for conn in sources:
+        for conn in sources if cache else []:
             blob = await self._gfs.fetch_space_media(
                 conn, ref.blob_id, max_bytes=ref.size, timeout_s=REQUEST_TIMEOUT_S
             )
@@ -1382,26 +1434,30 @@ class SpaceMediaGfsFetcher:
             if got != _MISS:
                 return got
             outcome = _REFUSED
-        if (
-            outcome == _MISS
-            and want
-            and not single
-            and await self._direct_fetch(ref, path)
-        ):
-            return _STORED
         if outcome == _MISS and want and await self._asks_its_gfs(ref):
-            return await self._want(ref, scope_id, current[1], path, sources)
+            return await self._want(
+                ref,
+                scope_id,
+                current[1],
+                path,
+                sources or await self._sources(ref.space_id),
+            )
         if outcome == _MISS:
             log.info(
                 "space media %s: no GFS holds blob %s (yet)", filename, ref.blob_id[:12]
             )
         return outcome
 
-    async def _direct_fetch(self, ref: SpaceMediaRef, path: pathlib.Path) -> bool:
+    async def _direct_for(self, filename: str) -> bool:
         """Owner 2026-11-28 — a file for one reader straight from a
         household that holds it, over a direct link (never re-uploaded
-        into the GFS cache for one reader). Whether it is here now."""
+        into the GFS cache for one reader). Whether it is here now. A file
+        in pieces never goes this way (over a holder's budget)."""
         if self._direct is None:
+            return False
+        ref = await self._refs.get(filename)
+        path = media_file_path(self._dir, filename)
+        if ref is None or path is None or ref.pieced:
             return False
         if await self._direct.fetch(ref):
             return await aiofiles.os.path.isfile(path)
