@@ -1100,10 +1100,10 @@ async def test_a_gfs_spaces_file_is_never_pushed_to_a_cache_reader(
     fed = _fed()
     fed.send_media_chunk = AsyncMock(return_value=_OK)
     svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
-    asked: list[tuple[str, str, list[str]]] = []
+    asked: list[tuple[str, list[str]]] = []
 
-    async def readers(space_id, filename, targets):
-        asked.append((space_id, filename, list(targets)))
+    async def readers(space_id, targets):
+        asked.append((space_id, list(targets)))
         return [t for t in targets if t != "peer-b"]
 
     svc.attach_cache_readers(readers)
@@ -1111,9 +1111,10 @@ async def test_a_gfs_spaces_file_is_never_pushed_to_a_cache_reader(
         space_id="sp-1",
         correlation_id="p-1",
         target_instance_ids=["peer-b", "peer-a"],
-        media_urls=["api/media/img-1.webp"],
+        media_urls=["api/media/img-1.webp", "api/media/img-2.webp"],
     )
-    assert asked == [("sp-1", "img-1.webp", ["peer-b", "peer-a"])]
+    # Review M4: asked once per call, not once per file.
+    assert asked == [("sp-1", ["peer-b", "peer-a"])]
     await svc.flush_once()
     sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
     assert sent_to == {"peer-a"}

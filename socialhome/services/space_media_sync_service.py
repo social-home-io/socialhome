@@ -151,9 +151,9 @@ class SpaceMediaSyncService:
         #: v_97 — ``(space, file, targets) → targets still pushed``: a
         #: live item's file it described for the GFS cache reaches its v_97
         #: households from there (the uploader's :meth:`push_targets`).
-        self._cache_readers: (
-            Callable[[str, str, list[str]], Awaitable[list[str]]] | None
-        ) = None
+        self._cache_readers: Callable[[str, list[str]], Awaitable[list[str]]] | None = (
+            None
+        )
         #: Bytes of the files the current pass holds (``MAX_INFLIGHT_FILE_BYTES``).
         self._budget = asyncio.Condition()
         self._held = 0
@@ -175,7 +175,7 @@ class SpaceMediaSyncService:
         self._relay_readers = readers
 
     def attach_cache_readers(
-        self, readers: Callable[[str, str, list[str]], Awaitable[list[str]]]
+        self, readers: Callable[[str, list[str]], Awaitable[list[str]]]
     ) -> None:
         """v_97 (owner 2026-11-27) — a GFS space's files reach its v_97
         households only through the GFS space media cache: they get no
@@ -234,6 +234,7 @@ class SpaceMediaSyncService:
         ``(blob_id, target_instance_id)`` primary key — a re-shared
         image doesn't ship twice.
         """
+        pushed: list[str] | None = None
         for url in media_urls:
             filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
             if not filename:
@@ -247,23 +248,28 @@ class SpaceMediaSyncService:
                     filename,
                 )
                 continue
-            targets = list(target_instance_ids)
-            if self._cache_readers is not None and not asked:
-                try:
-                    targets = await self._cache_readers(space_id, filename, targets)
-                except Exception:
-                    log.warning(
-                        "space-media-sync: cache readers of %s unknown — pushed",
-                        filename,
-                        exc_info=True,
-                    )
-                if len(targets) < len(target_instance_ids):
-                    log.info(
-                        "space-media-sync: %s reaches %d household(s) through"
-                        " the GFS cache — no push to them",
-                        filename,
-                        len(target_instance_ids) - len(targets),
-                    )
+            if pushed is None:
+                # Review M4: who reads the space from the cache only is
+                # asked once per call, not once per file.
+                pushed = list(target_instance_ids)
+                if self._cache_readers is not None and not asked:
+                    try:
+                        pushed = await self._cache_readers(space_id, pushed)
+                    except Exception:
+                        log.warning(
+                            "space-media-sync: cache readers of space %s unknown"
+                            " — pushed",
+                            space_id,
+                            exc_info=True,
+                        )
+            targets = pushed
+            if len(targets) < len(target_instance_ids):
+                log.info(
+                    "space-media-sync: %s reaches %d household(s) through"
+                    " the GFS cache — no push to them",
+                    filename,
+                    len(target_instance_ids) - len(targets),
+                )
             for target in targets:
                 if not target:
                     continue

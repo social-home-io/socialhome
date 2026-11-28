@@ -459,14 +459,16 @@ class SpaceMediaGfsUploader:
         the legacy events, so it keeps the push too."""
         self._legacy_window = is_open
 
-    async def push_targets(
-        self, space_id: str, filename: str, targets: list[str]
-    ) -> list[str]:
-        """Who still gets the household push of *filename* (v_97, owner
-        2026-11-27): the *targets* that do not read the space from the GFS
-        cache only (:meth:`cache_only`). A mesh space's files go to
-        everyone."""
-        return [t for t in targets if not await self.cache_only(space_id, t)]
+    async def push_targets(self, space_id: str, targets: list[str]) -> list[str]:
+        """Who still gets the household push of a file of *space_id* (v_97,
+        owner 2026-11-27): the *targets* that do not read the space from
+        the GFS cache only (:meth:`cache_only`). A mesh space's files go to
+        everyone. The space's own conditions are read once per call
+        (review M4)."""
+        host = await self._cache_only_host(space_id)
+        if host is None:
+            return list(targets)
+        return [t for t in targets if not await self._supports_items(t)]
 
     async def cache_only(self, space_id: str, instance_id: str) -> bool:
         """v_97 (owner 2026-11-27) — whether *instance_id* takes
@@ -478,22 +480,33 @@ class SpaceMediaGfsUploader:
         a v_96 host (whose own files carry no descriptor) or a space with
         no stored channel yet keeps the push. Every path that sends such a
         household an item with files describes them (``media_refs``)."""
+        return await self._cache_only_host(space_id) is not None and (
+            await self._supports_items(instance_id)
+        )
+
+    async def _cache_only_host(self, space_id: str) -> str | None:
+        """The host of *space_id* when the space itself reads from the
+        cache only (a stored channel, the legacy window closed, a v_97
+        host), else ``None``."""
         if self._federation is None or await self.scope_of(space_id) is None:
-            return False
+            return None
         if self._legacy_window is not None and await self._legacy_window(space_id):
-            return False
+            return None
         space = await self._spaces.get(space_id)
         host = str(getattr(space, "owner_instance_id", "") or "")
-        for iid in (instance_id, host):
-            if not iid:
-                return False
-            if iid == self._origin():
-                continue
-            if not await self._federation.space_member_supports(
-                iid, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
-            ):
-                return False
-        return True
+        if not host or not await self._supports_items(host):
+            return None
+        return host
+
+    async def _supports_items(self, instance_id: str) -> bool:
+        if not instance_id:
+            return False
+        if instance_id == self._origin():
+            return True
+        assert self._federation is not None
+        return await self._federation.space_member_supports(
+            instance_id, min_version=FederationCapability.MIN_FOR_SPACE_ITEMS
+        )
 
     def attach_channels(self, channels: GfsChannelService) -> None:
         """Wire the v_51 channel service: a private space with an opaque

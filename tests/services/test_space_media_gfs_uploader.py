@@ -1420,17 +1420,17 @@ async def test_a_gfs_spaces_files_are_pushed_only_below_v97(tmp_path):
     u = _pieced_uploader(tmp_path, _Gfs([g1]))
     u.attach_federation(_Fed({"new": OURS, "old": 90}))
     targets = ["new", "old"]
-    assert await u.push_targets(SPACE, "a.webp", targets) == ["old"]
-    assert await u.push_targets(SPACE, "any.webp", targets) == ["old"]
+    assert await u.push_targets(SPACE, targets) == ["old"]
+    assert await u.push_targets(SPACE, targets) == ["old"]
     mesh = _uploader(tmp_path, gfs=_Gfs([]), spaces=_Spaces(b"\1" * 32, channel=None))
     mesh.attach_federation(_Fed({"new": OURS}))
-    assert await mesh.push_targets(SPACE, "a.webp", targets) == targets
+    assert await mesh.push_targets(SPACE, targets) == targets
 
     async def window_open(space_id):
         return True
 
     u.attach_legacy_window(window_open)
-    assert await u.push_targets(SPACE, "a.webp", targets) == targets
+    assert await u.push_targets(SPACE, targets) == targets
 
 
 async def test_a_v96_host_or_no_stored_channel_keeps_the_push(tmp_path):
@@ -1448,7 +1448,7 @@ async def test_a_v96_host_or_no_stored_channel_keeps_the_push(tmp_path):
             spaces=_Spaces(seed, channel=channel, private_gfs=True, owner=host),
         )
         u.attach_federation(_Fed({"new": OURS, "host96": 96, "host97": OURS}))
-        assert await u.push_targets(SPACE, "a.webp", ["new"]) == expected
+        assert await u.push_targets(SPACE, ["new"]) == expected
         assert await u.cache_only(SPACE, "new") is (not expected)
     no_channel = _uploader(
         tmp_path,
@@ -1456,7 +1456,7 @@ async def test_a_v96_host_or_no_stored_channel_keeps_the_push(tmp_path):
         spaces=_Spaces(seed, channel=None, private_gfs=True, owner="host97"),
     )
     no_channel.attach_federation(_Fed({"new": OURS, "host97": OURS}))
-    assert await no_channel.push_targets(SPACE, "a.webp", ["new"]) == ["new"]
+    assert await no_channel.push_targets(SPACE, ["new"]) == ["new"]
 
 
 async def test_a_catch_up_reader_of_a_gfs_space_is_described_for_the_cache(
