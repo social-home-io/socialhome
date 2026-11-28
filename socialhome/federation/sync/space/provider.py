@@ -290,6 +290,13 @@ class _WithMediaRefs:
         #: watermark, so the next one sends the record, described.
         self.deferred = False
 
+    async def describe(
+        self, space_id: str, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """*rows* described for the requester (a verified fetch's rows,
+        review M2); a row held back sets :attr:`deferred`."""
+        return await self._add(space_id, rows)
+
     @property
     def inner(self) -> ResourceExporter:
         """The plain exporter — what the quiet check reads (review M3: no
@@ -889,9 +896,19 @@ class SpaceSyncService:
             # v_85 — the host (or a delegated admin) vouches for the files
             # it streams: each record carries their hashes (decision B).
             exporter = _WithFileHashes(exporter, self._file_hasher)
+        if exporter is not None:
+            exporter = await self._with_media_refs(exporter, resource, session)
+        return exporter
+
+    async def _with_media_refs(
+        self, exporter: ResourceExporter, resource: str, session: SyncSessionRecord
+    ) -> ResourceExporter:
+        """*exporter* wrapped so its records describe their files
+        (:class:`_WithMediaRefs`) for a requester that takes them from a GFS
+        media cache — a stream's records and a verified fetch's rows alike
+        (review M2)."""
         if (
-            exporter is not None
-            and resource in MEDIA_REF_RESOURCES
+            resource in MEDIA_REF_RESOURCES
             and self._media_gfs is not None
             and await self._reads_from_cache(session)
             and (
@@ -901,7 +918,7 @@ class SpaceSyncService:
                 )
             )
         ):
-            exporter = _WithMediaRefs(
+            return _WithMediaRefs(
                 exporter,
                 self._media_gfs,
                 session.requester_instance_id,
@@ -911,6 +928,34 @@ class SpaceSyncService:
                 ),
             )
         return exporter
+
+    async def _described_rows(
+        self, session: SyncSessionRecord, rows: list[dict]
+    ) -> list[dict]:
+        """A verified fetch's ``__rows__``, each row describing its files
+        for the requester like a streamed record (review M2). A row whose
+        file is still on its way here is held back — the requester's page
+        compare asks for it again. Bounded like a stream: one wrapper per
+        resource, so a non-lazy requester keeps the record budget."""
+        wrappers: dict[str, ResourceExporter] = {}
+        out: list[dict] = []
+        for wire in rows:
+            resource = str(wire.get("r") or "")
+            record = wire.get("row")
+            if resource not in wrappers:
+                wrappers[resource] = await self._with_media_refs(
+                    _Listings([], resource=resource), resource, session
+                )
+            wrapper = wrappers[resource]
+            if not isinstance(wrapper, _WithMediaRefs) or not isinstance(record, dict):
+                out.append(wire)
+                continue
+            wrapper.deferred = False
+            described = await wrapper.describe(session.space_id, [record])
+            if wrapper.deferred or not described:
+                continue
+            out.append({**wire, "row": described[0]})
+        return out
 
     async def _reads_from_cache(self, session: SyncSessionRecord) -> bool:
         """Whether the requester takes the stream's files from a GFS
@@ -1243,6 +1288,8 @@ class SpaceSyncService:
                 session.space_id,
             )
             return
+        if rows:
+            rows = await self._described_rows(session, rows)
         log.info(
             "sync %s: %d bucket listing(s) of space %s to %s",
             session.sync_id,

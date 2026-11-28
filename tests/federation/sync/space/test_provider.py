@@ -2895,3 +2895,70 @@ async def test_the_quiet_check_describes_no_file(encoder):
     session.peer_version = OURS
     assert await svc.is_quiet(session) is False
     assert uploader.items == []
+
+
+class _MediaFetchPages(_ListingPages):
+    async def fetch_records(self, **kwargs):
+        listings = [{"i": b, "held": True, "rows": []} for b in kwargs["buckets"]]
+        return listings, [
+            {
+                "i": 4,
+                "r": "posts",
+                "row": {
+                    "id": "p-1",
+                    "author": "u-1",
+                    "image_urls": ["api/media/a.webp"],
+                },
+            },
+            {
+                "i": 4,
+                "r": "posts",
+                "row": {
+                    "id": "p-2",
+                    "author": "u-1",
+                    "image_urls": ["api/media/b.webp"],
+                },
+            },
+            {"i": 4, "r": "members", "row": {"user_id": "u-1"}},
+        ]
+
+
+async def test_a_verified_fetch_describes_its_rows_for_a_cache_only_requester(
+    encoder,
+):
+    """Review M2 — the ``__rows__`` of a verified fetch to a household that
+    reads a GFS space from the cache only describe their files through the
+    same path as a stream's records; a row whose file is still on its way
+    here is held back (the requester asks for it again), never sent
+    undescribed."""
+
+    class _Lazy(_ReaderPlan):
+        lazy = True
+
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-r"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        return _PendingPlan(urls) if item_id == "p-2" else _Lazy(urls)
+
+    uploader.plan_for_reader = plan_for_reader
+    svc = _media_provider(encoder, uploader)
+    svc.attach_sync_pages(_MediaFetchPages())
+
+    async def gate(space_id, requester):
+        return True
+
+    svc.attach_member_gate(gate)
+    session = _FakeSession(sync_mode="incremental", requester="peer-r")
+    session.peer_version = OURS
+    session.page_ref = {"root": b"\x01" * 32}
+    session.buckets = [4]
+    session.want_rows = True
+    await svc.stream_initial(session)
+    rows = _streamed_records(session, "__rows__")
+    assert [w["row"].get("id") or w["row"]["user_id"] for w in rows] == [
+        "p-1",
+        "u-1",
+    ]
+    assert "media_refs" in rows[0]["row"]
+    assert "media_refs" not in rows[1]["row"]
