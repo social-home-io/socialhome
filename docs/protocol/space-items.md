@@ -540,7 +540,7 @@ frame).
 
 | limit | value | where |
 |---|---|---|
-| publishes per channel | 1 200 / min (20 / s); 120 / min and 1 MiB / min while the channel still has a seat that does not read the ring (v_96, rollout) | GFS `CHANNEL_PUBLISH_MAX_PER_MINUTE` (`_LEGACY`) |
+| publishes per channel | 1 200 / min (20 / s); a publish WITHOUT a ring class (a v_96 publisher, pushed or queued per seat) 120 / min and 1 MiB / min while the channel still has a seat that does not read the ring — a ring publish is never slowed by such a seat (final review I2) | GFS `CHANNEL_PUBLISH_MAX_PER_MINUTE` (`_LEGACY`) |
 | publishes per writer key (epoch) | 1 200 / min | GFS |
 | publishes per client address, per channel | 240 / min (a fifth), per-node floor 60 | GFS |
 | bytes per channel | 4 MiB / min | GFS |
