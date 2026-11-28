@@ -2817,3 +2817,81 @@ async def test_a_cache_only_requester_gets_a_descriptor_for_every_record(encoder
     assert len(posts) == count
     assert all("media_refs" in r for r in posts)
     assert uploader.stored_asks == []
+
+
+class _PendingPlan(_ReaderPlan):
+    lazy = True
+    pending = ("a.webp",)
+
+
+def _pending_uploader():
+    uploader = _ReaderUploader(readers=())
+    uploader.cache_readers = {"peer-r"}
+
+    async def plan_for_reader(space_id, urls, iid, *, item_id):
+        uploader.items.append(item_id)
+        return _PendingPlan(urls)
+
+    uploader.plan_for_reader = plan_for_reader
+    return uploader
+
+
+async def test_a_request_more_slice_that_holds_a_record_back_keeps_the_watermark(
+    encoder,
+):
+    """Review M3 — a REQUEST_MORE slice that holds a record back (its file
+    still on its way here) marks the session not clean, before or after the
+    sentinel: the requester's confirm then advances no watermark, so the
+    next stream sends the record, described."""
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+    svc.attach_media_gfs(_pending_uploader())
+    svc._exporters["posts"] = _IncExporter(
+        "posts",
+        [{"id": "p-1", "author": "u-1", "image_urls": ["api/media/a.webp"]}],
+        [],
+    )
+    marks._since = None
+    session = _FakeSession(requester="peer-r")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    # The main stream held p-1 back already; a clean stream would confirm.
+    session.stream_clean = True
+    await svc.stream_request_more(session, {"resource": "posts"})
+    assert session.stream_clean is False
+    await svc.confirm_complete(session)
+    assert marks.confirmed == []
+
+
+async def test_a_slice_held_back_before_the_sentinel_keeps_the_stream_unclean(
+    encoder,
+):
+    """Review M3 — the sentinel's clean mark never undoes a slice that held
+    a record back before it."""
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+    marks._since = None
+    session = _FakeSession(requester="peer-r")
+    session.peer_version = OURS
+    session.held_back = True
+    await svc.stream_initial(session)
+    assert session.stream_clean is False
+
+
+async def test_the_quiet_check_describes_no_file(encoder):
+    """Review M3 — ``is_quiet`` runs in the BEGIN handler: it reads the
+    plain records (one is enough), never seals or fetches a file for a
+    cache-only requester."""
+    marks = _Marks()
+    svc, _members = _roster_inc_provider(encoder, marks)
+    await _session(svc, marks, since=None, snapshot=40)
+    uploader = _pending_uploader()
+    svc.attach_media_gfs(uploader)
+    svc._exporters["posts"]._changed = [
+        {"id": "p-9", "author": "u-1", "image_urls": ["api/media/a.webp"]}
+    ]
+    marks._since = 40
+    session = _FakeSession(sync_mode="incremental", requester="peer-r")
+    session.peer_version = OURS
+    assert await svc.is_quiet(session) is False
+    assert uploader.items == []

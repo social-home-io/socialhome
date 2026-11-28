@@ -290,6 +290,12 @@ class _WithMediaRefs:
         #: watermark, so the next one sends the record, described.
         self.deferred = False
 
+    @property
+    def inner(self) -> ResourceExporter:
+        """The plain exporter — what the quiet check reads (review M3: no
+        file is sealed or fetched inside the BEGIN handler)."""
+        return self._inner
+
     async def _add(
         self, space_id: str, rows: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
@@ -1135,7 +1141,11 @@ class SpaceSyncService:
                 return
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.
-            session.stream_clean = not any_failure
+            # A REQUEST_MORE slice that held a record back keeps it unclean
+            # too (review M3).
+            session.stream_clean = not any_failure and not getattr(
+                session, "held_back", False
+            )
             sent_sentinel = await self._send(session, sentinel)
             # v_95: after the sentinel shipped (a network send of its own
             # never delays the stream's end — security check 2, L7).
@@ -1353,6 +1363,9 @@ class SpaceSyncService:
             if since is None:
                 return False
             for exporter in plan:
+                if isinstance(exporter, _WithMediaRefs):
+                    # Whether a record changed, not its descriptor (M3).
+                    exporter = exporter.inner
                 batches = record_batches(exporter, session.space_id, since=since)
                 try:
                     async for _batch in batches:
@@ -1381,6 +1394,7 @@ class SpaceSyncService:
         if (
             self._watermarks is None
             or not getattr(session, "stream_clean", False)
+            or getattr(session, "held_back", False)
             or snapshot is None
         ):
             return
@@ -1683,6 +1697,13 @@ class SpaceSyncService:
                 session.sync_id,
                 resource,
             )
+        finally:
+            if getattr(exporter, "deferred", False):
+                # v_97 (review M3) — a record held back (a file still on
+                # its way here): the watermark stays and the next stream
+                # sends it, whether the sentinel went before or after.
+                session.held_back = True
+                session.stream_clean = False
 
     async def _send(self, session, envelope: dict[str, Any]) -> DeliveryResult:
         """Serialise and dispatch one envelope to the requester.

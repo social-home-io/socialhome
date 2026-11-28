@@ -594,6 +594,9 @@ class SyncSessionRecord:
     #: stream the requester confirms (``SPACE_SYNC_COMPLETE``) advances the
     #: requester's watermark — to ``snapshot_seq``, never further.
     stream_clean: bool = False
+    #: … whether a REQUEST_MORE slice held a record back (v_97: a file
+    #: still on its way here) — the stream is then never clean …
+    held_back: bool = False
     #: §25.6 #2(c): the digest of each kept-full resource (``members``,
     #: ``bans``) as this session read it — kept by the provider once the
     #: requester confirms, so the next incremental session skips it unless
