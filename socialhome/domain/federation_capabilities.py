@@ -1684,7 +1684,11 @@ from __future__ import annotations
 #:   **Fallback**: a member household below v_97 gets the legacy event
 #:   (``broadcast_to_space_members`` splits the audience) for one release
 #:   window; v_98 removes the legacy fan-out. Space-scoped. Labelled
-#:   "Space content travels as one space item".
+#:   "Space content travels as one space item". Same release (owner
+#:   2026-11-28): households met only through a GFS and seated together in
+#:   a shared space may open a direct WebRTC link on demand (its RTC
+#:   signalling as sealed events through the relay), used for single-reader
+#:   file fetches (``MIN_FOR_DIRECT_SEAT_LINK``); a v_96 seat keeps the GFS.
 OURS: int = 97
 
 
@@ -2438,6 +2442,10 @@ class FederationCapability:
     #: above it gets a content change as one item; one
     #: below it the legacy event.
     MIN_FOR_SPACE_ITEMS = 97
+    #: v_97 (owner 2026-11-28) — households met only through a GFS may
+    #: hold a direct WebRTC link (signalled through the GFS relay), used for
+    #: single-reader file fetches (``services/space_media_direct``).
+    MIN_FOR_DIRECT_SEAT_LINK = 97
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so

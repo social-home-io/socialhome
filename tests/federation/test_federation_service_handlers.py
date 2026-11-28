@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import socialhome.federation.federation_service as fed_mod
 from socialhome.domain.events import (
     PairingIntroRelayReceived,
     SpaceSyncComplete,
@@ -2697,3 +2698,102 @@ async def test_an_invite_link_household_hears_one_refusal_per_space_window(
             )
         )
     assert send.await_count == 2  # one per space
+
+
+# ── v_97 (owner 2026-11-28): direct links to households met via a GFS ──
+
+
+def _seat_peer(
+    svc, monkeypatch, *, version: int = 97, shares: bool = True
+) -> list[str]:
+    """The sender is a household met through a GFS; returns the gate's
+    calls."""
+    svc._federation_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(
+            id="peer-1",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.SPACE_SESSION,
+        )
+    )
+    asked: list[str] = []
+
+    async def gate(iid):
+        asked.append(iid)
+        return shares
+
+    svc._direct_link_gate = gate
+
+    async def supports(self, iid, *, min_version):
+        return version >= min_version
+
+    monkeypatch.setattr(FederationService, "peer_supports", supports)
+    return asked
+
+
+@pytest.mark.parametrize(
+    ("version", "shares", "taken"),
+    [(97, True, True), (97, False, False), (96, True, False)],
+    ids=["seated together", "no shared seat", "older than v_97"],
+)
+async def test_a_seats_offer_is_taken_only_from_a_household_seated_with_us(
+    svc, monkeypatch, version, shares, taken
+):
+    """A household met through a GFS may open a direct link (its offer /
+    answer / ICE come through the relay) only when it is at v_97 and holds
+    a seat in a space a local person is seated in."""
+    _seat_peer(svc, monkeypatch, version=version, shares=shares)
+    svc._transport = MagicMock()
+    svc._transport.on_rtc_offer = AsyncMock()
+    ev = _event(FederationEventType.FEDERATION_RTC_OFFER, {"sdp": "x"})
+    ev.event_type = FederationEventType.FEDERATION_RTC_OFFER
+    await svc._handle_transport_event(ev)
+    assert svc._transport.on_rtc_offer.await_count == (1 if taken else 0)
+
+
+async def test_no_gate_wired_means_no_link_to_a_seat(svc, monkeypatch):
+    _seat_peer(svc, monkeypatch)
+    svc._direct_link_gate = None
+    svc._transport = MagicMock()
+    svc._transport.on_rtc_ice = AsyncMock()
+    ev = _event(FederationEventType.FEDERATION_RTC_ICE, {"candidate": "c"})
+    ev.event_type = FederationEventType.FEDERATION_RTC_ICE
+    await svc._handle_transport_event(ev)
+    svc._transport.on_rtc_ice.assert_not_awaited()
+
+
+async def test_open_direct_link_waits_for_the_media_channel(svc, monkeypatch):
+    monkeypatch.setattr(fed_mod, "DIRECT_LINK_POLL_S", 0.0)
+    _seat_peer(svc, monkeypatch)
+    ready = iter([False, False, True])
+    svc._transport = MagicMock()
+    svc._transport.is_media_ready = lambda iid: next(ready)
+    svc._transport.open_link = AsyncMock()
+    assert await svc.open_direct_link("peer-1", timeout_s=5)
+    svc._transport.open_link.assert_awaited_once()
+
+
+async def test_open_direct_link_refuses_a_seat_outside_the_gate(svc, monkeypatch):
+    _seat_peer(svc, monkeypatch, shares=False)
+    svc._transport = MagicMock()
+    svc._transport.is_media_ready = lambda iid: False
+    svc._transport.open_link = AsyncMock()
+    assert not await svc.open_direct_link("peer-1", timeout_s=0.01)
+    svc._transport.open_link.assert_not_awaited()
+
+
+async def test_open_direct_link_gives_up_after_the_wait(svc, monkeypatch):
+    _seat_peer(svc, monkeypatch)
+    svc._transport = MagicMock()
+    svc._transport.is_media_ready = lambda iid: False
+    svc._transport.open_link = AsyncMock()
+    assert not await svc.open_direct_link("peer-1", timeout_s=0.0)
+
+
+async def test_only_a_seats_link_is_closed_when_idle(svc, monkeypatch):
+    svc._transport = MagicMock()
+    svc._transport.close_peer = AsyncMock()
+    await svc.close_seat_link("paired")  # the default row: a paired household
+    svc._transport.close_peer.assert_not_awaited()
+    _seat_peer(svc, monkeypatch)
+    await svc.close_seat_link("peer-1")
+    svc._transport.close_peer.assert_awaited_once_with("peer-1")

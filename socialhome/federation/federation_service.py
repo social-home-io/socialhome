@@ -253,6 +253,10 @@ def _digest_matches(expected: object, actual: str) -> bool:
 
 log = logging.getLogger(__name__)
 
+#: How often :meth:`FederationService.open_direct_link` looks whether the
+#: link came up.
+DIRECT_LINK_POLL_S: float = 0.2
+
 #: A writer seat's role values (a household holding none only follows).
 _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
@@ -497,6 +501,7 @@ class FederationService:
         "_deferred_mesh_queues",
         "_deferred_mesh_tasks",
         "_deferred_mesh_wake",
+        "_direct_link_gate",
         "_dm_routing_service",
         "_encoder",
         "_event_registry",
@@ -619,6 +624,8 @@ class FederationService:
         # seated as a read-only Follower.
         self._space_repo = None
         self._space_remote_member_repo = None
+        #: v_97 — may a household met through a GFS hold a link with us.
+        self._direct_link_gate: Callable[[str], Awaitable[bool]] | None = None
         self._pending_seat_buffer: PendingSeatBuffer | None = None
         #: Hear writes the archived-space gate refused (v_48 pages answer a
         #: member's proposal ``refused/archived``).
@@ -5961,9 +5968,79 @@ class FederationService:
             payload=event.payload,
         )
 
-    async def _handle_transport_event(self, event: FederationEvent) -> None:
-        """Dispatch P2P federation RTC events to the transport."""
+    def attach_direct_link_gate(self, gate: Callable[[str], Awaitable[bool]]) -> None:
+        """v_97 (owner 2026-11-28) — ``gate(instance_id)``: whether a
+        household met through a GFS may hold a direct link with us (it is
+        seated with us in a shared space). Without it no such link opens."""
+        self._direct_link_gate = gate
+
+    async def open_direct_link(self, instance_id: str, *, timeout_s: float) -> bool:
+        """Whether a direct media link to *instance_id* is up — opened now
+        if needed and allowed (a confirmed peer; one met through a GFS
+        only at v_97 and through the gate), waiting at most *timeout_s*.
+        Never raises."""
+        transport = self._transport
+        if transport is None:
+            return False
+        try:
+            if transport.is_media_ready(instance_id):
+                return True
+            inst = await self._federation_repo.get_instance(instance_id)
+            if inst is None or inst.status is not PairingStatus.CONFIRMED:
+                return False
+            if inst.source is InstanceSource.SPACE_SESSION and not (
+                await self._may_link_seat(instance_id)
+            ):
+                return False
+            await transport.open_link(inst)
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if transport.is_media_ready(instance_id):
+                    return True
+                await asyncio.sleep(DIRECT_LINK_POLL_S)
+        except Exception:
+            log.warning("direct link to %s not opened", instance_id, exc_info=True)
+        return False
+
+    async def close_seat_link(self, instance_id: str) -> None:
+        """Close the direct link to a household met through a GFS (one
+        opened for a file, now idle). A paired household's link is left."""
         if self._transport is None:
+            return
+        inst = await self._federation_repo.get_instance(instance_id)
+        if inst is not None and inst.source is InstanceSource.SPACE_SESSION:
+            await self._transport.close_peer(instance_id)
+
+    async def _may_link_seat(self, instance_id: str) -> bool:
+        """A household met through a GFS: at v_97, and seated with us in a
+        shared space (the gate)."""
+        gate = self._direct_link_gate
+        return (
+            gate is not None
+            and await self.peer_supports(
+                instance_id,
+                min_version=FederationCapability.MIN_FOR_DIRECT_SEAT_LINK,
+            )
+            and await gate(instance_id)
+        )
+
+    async def _handle_transport_event(self, event: FederationEvent) -> None:
+        """Dispatch P2P federation RTC events to the transport. From a
+        household met through a GFS only while it may hold a link with us
+        (v_97, :meth:`_may_link_seat`)."""
+        if self._transport is None:
+            return
+        inst = await self._federation_repo.get_instance(event.from_instance)
+        if (
+            inst is not None
+            and inst.source is InstanceSource.SPACE_SESSION
+            and not await self._may_link_seat(event.from_instance)
+        ):
+            log.info(
+                "fed RTC %s from seat %s refused: no shared seated space",
+                event.event_type.value,
+                event.from_instance,
+            )
             return
         match event.event_type:
             case FederationEventType.FEDERATION_RTC_OFFER:

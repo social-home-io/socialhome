@@ -1753,8 +1753,8 @@ Every page loads `/static/dashboard.js`, which reloads a page restored from the 
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/storage/usage` | Own usage: `used_bytes`, `quota_bytes`, `available_bytes`, `percent_used`, and `space_sync_bytes` (storage for one GFS space's synced files; 0 = only what is opened). |
-| PUT | `/api/admin/storage/quota` | Admin: `{quota_bytes?, space_sync_bytes?}` (at least one; each ≥ 0) — the household storage quota (0 = no cap) and the storage for one GFS space's synced files (0 = only what is opened). Process-local, like the quota. |
+| GET | `/api/storage/usage` | Own usage: `used_bytes`, `quota_bytes`, `available_bytes`, `percent_used`, `space_sync_bytes` (storage for one GFS space's synced files; 0 = only what is opened) and `space_sync_total_bytes` (for every space's synced files together). |
+| PUT | `/api/admin/storage/quota` | Admin: `{quota_bytes?, space_sync_bytes?, space_sync_total_bytes?}` (at least one; whole numbers ≥ 0, else 422) — the household storage quota (0 = no cap), the storage for one GFS space's synced files (0 = only what is opened) and for every space's together. Kept in `instance_config` (`storage.settings`), so a restart keeps them; synced files only ever use the quota's free space (an upload evicts them first). 403 for a non-admin. |
 | PUT | `/api/admin/moments/archive-cap` | Admin sets the per-person cap on archived moment media. Body `{cap_bytes}` — a whole number ≥ 0, `0` = no limit (default 2 GiB); `422` otherwise, `403` for a non-admin. Returns `{cap_bytes}`. Stored in `instance_config` (`moments.archive_cap_bytes`). |
 | PUT | `/api/admin/moments/reach-max` | Admin sets the household's maximum moment reach (v_96). Body `{reach_max}` — a whole number 1–5, `5` = no limit (the default); `422` otherwise, `403` for a non-admin. Returns `{reach_max}`. A person's `moments.reach` may be lower, never higher; moments already written keep their reach. Stored in `instance_config` (`moments.reach_max`). |
 | POST | `/api/backup/pre_backup` | HA snapshot hook. |

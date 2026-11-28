@@ -2072,6 +2072,24 @@ class FederationTransport:
         AES-256-GCM payload are already baked in.
         """
         if instance.source is InstanceSource.SPACE_SESSION:
+            # Owner 2026-11-28: households met through a GFS may hold a
+            # direct link, opened on demand (:meth:`open_link`) — used while
+            # it is up; never dialled from here, the relay stays the path.
+            peer = self._peers.get(instance.id)
+            if (
+                peer is not None
+                and peer.is_ready
+                and envelope_dict.get("event_type") not in NEEDS_RECEIPT_EVENT_TYPES
+            ):
+                try:
+                    if await peer.send(envelope_dict):
+                        return _TransportSendResult(ok=True, via="rtc")
+                except Exception:
+                    log.debug(
+                        "fed RTC send to seat %s failed — the GFS relay",
+                        instance.id,
+                        exc_info=True,
+                    )
             return await self.send_via_gfs_relay(
                 instance=instance,
                 envelope_dict=envelope_dict,
@@ -2620,6 +2638,16 @@ class FederationTransport:
         if not await self._gfs_relay.mailbox_ready(target, media=media):
             return None
         return target
+
+    async def open_link(self, instance: RemoteInstance) -> None:
+        """Start a direct link to *instance* now (owner 2026-11-28: on
+        demand, also to a household met through a GFS — its signalling then
+        travels sealed through the GFS relay like any of its events). A
+        link already there, or one suppressed after a failure, is left
+        alone; whether it comes up is :meth:`is_media_ready`."""
+        if instance.id in self._peers or self._rtc_suppressed(instance.id):
+            return
+        await self._ensure_handshake(instance)
 
     def is_media_ready(self, instance_id: str) -> bool:
         peer = self._peers.get(instance_id)

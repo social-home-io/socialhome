@@ -188,7 +188,7 @@ async def test_no_push_row_is_queued_for_a_cache_only_household(
     fed = AsyncMock()
     svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
 
-    async def readers(space_id, filename, targets):
+    async def readers(space_id, targets):
         return [t for t in targets if t != "cache"]
 
     svc.attach_cache_readers(readers)

@@ -680,6 +680,13 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: it both sides stay pinned at v_1 and every capability-gated
         #: field is suppressed forever. The only non-``SPACE_*`` entry.
         FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        #: v_97 (owner 2026-11-28) — a direct WebRTC link between
+        #: households met through a GFS, signalled through the relay: its
+        #: handler takes it only from a household seated with us in a
+        #: shared space (``FederationService._handle_transport_event``).
+        FederationEventType.FEDERATION_RTC_OFFER,
+        FederationEventType.FEDERATION_RTC_ANSWER,
+        FederationEventType.FEDERATION_RTC_ICE,
         # ── Structure / config of the space we actually share ──
         #: The host dissolving the space, or a household leaving it, is
         #: exactly the news a link-joined member must not miss.

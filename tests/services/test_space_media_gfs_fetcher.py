@@ -2140,3 +2140,119 @@ async def test_a_failed_view_stamp_is_tried_again(tmp_path):
     await f.note_viewed(name)
     await f.note_viewed(name)
     assert f._refs.rows[name].viewed_at is not None
+
+
+# ── Owner 2026-11-28 routing: one reader → direct, many → the GFS cache ───
+
+
+class _Direct:
+    """A holder household over a direct link: writes the file (as the
+    inbound blob handler would) when it holds it."""
+
+    def __init__(self, tmp_path, holds: dict[str, bytes] | None = None):
+        self.dir = tmp_path
+        self.holds = holds or {}
+        self.asked: list[str] = []
+
+    async def fetch(self, ref):
+        self.asked.append(ref.local_name)
+        data = self.holds.get(ref.local_name)
+        if data is None:
+            return False
+        (self.dir / ref.local_name).write_bytes(data)
+        return True
+
+
+_OLD_GALLERY = SyncHint(SyncSource.GALLERY, created_at=datetime(2020, 1, 1, tzinfo=UTC))
+
+
+async def test_a_catch_up_file_comes_direct_and_the_gfs_is_not_asked(tmp_path):
+    """A newcomer's old gallery file (one reader): straight from a holder
+    household over a direct link — the GFS cache is not asked, and nothing
+    is uploaded to it for this one reader."""
+    blob = _blob("g.webp", b"pic", item_id="g-1")
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    name = _L("g.webp", item_id="g-1")
+    direct = _Direct(tmp_path, {name: b"pic"})
+    f.attach_direct(direct)
+    await _recv(
+        f,
+        SPACE,
+        _wire("g.webp", blob),
+        ["api/media/g.webp"],
+        item_id="g-1",
+        hint=_OLD_GALLERY,
+    )
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert direct.asked == [name]
+    assert gfs.fetches == []
+    assert (tmp_path / name).read_bytes() == b"pic"
+
+
+async def test_a_catch_up_file_no_holder_delivers_falls_back_to_the_cache(tmp_path):
+    blob = _blob("g.webp", b"pic", item_id="g-1")
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    direct = _Direct(tmp_path)
+    f.attach_direct(direct)
+    await _recv(
+        f,
+        SPACE,
+        _wire("g.webp", blob),
+        ["api/media/g.webp"],
+        item_id="g-1",
+        hint=_OLD_GALLERY,
+    )
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert len(direct.asked) == 1 and len(gfs.fetches) >= 1
+    assert (tmp_path / _L("g.webp", item_id="g-1")).read_bytes() == b"pic"
+
+
+async def test_a_live_items_file_comes_from_the_cache_only(tmp_path):
+    """New content many households read: the GFS cache, never a holder."""
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    direct = _Direct(tmp_path, {_L("a.webp"): b"x"})
+    f.attach_direct(direct)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert direct.asked == []
+    assert len(gfs.fetches) == 1
+
+
+async def test_a_view_the_cache_misses_goes_direct_before_on_demand(tmp_path):
+    """A view: the cache first (fast while it holds the file); a miss —
+    the cache let it go — asks a holder directly, before v_83."""
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({})
+    f = _fetcher(tmp_path, gfs)
+    direct = _Direct(tmp_path, {_L("a.webp"): b"x"})
+    f.attach_direct(direct)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp"))
+    assert len(gfs.fetches) >= 1 and direct.asked == [_L("a.webp")]
+
+
+async def test_the_host_archive_scan_fetches_direct(tmp_path):
+    """The host's archive catching up a missed file is one reader too."""
+    blob = _blob("v.webm", b"y" * 10)
+    gfs = _Gfs({})
+    f = _fetcher(
+        tmp_path,
+        gfs,
+        conns=[_Conn("g", "https://g")],
+        insts=(),
+        gfs_space=True,
+        host=True,
+    )
+    await _recv(f, SPACE, _wire("v.webm", blob), ["api/media/v.webm"])
+    await _settle(f)  # on arrival (live): the cache — which missed
+    asked = len(gfs.fetches)
+    direct = _Direct(tmp_path, {_L("v.webm"): b"y" * 10})
+    f.attach_direct(direct)
+    assert await f.archive_scan() == 1
+    await _settle(f)
+    assert direct.asked == [_L("v.webm")]
+    assert len(gfs.fetches) == asked

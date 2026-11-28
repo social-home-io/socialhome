@@ -3548,3 +3548,66 @@ async def test_peer_sends_never_wait_on_the_drain_event(held: int) -> None:
 
     await asyncio.wait_for(_twice(), timeout=2.0)
     assert len(json_ch.sent) == len(media_ch.sent) == len(app_ch.sent) == 2
+
+
+# ── v_97 (owner 2026-11-28): a seat's direct link, opened on demand ────
+
+
+async def test_a_seat_with_an_open_link_takes_it_and_never_dials_on_its_own():
+    """A household met through a GFS: while a direct link opened on demand
+    is up, its events ride it; without one the relay, and a send never
+    starts a handshake (links to seats open only on demand)."""
+    https_inbox = _RecordingHttpsInbox()
+    relay = _RecordingRelay()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=https_inbox,
+        gfs_relay=relay,
+        signaling_send=_FakeSignaler(),
+    )
+    inst = _link_joined_instance()
+    result = await t.send(instance=inst, envelope_dict={"msg_id": "m-1"})
+    assert result.via == "gfs_relay" and t._peers == {}
+
+    peer = _RtcPeer(
+        instance_id=inst.id,
+        signaling=t._signaling_factory(inst.id),
+        inbound=t._inbound_factory(inst.id),
+    )
+
+    class _FakeChannel:
+        def __init__(self):
+            self.sent = []
+            self.buffered_amount = 0
+
+        async def send(self, data, *, wait_for_drain: bool = True):
+            self.sent.append(data)
+
+    ch = _FakeChannel()
+    peer._channel = ch  # type: ignore[attr-defined]
+    peer._open.set()  # type: ignore[attr-defined]
+    t._peers[inst.id] = peer  # type: ignore[attr-defined]
+    result = await t.send(instance=inst, envelope_dict={"msg_id": "m-2"})
+    assert result.via == "rtc" and ch.sent
+    assert [c[1]["msg_id"] for c in relay.calls] == ["m-1"]
+    assert https_inbox.calls == []
+
+
+async def test_open_link_starts_the_handshake_once():
+    """``open_link`` dials a seat on demand (its signalling then goes as the
+    seat's own events, through the relay); a peer already there is left."""
+    signal = _FakeSignaler()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        gfs_relay=_RecordingRelay(),
+        signaling_send=signal,
+    )
+    t.mark_ice_primed()
+    inst = _link_joined_instance()
+    await t.open_link(inst)
+    first = t._peers.get(inst.id)
+    assert first is not None
+    await t.open_link(inst)
+    assert t._peers[inst.id] is first
+    await t.close_all()

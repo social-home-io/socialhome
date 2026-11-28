@@ -462,6 +462,7 @@ from .services.space_gfs_needed_service import SpaceGfsNeededService
 from .services.space_item_outbox import SpaceItemOutbox
 from .services.space_listing_counts_service import SpaceListingCountsService
 from .services.space_location_outbound import SpaceLocationOutbound
+from .services.space_media_direct import SpaceMediaDirect, shares_a_seated_space
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
@@ -5947,6 +5948,25 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # Fable I6 — the host archive scan (at start, then every 15 min).
         await space_media_fetcher.start()
+        # Owner 2026-11-28 — a file one reader wants (a catch-up, the host
+        # archive's scan, a view the cache missed) comes straight from a
+        # household that holds it, over a direct link; households met
+        # through a GFS may open one when seated together in a space.
+        space_media_fetcher.attach_direct(
+            SpaceMediaDirect(
+                federation=federation_service,
+                spaces=space_repo,
+                seats=repos.space_remote_member,
+                media_dir=pathlib.Path(config.media_path),
+            )
+        )
+
+        async def _shares_a_seated_space(instance_id: str) -> bool:
+            return await shares_a_seated_space(
+                space_repo, repos.space_remote_member, instance_id
+            )
+
+        federation_service.attach_direct_link_gate(_shares_a_seated_space)
         if gfs_channels is not None:
             # A private space with an opaque channel uploads under its
             # channel scope (the GFS never learns the space).

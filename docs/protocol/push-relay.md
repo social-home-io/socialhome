@@ -24,7 +24,15 @@ shipped that way:
 
 - **HFS**: stores its people's push subscriptions, sends their
   notifications, and signals the federation DataChannel to each paired
-  household.
+  household — and, on demand, to a household met only through a GFS that
+  is seated with it in a shared space (v_97, owner-approved 2026-11-28:
+  both then see each other's IP; standard behaviour, no setting; see
+  [principles](../principles.md#sign-off-households-met-through-a-gfs-may-connect-directly-owner-approved-2026-11-28)).
+  Such a link opens only on demand (a single-reader file fetch,
+  [media.md](./media.md)), its signalling travels as that pair's sealed
+  events through the GFS relay, each side takes it only from a v_97
+  household seated with it in a shared space, and it closes after 10
+  minutes idle (at most 8 kept).
 - **GFS**: no push, and no signalling of its own between households. It
   may carry a household's sealed envelopes on its relay tier, signalling
   included, only as ciphertext. What the GFS does is listed in
@@ -36,7 +44,11 @@ shipped that way:
 ## Event types
 
 RTC signalling (household to household, inside sealed envelopes):
-`FEDERATION_RTC_OFFER`, `FEDERATION_RTC_ANSWER`, `FEDERATION_RTC_ICE`.
+`FEDERATION_RTC_OFFER`, `FEDERATION_RTC_ANSWER`, `FEDERATION_RTC_ICE`. Since
+v_97 they are in `SPACE_SESSION_ALLOWED_EVENT_TYPES`: a seat sends them
+through the GFS relay, and `FederationService._handle_transport_event`
+takes them from a seat only through the shared-seat gate
+(`shares_a_seated_space`).
 
 Push has no event type of its own. A household turns an event it received
 (a DM, a post, a mention…) into a local notification for its own people.

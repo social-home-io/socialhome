@@ -335,7 +335,11 @@ _COUNTS: dict[str, dict[str, int]] = {
         # +1 (P10, transport): reaches_host_directly — a GFS seat is no
         # paired path to the host, so the media fetch goes through the GFS
         # (by path, never by role).
-        "socialhome/federation/federation_service.py": 20,
+        # +3 (v_97, transport, owner 2026-11-28): a direct link to a
+        # household met through a GFS opens only through the shared-seat
+        # gate (open_direct_link, its RTC signalling), and only such a link
+        # is closed when idle (close_seat_link) — a paired link stays.
+        "socialhome/federation/federation_service.py": 23,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,

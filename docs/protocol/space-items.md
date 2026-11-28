@@ -154,17 +154,24 @@ Targeted secrets never become items: rekeys, key shares, writer grants,
 roster snapshots, invites and joins, moderation submissions (to the host),
 reports, DMs, bazaar threads and offers, app sessions and sync streams keep
 their per-recipient events. **Files**: in a mesh space they keep the
-per-household push (`SPACE_MEDIA_BLOB`); in a GFS space every household
-takes them from the GFS space media cache — the item carries the
-`media_refs` descriptor on its one shared payload, the author's uploads
-wait in the durable queue (rows of kind `space_media_upload`), files over
-8 MiB go in proven 8 MiB pieces, and a miss is fetched on demand
-([media.md](./media.md#gfs-spaces-every-household-from-the-cache-v_97)).
-The targeted paths that carry files describe them the same way for a
-household that reads the space from the cache only — a page proposal, a
-moderation submission (to that reviewer household's copy), the §25.6
-catch-up and a `SPACE_SYNC_RESUME` replay — so such a household is never
-pushed a file and never asks for one it has a descriptor for. A file the
+per-household push (`SPACE_MEDIA_BLOB`); in a GFS space new content —
+read by many households — is taken from the GFS space media cache: the
+item carries the `media_refs` descriptor on its one shared payload, the
+author's uploads wait in the durable queue (rows of kind
+`space_media_upload`), files over 8 MiB go in proven 8 MiB pieces. A file
+only one reader wants — a catch-up's old file, a newcomer's gallery, the
+host archive's scan, a view the cache missed — comes **directly** from a
+household that holds it (owner 2026-11-28: over a direct WebRTC link, one
+opened on demand between households met through the GFS too), then the
+cache if it still holds it, a view last through v_83 on demand, which
+streams old content without storing it
+([media.md](./media.md#gfs-spaces-every-household-from-the-cache-v_97),
+"Media routing"). The targeted paths that carry files describe them the
+same way for a household that reads the space from the cache — a page
+proposal, a moderation submission (to that reviewer household's copy), the
+§25.6 catch-up and a `SPACE_SYNC_RESUME` replay — so such a household is
+never pushed a file unasked; it asks a holder directly only for one it
+reads alone. A file the
 author named elsewhere too gets a copy of its own in the space when the
 item is created.
 

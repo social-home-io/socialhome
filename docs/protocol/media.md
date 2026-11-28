@@ -1139,10 +1139,50 @@ the push.
 - **No push.** No `SPACE_MEDIA_BLOB` row is queued for a cache-only
   household — live, catch-up or replay (`SpaceMediaGfsUploader
   .push_targets`) — except the answer to its own `SPACE_MEDIA_WANTED`.
-- **`SPACE_MEDIA_WANTED` only without a descriptor.** A household asks
-  only for a file it holds no descriptor for (a v_96 author's, whose items
-  carry none); a described file's miss goes through v_83 on demand
-  (below), for members as for followers.
+- **Media routing: many readers → the cache, one reader → direct** (owner
+  2026-11-28). The GFS cache is for content many households read at once;
+  filling it for one reader's old file only crowds out the files many read.
+  So:
+
+  | Situation | Path |
+  |---|---|
+  | New content (a live post, comment, gallery item, chat picture, calendar cover, page, listing) — the upload at creation | uploaded once to the GFS cache; every reader fetches it there |
+  | A live item's file a reader syncs or views while the cache holds it | the GFS cache |
+  | A catch-up's old file (a newcomer's gallery, upcoming covers, active listings, current pages) | **direct** from a holder → the GFS cache if it still holds it (never v_83 without a view) |
+  | The host archive's scan (a file it missed) | **direct** from a holder → the GFS cache |
+  | A view the GFS cache missed (it let the file go) | the cache → **direct** from a holder → v_83 on demand |
+  | A big file in pieces (> 8 MiB) | the GFS cache → v_83 on demand (never direct: over the holder's budget) |
+  | A mesh space (no channel) | unchanged: pushes, `SPACE_MEDIA_WANTED` to the host / helpers |
+
+  **Direct** (`services/space_media_direct.py`): the households that can
+  ship the file under the `SPACE_MEDIA_WANTED` file gate — the acting
+  hosts (owner first), then the household that delivered the item — one at
+  a time, at most 3. Over a direct WebRTC link: the paired one, or one
+  opened on demand to a household met through a GFS (v_97; its offer /
+  answer / ICE travel sealed through the GFS relay, see
+  [principles](../principles.md#sign-off-households-met-through-a-gfs-may-connect-directly-owner-approved-2026-11-28)).
+  One `SPACE_MEDIA_WANTED` for the file's content name (`sc-` only — a file
+  without one is never asked for directly) over the link; the holder's
+  `SPACE_MEDIA_BLOB` comes back as binary frames on `fed-media-v1`, checked
+  against the content name. A link that does not come up within 20 s (NAT
+  without TURN, offline, older than v_97) skips that holder; nothing
+  delivered within 120 s → the next path. At most 2 direct fetches at once,
+  one per space; links this opened to seats close after 10 min idle (at
+  most 8 kept). Nothing is stored on the GFS.
+
+  **v_83 on demand** is the last resort for a view: the GFS asks a seated
+  holder and **streams** old content through to the waiting reader without
+  storing it (`Cache-Control: no-store`); only content stored within 7
+  days or asked 3 times within the hour is re-uploaded into the cache
+  ("Cache or stream", below) — so a single reader's old file never refills
+  the cache.
+
+  **Cost** per directly fetched file: one link setup when none is up (a
+  few relayed signalling envelopes, ~2–6 KiB through the GFS mailbox), a
+  < 1 KiB request, the file's bytes once household to household. A
+  newcomer's 2 GiB gallery from the host: ~2 GiB once over one link, paced
+  by the holder's budget (32 MiB per 30 min per requester and space) — a
+  low-priority background sync; with 3 holders up, ~3× that pace.
 - **A file the cache can't take is shown, never pushed.** No GFS of the
   space keeps media (or this household holds no upload authorization):
   its author sees "Couldn't send" (`refused`); a file over 8 MiB with no
@@ -1152,13 +1192,15 @@ the push.
   serves as host — `serves_as_host`) fetches EVERY described file on
   arrival — videos and files in pieces too, the one exception to "big files
   are fetched on view" — so it stays the space's long-term holder after the
-  GFS cache let a blob go (v_83 on demand then asks it). A bounded
-  background queue: 2 fetches at once, at most 4 096 files / 4 GiB waiting
-  (past it a WARNING; the file is fetched when someone views it); a file no
-  GFS holds yet (a long video's pieces still uploading) is asked for again
-  after 30 s, 5 min and 30 min, then a WARNING. The queue is memory only: a
-  file still queued at a restart is fetched on its first view. The host
-  never evicts a synced file and has no storage opt-out.
+  GFS cache let a blob go (a reader then fetches it from the host
+  directly). A bounded background queue: 2 fetches at once, at most 4 096
+  files / 4 GiB waiting, within the household quota's free space. Every 15
+  minutes (and at start) a scan queues the hosted spaces' rows without a
+  file again, at most 512 per space — a file still uploading, a full queue
+  or a restart is caught up there, fetched directly from a holder first
+  (one reader); a file missed 3 scans in a row is asked for only every 8th
+  scan (≈ 2 h), with one WARNING. The host never evicts a synced file and
+  has no storage opt-out.
 - **Every household keeps what people are likely to open** (owner
   2026-11-28, one rule for members and followers alike —
   `domain/space_media_sync.py`):
@@ -1177,20 +1219,32 @@ the push.
   Every kept file is at most **50 MiB** (`SYNC_MAX_FILE_BYTES`, every space
   size); a larger file (pieces) is fetched on view, and kept by the host.
   Up to 3 such fetches at once, a catch-up's at most 1 (live content
-  first), ≤ 1 000 files / 1 GiB / 200 per space waiting.
-- **Storage for synced space files.** Per space, a household keeps at most
-  its storage setting of synced files (Admin › Storage, `PUT
-  /api/admin/storage/quota {space_sync_bytes}`, `space_sync_max_bytes` in
-  the config; default **2 GiB**, 0 = only what is opened). Past it
-  (`SpaceMediaGfsFetcher.sweep`, at most every 10 min per space, after a
-  synced file landed) never-viewed files go first (oldest first), then the
-  least recently viewed (`space_media_refs.viewed_at`, stamped at most once
-  a day per file by `GET /api/media`); never a file viewed in the last 30
-  days, one this household delivered, one being fetched, or anything on a
-  household acting as host. The row stays, so a view fetches the file
-  again (GFS cache, else v_83 on demand from any holder). With the host
-  plus every syncing household holding a file, even a space where most
-  households set 0 keeps it reachable.
+  first). Live syncs and a catch-up's syncs wait in separate backlogs, each
+  ≤ 1 000 files / 1 GiB, ≤ 200 files / 256 MiB per space; a retry's wait
+  holds no slot. A post's or comment's stamp more than 5 minutes ahead of
+  the clock never counts as new.
+- **Storage for synced space files** (owner 2026-11-28). Three settings
+  bound them (Admin › Storage, `PUT /api/admin/storage/quota`, kept in
+  `instance_config` `storage.settings` across restarts; the config file
+  gives the defaults): per space `space_sync_bytes` (default **2 GiB**,
+  0 = only what is opened), all spaces together `space_sync_total_bytes`
+  (default **8 GiB**), and the household quota's **free space** — synced
+  files never take room from the household's own uploads: an upload that
+  would not fit evicts synced files first (`evict_for_upload`, oldest view
+  first, a recent view too), and is refused only if still over. A file is
+  synced only when it fits after making room by the rules below — never
+  fetched just to be evicted again. Eviction (`SpaceMediaGfsFetcher.sweep`,
+  after a file landed — at most every 10 min per space, with a trailing
+  sweep — and at once when a setting changes): never-viewed files first
+  (oldest first), then the least recently viewed
+  (`space_media_refs.viewed_at`, stamped at most once a day per file by
+  `GET /api/media`); never a file viewed in the last 30 days, one being
+  fetched, or anything on a household acting as host (nor when that role
+  can't be read). The household's own files have no `space_media_refs`
+  row: never counted, never evicted. The row stays, so a view fetches the
+  file again (the cache, else directly from a holder, else v_83). With the
+  host plus every syncing household holding a file, even a space where
+  most households set 0 keeps it reachable.
 - **Cost of keeping files** (owner 2026-11-28, CDN-cacheable): GFS egress
   per new item ≈ households that open the space in its window × bytes.
   A 10 000-seat space (~3 000 households opening it in a week): a 0.4 MB

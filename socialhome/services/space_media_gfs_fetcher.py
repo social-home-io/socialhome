@@ -305,6 +305,10 @@ class _ChannelRing(Protocol):
     ) -> tuple[str, list[GfsConnection]] | None: ...
 
 
+class _DirectSource(Protocol):
+    async def fetch(self, ref: SpaceMediaRef) -> bool: ...
+
+
 class _SyncStorage(Protocol):
     """The household's storage settings (``StorageQuotaService``)."""
 
@@ -369,6 +373,7 @@ class SpaceMediaGfsFetcher:
         "_channels",
         "_crypto",
         "_dir",
+        "_direct",
         "_federation",
         "_federation_repo",
         "_fetch_sem",
@@ -415,7 +420,7 @@ class SpaceMediaGfsFetcher:
         self._federation = federation
         self._dir = pathlib.Path(media_dir)
         #: (filename, asks on a miss) → the one fetch running for it.
-        self._inflight: dict[tuple[str, bool], asyncio.Task[str]] = {}
+        self._inflight: dict[tuple[str, bool, bool], asyncio.Task[str]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._prefetch_sem = asyncio.Semaphore(PREFETCH_CONCURRENCY)
         self._catch_up_sem = asyncio.Semaphore(CATCH_UP_SYNC_CONCURRENCY)
@@ -423,6 +428,8 @@ class SpaceMediaGfsFetcher:
         self._backlogs = {False: _Backlog(), True: _Backlog()}
         #: The household's storage settings (none: nothing is synced).
         self._storage: _SyncStorage | None = None
+        #: Single-reader fetches from a holder household (none: the cache).
+        self._direct: _DirectSource | None = None
         #: space → bytes of its synced files on disk (spaces this household
         #: hosts are not counted); ``None`` until first counted.
         self._held: dict[str, int] | None = None
@@ -450,7 +457,7 @@ class SpaceMediaGfsFetcher:
         self._active_parts: set[pathlib.Path] = set()
         #: v_97 — the acting host's archive queue: (local name, size,
         #: attempts so far), the bytes waiting in it and its workers.
-        self._archive_queue: deque[tuple[str, int]] = deque()
+        self._archive_queue: deque[tuple[str, int, bool]] = deque()
         self._archive_bytes = 0
         self._archive_workers = 0
         #: local name → scans in a row its archive fetch missed; scans run.
@@ -476,6 +483,12 @@ class SpaceMediaGfsFetcher:
             await self.archive_scan()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=HOST_ARCHIVE_SCAN_S)
+
+    def attach_direct(self, direct: _DirectSource) -> None:
+        """Owner 2026-11-28 — single-reader fetches (a catch-up, the host
+        archive's scan, a view the cache missed) ask a holder household
+        over a direct link (``services/space_media_direct``)."""
+        self._direct = direct
 
     def attach_channels(self, channels: _ChannelRing) -> None:
         """v_97 — a GFS space's files come only from the GFS cache: the
@@ -783,10 +796,11 @@ class SpaceMediaGfsFetcher:
         own = str(getattr(self._federation, "own_instance_id", "") or "")
         return await serves_as_host(self._spaces, space, own_instance_id=own)
 
-    def _archive(self, filename: str, size: int) -> bool:
+    def _archive(self, filename: str, size: int, *, single: bool = False) -> bool:
         """Queue *filename* for the host's archive (bounded; never raises).
-        Whether it was queued."""
-        if any(name == filename for name, _size in self._archive_queue):
+        Whether it was queued. *single*: a file the scan found missing — one
+        reader's fetch, direct first (owner 2026-11-28 routing)."""
+        if any(entry[0] == filename for entry in self._archive_queue):
             return True
         if (
             len(self._archive_queue) >= MAX_HOST_ARCHIVE_PENDING
@@ -800,7 +814,7 @@ class SpaceMediaGfsFetcher:
                 filename,
             )
             return False
-        self._archive_queue.append((filename, max(size, 0)))
+        self._archive_queue.append((filename, max(size, 0), single))
         self._archive_bytes += max(size, 0)
         if self._archive_workers < HOST_ARCHIVE_CONCURRENCY:
             self._archive_workers += 1
@@ -812,7 +826,7 @@ class SpaceMediaGfsFetcher:
     async def _archive_worker(self) -> None:
         try:
             while self._archive_queue:
-                filename, size = self._archive_queue.popleft()
+                filename, size, single = self._archive_queue.popleft()
                 self._archive_bytes -= size
                 try:
                     if not await self._fits_quota(size):
@@ -822,7 +836,7 @@ class SpaceMediaGfsFetcher:
                             filename,
                         )
                         continue
-                    outcome = await self._fetch_task(filename)
+                    outcome = await self._fetch_task(filename, single=single)
                 except Exception:
                     log.warning(
                         "space media archive of %s failed", filename, exc_info=True
@@ -881,7 +895,7 @@ class SpaceMediaGfsFetcher:
                     and self._archive_scans % HOST_ARCHIVE_BACKOFF_SCANS
                 ):
                     continue
-                if not self._archive(ref.local_name, ref.size):
+                if not self._archive(ref.local_name, ref.size, single=True):
                     return queued
                 per_space += 1
                 queued += 1
@@ -935,28 +949,38 @@ class SpaceMediaGfsFetcher:
     def fetching(self, filename: str) -> bool:
         """Whether a fetch of *filename* is running now (v_97: a catch-up
         holds a record back for its next stream while it is)."""
-        return any(name == filename for name, _want in self._inflight)
+        return any(key[0] == filename for key in self._inflight)
 
-    def _fetch_task(self, filename: str, *, want: bool = False) -> asyncio.Task[str]:
-        key = (filename, want)
+    def _fetch_task(
+        self, filename: str, *, want: bool = False, single: bool = False
+    ) -> asyncio.Task[str]:
+        """The one fetch running for *filename*. *want*: a view (cache,
+        then direct, then v_83). *single*: a file one reader wants — a
+        catch-up sync, the host archive's scan — direct first, then the
+        cache (owner 2026-11-28 routing). Neither: new content, the cache."""
+        key = (filename, want, single)
         task = self._inflight.get(key)
         if task is None:
-            task = asyncio.create_task(self._fetch_bounded(filename, want=want))
+            task = asyncio.create_task(
+                self._fetch_bounded(filename, want=want, single=single)
+            )
             self._inflight[key] = task
             self._tasks.add(task)
 
-            def _done(t: asyncio.Task, k: tuple[str, bool] = key) -> None:
+            def _done(t: asyncio.Task, k: tuple[str, bool, bool] = key) -> None:
                 self._inflight.pop(k, None)
                 self._tasks.discard(t)
 
             task.add_done_callback(_done)
         return task
 
-    async def _fetch_bounded(self, filename: str, *, want: bool = False) -> str:
+    async def _fetch_bounded(
+        self, filename: str, *, want: bool = False, single: bool = False
+    ) -> str:
         path = media_file_path(self._dir, filename)
         here = path is not None and await aiofiles.os.path.isfile(path)
         async with self._fetch_sem:
-            outcome = await self._fetch(filename, want=want)
+            outcome = await self._fetch(filename, want=want, single=single)
         if outcome == _STORED and not here:
             # A new file here: the synced-files storage counts it (a view's
             # too) and sweeps if it went past a cap.
@@ -1012,7 +1036,7 @@ class SpaceMediaGfsFetcher:
                             filename,
                         )
                         return
-                    outcome = await self._fetch_task(filename)
+                    outcome = await self._fetch_task(filename, single=catch_up)
                 if outcome != _MISS:
                     break
             self._count_space_miss(space_id, outcome)
@@ -1289,7 +1313,9 @@ class SpaceMediaGfsFetcher:
         for task in pending:
             task.cancel()
 
-    async def _fetch(self, filename: str, *, want: bool = False) -> str:
+    async def _fetch(
+        self, filename: str, *, want: bool = False, single: bool = False
+    ) -> str:
         """One fetch: ``stored`` (the file is here now), ``miss`` (no GFS
         holds the blob — yet) or ``refused`` (anything else: unknown
         suite, no key, wrong hash, failed decrypt — not worth retrying).
@@ -1338,6 +1364,8 @@ class SpaceMediaGfsFetcher:
                 ref.space_id,
             )
             return _REFUSED
+        if single and not ref.pieced and await self._direct_fetch(ref, path):
+            return _STORED
         sources = await self._sources(ref.space_id)
         if ref.pieced:
             return await self._fetch_pieced(
@@ -1354,6 +1382,13 @@ class SpaceMediaGfsFetcher:
             if got != _MISS:
                 return got
             outcome = _REFUSED
+        if (
+            outcome == _MISS
+            and want
+            and not single
+            and await self._direct_fetch(ref, path)
+        ):
+            return _STORED
         if outcome == _MISS and want and await self._asks_its_gfs(ref):
             return await self._want(ref, scope_id, current[1], path, sources)
         if outcome == _MISS:
@@ -1361,6 +1396,16 @@ class SpaceMediaGfsFetcher:
                 "space media %s: no GFS holds blob %s (yet)", filename, ref.blob_id[:12]
             )
         return outcome
+
+    async def _direct_fetch(self, ref: SpaceMediaRef, path: pathlib.Path) -> bool:
+        """Owner 2026-11-28 — a file for one reader straight from a
+        household that holds it, over a direct link (never re-uploaded
+        into the GFS cache for one reader). Whether it is here now."""
+        if self._direct is None:
+            return False
+        if await self._direct.fetch(ref):
+            return await aiofiles.os.path.isfile(path)
+        return False
 
     async def _asks_its_gfs(self, ref: SpaceMediaRef) -> bool:
         """v_83 on-demand is the path of a household that reaches the space

@@ -907,8 +907,10 @@ This is plaintext the GFS stores. What bounds it:
 3. **Bounded.** Kept 30 days, one row per (author, moment), only while
    someone follows that author there, ≤ 1 000 per author; pushed only to a
    household that follows the author, only what it could have missed.
-4. **Households met via the GFS still never talk directly.** The
-   certificate travels author → GFS → follower like every public delete.
+4. **The certificate travels author → GFS → follower** like every
+   public delete. Following an author's moments seats nobody in a shared
+   space, so it opens no direct link (see "Households met through a GFS
+   may connect directly", owner-approved 2026-11-28).
 
 ### Sign-off: "delete removes saved copies" is best effort (v_66)
 
@@ -1022,8 +1024,10 @@ What the GFS learns, and what it doesn't:
    household only; `from_instance` is F, which the GFS authenticated and A
    learns from the signed reaction anyway. The GFS tells F nothing back —
    not whether A was online, reached on another node or queued.
-3. **Households met through the GFS still never talk directly.** F posts to
-   the GFS the moment came on and nowhere else; A answers nothing.
+3. **F posts to the GFS the moment came on and nowhere else; A answers
+   nothing.** A moment reaction seats nobody in a shared space, so it opens
+   no direct link (see "Households met through a GFS may connect directly",
+   owner-approved 2026-11-28).
 4. **The author decides on the signed reaction alone** — the same checks as
    a routed reaction, plus: the household the GFS authenticated is the
    reactor's own, and the moment is public. The GFS can withhold or delay a
@@ -1205,7 +1209,8 @@ receives none of the member-only data (zones, location, chat, proposals,
 sync pages) the existing role checks keep from it; the GFS reads nothing it
 relays and still cannot forge an item; the follower set it sees is the
 channel's seats (the channel carries no space id on the wire); households
-met through a GFS still never talk directly; non-member households on the
+met through a GFS connect directly only as the 2026-11-28 sign-off below
+allows (seated together in a shared space); non-member households on the
 mesh still see only `SPACE_ROUTED` ciphertext. Anything that lets a
 follower write more, or read member-only data, is a §2-principle change
 needing a new sign-off.
@@ -1658,3 +1663,50 @@ pattern is gone.
 - §11 (instance pairing) — for the no-third-party-trust posture
 - §24.11 (inbound validation pipeline) — for "fail closed on crypto"
 - §25.8 / §25.8.21 (post-quantum migration + encryption-first)
+
+### Sign-off: households met through a GFS may connect directly (owner-approved 2026-11-28)
+
+**PRINCIPLE CHANGE.** Until 2026-11-28 households that met only through a
+GFS (a seat from an invite link or the space directory,
+`InstanceSource.SPACE_SESSION`) never talked directly: every byte between
+them went through the GFS relay, and neither learned the other's IP
+address. The owner changed that for feature parity with paired households:
+
+- **Standard behaviour, no setting.** Two households seated together in a
+  shared space — members, moderators, admins, the owner and followers
+  alike — may open a direct WebRTC link (the federation PeerConnection,
+  `fed-v1` + `fed-media-v1`). **Both see each other's IP address** (and
+  whatever TURN relays, if a TURN server is configured).
+- **Signalling through the GFS, sealed.** The offer, answer and ICE
+  candidates are ordinary federation events (`FEDERATION_RTC_*`), signed and
+  encrypted under the pair's session keys and carried by the GFS relay like
+  any other event between the two. The GFS sees that two of its households
+  exchanged a few envelopes — what it already sees of their traffic — and
+  never the SDP, the candidates or the addresses inside.
+- **Who may link to whom.** Each side takes the signalling only from a
+  household at v_97 that holds a live seat in a space a local person is
+  seated in (`shares_a_seated_space`); anything else is dropped with an INFO
+  line. No shared seat (a moment follower, a household that left or was
+  removed), no link. A link is opened on demand only (never by an ordinary
+  send), closed again when idle for 10 minutes, and at most 8 such links
+  are kept.
+- **What it carries.** Anything a paired link does: once up, events
+  between the two ride it before the relay. Its first use is the owner's
+  media routing (2026-11-28): a file only one reader wants (a catch-up, a
+  newcomer's gallery, a file the GFS cache let go, the host archive's scan)
+  is fetched directly from a household that holds it (`SPACE_MEDIA_WANTED`
+  over the link, the bytes on `fed-media-v1`), never re-uploaded into the
+  GFS cache for one reader. New content many households read still goes
+  through the GFS cache once.
+- **Abuse bounds.** A household can make us open at most one
+  PeerConnection; a re-dial after a closed link is accepted once per
+  backoff floor; the holder's `SPACE_MEDIA_WANTED` budget (50 files /
+  32 MiB per requester and space per 30 minutes) bounds what one household
+  can pull; the file gate decides what a holder may ship at all.
+
+What does not change: the GFS still reads nothing it relays; a household
+that met another only through moments, or that holds no seat in a shared
+space, still never connects directly; non-member households on the mesh
+still see only `SPACE_ROUTED` ciphertext; people's locations still leave a
+household only under the per-pair switches (a direct link carries no
+location by itself).

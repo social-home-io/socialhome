@@ -510,8 +510,15 @@ Tier 4 is a `TransportStrategy` like the others
 (`federation/gfs_relay_transport.GfsRelayTransport`). `FederationTransport`
 selects it in two cases:
 
-- `source = space_session` — the only tier, to the connection server that
-  introduced the pair (`relay_via`). From v_89 this tier has a second
+- `source = space_session` — the tier, to the connection server that
+  introduced the pair (`relay_via`). Since v_97 (owner-approved
+  2026-11-28) such a pair, seated together in a shared space, may also hold
+  a direct WebRTC link opened on demand (`FederationTransport.open_link`
+  via `FederationService.open_direct_link`; the RTC signalling rides this
+  tier as the pair's sealed events): while it is up the pair's events take
+  it first, and it carries single-reader file fetches
+  (`services/space_media_direct`); it is never dialled by an ordinary send
+  and closes after 10 minutes idle. From v_89 this tier has a second
   target: the household's **one GFS mailbox** at that GFS, shared by every
   space it reaches there. Per send, `FederationTransport._mailbox_target`
   asks `GfsMailboxService` for the counterpart's verified member card
