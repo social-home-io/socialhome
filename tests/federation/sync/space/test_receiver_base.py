@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Post, PostType
+from socialhome.domain.space_media_sync import SyncSource
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.federation.sync.space.receiver_base import (
     VERIFIED_ROW,
@@ -77,6 +78,7 @@ async def test_streamed_post_media_refs_are_kept(setup):
     stored = {post.id: post for _s, post in c.posts}
     assert stored["p-m"].image_urls == ("api/media/sg-a.webp",)
     assert sink.kept == [{"a.webp": "sg-a.webp"}]
+    assert [h.source for h in sink.hints] == [SyncSource.POST]
 
 
 async def test_streamed_records_without_a_fetcher_store_nothing(setup):

@@ -22,6 +22,10 @@ class AbstractSpaceMediaRefRepo(Protocol):
 
     async def get(self, local_name: str) -> SpaceMediaRef | None: ...
 
+    async def list_for_space(self, space_id: str) -> list[SpaceMediaRef]: ...
+
+    async def mark_viewed(self, local_name: str) -> None: ...
+
     async def list_for_item(
         self, space_id: str, item_id: str
     ) -> list[SpaceMediaRef]: ...
@@ -91,10 +95,26 @@ class SqliteSpaceMediaRefRepo:
         )
         return [_row(r) for r in rows]
 
+    async def list_for_space(self, space_id: str) -> list[SpaceMediaRef]:
+        """Every row of *space_id*, oldest first (the synced-files sweep)."""
+        rows = await self._db.fetchall(
+            f"SELECT {_COLS} FROM space_media_refs WHERE space_id = ? ORDER BY rowid",
+            (space_id,),
+        )
+        return [_row(r) for r in rows]
+
+    async def mark_viewed(self, local_name: str) -> None:
+        """Stamp *local_name* as viewed now (UTC, migration 0159)."""
+        await self._db.enqueue(
+            "UPDATE space_media_refs SET viewed_at = datetime('now')"
+            " WHERE local_name = ?",
+            (local_name,),
+        )
+
 
 _COLS = (
     "local_name, filename, space_id, blob_id, suite, epoch, size, scope,"
-    " addr_suite, item_id, origin, created_at"
+    " addr_suite, item_id, origin, created_at, viewed_at"
 )
 
 
@@ -112,4 +132,5 @@ def _row(row: Any) -> SpaceMediaRef:
         item_id=row["item_id"],
         origin=row["origin"],
         created_at=row["created_at"],
+        viewed_at=row["viewed_at"],
     )

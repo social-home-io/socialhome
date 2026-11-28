@@ -22,6 +22,7 @@ from ....domain.federation import FederationEvent
 from ....domain.media_constraints import space_media_ref
 from ....domain.space_item import stored_stamp
 from ....domain.space_media_fields import item_media_urls
+from ....domain.space_media_sync import SyncHint, SyncSource, parse_moment
 from ....services.calendar_service import (
     calendar_event_too_large,
     log_calendar_event_not_stored,
@@ -102,7 +103,14 @@ class CalendarMixin(ReceiverBase):
             if not await self._space_calendar_repo.save_event(event, space_id=space_id):
                 _log_sync_refusal("calendar event", event.id, space_id)
                 continue
-            await self._keep_media(media)
+            # A cover syncs while the event (or its series) is upcoming.
+            await self._keep_media(
+                media,
+                SyncHint(
+                    SyncSource.CALENDAR,
+                    until=None if event.rrule else parse_moment(event.end),
+                ),
+            )
             if from_host and isinstance(r.get("rsvps"), list):
                 await self._persist_rsvps(event, r, space_id)
 

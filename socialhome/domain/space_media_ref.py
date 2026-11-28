@@ -118,6 +118,8 @@ class SpaceMediaRef:
     #: v_97 — the whole file's SHA-256 (a file in pieces only, on the wire;
     #: a row keeps it as its content name, ``sc-``).
     sha256: str = ""
+    #: When the file was last viewed here (a row only, migration 0159).
+    viewed_at: str | None = None
 
     @property
     def pieced(self) -> bool:

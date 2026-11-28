@@ -33,6 +33,7 @@ from ....domain.space import ContentAction
 from ....domain.space_item import reaction_emoji_ok, stamp_to_db, stored_stamp
 from ....domain.space_media_fields import item_media_urls
 from ....domain.space_media_ref import post_media_urls
+from ....domain.space_media_sync import SyncHint, SyncSource, parse_moment
 from ....services.inbound_media_store import space_media_refs
 from ....services.link_preview_service import space_wire_link_preview
 from ....services.space_media_names import comment_media_ref
@@ -226,7 +227,10 @@ class PostsMixin(ReceiverBase):
                 await self._space_post_repo.merge_reaction_stamps(
                     post.id, stamps, space_id=space_id
                 )
-            await self._keep_media(media)
+            await self._keep_media(
+                media,
+                SyncHint(SyncSource.POST, created_at=parse_moment(post.created_at)),
+            )
             # Derived local state only (the system album's mirror of its
             # media) — no notification, no fan-out.
             await self._bus.publish(SpacePostSynced(post=post, space_id=space_id))
@@ -341,7 +345,12 @@ class PostsMixin(ReceiverBase):
                     media_url=comment_media_ref(space_id, comment.media_url, hashes),
                 )
             if await self._space_post_repo.add_comment(comment, space_id=space_id):
-                await self._keep_media(media)
+                await self._keep_media(
+                    media,
+                    SyncHint(
+                        SyncSource.COMMENT, created_at=parse_moment(comment.created_at)
+                    ),
+                )
                 # History, not news: only replies held for this comment
                 # (the parent-wait buffer) follow it.
                 await self._bus.publish(

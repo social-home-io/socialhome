@@ -116,6 +116,7 @@ from ..domain.space import (
 )
 from ..domain.space_media_fields import sanitize_moderation_payload
 from ..domain.space_media_ref import MEDIA_REFS_FIELD, SpaceMediaLocalization
+from ..domain.space_media_sync import SyncHint, SyncSource
 from ..federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
@@ -996,7 +997,9 @@ class SpaceModerationFederation(FileHashesMixin, SpaceMediaRefsMixin):
             # (the fetcher's ``serves_as_host`` check), which releases the
             # item once approved and must hold what it then describes.
             if self._gfs_media is not None:
-                await self._gfs_media.keep(gfs_files)
+                await self._gfs_media.keep(
+                    gfs_files, hint=SyncHint(SyncSource.MODERATION)
+                )
             log.info(
                 "moderation: holding %s %s item %s from %s for review",
                 item.feature,

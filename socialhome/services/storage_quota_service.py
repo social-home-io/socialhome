@@ -29,6 +29,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..domain.space_media_sync import DEFAULT_SPACE_SYNC_BYTES
+
 log = logging.getLogger(__name__)
 
 
@@ -66,16 +68,31 @@ class StorageUsage:
 class StorageQuotaService:
     """Per-household storage usage + quota enforcement."""
 
-    __slots__ = ("_media_path", "_quota_bytes")
+    __slots__ = ("_media_path", "_quota_bytes", "_space_sync_bytes")
 
     def __init__(
         self,
         *,
         media_path: str | Path,
         quota_bytes: int,
+        space_sync_bytes: int = DEFAULT_SPACE_SYNC_BYTES,
     ) -> None:
         self._media_path = Path(media_path)
         self._quota_bytes = quota_bytes
+        self._space_sync_bytes = max(int(space_sync_bytes), 0)
+
+    @property
+    def space_sync_bytes(self) -> int:
+        """Storage for one GFS space's synced files (owner 2026-11-28): the
+        files a household keeps without anyone opening them. 0 = only what
+        it opens."""
+        return self._space_sync_bytes
+
+    def set_space_sync_bytes(self, value: int) -> None:
+        """Mutate the synced-files storage at runtime, like
+        :meth:`set_quota_bytes` (process-local; ``value <= 0`` = only what
+        the household opens)."""
+        self._space_sync_bytes = int(value) if value > 0 else 0
 
     @property
     def quota_bytes(self) -> int:

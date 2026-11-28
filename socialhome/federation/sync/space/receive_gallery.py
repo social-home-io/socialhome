@@ -10,6 +10,7 @@ from ....domain.federation import FederationEvent
 from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
 from ....domain.media_constraints import CAPTION_MAX, space_media_ref
 from ....domain.space_media_fields import item_media_urls
+from ....domain.space_media_sync import SyncHint, SyncSource
 from ....media.cleanup import unlink_unreferenced
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -497,7 +498,8 @@ class GalleryMixin(ReceiverBase):
                 item, space_id=space_id, bump_count=False
             ):
                 if held_elsewhere is None:
-                    await self._keep_media(media)
+                    # A gallery stays complete, catch-up included.
+                    await self._keep_media(media, SyncHint(SyncSource.GALLERY))
                 return True
             if (
                 await self._gallery_repo.get_album(album_id) is None

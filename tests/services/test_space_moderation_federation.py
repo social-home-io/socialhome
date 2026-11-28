@@ -38,6 +38,7 @@ from socialhome.domain.space_media_fields import (
     moderation_item,
 )
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
+from socialhome.domain.space_media_sync import SyncSource
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.media_file_hasher import MediaFileHasher
@@ -307,6 +308,7 @@ class _GfsFetcher:
     def __init__(self) -> None:
         self.localized: list[dict] = []
         self.kept: list = []
+        self.hints: list = []
 
     async def localize(self, space_id, raw, urls, *, item_id, origin, hashes=None):
         self.localized.append({"raw": raw, "item_id": item_id, "origin": origin})
@@ -327,8 +329,9 @@ class _GfsFetcher:
             refs=tuple(local for name, local in added.items() if name in described)
         )
 
-    async def keep(self, loc):
+    async def keep(self, loc, *, hint=None):
         self.kept.append(loc)
+        self.hints.append(hint)
 
 
 async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
@@ -425,6 +428,8 @@ async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
     # acting as the space's host, which releases the item once approved).
     (loc,) = fetcher.kept
     assert loc.refs == (a_here,)
+    # A reviewer household syncs a held submission's pictures only.
+    assert [h.source for h in fetcher.hints] == [SyncSource.MODERATION]
 
 
 async def test_a_held_calendar_events_cover_goes_to_the_reviewers():

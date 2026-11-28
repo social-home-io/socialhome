@@ -12,6 +12,7 @@ from ....domain.federation import FederationEvent
 from ....domain.page import Page
 from ....domain.relay_media_frame import bounded_id, bounded_stamp
 from ....domain.space_media_ref import MEDIA_REFS_FIELD, page_media_urls
+from ....domain.space_media_sync import SyncHint, SyncSource
 from ....services.page_conflict_service import (
     PageMode,
     canonical_from_wire,
@@ -315,7 +316,9 @@ class PagesMixin(ReceiverBase):
                         ],
                         item_id=page.id,
                         origin=provider,
-                    )
+                    ),
+                    # A page's current files (and its open sides) always.
+                    SyncHint(SyncSource.PAGE),
                 )
             return True
         if mode is PageMode.LEGACY:

@@ -32,3 +32,33 @@ async def test_storage_usage_reports_media_dir_bytes(client):
     r = await client.get("/api/storage/usage", headers=_auth(client._tok))
     body = await r.json()
     assert body["used_bytes"] == 2000
+
+
+async def test_the_synced_space_files_storage_is_set_with_the_quota(client):
+    """Owner 2026-11-28 — "Storage for synced space files" lives with the
+    household's storage settings: reported with the usage (default 2 GiB
+    per space) and set by an admin through the same endpoint (0 = only
+    what is opened), without touching the household quota."""
+    r = await client.get("/api/storage/usage", headers=_auth(client._tok))
+    body = await r.json()
+    assert body["space_sync_bytes"] == 2 * 1024 * 1024 * 1024
+    quota = body["quota_bytes"]
+    r = await client.put(
+        "/api/admin/storage/quota",
+        json={"space_sync_bytes": 0},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["space_sync_bytes"] == 0
+    assert body["quota_bytes"] == quota
+    r = await client.put(
+        "/api/admin/storage/quota",
+        json={"space_sync_bytes": -1},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    r = await client.put(
+        "/api/admin/storage/quota", json={}, headers=_auth(client._tok)
+    )
+    assert r.status == 422

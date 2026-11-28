@@ -1,0 +1,31 @@
+-- 0159 — ``space_media_refs.viewed_at``: when a GFS space's file was last
+-- viewed on this household (owner 2026-11-28, the synced-files budget).
+--
+-- A household keeps a GFS space's files without a view by source (gallery
+-- and current pages always, new posts and comments, upcoming events,
+-- active listings — ``domain/space_media_sync.py``), bounded per space by
+-- its storage setting (default 2 GiB, 0 = only what it opens). Past it the
+-- least recently viewed synced file goes first; a file viewed within 30
+-- days never goes, nor one on a household acting as the space's host.
+-- That needs to know, across restarts, when each file was last viewed.
+--
+-- CLAUDE.md "audit before a migration":
+--
+-- 1. Audited every path that touches these files: ``space_media_refs``
+--    (0142: one row per described file, keyed by this household's name for
+--    it, with ``created_at`` — when it arrived — but nothing about views),
+--    ``routes/media.py`` (serves by filename, writes nothing),
+--    ``SpaceMediaGfsFetcher`` (prefetch / fetch on view, in memory only),
+--    ``media_references`` (which rows NAME a file, not when it was opened)
+--    and the storage quota (household totals). None records a view.
+-- 2. Alternatives rejected: the file's atime (``noatime`` / ``relatime``
+--    mounts, the norm on a Pi and in containers, make it meaningless); an
+--    in-memory view map (a restart would forget every view and evict files
+--    people opened yesterday); a new table (a second row per file, keyed
+--    the same as ``space_media_refs``). The existing row is the file's.
+-- 3. Smallest change: one additive NULL column, no default, no backfill,
+--    no index (the sweep reads one space's rows through the existing
+--    ``space_id`` prefix of ``idx_space_media_refs_item``). NULL means
+--    "never viewed here" — exactly what a row from before this migration is.
+
+ALTER TABLE space_media_refs ADD COLUMN viewed_at TEXT;

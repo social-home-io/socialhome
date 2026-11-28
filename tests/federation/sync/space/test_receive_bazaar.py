@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
+from socialhome.domain.space_media_sync import SyncSource
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.receive_bazaar import _apply_bazaar_faq
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
@@ -349,3 +350,4 @@ async def test_a_streamed_listings_descriptor_names_its_photos_from_the_gfs(setu
     assert [(x[3], x[4]) for x in sink.received] == [("bzr-1", "peer-a")]
     assert c.bazaar_listings[0].image_urls == ("api/media/sg-a.webp",)
     assert sink.kept == [{"a.webp": "sg-a.webp"}]
+    assert [h.source for h in sink.hints] == [SyncSource.BAZAAR]

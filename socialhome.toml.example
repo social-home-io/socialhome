@@ -23,6 +23,7 @@
 # data_dir = "~/.local/share/socialhome"  # XDG default
 # media_path = "~/.local/share/socialhome/media"
 # max_storage_bytes = 10737418240       # 10 GB (0 = no cap)
+# space_sync_max_bytes = 2147483648     # synced files per GFS space (0 = only what you open)
 
 [federation]
 # instance_name = "My Home"

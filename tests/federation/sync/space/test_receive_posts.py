@@ -16,6 +16,7 @@ from socialhome.domain.post import (
     Post,
     PostType,
 )
+from socialhome.domain.space_media_sync import SyncSource
 from socialhome.federation.sync.space.exporters.posts import _post_to_dict
 from socialhome.federation.sync.space.receive_posts import (
     _comment_from_record,
@@ -519,6 +520,9 @@ async def test_a_streamed_comments_descriptor_names_its_picture_from_the_gfs(set
     assert [(x[3], x[4]) for x in sink.received] == [("c-m", "peer-a")]
     assert c.comments[0].media_url == "api/media/sg-a.webp"
     assert sink.kept == [{"a.webp": "sg-a.webp"}]
+    # Catch-up content: synced by its source and age (owner 2026-11-28).
+    assert [h.source for h in sink.hints] == [SyncSource.COMMENT]
+    assert sink.hints[0].created_at is not None
 
 
 async def test_a_hosts_hashed_comment_keeps_its_descriptor(setup):

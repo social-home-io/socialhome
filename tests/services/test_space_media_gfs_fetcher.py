@@ -7,9 +7,11 @@ import asyncio
 import hashlib
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 
 from socialhome.crypto import ed25519_public_key
+from socialhome.domain import space_media_sync as sync_mod
 from socialhome.domain.federation import InstanceSource
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.file_hashes import (
@@ -25,6 +27,7 @@ from socialhome.domain.gfs_space_media import (
 )
 from socialhome.domain.space import SpaceFeatures, SpaceRole, SpaceType
 from socialhome.domain.space_media_ref import SpaceMediaRef, space_page_media_name
+from socialhome.domain.space_media_sync import SyncHint, SyncSource
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
 from socialhome.services.inbound_media_store import (
     gfs_space_media_name,
@@ -112,11 +115,12 @@ async def _recv(
     item_id: str = ITEM,
     origin: str = ORIGIN,
     prefetch: bool = True,
+    hint: SyncHint | None = None,
 ):
     """As an inbound handler does it: localize the item (before it is
     saved), then keep its rows. Returns the kept rows."""
     loc = await f.localize(space_id, raw, urls, item_id=item_id, origin=origin)
-    return await f.keep(loc, prefetch=prefetch)
+    return await f.keep(loc, prefetch=prefetch, hint=hint)
 
 
 class _Refs:
@@ -145,6 +149,14 @@ class _Refs:
             for r in self.rows.values()
             if r.space_id == space_id and r.item_id == item_id
         ]
+
+    async def list_for_space(self, space_id):
+        return [r for r in self.rows.values() if r.space_id == space_id]
+
+    async def mark_viewed(self, local_name):
+        row = self.rows.get(local_name)
+        if row is not None:
+            self.rows[local_name] = replace(row, viewed_at="2026-11-28 12:00:00")
 
 
 class _Crypto:
@@ -355,11 +367,14 @@ async def test_prefetch_writes_the_picture_byte_identical(tmp_path):
     assert not any(p.name.startswith(".") for p in tmp_path.iterdir() if p.is_file())
 
 
-async def test_prefetch_skips_videos_and_files(tmp_path):
+async def test_an_old_posts_files_wait_for_a_view(tmp_path):
+    """Owner 2026-11-28: a catch-up post older than the live window keeps
+    its files on view only."""
     blob = _blob("v.mp4", b"x")
     gfs = _Gfs({_addr(blob): blob})
     f = _fetcher(tmp_path, gfs)
-    await _recv(f, SPACE, _wire("v.mp4", blob), ["api/media/v.mp4"])
+    old = SyncHint(SyncSource.POST, created_at=datetime.now(UTC) - timedelta(days=30))
+    await _recv(f, SPACE, _wire("v.mp4", blob), ["api/media/v.mp4"], hint=old)
     await asyncio.wait_for(f.drain(), timeout=5)
     assert gfs.fetches == []
     assert await f.ensure_local(_L("v.mp4")) is True
@@ -914,8 +929,8 @@ async def test_the_same_item_moves_its_file_to_a_newer_epoch(tmp_path, monkeypat
 
 
 def test_the_per_space_prefetch_cap_is_small():
-    assert fetch_mod.MAX_PREFETCH_PER_SPACE <= 20
-    assert fetch_mod.MAX_PREFETCH_PER_SPACE < fetch_mod.MAX_PREFETCH_PENDING
+    """One space never takes more than a fifth of the backlog."""
+    assert fetch_mod.MAX_PREFETCH_PER_SPACE * 5 <= fetch_mod.MAX_PREFETCH_PENDING
 
 
 async def test_a_space_that_keeps_missing_stops_retrying(tmp_path, monkeypatch):
@@ -1564,7 +1579,8 @@ async def test_a_wrong_whole_file_checksum_writes_nothing(tmp_path):
     assert gfs.fetches == []
 
 
-async def test_a_file_in_pieces_is_never_prefetched(tmp_path):
+async def test_a_file_over_the_sync_cap_is_never_prefetched(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_mod, "SYNC_MAX_FILE_BYTES", PIECE_BYTES)
     data = os.urandom(PIECE_BYTES + 1)
     wire, blobs, _addrs = _pieced("v.webp", data)
     wire = {"v.webm": wire["v.webp"]}
@@ -1765,3 +1781,134 @@ async def test_a_delegated_admin_acting_as_host_keeps_every_file(tmp_path):
     await _recv_pieced(f, wire)
     await _settle(f)
     assert (tmp_path / _sc("v.webm", data)).read_bytes() == data
+
+
+async def test_a_live_video_and_an_old_gallery_picture_are_synced(tmp_path):
+    """Owner 2026-11-28 (per source): a live item's files sync, videos too
+    (up to the cap); a gallery's files sync whatever their age (albums
+    stay complete after a catch-up)."""
+    video = _blob("v.webm", b"video")
+    old_pic = _blob("g.webp", b"pic", item_id="g-1")
+    gfs = _Gfs({_addr(video): video, _addr(old_pic): old_pic})
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("v.webm", video), ["api/media/v.webm"])
+    await _recv(
+        f,
+        SPACE,
+        _wire("g.webp", old_pic),
+        ["api/media/g.webp"],
+        item_id="g-1",
+        hint=SyncHint(SyncSource.GALLERY, created_at=datetime(2020, 1, 1, tzinfo=UTC)),
+    )
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert (tmp_path / _L("v.webm")).read_bytes() == b"video"
+    assert (tmp_path / _L("g.webp", item_id="g-1")).read_bytes() == b"pic"
+
+
+async def test_a_zero_budget_syncs_nothing_but_the_host_keeps_all(tmp_path):
+    """Storage for synced space files 0 = "only what I open": nothing is
+    synced; the host of a GFS space still keeps every file."""
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    f.attach_sync_budget(lambda: 0)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert gfs.fetches == []
+    (tmp_path / "h").mkdir()
+    host = _fetcher(
+        tmp_path / "h", gfs, conns=[_Conn("g", "https://g")], gfs_space=True, host=True
+    )
+    host.attach_sync_budget(lambda: 0)
+    await _recv(host, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(host.drain(), timeout=5)
+    assert (tmp_path / "h" / _L("a.webp")).read_bytes() == b"x"
+
+
+async def test_the_prefetch_backlog_is_bounded_by_bytes(tmp_path, monkeypatch):
+    a = _blob("a.webp", b"x" * 10)
+    b = _blob("b.webp", b"y" * 10)
+    monkeypatch.setattr(fetch_mod, "MAX_PREFETCH_BYTES", len(a) + 1)
+    gfs = _Gfs({_addr(a): a, _addr(b): b}, delay=0.05)
+    f = _fetcher(tmp_path, gfs)
+    await _recv(
+        f,
+        SPACE,
+        {**_wire("a.webp", a), **_wire("b.webp", b)},
+        ["api/media/a.webp", "api/media/b.webp"],
+    )
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert len(gfs.fetches) == 1  # the other waits for a view
+
+
+def _held(f, tmp_path, name, *, item_id, size, viewed=None, origin=ORIGIN, age_days=1):
+    ref = SpaceMediaRef(
+        filename=name,
+        space_id=SPACE,
+        blob_id="0" * 64,
+        suite="s",
+        epoch=2,
+        size=size,
+        scope="channel",
+        addr_suite="sm1",
+        item_id=item_id,
+        origin=origin,
+        local_name=_L(name, origin=origin, item_id=item_id),
+        created_at=(datetime.now(UTC) - timedelta(days=age_days)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        viewed_at=viewed,
+    )
+    f._refs.rows[ref.local_name] = ref
+    (tmp_path / ref.local_name).write_bytes(b"z" * size)
+    return ref.local_name
+
+
+def _ago(days):
+    return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def test_the_budget_evicts_the_least_recently_viewed_synced_file(tmp_path):
+    """Past the space's budget, synced files never viewed go first (oldest
+    first), then the least recently viewed; a file viewed within 30 days
+    and one this household delivered itself never go."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    f.attach_sync_budget(lambda: 250)
+    never_old = _held(f, tmp_path, "a.webp", item_id="1", size=100, age_days=9)
+    never_new = _held(f, tmp_path, "b.webp", item_id="2", size=100, age_days=1)
+    viewed_old = _held(f, tmp_path, "c.webp", item_id="3", size=100, viewed=_ago(60))
+    viewed_new = _held(f, tmp_path, "d.webp", item_id="4", size=100, viewed=_ago(2))
+    own = _held(f, tmp_path, "e.webp", item_id="5", size=100, origin="me")
+    await f.sweep(SPACE)
+    left = {p.name for p in tmp_path.iterdir()}
+    assert never_old not in left and never_new not in left
+    assert viewed_old not in left
+    assert {viewed_new, own} <= left
+    # The rows stay: a view fetches the file again.
+    assert never_old in f._refs.rows
+
+
+async def test_the_host_never_evicts(tmp_path):
+    f = _fetcher(tmp_path, _Gfs({}), gfs_space=True, host=True)
+    f.attach_sync_budget(lambda: 10)
+    name = _held(f, tmp_path, "a.webp", item_id="1", size=100)
+    await f.sweep(SPACE)
+    assert (tmp_path / name).exists()
+
+
+async def test_a_view_is_stamped_once_a_day(tmp_path):
+    f = _fetcher(tmp_path, _Gfs({}))
+    name = _held(f, tmp_path, "a.webp", item_id="1", size=10)
+    calls = []
+    real = f._refs.mark_viewed
+
+    async def counting(local_name):
+        calls.append(local_name)
+        await real(local_name)
+
+    f._refs.mark_viewed = counting
+    await f.note_viewed(name)
+    await f.note_viewed(name)
+    await f.note_viewed("not-a-space-file.webp")
+    assert calls == [name]
+    assert f._refs.rows[name].viewed_at is not None

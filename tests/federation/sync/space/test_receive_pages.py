@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from socialhome.domain.space_media_sync import SyncSource
 from socialhome.services.page_conflict_service import PageMode
 from tests.federation.sync.space.receiver_fakes import _SYNC_REFS, _GfsMediaSink, _send
 
@@ -160,6 +161,7 @@ async def test_the_hosts_page_record_keeps_its_files_under_the_pages_names(setup
         ("sp-1", _SYNC_REFS, ["api/media/c.webp", "api/media/a.webp"], "pg-1", "peer-a")
     ]
     assert sink.kept == [{}]
+    assert [h.source for h in sink.hints] == [SyncSource.PAGE]
     assert conflicts.mirrored[0]["version"].content == body
 
 

@@ -722,3 +722,17 @@ async def test_a_missing_content_file_is_asked_for(client, monkeypatch):
     r = await client.get(f"/api/media/{name}", headers=_auth(client._tok))
     assert r.status == 404
     assert asked == [name]
+
+
+async def test_a_viewed_space_file_is_stamped_for_the_sync_budget(client, monkeypatch):
+    """Owner 2026-11-28 — a GFS space's file a person opens is stamped
+    (``space_media_refs.viewed_at``, migration 0159): the synced-files
+    budget never evicts one viewed within 30 days."""
+    _gfs, local = await _gfs_held_picture(
+        client, monkeypatch, name="gfs-viewed.webp", data=b"viewed picture"
+    )
+    fetcher = client.app[space_media_gfs_fetcher_key]
+    assert (await fetcher._refs.get(local)).viewed_at is None
+    r = await client.get(f"/api/media/{local}", headers=_auth(client._tok))
+    assert r.status == 200
+    assert (await fetcher._refs.get(local)).viewed_at is not None

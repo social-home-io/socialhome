@@ -3911,6 +3911,7 @@ def create_app(config: Config | None = None) -> web.Application:
     storage_quota = StorageQuotaService(
         media_path=config.media_path,
         quota_bytes=config.max_storage_bytes,
+        space_sync_bytes=config.space_sync_max_bytes,
     )
 
     # ── Backup (HA-mode only) ─────────────────────────────────────────────
@@ -5931,6 +5932,9 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_service=federation_service,
             identity_seed=identity_seed,
         )
+        # Owner 2026-11-28 — "Storage for synced space files", the
+        # household's storage setting (0 = only what it opens).
+        space_media_fetcher.attach_sync_budget(lambda: storage_quota.space_sync_bytes)
         if gfs_channels is not None:
             # A private space with an opaque channel uploads under its
             # channel scope (the GFS never learns the space).

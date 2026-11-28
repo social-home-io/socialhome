@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ....domain.bazaar_faq import (
@@ -19,6 +20,7 @@ from ....domain.post import (
     BazaarStatus,
 )
 from ....domain.space_media_fields import item_media_urls
+from ....domain.space_media_sync import SyncHint, SyncSource, parse_moment
 from ....services.inbound_media_store import space_media_refs
 from .receiver_base import ReceiverBase
 from .stream_health import HeldBack
@@ -28,6 +30,9 @@ if TYPE_CHECKING:
     from ....repositories.bazaar_repo import AbstractBazaarRepo
 
 log = logging.getLogger(__name__)
+
+#: A listing no longer active: its photos are fetched on view.
+_ENDED = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class BazaarMixin(ReceiverBase):
@@ -84,7 +89,16 @@ class BazaarMixin(ReceiverBase):
                             space_id,
                         )
                     else:
-                        await self._keep_media(names)
+                        # Photos sync while the listing is active.
+                        await self._keep_media(
+                            names,
+                            SyncHint(
+                                SyncSource.BAZAAR,
+                                until=parse_moment(listing.end_time)
+                                if listing.status is BazaarStatus.ACTIVE
+                                else _ENDED,
+                            ),
+                        )
                         await _apply_bazaar_faq(
                             self._bazaar_repo, listing.post_id, r.get("faq")
                         )

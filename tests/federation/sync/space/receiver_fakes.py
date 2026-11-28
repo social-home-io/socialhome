@@ -564,6 +564,7 @@ class _GfsMediaSink:
     def __init__(self):
         self.received: list[tuple] = []
         self.kept: list[dict] = []
+        self.hints: list = []
         self.as_shown: list[tuple] = []
         #: item → the hash map the receiver passed (v_85).
         self.hashes: dict[str, object] = {}
@@ -587,9 +588,11 @@ class _GfsMediaSink:
         self.as_shown.append((space_id, raw_refs, list(media_urls), item_id, origin))
         return SpaceMediaLocalization(refs=(object(),))
 
-    async def keep(self, loc, *, prefetch=True):
+    async def keep(self, loc, *, prefetch=True, hint=None):
         if loc.refs:
             self.kept.append(dict(loc.names))
+            #: What the sync policy was told about each kept item.
+            self.hints.append(hint)
         return []
 
 

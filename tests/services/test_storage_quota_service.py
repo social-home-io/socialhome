@@ -115,3 +115,15 @@ async def test_set_quota_bytes_updates_cap(media_dir):
     assert svc.quota_bytes == 500
     svc.set_quota_bytes(-1)  # <= 0 disables
     assert svc.quota_bytes == 0
+
+
+def test_the_synced_space_files_storage_defaults_and_is_set(tmp_path):
+    """Owner 2026-11-28: one GFS space's synced files default to 2 GiB on a
+    household; an admin sets it at runtime, 0 (or less) = only what is
+    opened."""
+    svc = StorageQuotaService(media_path=tmp_path, quota_bytes=0)
+    assert svc.space_sync_bytes == 2 * 1024 * 1024 * 1024
+    svc.set_space_sync_bytes(5)
+    assert svc.space_sync_bytes == 5
+    svc.set_space_sync_bytes(-3)
+    assert svc.space_sync_bytes == 0

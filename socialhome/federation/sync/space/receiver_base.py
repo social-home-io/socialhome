@@ -18,6 +18,7 @@ from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.file_hashes import FileHash, parse_file_hashes
 from ....domain.space import ContentAction
 from ....domain.space_media_ref import MEDIA_REFS_FIELD, SpaceMediaLocalization
+from ....domain.space_media_sync import SyncHint
 from ....infrastructure.event_bus import EventBus
 from ....services.space_media_names import SpaceMediaNamer
 from ...owner_bound_id import OwnerBinding, check_owner_bound_id
@@ -82,7 +83,9 @@ class _GfsMediaSink(Protocol):
         origin: str,
     ) -> SpaceMediaLocalization: ...
 
-    async def keep(self, loc: SpaceMediaLocalization) -> Any: ...
+    async def keep(
+        self, loc: SpaceMediaLocalization, *, hint: SyncHint | None = None
+    ) -> Any: ...
 
 
 def _parse_iso(value: Any) -> datetime:
@@ -221,9 +224,14 @@ class ReceiverBase:
             hashes=hashes,
         )
 
-    async def _keep_media(self, media: SpaceMediaLocalization) -> None:
+    async def _keep_media(
+        self, media: SpaceMediaLocalization, hint: SyncHint | None = None
+    ) -> None:
+        """Keep a streamed item's described files; *hint* tells the sync
+        policy what the item is (``domain/space_media_sync``) — a streamed
+        record is catch-up content, synced by its source and age."""
         if self._gfs_media is not None:
-            await self._gfs_media.keep(media)
+            await self._gfs_media.keep(media, hint=hint)
 
     async def _local_people(self, space_id: str) -> frozenset[str]:
         """This household's own people seated in ``space_id`` — the

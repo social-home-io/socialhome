@@ -144,6 +144,11 @@ class MediaServeView(BaseView):
                 if wanted is not None:
                     wanted.schedule(filename)
                 return error_response(404, "NOT_FOUND", "Media file not found.")
+        # A GFS space's file a person opens is stamped (at most once a day):
+        # the synced-files budget never evicts one viewed within 30 days.
+        fetcher = self.request.app.get(space_media_gfs_fetcher_key)
+        if fetcher is not None:
+            await fetcher.note_viewed(filename)
         gallery = self.request.app.get(gallery_service_key)
         # A private album's file is never kept in a browser or proxy cache:
         # someone taken out of the album must not find it there (a signed

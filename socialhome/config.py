@@ -158,6 +158,10 @@ class Config:
     # ``media_storage_max_gb: 5.0``.
     max_storage_bytes: int = 5 * 1024 * 1024 * 1024  # 5 GB
 
+    # Storage for one GFS space's synced files (owner 2026-11-28): what a
+    # household keeps without anyone opening it. 0 = only what it opens.
+    space_sync_max_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GB per space
+
     # CORS allowlist (§25.7). Empty tuple = deny every cross-origin
     # request. Set to ("https://example.com",) to allow that origin.
     cors_allowed_origins: tuple[str, ...] = ()
@@ -396,6 +400,11 @@ class Config:
                 "max_storage_bytes",
                 "SH_MAX_STORAGE_BYTES",
                 10 * 1024 * 1024 * 1024,
+            ),
+            space_sync_max_bytes=_int_opt(
+                "space_sync_max_bytes",
+                "SH_SPACE_SYNC_MAX_BYTES",
+                2 * 1024 * 1024 * 1024,
             ),
             cors_allowed_origins=tuple(
                 v

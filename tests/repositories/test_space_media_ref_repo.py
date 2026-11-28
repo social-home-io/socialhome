@@ -125,3 +125,20 @@ async def test_the_same_item_moves_its_row_to_a_newer_epoch(repo) -> None:
 async def test_the_repo_has_no_delete() -> None:
     """Rows go with their space (ON DELETE CASCADE); nothing else deletes."""
     assert not hasattr(SqliteSpaceMediaRefRepo, "delete")
+
+
+async def test_a_view_is_stamped_and_listed_per_space(repo) -> None:
+    """Migration 0159 — when a file was last viewed here (the synced-files
+    budget evicts the least recently viewed first, never one viewed
+    within 30 days); a space's rows are listed with it."""
+    await repo.save_many(
+        [_ref("sg-a.webp"), _ref("sg-b.webp"), _ref("sg-c.webp", "sp-2")]
+    )
+    await repo.mark_viewed("sg-a.webp")
+    rows = {r.local_name: r for r in await repo.list_for_space("sp-1")}
+    assert set(rows) == {"sg-a.webp", "sg-b.webp"}
+    assert rows["sg-a.webp"].viewed_at is not None
+    assert rows["sg-b.webp"].viewed_at is None
+    held = await repo.get("sg-a.webp")
+    assert held is not None and held.viewed_at is not None
+    await repo.mark_viewed("nope.webp")  # no row: nothing happens
