@@ -9077,7 +9077,9 @@ def _gfs_restart_keeping_state() -> None:
     offset = _gfs_log_size()
     kept = dict(_load().get("gfs") or {})
     cmd_gfs_down()
-    cmd_gfs_up()
+    # ``env_extra`` (even empty) appends to the GFS log, so the offset taken
+    # before the restart still lines up.
+    cmd_gfs_up(env_extra={})
     fresh = _load()
     fresh["gfs"] = {**kept, **(fresh.get("gfs") or {})}
     _save(fresh)
@@ -9093,10 +9095,9 @@ def cmd_gfs_channel_flows() -> None:
     (a owner and host, b member, e GFS-only follower):
 
     1. **A mention reaches a household that is not watching.** Nobody of
-       e has the space open (past the 2-minute linger); b posts
-       "@<e's person>" — e gets the item at once as a ``SPACE_MENTION_NOTE``
-       in its GFS mailbox (no view, no heads ping) and a mention
-       notification.
+       b or e has the space open (past the 2-minute linger); a posts
+       "@<b's person>" — b gets the item at once as a ``SPACE_MENTION_NOTE``
+       (no view, no heads ping) and a mention notification.
     2. **A non-watcher is pinged, then fetches; the cursor survives a GFS
        restart.** b posts again: e (not watching) gets nothing live. The
        GFS restarts on its data dir; e's socket comes back, the initial
@@ -9122,46 +9123,51 @@ def cmd_gfs_channel_flows() -> None:
     # b's 14-day legacy window (every household also gets the legacy event)
     # fast-forwarded past its end, as in ``gfs-big-file``: only the channel
     # (and the mention note) carry b's items now.
-    channel = _rows("b", "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,))
     past = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
-    _db_write(
-        "b",
-        [
-            (
-                "INSERT OR REPLACE INTO instance_config(key, value) VALUES(?, ?)",
+    for label in ("a", "b"):
+        channel = _rows(
+            label, "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,)
+        )
+        _db_write(
+            label,
+            [
                 (
-                    f"space_items_channel_since:{space_id}:"
-                    f"{channel[0][0] if channel else ''}",
-                    past,
-                ),
-            )
-        ],
-    )
-    print("  waiting 140 s: nobody of e watches the space any more (linger)")
+                    "INSERT OR REPLACE INTO instance_config(key, value) VALUES(?, ?)",
+                    (
+                        f"space_items_channel_since:{space_id}:"
+                        f"{channel[0][0] if channel else ''}",
+                        past,
+                    ),
+                )
+            ],
+        )
+    print("  waiting 140 s: nobody of b or e watches the space any more (linger)")
     time.sleep(140.0)
 
-    # 1. The mention note.
-    s, me = _request(f"{e_url}/api/me", token=e["token"])
-    e_name = _must(f"{step}: e's person", s, me, ok=(200,))["username"]
+    # 1. The mention note: a (host) mentions b's person; b is not watching.
+    a = state["instances"]["a"]
+    a_url = f"http://127.0.0.1:{a['port']}"
+    s, me = _request(f"{b_url}/api/me", token=b["token"])
+    b_name = _must(f"{step}: b's person", s, me, ok=(200,))["username"]
     s, post = _request(
-        f"{b_url}/api/spaces/{space_id}/posts",
-        token=b["token"],
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
         method="POST",
-        body={"type": "text", "content": f"@{e_name} look at this {time.time_ns()}"},
+        body={"type": "text", "content": f"@{b_name} look at this {time.time_ns()}"},
     )
-    mention_id = _must(f"{step}: b mentions e", s, post, ok=(201,))["id"]
+    mention_id = _must(f"{step}: a mentions b", s, post, ok=(201,))["id"]
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline and mention_id not in _space_feed_ids(
-        "e", space_id
+        "b", space_id
     ):
         time.sleep(1.0)
-    if mention_id not in _space_feed_ids("e", space_id):
-        raise SystemExit(f"{step}: the mention never reached e while it was not watching")
-    s, notes = _request(f"{e_url}/api/notifications", token=e["token"])
+    if mention_id not in _space_feed_ids("b", space_id):
+        raise SystemExit(f"{step}: the mention never reached b while it was not watching")
+    s, notes = _request(f"{b_url}/api/notifications", token=b["token"])
     rows = notes if isinstance(notes, list) else (notes or {}).get("items") or []
     if not any("mention" in str(n.get("type", "")) for n in rows):
-        raise SystemExit(f"{step}: e has no mention notification: {rows[:3]!r}")
-    print("  1. mention note: e (not watching) got the post and a notification ✓")
+        raise SystemExit(f"{step}: b has no mention notification: {rows[:3]!r}")
+    print("  1. mention note: b (not watching) got a's post and a notification ✓")
 
     # 2. A non-watcher: nothing live; the GFS restarts; heads; open → fetch.
     e_off = _log_size("e")

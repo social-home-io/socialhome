@@ -339,7 +339,9 @@ _COUNTS: dict[str, dict[str, int]] = {
         # household met through a GFS opens only through the shared-seat
         # gate (open_direct_link, its RTC signalling), and only such a link
         # is closed when idle (close_seat_link) — a paired link stays.
-        "socialhome/federation/federation_service.py": 23,
+        # +2 (Fable A3/A4, transport): an OFFER from a seat counts as a seat
+        # link on the answering side, and open_direct_link counts its own.
+        "socialhome/federation/federation_service.py": 25,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,
