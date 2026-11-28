@@ -38,6 +38,7 @@ import { confirmDialog } from '@/components/confirm'
 import { addBase } from '@/baseUrl'
 import { formatLocale, t } from '@/i18n/i18n'
 import { MomentArchiveCap } from './MomentArchiveCap'
+import { SpaceSyncCap } from './SpaceSyncCap'
 
 type TabId =
   | 'members' | 'ha-users' | 'spaces' | 'moderation'
@@ -874,6 +875,7 @@ function StorageTab() {
       </div>
       <p class="sh-muted">{t('admin.storage.hint')}</p>
       <MomentArchiveCap />
+      <SpaceSyncCap />
     </section>
   )
 }
