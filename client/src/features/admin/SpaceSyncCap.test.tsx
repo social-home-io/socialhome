@@ -53,6 +53,17 @@ describe('SpaceSyncCap', () => {
     await waitFor(() => expect(select.value).toBe(String(GB)))
   })
 
+  it('sets the cap for every space together on its own', async () => {
+    vi.mocked(api.get).mockResolvedValue({ space_sync_bytes: 2 * GB, space_sync_total_bytes: 8 * GB })
+    vi.mocked(api.put).mockResolvedValue({})
+    const { findByLabelText } = render(<SpaceSyncCap />)
+    const total = await findByLabelText('All spaces together') as HTMLSelectElement
+    expect(total.value).toBe(String(8 * GB))
+    fireEvent.change(total, { target: { value: String(20 * GB) } })
+    await waitFor(() => expect(api.put).toHaveBeenCalledWith(
+      '/api/admin/storage/quota', { space_sync_total_bytes: 20 * GB }))
+  })
+
   it('shows nothing when the setting cannot be read', async () => {
     vi.mocked(api.get).mockRejectedValue(new Error('offline'))
     const { container } = render(<SpaceSyncCap />)
