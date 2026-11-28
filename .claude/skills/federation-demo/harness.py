@@ -7327,7 +7327,15 @@ def cmd_gfs_invite_link_content() -> None:
     env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
     to_mailbox = [line for line in env_lines if "<mailbox>" in line]
     to_e = [line for line in env_lines if e["instance_id"] in line]
-    if not to_mailbox:
+    # Owner 2026-11-28: a and e may hold a direct WebRTC link by now (an
+    # earlier step fetched a file from a directly) — then a's events to e
+    # ride it before the relay, and nothing reaches the mailbox.
+    linked = _all_log_lines_matching(
+        "e", f"fed RTC channel open to {state['instances']['a']['instance_id']}"
+    )
+    if not to_mailbox and linked:
+        print("  a's post went over the direct a↔e link (no relay needed) ✓")
+    elif not to_mailbox:
         raise SystemExit(
             "gfs-invite-link-content: the GFS delivered nothing to a mailbox "
             "while a's post reached e — the v_89 mailbox was not used. Check "
@@ -8683,6 +8691,12 @@ def cmd_gfs_media_on_demand() -> None:
         )
 
     _respawn(_load(), "a")
+    # e dialled a directly while a was away (its offer waited in a's
+    # mailbox): restart e too, so the later steps start without a direct
+    # link between them (they prove the relay / mailbox paths).
+    fresh = _load()
+    _kill_household("e", fresh["instances"]["e"])
+    _respawn(fresh, "e")
     print(
         f"{step}: ok (fresh → one re-upload, then a plain cache read; old → "
         f"streamed, nothing stored; the follower {follower}, holder {holder})"
