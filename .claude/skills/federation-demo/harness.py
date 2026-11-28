@@ -9205,6 +9205,9 @@ def cmd_gfs_channel_flows() -> None:
     )
     if not gfs_rows:
         raise SystemExit(f"{step}: e stored no ring cursor")
+    # The GFS restart saved a new state (its pid): never write the old back.
+    state = _load()
+    e = state["instances"]["e"]
     _kill_household("e", e)
     writes = []
     for key, value in gfs_rows:
@@ -9217,9 +9220,9 @@ def cmd_gfs_channel_flows() -> None:
             )
         )
     _db_write("e", writes)
-    e_off = _log_size("e")
     _respawn(state, "e")
-    if not _await_log_lines("e", "channel ring: gap", offset=e_off, timeout=90.0):
+    # The respawn starts a fresh log.txt (the old one is kept aside).
+    if not _await_log_lines("e", "channel ring: gap", offset=0, timeout=90.0):
         raise SystemExit(f"{step}: e never noticed the gap")
     print("  3. gap: e saw another ring and ran the §25.6 catch-up ✓")
     print(f"{step}: ok (mention note, ping then fetch across a GFS restart, gap catch-up)")
@@ -9227,23 +9230,27 @@ def cmd_gfs_channel_flows() -> None:
 
 def cmd_gfs_direct_catchup() -> None:
     """Owner 2026-11-28 (media routing; principle change: households met
-    through a GFS may connect directly) — an old gallery file reaches the
-    GFS-only follower e straight from the host over a WebRTC link signalled
-    through the GFS, and the GFS cache is not touched.
+    through a GFS may connect directly) — an old gallery file the GFS cache
+    let go reaches the GFS-only follower e straight from the host over a
+    WebRTC link signalled through the GFS, and nothing is re-uploaded.
 
     1. a (host) adds an album + picture in its global space; e (GFS only,
-       paired with nobody) gets the item and its file (live: the cache).
+       paired with nobody) gets the item and its file.
     2. The file goes from e (an old file e no longer holds) and e's §25.6
        watermark for a is cleared — the next sync is a full catch-up.
-    3. e syncs: the gallery record's file is a catch-up sync — one reader —
-       so e asks a holder DIRECTLY: e opens a WebRTC link to a (its
-       offer / answer / ICE as sealed events through the GFS relay; a takes
-       them only from a household seated with it in a shared space), sends
-       one SPACE_MEDIA_WANTED over it, and a's SPACE_MEDIA_BLOB comes back
-       as binary frames on ``fed-media-v1``.
+    2. The GFS cache drops the blob (its TTL) and e no longer holds the
+       file.
+    3. A person of e opens it: the cache misses, so e asks the space's
+       host DIRECTLY: e opens a WebRTC link to a (its offer / answer / ICE
+       as sealed events through the GFS relay; a takes them only from a
+       household seated with it in a shared space), sends one
+       SPACE_MEDIA_WANTED over it, and a's SPACE_MEDIA_BLOB comes back as
+       binary frames on ``fed-media-v1``.
     4. e holds the file again, byte-identical, and logged "fetched directly
-       from <a>"; the GFS logged no fetch of that blob and stores no new
-       blob (nothing was re-uploaded for one reader).
+       from <a>"; the GFS got no on-demand ask and stores no new blob
+       (nothing re-uploaded for one reader).
+    5. e's own join catch-up fetched the space's old files the same way
+       (counted from its log).
 
     Prereqs: ``gfs-global-channel``."""
     step = "gfs-direct-catchup"
@@ -9255,6 +9262,23 @@ def cmd_gfs_direct_catchup() -> None:
         raise SystemExit(f"{step}: run 'gfs-global-channel' first")
     a, e = state["instances"]["a"], state["instances"]["e"]
     a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+
+    # a's 14-day legacy window (every household also gets the push) is
+    # fast-forwarded past its end: only the GFS cache and direct fetches.
+    channel = _rows("a", "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,))
+    _db_write(
+        "a",
+        [
+            (
+                "INSERT OR REPLACE INTO instance_config(key, value) VALUES(?, ?)",
+                (
+                    f"space_items_channel_since:{space_id}:"
+                    f"{channel[0][0] if channel else ''}",
+                    (datetime.now(timezone.utc) - timedelta(days=15)).isoformat(),
+                ),
+            )
+        ],
+    )
 
     # 1. a's album + picture; e gets it live.
     s, album = _request(
@@ -9293,14 +9317,20 @@ def cmd_gfs_direct_catchup() -> None:
     with urllib.request.urlopen(req, timeout=60) as resp:
         item = json.loads(resp.read())
     item_id = item["id"]
+    names = [
+        u.rsplit("/", 1)[-1].split("?", 1)[0]
+        for u in (item.get("url"), item.get("thumbnail_url"))
+        if u
+    ]
+    marks = ",".join("?" for _ in names)
     deadline = time.monotonic() + 90.0
     held: list = []
     while time.monotonic() < deadline:
         held = _rows(
             "e",
-            "SELECT local_name, blob_id FROM space_media_refs WHERE item_id = ?"
-            " AND local_name LIKE 'sc-%'",
-            (item_id,),
+            "SELECT local_name, blob_id FROM space_media_refs WHERE space_id = ?"
+            f" AND filename IN ({marks}) AND local_name LIKE 'sc-%'",
+            (space_id, *names),
         )
         if held and all(
             (_instance_dir("e") / "media" / name).is_file() for name, _b in held
@@ -9308,32 +9338,47 @@ def cmd_gfs_direct_catchup() -> None:
             break
         time.sleep(1.0)
     else:
+        every = _rows(
+            "e",
+            "SELECT local_name, item_id, filename FROM space_media_refs"
+            " WHERE space_id = ? ORDER BY rowid DESC LIMIT 10",
+            (space_id,),
+        )
         raise SystemExit(
-            f"{step}: e never held the gallery item's files under content names: {held!r}"
+            f"{step}: e never held the gallery item's files under content names:"
+            f" {held!r}; item {item_id}; e's latest rows {every!r}; item {item!r}"
         )
     files = {name: (_instance_dir("e") / "media" / name).read_bytes() for name, _b in held}
     print(f"  1. a's gallery item {item_id[:8]}… reached e with {len(files)} file(s)")
 
-    # 2. An old file e no longer holds; a full catch-up next.
-    for name in files:
+    # 2. The GFS cache let the file go (its TTL), and e no longer holds it
+    # (evicted). Every fetch of the live item settles first.
+    time.sleep(15.0)
+    for name, blob_id in held:
         (_instance_dir("e") / "media" / name).unlink()
-    _db_write(
-        "e",
-        [
-            (
-                "UPDATE space_instances SET applied_seq = NULL WHERE space_id = ?"
-                " AND instance_id = ?",
-                (space_id, a["instance_id"]),
-            )
-        ],
-    )
+        for blob in (GFS_DIR / "space_media").rglob(f"*{blob_id}*"):
+            blob.unlink()
+    time.sleep(3.0)
+    if any((_instance_dir("e") / "media" / name).is_file() for name in files):
+        raise SystemExit(f"{step}: a file came back before the view")
     blobs_before = sum(1 for p in (GFS_DIR / "space_media").rglob("*") if p.is_file())
     e_off, gfs_off = _log_size("e"), _gfs_log_size()
 
-    # 3. e syncs: the gallery's files come direct.
-    s, out = _request(f"{e_url}/api/spaces/{space_id}/sync", token=e["token"], method="POST")
-    _must(f"{step}: e asks for a sync", s, out, ok=(200, 202))
-    deadline = time.monotonic() + 240.0
+    # 3. A person of e opens it: the cache misses, so e asks the space's
+    # host directly over the link (never the author, never a re-upload).
+    for name in files:
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{e_url}/api/media/{name}",
+                    headers={"Authorization": f"Bearer {e['token']}"},
+                ),
+                timeout=60,
+            ) as resp:
+                resp.read()
+        except urllib.error.HTTPError:
+            pass  # the first view may time out while the link comes up
+    deadline = time.monotonic() + 180.0
     while time.monotonic() < deadline and not all(
         (_instance_dir("e") / "media" / name).is_file() for name in files
     ):
@@ -9346,13 +9391,26 @@ def cmd_gfs_direct_catchup() -> None:
     if not any(a["instance_id"] in line for line in direct):
         raise SystemExit(f"{step}: e's file did not come directly from a: {direct!r}")
     for _name, blob_id in held:
-        if _gfs_log_lines_matching(blob_id, offset=gfs_off):
-            raise SystemExit(f"{step}: the GFS was asked for blob {blob_id[:12]}…")
+        if [
+            line
+            for line in _gfs_log_lines_matching(blob_id, offset=gfs_off)
+            if "wanted" in line.lower()
+        ]:
+            raise SystemExit(f"{step}: the GFS was asked to fetch {blob_id[:12]}…")
     blobs_after = sum(1 for p in (GFS_DIR / "space_media").rglob("*") if p.is_file())
     if blobs_after > blobs_before:
         raise SystemExit(f"{step}: the GFS stores {blobs_after - blobs_before} new file(s)")
-    print("  3. e's old gallery file came over a direct WebRTC link from a ✓")
-    print("  4. the GFS was not asked and stores nothing new ✓")
+    print("  3. the cache missed; e's file came over a direct WebRTC link from a ✓")
+    print("  4. no on-demand ask, nothing re-uploaded to the GFS ✓")
+
+    # 5. The newcomer's catch-up: when e joined (``gfs-global-channel``),
+    # an old file of the space the cache no longer held came the same way.
+    joined = [
+        line
+        for line in _all_log_lines_matching("e", "fetched directly from")
+        if a["instance_id"] in line
+    ]
+    print(f"  5. e's own catch-up fetched {len(joined)} file(s) directly from a")
     print(f"{step}: ok (one reader's old file: direct, the GFS cache untouched)")
 
 
