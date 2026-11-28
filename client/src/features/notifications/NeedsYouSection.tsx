@@ -311,11 +311,15 @@ function Actions({ entry, describedBy, onNavigate }: {
         aria-describedby={describedBy}
         onClick={() => onNavigate?.()}
       >
-        {t('notifications.needs_you.review')}
+        {t(row && CONNECT_TYPES.has(row.type) ? 'notifications.needs_you.connect' : 'notifications.needs_you.review')}
       </a>
     </div>
   )
 }
+
+/** Rows whose link is Connections, where an admin connects a GFS: the
+ *  button says what happens there. */
+const CONNECT_TYPES: ReadonlySet<string> = new Set(['space_gfs_asked', 'space_gfs_needed'])
 
 function GroupRow({ entry, titleId, compact, onNavigate }: {
   entry: Extract<NeedsYouEntry, { kind: 'group' }>

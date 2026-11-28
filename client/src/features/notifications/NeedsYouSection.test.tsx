@@ -124,6 +124,16 @@ describe('NeedsYouSection', () => {
     expect(container.querySelector('a.sh-notif-row button')).toBeNull()
   })
 
+  it.each(['space_gfs_asked', 'space_gfs_needed'])(
+    'a %s row offers Connect, where it leads (not Review)',
+    async (type) => {
+      const r = row('g', { type, object_key: `space:sp-g`, link_url: '/connections?gfs=gfs.example.org' })
+      const { getByRole, queryByRole } = await mount([r])
+      expect(queryByRole('link', { name: 'Review' })).toBeNull()
+      expect(getByRole('link', { name: 'Connect' }).getAttribute('href')).toBe('/connections?gfs=gfs.example.org')
+    },
+  )
+
   it('a flagged request only offers Review', async () => {
     const r = row('a')
     r.params = { ...r.params!, flags: ['edge'] }

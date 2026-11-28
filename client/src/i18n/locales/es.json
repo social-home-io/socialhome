@@ -6526,6 +6526,7 @@
   "notifications.needs_you.approve": "Aprobar",
   "notifications.needs_you.decline": "Rechazar",
   "notifications.needs_you.review": "Revisar",
+  "notifications.needs_you.connect": "Conectar",
   "notifications.needs_you.view_invite": "Ver",
   "notifications.needs_you.group": "{count} solicitudes te esperan en {space}",
   "notifications.needs_you.group_unnamed": "{count} solicitudes te esperan",
