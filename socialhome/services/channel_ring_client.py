@@ -64,6 +64,7 @@ from ..domain.gfs_channel import (
     valid_channel_id,
     valid_ring_id,
 )
+from ..federation.host_equivalence import serves_as_host
 from .gfs_ws_client import RING_CONNECTED_FRAME, RING_TAKEN_FIELD
 
 if TYPE_CHECKING:
@@ -456,7 +457,7 @@ class ChannelRingClient:
                 await self._fetch(gfs_id, channel_id)
                 break
         for space_id in spaces:
-            if not await self._hosts(space_id):
+            if not await self._owns(space_id):
                 self._catch_up_due.add(space_id)
         await self._run_catch_ups()
 
@@ -532,8 +533,17 @@ class ChannelRingClient:
     # ── Watching ─────────────────────────────────────────────────────────
 
     async def _hosts(self, space_id: str) -> bool:
-        """Whether this household OWNS the space: the host always watches
-        (owner F5) and runs no catch-up from itself."""
+        """Whether this household acts as the space's host — its owner or a
+        delegated admin household (:func:`serves_as_host`): the host always
+        watches (owner F5) and fetches at each ping."""
+        space = await self._spaces.get(space_id)
+        return await serves_as_host(
+            self._spaces, space, own_instance_id=self._own_instance_id
+        )
+
+    async def _owns(self, space_id: str) -> bool:
+        """Whether this household OWNS the space: only the owner has no
+        host above it to run a catch-up from."""
         space = await self._spaces.get(space_id)
         return space is not None and space.owner_instance_id == self._own_instance_id
 
@@ -551,9 +561,9 @@ class ChannelRingClient:
         person has open (plus the linger) and the spaces we host."""
         out: dict[str, set[str]] = {}
         space_ids = {s for s in self._viewed if self._viewing(s)}
-        space_ids |= set(
-            await self._spaces.hosted_channel_spaces(self._own_instance_id)
-        )
+        space_ids |= {
+            s for s in await self._spaces.list_channel_spaces() if await self._hosts(s)
+        }
         for space_id in sorted(space_ids):
             found = await self._channels.ring_connections(space_id)
             if found is None:

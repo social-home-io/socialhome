@@ -576,13 +576,12 @@ class SpaceMediaGfsFetcher:
         loc: SpaceMediaLocalization,
         *,
         prefetch: bool = True,
-        prefetch_all: bool = False,
     ) -> list[SpaceMediaRef]:
         """Keep *loc*'s new rows — call it once the item is stored — and
         prefetch their pictures. The acting host of a GFS space archives
-        every file instead, a file in pieces too (v_97, owner 2026-11-28),
-        as does *prefetch_all* (the space's host holding a submission it
-        will release). Never raises."""
+        every file instead, a file in pieces too (v_97, owner 2026-11-28) —
+        a submission it holds for review too, which it releases once
+        approved. Never raises."""
         if not loc.refs:
             return []
         try:
@@ -595,9 +594,7 @@ class SpaceMediaGfsFetcher:
             # A newer epoch may have moved the row: ask the GFS again.
             self._misses.pop(ref.local_name, None)
             if ref.space_id not in archives:
-                archives[ref.space_id] = prefetch_all or await self._archives(
-                    ref.space_id
-                )
+                archives[ref.space_id] = await self._archives(ref.space_id)
             if archives[ref.space_id]:
                 self._archive(ref.local_name, ref.size)
             elif prefetch and not ref.pieced and _is_picture(ref.local_name):

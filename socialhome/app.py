@@ -2954,6 +2954,16 @@ def _build_space_media_gfs(
         media_dir=media_dir,
     )
     uploader.attach_federation(federation_service)
+
+    async def _acting_hosts(space) -> list[str]:
+        return await acting_hosts(
+            space_repo,
+            repos.space_remote_member,
+            space,
+            own_instance_id=federation_service.own_instance_id,
+        )
+
+    uploader.attach_acting_hosts(_acting_hosts)
     fetcher = SpaceMediaGfsFetcher(
         refs_repo=repos.space_media_ref,
         space_crypto=space_crypto,

@@ -9,6 +9,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+from socialhome.crypto import ed25519_public_key
 from socialhome.domain.federation import InstanceSource
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.file_hashes import (
@@ -234,6 +235,7 @@ class _Space:
     owner_instance_id: str
     space_type: SpaceType = SpaceType.PRIVATE
     features: SpaceFeatures = field(default_factory=SpaceFeatures)
+    identity_public_key: str = ""
 
 
 class _Spaces:
@@ -1602,28 +1604,13 @@ async def test_part_directories_stay_under_their_cap(tmp_path, monkeypatch):
     assert not old.exists()
 
 
-async def test_the_host_prefetches_every_file_of_a_held_submission(tmp_path):
-    """v_97 — ``prefetch_all`` (the space's host keeping a submission it
-    will release) fetches a file in pieces too, which a plain keep never
-    prefetches; ``fetching`` tells a fetch still running."""
-    data = os.urandom(BIG_SIZE)
-    wire, blobs, _addrs = _pieced("v.webm", data)
-    f = _fetcher(tmp_path, _Gfs(blobs), conns=[_Conn("g", "https://g")])
-    loc = await f.localize(
-        SPACE, wire, ["api/media/v.webm"], item_id=ITEM, origin=ORIGIN
-    )
-    name = _sc("v.webm", data)
-    await f.keep(loc)
-    while f._tasks:
-        await asyncio.gather(*list(f._tasks))
-    assert not (tmp_path / name).exists()
-    await f.keep(loc, prefetch_all=True)
-    while f._tasks:
-        await asyncio.gather(*list(f._tasks))
-    assert (tmp_path / name).read_bytes() == data
-    assert not f.fetching(name)
-    f._inflight[(name, True)] = None  # a fetch running now
-    assert f.fetching(name)
+async def test_fetching_tells_a_fetch_still_running(tmp_path):
+    """``fetching`` tells a fetch still running (a catch-up holds a record
+    back for its next stream while it is)."""
+    f = _fetcher(tmp_path, _Gfs({}), conns=[_Conn("g", "https://g")])
+    assert not f.fetching("x.webm")
+    f._inflight[("x.webm", True)] = None  # a fetch running now
+    assert f.fetching("x.webm")
 
 
 async def _settle(f):
@@ -1744,3 +1731,37 @@ async def test_the_host_archive_retries_a_miss_then_warns(
         await _settle(f)
     assert [u for u, _b in gfs.fetches].count("https://g") == 3
     assert "holds no copy" in caplog.text
+
+
+async def test_a_delegated_admin_acting_as_host_keeps_every_file(tmp_path):
+    """Owner reminder 2026-11-28: "the host" is every household acting as
+    host (``serves_as_host``): a delegated admin household — delegation on,
+    a local admin seat, the space's authority seed — archives every file
+    like the owner."""
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    f = _fetcher(tmp_path, _Gfs(blobs), conns=[_Conn("g", "https://g")])
+    seed = bytes(range(32))
+    spaces = f._spaces
+
+    async def get(space_id):
+        return _Space(
+            space_id,
+            SPACE_HOST,
+            space_type=SpaceType.GLOBAL,
+            features=SpaceFeatures(delegated_admin_authority=True),
+            identity_public_key=ed25519_public_key(seed).hex(),
+        )
+
+    async def get_space_seed(space_id):
+        return seed
+
+    async def list_members(space_id):
+        return [_Seat("u-me", SpaceRole.ADMIN)]
+
+    spaces.get = get
+    spaces.get_space_seed = get_space_seed
+    spaces.list_members = list_members
+    await _recv_pieced(f, wire)
+    await _settle(f)
+    assert (tmp_path / _sc("v.webm", data)).read_bytes() == data

@@ -992,14 +992,11 @@ class SpaceModerationFederation(FileHashesMixin, SpaceMediaRefsMixin):
         from_host = space is not None and event.from_instance == space.owner_instance_id
         if await self._moderation.store_received(item, from_host=from_host):
             # v_97 — its described files: kept, the pictures fetched now
-            # — every file on the space's host, which releases the item
-            # once approved and must hold what it then describes.
+            # — every file on a household acting as the space's host
+            # (the fetcher's ``serves_as_host`` check), which releases the
+            # item once approved and must hold what it then describes.
             if self._gfs_media is not None:
-                await self._gfs_media.keep(
-                    gfs_files,
-                    prefetch_all=space is not None
-                    and space.owner_instance_id == self._own,
-                )
+                await self._gfs_media.keep(gfs_files)
             log.info(
                 "moderation: holding %s %s item %s from %s for review",
                 item.feature,

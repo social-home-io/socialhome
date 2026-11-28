@@ -327,8 +327,8 @@ class _GfsFetcher:
             refs=tuple(local for name, local in added.items() if name in described)
         )
 
-    async def keep(self, loc, *, prefetch_all=False):
-        self.kept.append((loc, prefetch_all))
+    async def keep(self, loc):
+        self.kept.append(loc)
 
 
 async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
@@ -421,10 +421,10 @@ async def test_a_cache_only_reviewer_keeps_a_described_submissions_files(
     ]
     assert fetcher.localized[0]["item_id"] == "item-9"
     assert fetcher.localized[0]["origin"] == "house-a"
-    # Kept once stored — every file fetched on the space's host, which
-    # releases the item once approved.
-    ((loc, everything),) = fetcher.kept
-    assert loc.refs == (a_here,) and everything is True
+    # Kept once stored (the fetcher archives every file on a household
+    # acting as the space's host, which releases the item once approved).
+    (loc,) = fetcher.kept
+    assert loc.refs == (a_here,)
 
 
 async def test_a_held_calendar_events_cover_goes_to_the_reviewers():

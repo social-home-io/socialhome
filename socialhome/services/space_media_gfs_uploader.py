@@ -128,6 +128,7 @@ from .inbound_media_store import media_file_path
 
 if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
+    from ..domain.space import Space
     from ..federation.federation_service import FederationService
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
@@ -369,6 +370,7 @@ class SpaceMediaGfsUploader:
     """Plan and upload a space item's files to the GFSs its readers use."""
 
     __slots__ = (
+        "_acting_hosts",
         "_channels",
         "_crypto",
         "_describe_misses",
@@ -409,6 +411,7 @@ class SpaceMediaGfsUploader:
         self._media_refs = media_refs
         self._dir = pathlib.Path(media_dir)
         self._federation: FederationService | None = None
+        self._acting_hosts: Callable[[Space], Awaitable[list[str]]] | None = None
         #: v_51 opaque channels — a private space's member grants.
         self._channels: GfsChannelService | None = None
         #: v_97 — the durable queue every upload waits in.
@@ -442,6 +445,14 @@ class SpaceMediaGfsUploader:
 
     def attach_federation(self, federation: FederationService) -> None:
         self._federation = federation
+
+    def attach_acting_hosts(
+        self, hosts: Callable[[Space], Awaitable[list[str]]]
+    ) -> None:
+        """The households acting as a space's host here (``acting_hosts``):
+        each must be at v_97 for the space's files to come from the cache
+        only (:meth:`cache_only`). Without it, the owner alone."""
+        self._acting_hosts = hosts
 
     def attach_fetcher(self, fetcher: _DescribeFetcher) -> None:
         """Wire the GFS space media fetcher: a file this household holds
@@ -477,7 +488,8 @@ class SpaceMediaGfsUploader:
         for a space whose channel is stored here, once its 14-day legacy
         window closed, when both the household and the space's host are at
         v_97 — a version and channel condition, never the space type alone:
-        a v_96 host (whose own files carry no descriptor) or a space with
+        a v_96 host — any household acting as its host here (whose own
+        files carry no descriptor) — or a space with
         no stored channel yet keeps the push. Every path that sends such a
         household an item with files describes them (``media_refs``)."""
         return await self._cache_only_host(space_id) is not None and (
@@ -494,8 +506,14 @@ class SpaceMediaGfsUploader:
             return None
         space = await self._spaces.get(space_id)
         host = str(getattr(space, "owner_instance_id", "") or "")
-        if not host or not await self._supports_items(host):
+        if space is None or not host:
             return None
+        # Every household acting as its host here (owner reminder
+        # 2026-11-28): the owner, and a delegated admin that invited us.
+        hosts = await self._acting_hosts(space) if self._acting_hosts else [host]
+        for iid in hosts:
+            if not await self._supports_items(iid):
+                return None
         return host
 
     async def _supports_items(self, instance_id: str) -> bool:

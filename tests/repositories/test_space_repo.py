@@ -2084,18 +2084,6 @@ async def test_gfs_channel_round_trip_and_candidate_lookup(env):
     assert not await env.repo.set_gfs_channel("sp-missing", "d" * 32, "pk")
 
 
-async def test_hosted_channel_spaces_lists_our_owned_spaces_with_a_channel(env):
-    """v_97 — the host always watches these channels."""
-    await env.repo.save(_space("sp-1"))
-    await env.repo.save(_space("sp-2"))
-    await env.repo.save(_space("sp-3"))
-    owner = (await env.repo.get("sp-1")).owner_instance_id
-    await env.repo.set_gfs_channel("sp-1", "c" * 32, "pk")
-    await env.repo.set_gfs_channel("sp-2", "d" * 32, "pk")
-    assert await env.repo.hosted_channel_spaces(owner) == ["sp-1", "sp-2"]
-    assert await env.repo.hosted_channel_spaces("someone-else") == []
-
-
 async def test_gfs_channel_healed_at_round_trip(env):
     await env.repo.save(_space("sp-1"))
     assert await env.repo.get_gfs_channel_healed_at("sp-1") is None

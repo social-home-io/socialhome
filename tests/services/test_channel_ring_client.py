@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import orjson
 import pytest
 
+from socialhome.crypto import ed25519_public_key
+from socialhome.domain.space import SpaceRole
 from socialhome.services import channel_ring_client as mod
 from socialhome.services.channel_ring_client import (
     CURSOR_KEY_PREFIX,
@@ -31,6 +33,9 @@ class _Clock:
 class _Spaces:
     def __init__(self) -> None:
         self.owner = "host-household"
+        #: A delegated admin household: delegation on, a local admin seat
+        #: and the authority seed the space pins (``serves_as_host``).
+        self.delegate = False
 
     async def spaces_for_gfs_channel(self, channel_id: str) -> list[str]:
         return ["sp-1"] if channel_id == CH else []
@@ -39,10 +44,24 @@ class _Spaces:
         return ["sp-1"]
 
     async def get(self, space_id: str):
-        return SimpleNamespace(id=space_id, owner_instance_id=self.owner)
+        return SimpleNamespace(
+            id=space_id,
+            owner_instance_id=self.owner,
+            features=SimpleNamespace(delegated_admin_authority=self.delegate),
+            identity_public_key=ed25519_public_key(_SEED).hex(),
+        )
 
-    async def hosted_channel_spaces(self, owner: str) -> list[str]:
-        return ["sp-1"] if self.owner == owner else []
+    async def list_local_member_user_ids(self, space_id: str) -> list[str]:
+        return ["u-admin"]
+
+    async def list_members(self, space_id: str):
+        return [SimpleNamespace(user_id="u-admin", role=SpaceRole.ADMIN)]
+
+    async def get_space_seed(self, space_id: str):
+        return _SEED if self.delegate else None
+
+
+_SEED = bytes(range(32))
 
 
 class _Channels:
@@ -492,3 +511,18 @@ async def test_the_badge_is_readable_for_the_spaces_list(world):
     await world.client.viewing("sp-1")
     await world.client.on_frame(_done(world, head=20), gfs_id=GFS)
     assert world.client.has_activity("sp-1") is False
+
+
+async def test_a_delegated_admin_acting_as_host_always_watches(world):
+    """Owner reminder 2026-11-28: "the host" is every household acting as
+    host (``serves_as_host``) — a delegated admin household watches its
+    GFS space always and fetches at each ping, like the owner; it still runs
+    the catch-up from its own host above it (only the owner has none)."""
+    world.spaces.delegate = True
+    await world.client.on_frame({"type": RING_CONNECTED_FRAME}, gfs_id=GFS)
+    assert _watches(world) == [{"type": "channel_watch", "watch": [CH], "unwatch": []}]
+    await world.client.on_frame(_heads(10), gfs_id=GFS)
+    await world.client.on_frame(_heads(12), gfs_id=GFS)
+    assert [f["since_seq"] for f in _fetches(world)] == [10]
+    await world.client.on_frame(_heads(900, "f" * 16), gfs_id=GFS)
+    assert world.sync.calls == ["sp-1"]

@@ -1702,3 +1702,25 @@ async def test_fetches_to_describe_are_capped_per_space(tmp_path):
     )
     assert len(fetcher.asked) == 6
     assert fetcher.peak == up_mod.MAX_DESCRIBE_FETCHES_PER_SPACE
+
+
+async def test_every_acting_host_must_be_at_v97_for_cache_only(tmp_path):
+    """Owner reminder 2026-11-28: "the host" is every household acting as
+    host here (``acting_hosts``): a delegated admin household acting as
+    host below v_97 keeps the push like a v_96 owner would."""
+    g1 = _Conn("g1", "https://g1.example")
+    seed = b"\3" * 32
+    channel = (CHANNEL_ID, channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)))
+    u = _uploader(
+        tmp_path,
+        gfs=_Gfs([g1]),
+        spaces=_Spaces(seed, channel=channel, private_gfs=True, owner="host97"),
+    )
+    u.attach_federation(_Fed({"new": OURS, "host97": OURS, "admin96": 96}))
+
+    async def hosts(space):
+        return [space.owner_instance_id, "admin96"]
+
+    u.attach_acting_hosts(hosts)
+    assert await u.cache_only(SPACE, "new") is False
+    assert await u.push_targets(SPACE, ["new"]) == ["new"]
