@@ -89,13 +89,32 @@ describe('askGfsConsent', () => {
     expect(toast).toHaveBeenLastCalledWith(expect.any(String), 'error')
   })
 
-  it('anyone else is told to ask an admin, and nothing is sent', async () => {
+  it('anyone else asks the household admins with one tap; Cancel asks nobody', async () => {
     get.mockResolvedValue({ gfs_space: true, connected: false, may_connect: false })
-    confirm.mockResolvedValueOnce(true)
-    expect(await askGfsConsent('sp', 'Choir')).toBe(false)
+    confirm.mockResolvedValueOnce(false)
+    expect(await askGfsConsent('sp', 'Choir', 'follow')).toBe(false)
     expect(post).not.toHaveBeenCalled()
-    // A notice: one way out, no Cancel next to OK.
-    expect(confirm.mock.calls[0][1]).toMatchObject({ notice: true })
+    expect(confirm.mock.calls[0][1]).toMatchObject({
+      confirmLabel: 'Ask an admin',
+      cancelLabel: 'Cancel',
+    })
+    confirm.mockResolvedValueOnce(true)
+    post.mockResolvedValueOnce({ asked: 2 })
+    // Asking never joins: the admins connect first.
+    expect(await askGfsConsent('sp', 'Choir', 'follow')).toBe(false)
+    expect(post).toHaveBeenCalledWith('/api/public_spaces/sp/ask-admin', { action: 'follow' })
+    expect(toast).toHaveBeenLastCalledWith(expect.stringContaining('admins were asked'), 'success')
+  })
+
+  it('says so when nobody could be asked or the ask failed', async () => {
+    get.mockResolvedValue({ gfs_space: true, connected: false, may_connect: false })
+    confirm.mockResolvedValue(true)
+    post.mockResolvedValueOnce({ asked: 0 })
+    expect(await askGfsConsent('sp', 'Choir')).toBe(false)
+    expect(toast).toHaveBeenLastCalledWith(expect.stringContaining('no other admin'), 'info')
+    post.mockRejectedValueOnce(new Error('offline'))
+    expect(await askGfsConsent('sp', 'Choir')).toBe(false)
+    expect(toast).toHaveBeenLastCalledWith(expect.stringContaining("Couldn't ask"), 'error')
   })
 
   it('fails closed: a failed or odd preflight blocks the join and says so', async () => {

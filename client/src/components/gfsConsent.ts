@@ -17,7 +17,10 @@
  * - an admin with no default to connect: "Open Connections", to connect a
  *   GFS that lists the space;
  * - anyone else: an admin must connect the household — the dialog says so
- *   and nothing is sent.
+ *   and offers "Ask an admin" (owner 2026-11-28): one tap sends the
+ *   household's admins a "Needs you" row that opens the Connect flow
+ *   (``POST /api/public_spaces/{id}/ask-admin``); nothing leaves the
+ *   household and nothing is joined — the person joins once connected.
  *
  * Fails closed: a preflight that does not answer is no "yes" — nothing is
  * sent and the person is told to try again. The server refuses the join
@@ -53,6 +56,21 @@ async function preflight(spaceId: string): Promise<Preflight> {
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+/** "Ask an admin": the household's admins get a row that opens the Connect
+ *  flow; the person is told whether anyone was asked. */
+async function askAdmins(spaceId: string, follow: boolean): Promise<void> {
+  try {
+    const res = await api.post(
+      `/api/public_spaces/${encodeURIComponent(spaceId)}/ask-admin`,
+      { action: follow ? 'follow' : 'join' },
+    ) as { asked?: number } | undefined
+    if (res?.asked) showToast(t('gfs_join.consent.asked'), 'success')
+    else showToast(t('gfs_join.consent.asked_none'), 'info')
+  } catch {
+    showToast(t('gfs_join.consent.ask_failed'), 'error')
+  }
+}
+
 /** ``true`` when the join may go ahead now. */
 export async function askGfsConsent(
   spaceId: string,
@@ -75,10 +93,15 @@ export async function askGfsConsent(
   const follow = action === 'follow'
   const title = t('gfs_join.consent.title')
   if (!pre.may_connect) {
-    await confirmDialog(
+    const ask = await confirmDialog(
       t(follow ? 'gfs_join.consent.ask_admin_follow' : 'gfs_join.consent.ask_admin', { name: spaceName }),
-      { title, confirmLabel: t('gfs_join.consent.ok'), notice: true },
+      {
+        title,
+        confirmLabel: t('gfs_join.consent.ask_button'),
+        cancelLabel: t('common.cancel'),
+      },
     )
+    if (ask) await askAdmins(spaceId, follow)
     return false
   }
   const gfs = pre.default_gfs ?? null
