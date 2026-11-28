@@ -16,6 +16,7 @@ import pytest
 from socialhome.authority_sig import AUTHORITY_EVENT_SPACE_SYNC_PAGE
 from socialhome.canonical_json import canonical_bytes
 from socialhome.crypto import b64url_encode, ed25519_public_key
+from socialhome.domain.space_media_ref import MEDIA_REFS_FIELD
 from socialhome.sync_page import (
     BUCKETS,
     COMMIT_SPECS,
@@ -885,3 +886,13 @@ def test_a_fetched_record_applies_every_committed_field_absent_as_none():
     assert record_leaf("tasks", got, _no_files) == record_leaf("tasks", task, _no_files)
     post = fetched_record("posts", {"id": "p", "file_meta": "not a dict"})
     assert post["file_meta"] is None and post["link_preview"] is None
+
+
+def test_no_page_commits_a_media_descriptor():
+    """v_97 (CLAUDE.md versioning step 7): ``media_refs`` is per requester
+    (sealed for the item and the household that delivered it) — no
+    ``CommitSpec`` commits it, so host and members hash the same row the
+    same way and the v_97 sync line needs no page suite bump."""
+    for spec in COMMIT_SPECS.values():
+        assert MEDIA_REFS_FIELD not in spec.fields
+        assert MEDIA_REFS_FIELD not in spec.files

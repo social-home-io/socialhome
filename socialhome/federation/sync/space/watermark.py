@@ -158,7 +158,15 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   a v_96 receiver stores and an older one skipped: the crossing full
 #:   stream brings them (the kept-full digest of ``bans`` would otherwise
 #:   hold back a list it already streamed to the older receiver).
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 87, 92, 94, 96)
+#: * 97 — a household that reads a GFS space from the GFS media cache only
+#:   (``SpaceMediaGfsUploader.cache_only``) gets every streamed record that
+#:   shows files described (``media_refs``, ``provider._WithMediaRefs``
+#:   lazy) — comment and bazaar records too, whose descriptor a v_97
+#:   receiver now keeps — and no file pushed. The crossing full stream
+#:   describes the records it took while older. The signed sync pages are
+#:   unchanged: ``media_refs`` is per requester and never committed
+#:   (``COMMIT_SPECS``), so no page suite bump.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 87, 92, 94, 96, 97)
 
 
 def sync_version_bucket(peer_version: int) -> int:

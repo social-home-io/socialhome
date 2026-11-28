@@ -849,3 +849,13 @@ def test_v96_household_bans_are_a_sync_line():
     it (the kept-full ``bans`` digest alone would hold them back)."""
     assert FederationCapability.MIN_FOR_SUBSCRIBER_SEATS in SYNC_RECORD_LINES
     assert _shape(96) != _shape(95)
+
+
+def test_v97_described_records_are_a_sync_line():
+    """v_97: a household reading a GFS space from the cache only gets every
+    streamed record with files described (``media_refs``) — comment and
+    bazaar records too, which a v_97 receiver now keeps — and takes no
+    push. A household crossing it gets one full stream, so records it took
+    undescribed while older (files pushed then) are described."""
+    assert FederationCapability.MIN_FOR_SPACE_ITEMS in SYNC_RECORD_LINES
+    assert _shape(97) != _shape(96)
