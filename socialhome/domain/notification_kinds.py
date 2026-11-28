@@ -106,6 +106,9 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # This household stands in for a space's host but isn't on every GFS
     # of it: only a household admin can connect.
     "space_gfs_needed": NotifKind.NEEDS_YOU,
+    # Someone asked the household's admins to connect for a GFS space they
+    # want to join or follow (owner 2026-11-28).
+    "space_gfs_asked": NotifKind.NEEDS_YOU,
     # Retired: an old row still files under Needs you (it resolves).
     "dm_contact_requested": NotifKind.NEEDS_YOU,
     "app_challenge": NotifKind.NEEDS_YOU,

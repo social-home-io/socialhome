@@ -1358,6 +1358,16 @@ class GfsConnectionRequiredError(CodedError, SpacePermissionError):
     detail = "Connect your household to this space's GFS first, then join."
 
 
+class NothingToAskError(CodedError, SpacePermissionError):
+    """Owner 2026-11-28 — "Ask an admin" to connect the household for a
+    space that needs no GFS connection, or one the household already holds:
+    nobody is asked."""
+
+    status = 409
+    code = "NOTHING_TO_ASK"
+    detail = "This space needs no new connection — join it directly."
+
+
 @dataclass(slots=True, frozen=True)
 class GfsJoinReadiness:
     """Whether joining a space needs a GFS connection this household lacks

@@ -56,6 +56,7 @@ from socialhome.domain.events import (
     DmMessageDeleted,
     DmMessageUpdated,
     EventReminderDue,
+    GfsConnectionAsked,
     HighlightFrameReactionChanged,
     MomentCreated,
     MomentReactionChanged,
@@ -5872,3 +5873,59 @@ async def test_channel_activity_respects_a_quieter_level(stack):
     )
     await stack.bus.publish(SpaceChannelActivity(space_id=space.id, unread=4))
     assert await _links(stack, u["bob"], "space_activity") == []
+
+
+# ─── GfsConnectionAsked: "Milo wants to join Garden, which needs a connection to gfs.example" ─
+
+
+async def _gfs_asked_rows(stack, user_id: str):
+    return [
+        n
+        for n in await stack.notif_repo.list(user_id, limit=20)
+        if n.type == "space_gfs_asked"
+    ]
+
+
+async def test_asking_to_connect_is_one_row_per_admin_opening_the_connect_flow(
+    stack,
+):
+    """Owner 2026-11-28 — "Ask an admin of your household": each admin gets
+    one "Needs you" row about the space, naming who asked, the space and
+    the GFS, opening the Connect flow aimed at that GFS; asking again joins
+    the same row (silent while unread)."""
+    anna = await stack.provision_user("anna", is_admin=True)
+    milo = await stack.provision_user("milo")
+    event = GfsConnectionAsked(
+        space_id="sp-g",
+        space_name="Garden",
+        requested_by=milo.user_id,
+        action="follow",
+        gfs="gfs.example",
+        gfs_url="https://gfs.example",
+        recipients=(anna.user_id,),
+    )
+    await stack.bus.publish(event)
+    await stack.bus.publish(event)
+    [row] = await _gfs_asked_rows(stack, anna.user_id)
+    assert row.title == (
+        "milo wants to follow Garden, which needs a connection to gfs.example"
+    )
+    assert row.object_key == "space:sp-g"
+    assert row.link_url == "/connections?connect_gfs=https%3A%2F%2Fgfs.example"
+    assert await _gfs_asked_rows(stack, milo.user_id) == []
+
+
+async def test_asking_to_connect_without_a_known_gfs_opens_connections(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(
+        GfsConnectionAsked(
+            space_id="sp-g",
+            space_name="Garden",
+            requested_by=milo.user_id,
+            recipients=(anna.user_id,),
+        )
+    )
+    [row] = await _gfs_asked_rows(stack, anna.user_id)
+    assert row.title == "milo wants to join Garden, which needs a GFS connection"
+    assert row.link_url == "/connections"

@@ -58,6 +58,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from string import Formatter
+from urllib.parse import quote
 
 from ..domain.app_group import END_CLOSED_BY_MODERATOR
 from ..domain.apps import (
@@ -115,6 +116,7 @@ from ..domain.events import (
     GalleryItemsAdded,
     GalleryItemsShared,
     GalleryPrivateAlbumTrashed,
+    GfsConnectionAsked,
     HighlightFrameReactionChanged,
     HighlightRemoved,
     LocalSpaceInviteCreated,
@@ -635,6 +637,18 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
             "Your household isn't connected to every GFS of a space",
         ),
     ),
+    # Someone asked the household's admins to connect for a GFS space: who
+    # and the space, never the GFS (the bell names it).
+    "space_gfs_asked": (
+        (
+            "notification.push.space_gfs_asked",
+            "{name} asked to connect your household for {space_name}",
+        ),
+        (
+            "notification.push.space_gfs_asked_anon",
+            "Someone asked to connect your household to a GFS",
+        ),
+    ),
     # An admin put your private album in the trash (D7): who, never the
     # album — its name can be the secret.
     "gallery_album_trashed": (
@@ -668,6 +682,10 @@ _DECISION_TYPES: frozenset[str] = frozenset({"post_moderated", "moderation_decid
 #: "Your household isn't on every GFS of a space it stands in for" — kept
 #: in line by :meth:`NotificationService.reconcile_space_gfs_needed`.
 _GFS_NEEDED_TYPE: str = "space_gfs_needed"
+
+#: "Ask an admin of your household" to connect for a GFS space (owner
+#: 2026-11-28).
+_GFS_ASKED_TYPE: str = "space_gfs_asked"
 
 #: The notice that a space ended — it outlives the space's other rows.
 _SPACE_ENDED_TYPES: frozenset[str] = frozenset({"space_dissolved"})
@@ -1687,6 +1705,7 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppDrawChanged, self.on_app_draw_changed)
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
+        self._subscribe(GfsConnectionAsked, self.on_gfs_connection_asked)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
         # An app turned back on answers the asks to turn it on (D10).
         self._subscribe(AppEnabledChanged, self.on_app_request_answered)
@@ -4084,6 +4103,81 @@ class NotificationService(ProtectionGateMixin):
                 about=about,
                 actor_user_id=asker.user_id,
                 actor_name=asker.display_name,
+            )
+
+    async def on_gfs_connection_asked(self, event: GfsConnectionAsked) -> None:
+        """Owner 2026-11-28 — "Ask an admin of your household": one "Needs
+        you" row per admin (``event.recipients``), about the space, so
+        asking again joins it (silent while unread). It names who asked,
+        the space and the GFS, and opens the Connect flow aimed at that GFS
+        (``/connections?connect_gfs=``; plain Connections when none is
+        known). Connecting there is the admin's own step."""
+        asker = await self._local_user(event.requested_by)
+        if asker is None:
+            return
+        link = (
+            f"/connections?connect_gfs={quote(event.gfs_url, safe='')}"
+            if event.gfs_url
+            else "/connections"
+        )
+        follow = event.action == "follow"
+        for recipient_id in event.recipients:
+            recipient = await self._local_user(recipient_id)
+            if recipient is None or not recipient.is_admin:
+                continue
+            locale = self._locale(recipient)
+            if event.gfs:
+                title = self._t(
+                    "notification.space.gfs_asked_follow"
+                    if follow
+                    else "notification.space.gfs_asked",
+                    locale=locale,
+                    fallback=(
+                        "{name} wants to follow {space_name}, which needs a "
+                        "connection to {gfs}"
+                        if follow
+                        else "{name} wants to join {space_name}, which needs a "
+                        "connection to {gfs}"
+                    ),
+                    name=asker.display_name,
+                    space_name=event.space_name,
+                    gfs=event.gfs,
+                )
+            else:
+                title = self._t(
+                    "notification.space.gfs_asked_any_follow"
+                    if follow
+                    else "notification.space.gfs_asked_any",
+                    locale=locale,
+                    fallback=(
+                        "{name} wants to follow {space_name}, which needs a "
+                        "GFS connection"
+                        if follow
+                        else "{name} wants to join {space_name}, which needs a "
+                        "GFS connection"
+                    ),
+                    name=asker.display_name,
+                    space_name=event.space_name,
+                )
+            await self._save_notif(
+                new_notification(
+                    user_id=recipient_id,
+                    type=_GFS_ASKED_TYPE,
+                    title=title,
+                    link_url=link,
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    event.space_id,
+                    space_id=event.space_id,
+                    space_name=event.space_name,
+                ),
+                actor_user_id=asker.user_id,
+                actor_name=asker.display_name,
+                push_params={
+                    "name": asker.display_name,
+                    "space_name": event.space_name,
+                },
             )
 
     async def on_app_request_answered(

@@ -17,9 +17,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.domain.events import GfsConnectionAsked
 from socialhome.domain.public_space import PublicSpaceListing
 from socialhome.domain.space import (
     GfsConnectionRequiredError,
+    NothingToAskError,
     SpaceFeatures,
     SpaceType,
 )
@@ -329,3 +331,50 @@ async def test_an_ask_through_the_gfs_needs_a_ring_connection_without_a_listing(
     with pytest.raises(GfsConnectionRequiredError):
         await _ask(stack, "sp-pinned")
     gfs_join.request_join.assert_not_awaited()
+
+
+async def test_asking_the_admins_tells_each_admin_once(stack):  # noqa: F811
+    """Owner 2026-11-28 — "Ask an admin of your household" is an action: a
+    member who can't connect the household asks its admins, who get one
+    notification each (``GfsConnectionAsked`` → the bell) naming the space
+    and the GFS, opening the Connect flow. The space's name comes from what
+    this household knows, never from the client."""
+    await _listed(stack)
+    stack.svc.attach_gfs_connection_service(_Gfs())
+    fan = await stack.provision("fan")
+    olga = await stack.provision("olga")
+    await stack.users.set_admin("olga", True)
+    asked: list = []
+
+    async def _record(event):
+        asked.append(event)
+
+    stack.bus.subscribe(GfsConnectionAsked, _record)
+    await stack.svc.ask_admins_to_connect(
+        "sp-g",
+        user_id=fan.user_id,
+        action="follow",
+        gfs="gfs.example",
+        gfs_url="https://gfs.example",
+    )
+    (event,) = asked
+    assert event.space_id == "sp-g" and event.space_name == "Global"
+    assert event.action == "follow" and event.requested_by == fan.user_id
+    assert event.gfs == "gfs.example" and event.gfs_url == "https://gfs.example"
+    assert event.recipients == (olga.user_id,)  # the household's admins
+    stack.fed.send_event.assert_not_awaited()  # nothing leaves the household
+
+
+async def test_nothing_to_ask_when_no_connection_is_needed(stack):  # noqa: F811
+    """A space that needs no GFS (or one already connected) asks nobody."""
+    await _listed(stack, sources=frozenset({"gfs-a"}))
+    stack.svc.attach_gfs_connection_service(_Gfs(ring={"gfs-a"}))
+    fan = await stack.provision("fan")
+    with pytest.raises(NothingToAskError):
+        await stack.svc.ask_admins_to_connect(
+            "sp-g", user_id=fan.user_id, action="join", gfs="", gfs_url=""
+        )
+    with pytest.raises(NothingToAskError):
+        await stack.svc.ask_admins_to_connect(
+            "sp-unknown", user_id=fan.user_id, action="join", gfs="", gfs_url=""
+        )

@@ -2791,6 +2791,29 @@ class AppUninstalled(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class GfsConnectionAsked(DomainEvent):
+    """Owner 2026-11-28 — a person who can't connect the household asked
+    its admins to ("Ask an admin of your household"): joining or following
+    *space_id* needs a GFS connection the household lacks. Published by
+    :meth:`SpaceService.ask_admins_to_connect`; each of ``recipients`` (the
+    household's admins) gets one "Needs you" row per space, opening the
+    Connect flow (``gfs_url``, the GFS to connect, when one is known).
+    Local only — nothing leaves the household."""
+
+    space_id: str
+    space_name: str
+    requested_by: str
+    #: ``join`` or ``follow`` — what the person wants to do.
+    action: str = "join"
+    #: The GFS to connect: its host name for the words, its address for
+    #: the Connect flow (both empty when none is known — the admin picks).
+    gfs: str = ""
+    gfs_url: str = ""
+    recipients: tuple[str, ...] = ()
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class AppRequested(DomainEvent):
     """A member asked for an app from the catalog ("Ask an admin", D4).
 

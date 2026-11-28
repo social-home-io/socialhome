@@ -196,15 +196,48 @@ class PublicSpaceJoinPreflightView(BaseView):
         )
 
     async def _default_gfs(self) -> str | None:
-        url = str(self.request.app[K.config_key].gfs_default_url or "").rstrip("/")
-        if not url:
-            return None
-        gfs = self.request.app.get(K.gfs_connection_service_key)
-        if gfs is not None:
-            for conn in await gfs.list_connections():
-                if conn.inbox_url.rstrip("/") == url:
-                    return None
-        return urlsplit(url).hostname or None
+        url = await _unconnected_default_gfs(self.request.app)
+        return (urlsplit(url).hostname or None) if url else None
+
+
+async def _unconnected_default_gfs(app: web.Application) -> str:
+    """The household's default GFS address while it is not connected to
+    it, else ``""``."""
+    url = str(app[K.config_key].gfs_default_url or "").rstrip("/")
+    if not url:
+        return ""
+    gfs = app.get(K.gfs_connection_service_key)
+    if gfs is not None:
+        for conn in await gfs.list_connections():
+            if conn.inbox_url.rstrip("/") == url:
+                return ""
+    return url
+
+
+class PublicSpaceAskAdminView(BaseView):
+    """``POST /api/public_spaces/{space_id}/ask-admin`` — owner 2026-11-28,
+    "Ask an admin of your household": joining (or following,
+    ``{"action": "follow"}``) a GFS space needs a connection the household
+    lacks and only an admin can connect it. Each household admin gets one
+    "Needs you" row naming who asked, the space and the GFS to connect (the
+    household's default, when it is not connected yet), opening the Connect
+    flow. ``202 {"asked": n}``; ``409 NOTHING_TO_ASK`` when the space needs
+    no new connection. Local only: nothing leaves the household."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        if ctx is None or ctx.user_id is None:
+            return web.json_response({"error": "unauthenticated"}, status=401)
+        body = await self.body()
+        url = await _unconnected_default_gfs(self.request.app)
+        asked = await self.svc(K.space_service_key).ask_admins_to_connect(
+            self.match("space_id"),
+            user_id=ctx.user_id,
+            action="follow" if body.get("action") == "follow" else "join",
+            gfs=(urlsplit(url).hostname or "") if url else "",
+            gfs_url=url,
+        )
+        return self._json({"asked": asked}, status=202)
 
 
 class PublicSpaceHideView(BaseView):

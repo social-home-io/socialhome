@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-from socialhome.app_keys import config_key
+from socialhome.app_keys import config_key, notification_delivery_key
 from socialhome.auth import sha256_token_hash
 from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
@@ -608,3 +608,50 @@ async def test_following_a_gfs_space_without_a_gfs_is_409(client, monkeypatch):
     )
     assert r.status == 409, await r.text()
     assert (await r.json())["error"]["code"] == "GFS_CONNECTION_REQUIRED"
+
+
+async def _seed_member_tok(db, username: str = "bob", user_id: str = "bob-id") -> str:
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
+        (username, user_id, username.capitalize()),
+    )
+    raw = f"{username}-raw-tok"
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        (f"tok-{username}", user_id, "t", sha256_token_hash(raw)),
+    )
+    return raw
+
+
+async def test_a_member_asks_the_admins_to_connect(client, monkeypatch):
+    """Owner 2026-11-28 — "Ask an admin of your household": a member who
+    can't connect asks; each admin gets one "Needs you" row opening the
+    Connect flow. A space that needs no connection asks nobody (409)."""
+    await _no_ring(monkeypatch)
+    await _global_listing(client)
+    tok = await _seed_member_tok(client._db)
+    r = await client.post(
+        "/api/public_spaces/sp-g/ask-admin",
+        json={"action": "join"},
+        headers=_auth(tok),
+    )
+    assert r.status == 202, await r.text()
+    assert (await r.json())["asked"] >= 1
+    await client.app[notification_delivery_key].drain()
+    rows = await client._db.fetchall(
+        "SELECT title, link_url FROM notifications WHERE type='space_gfs_asked'"
+    )
+    assert rows and all("Global" in row["title"] for row in rows)
+    assert all(row["link_url"].startswith("/connections") for row in rows)
+    r = await client.post(
+        "/api/public_spaces/sp-p/ask-admin",
+        json={"action": "join"},
+        headers=_auth(tok),
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "NOTHING_TO_ASK"
+
+
+async def test_asking_the_admins_needs_a_session(client):
+    r = await client.post("/api/public_spaces/sp-g/ask-admin", json={})
+    assert r.status == 401

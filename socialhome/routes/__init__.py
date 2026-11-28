@@ -342,6 +342,7 @@ from .polls import (
 )
 from .presence import PresenceCollectionView, PresenceLocationView
 from .public_spaces import (
+    PublicSpaceAskAdminView,
     PublicSpaceBlockInstanceView,
     PublicSpaceCollectionView,
     PublicSpaceHideView,
@@ -1514,6 +1515,10 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view(
         "/api/public_spaces/{space_id}/join-preflight",
         PublicSpaceJoinPreflightView,
+    )
+    app.router.add_view(
+        "/api/public_spaces/{space_id}/ask-admin",
+        PublicSpaceAskAdminView,
     )
     app.router.add_view("/api/public_spaces/{space_id}/hide", PublicSpaceHideView)
     app.router.add_view(

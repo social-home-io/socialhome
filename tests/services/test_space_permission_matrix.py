@@ -187,6 +187,9 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "request_join",  # any user may request; gate is on approval
         "request_join_remote",  # cross-instance request
         "follow_space",  # public-space follow-only
+        # Owner 2026-11-28 — "Ask an admin": local only, tells this household's
+        # admins; any member may ask (the gate is the admin's connect).
+        "ask_admins_to_connect",
         # v_97 — whether a join needs a GFS connection first: read only, for
         # the caller's own household (the preflight and the join guard).
         "gfs_join_readiness",

@@ -128,6 +128,7 @@ from ..domain.events import (
     CommentAdded,
     CommentDeleted,
     CommentUpdated,
+    GfsConnectionAsked,
     LocalSpaceInviteCreated,
     PeerProtoVersionRaised,
     PostDeleted,
@@ -246,6 +247,7 @@ from ..domain.space import (
     LocalAreaPublicOnlyError,
     LocalAreaUnavailableError,
     LocationRequiredError,
+    NothingToAskError,
     OutsideAreaError,
     OwnerBanError,
     OwnerStillActiveError,
@@ -1139,6 +1141,51 @@ class SpaceService(
         a join of a GFS-directory space needs a ring connection to
         (:meth:`gfs_join_readiness`)."""
         self._gfs_listing_sources = getter
+
+    async def ask_admins_to_connect(
+        self,
+        space_id: str,
+        *,
+        user_id: str,
+        action: str,
+        gfs: str,
+        gfs_url: str,
+    ) -> int:
+        """Owner 2026-11-28 — "Ask an admin of your household": *user_id*
+        wants to join (or follow, *action*) *space_id*, which needs a GFS
+        connection the household lacks (:meth:`gfs_join_readiness`); its
+        admins each get one "Needs you" row (:class:`GfsConnectionAsked`),
+        naming the space as this household knows it and *gfs*, opening the
+        Connect flow aimed at *gfs_url*. Raises :class:`NothingToAskError`
+        when no connection is needed. Local only. Returns how many admins
+        were asked."""
+        ready = await self.gfs_join_readiness(space_id)
+        if not ready.gfs_space or ready.connected:
+            raise NothingToAskError()
+        name = ""
+        space = await self._spaces.get(space_id)
+        if space is not None:
+            name = space.name
+        elif self._public_spaces is not None:
+            listing = await self._public_spaces.get(space_id)
+            name = str(getattr(listing, "name", "") or "")
+        admins = tuple(
+            u.user_id
+            for u in await self._users.list_active()
+            if u.is_admin and u.user_id != user_id
+        )
+        await self._bus.publish(
+            GfsConnectionAsked(
+                space_id=space_id,
+                space_name=name or space_id,
+                requested_by=user_id,
+                action="follow" if action == "follow" else "join",
+                gfs=gfs,
+                gfs_url=gfs_url,
+                recipients=admins,
+            )
+        )
+        return len(admins)
 
     async def gfs_join_readiness(self, space_id: str) -> GfsJoinReadiness:
         """v_97 — whether asking to join (or follow) ``space_id`` needs a
