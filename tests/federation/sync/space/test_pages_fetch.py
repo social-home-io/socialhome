@@ -48,6 +48,7 @@ from socialhome.sync_page import (
     row_key,
     sign_page,
 )
+from tests.federation.sync.space.receiver_fakes import _SYNC_REFS, _GfsMediaSink
 from tests.federation.sync.space.test_pages_households import (
     MEMBER,
     SEED,
@@ -2458,3 +2459,32 @@ async def _event_of(pages, page):
     )
     assert held is not None
     return await pages._page_event(SPACE, held)
+
+
+async def test_i1_a_verified_rows_descriptor_reaches_the_receiver(trio):
+    """Fable I1: the deliverer describes a verified row's files for the
+    requester (``media_refs``, review M2). The descriptor is not committed by
+    the leaf (the fetched bytes are checked against the committed hash), but
+    it must survive :func:`_verified_row` / :func:`_to_apply` — or a GFS-space
+    newcomer catching up from a member never learns where the file is."""
+    host, member, requester, host_pages, member_pages, r_pages, wire, _v = trio
+    sink = _GfsMediaSink()
+    requester.receiver.attach_gfs_media(sink)
+    await _picture_missed(host, member, requester)
+    await host_pages.seal_if_due(SPACE)
+    assert await _round(host_pages, member_pages, "s-m")
+
+    def describe(listings, rows):
+        for r in rows:
+            if r["row"].get("id") == "post-2":
+                name = r["row"]["media_url"].rsplit("/", 1)[-1]
+                described[name] = _SYNC_REFS["a.webp"]
+                r["row"]["media_refs"] = described
+        return listings, rows
+
+    described: dict = {}
+    wire.forge = describe
+    assert await _round(host_pages, r_pages, "s-r")
+    await wire.settle()
+    assert [(x[1], x[3]) for x in sink.received] == [(described, "post-2")]
+    assert len(sink.kept) == 1

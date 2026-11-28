@@ -419,7 +419,14 @@ def _verified_row(
         for url in file_refs(resource, kept)
         if (name := media_basename(url)) in files
     }
-    return resource, row_id, leaf[1], {**kept, **file_hashes_to_wire(named)}
+    applied = {**kept, **file_hashes_to_wire(named)}
+    # The deliverer's GFS descriptor (review M2 / Fable I1) is not committed
+    # by the leaf: it only says where the bytes are, and a fetched file is
+    # checked against the committed hash above before it is kept.
+    refs = record.get(MEDIA_REFS_FIELD)
+    if isinstance(refs, dict):
+        applied[MEDIA_REFS_FIELD] = refs
+    return resource, row_id, leaf[1], applied
 
 
 #: A delivered row that verified: ``(bucket, resource, row_id, leaf,
