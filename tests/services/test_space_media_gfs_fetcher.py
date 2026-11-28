@@ -270,8 +270,10 @@ class _Spaces:
 class _Fed:
     """``space_member_supports`` over fixed household versions."""
 
-    def __init__(self, versions, *, direct: bool = False):
+    def __init__(self, versions, *, direct: bool = False, own: str = "me"):
         self.versions = dict(versions)
+        #: This household's own id (``SPACE_HOST``: it owns the space).
+        self.own_instance_id = own
         #: This household reaches the host other than through a GFS (P10).
         self.direct = direct
 
@@ -293,6 +295,7 @@ def _fetcher(
     host_version=V92,
     direct=None,
     gfs_space=False,
+    host=False,
 ):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
@@ -304,7 +307,9 @@ def _fetcher(
         # By default a member reaches the host directly and a follower only
         # through its GFS — the path, not the role, decides (P10).
         federation=_Fed(
-            {SPACE_HOST: host_version}, direct=member if direct is None else direct
+            {SPACE_HOST: host_version},
+            direct=member if direct is None else direct,
+            own=SPACE_HOST if host else "me",
         ),
         media_dir=tmp_path,
     )
@@ -1619,3 +1624,123 @@ async def test_the_host_prefetches_every_file_of_a_held_submission(tmp_path):
     assert not f.fetching(name)
     f._inflight[(name, True)] = None  # a fetch running now
     assert f.fetching(name)
+
+
+async def _settle(f):
+    while f._tasks:
+        await asyncio.gather(*list(f._tasks))
+
+
+async def _public_space(space_id):
+    return _Space(space_id, SPACE_HOST, space_type=SpaceType.PUBLIC)
+
+
+async def test_the_host_of_a_gfs_space_keeps_every_described_file(tmp_path):
+    """v_97 (owner 2026-11-28) — the acting host of a GFS space fetches
+    EVERY described file on arrival, a file in pieces too, so it stays the
+    space's long-term holder; a member household does not."""
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    name = _sc("v.webm", data)
+    (tmp_path / "m").mkdir()
+    member = _fetcher(
+        tmp_path / "m", _Gfs(blobs), conns=[_Conn("g", "https://g")], gfs_space=True
+    )
+    await _recv_pieced(member, wire)
+    await _settle(member)
+    assert not (tmp_path / "m" / name).exists()
+    (tmp_path / "h").mkdir()
+    host = _fetcher(
+        tmp_path / "h",
+        _Gfs(blobs),
+        conns=[_Conn("g", "https://g")],
+        gfs_space=True,
+        host=True,
+    )
+    await _recv_pieced(host, wire)
+    await _settle(host)
+    assert (tmp_path / "h" / name).read_bytes() == data
+
+
+async def test_the_host_of_a_mesh_space_prefetches_only_pictures(tmp_path):
+    """A space without a channel tier (its files are pushed): its host's
+    keep is the plain one — no file in pieces is fetched on arrival."""
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    f = _fetcher(tmp_path, _Gfs(blobs), conns=[_Conn("g", "https://g")], host=True)
+    f._spaces.get = _public_space
+    await _recv_pieced(f, wire)
+    await _settle(f)
+    assert not (tmp_path / _sc("v.webm", data)).exists()
+
+
+async def test_the_host_archive_is_bounded_by_bytes(tmp_path, monkeypatch, caplog):
+    """The host's archive queue waits at most MAX_HOST_ARCHIVE_BYTES: a
+    file past it is left for a view, with a WARNING."""
+    monkeypatch.setattr(fetch_mod, "MAX_HOST_ARCHIVE_BYTES", BIG_SIZE - 1)
+    data = os.urandom(BIG_SIZE)
+    wire, blobs, _addrs = _pieced("v.webm", data)
+    f = _fetcher(
+        tmp_path,
+        _Gfs(blobs),
+        conns=[_Conn("g", "https://g")],
+        gfs_space=True,
+        host=True,
+    )
+    with caplog.at_level("WARNING"):
+        await _recv_pieced(f, wire)
+        await _settle(f)
+    assert not (tmp_path / _sc("v.webm", data)).exists()
+    assert "archive" in caplog.text
+
+
+async def test_the_host_archive_runs_a_bounded_number_at_once(tmp_path, monkeypatch):
+    """At most HOST_ARCHIVE_CONCURRENCY archive fetches run at once; the
+    rest wait in the queue and are all fetched."""
+    monkeypatch.setattr(fetch_mod, "HOST_ARCHIVE_CONCURRENCY", 1)
+
+    class _Counting(_Gfs):
+        running = 0
+        peak = 0
+
+        async def fetch_space_media(self, conn, blob_id, *, max_bytes, timeout_s):
+            type(self).running += 1
+            type(self).peak = max(type(self).peak, type(self).running)
+            try:
+                await asyncio.sleep(0.01)
+                return await super().fetch_space_media(
+                    conn, blob_id, max_bytes=max_bytes, timeout_s=timeout_s
+                )
+            finally:
+                type(self).running -= 1
+
+    gfs = _Counting({})
+    f = _fetcher(
+        tmp_path, gfs, conns=[_Conn("g", "https://g")], gfs_space=True, host=True
+    )
+    for i in range(4):
+        name = f"v{i}.webm"
+        blob = _blob(name, b"x" * 10)
+        gfs.blobs[_addr(blob)] = blob
+        await _recv(f, SPACE, _wire(name, blob), [f"api/media/{name}"])
+    await _settle(f)
+    assert _Counting.peak == 1
+    assert len(list(tmp_path.glob("sg-*"))) == 4
+
+
+async def test_the_host_archive_retries_a_miss_then_warns(
+    tmp_path, monkeypatch, caplog
+):
+    """A file no GFS holds yet (its upload still running) is asked for
+    again after HOST_ARCHIVE_RETRY_DELAYS_S; after the last, a WARNING."""
+    monkeypatch.setattr(fetch_mod, "HOST_ARCHIVE_RETRY_DELAYS_S", (0.0, 0.0))
+    gfs = _Gfs({})
+    f = _fetcher(
+        tmp_path, gfs, conns=[_Conn("g", "https://g")], gfs_space=True, host=True
+    )
+    blob = _blob("v.webm", b"y" * 10)
+    with caplog.at_level("WARNING"):
+        await _recv(f, SPACE, _wire("v.webm", blob), ["api/media/v.webm"])
+        await _settle(f)
+    assert [u for u, _b in gfs.fetches].count("https://g") == 3
+    assert "holds no copy" in caplog.text

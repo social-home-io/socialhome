@@ -26,6 +26,17 @@ This service:
   waiting and :data:`MAX_PREFETCH_PER_SPACE` of one space (the rest are
   fetched when viewed); a space whose last :data:`MAX_SPACE_PREFETCH_MISSES`
   prefetches found nothing tries once, without retries;
+* **archives** on the acting host of a GFS space (v_97, owner 2026-11-28):
+  the household that owns the space (or a delegated admin household that
+  acts as its host) fetches EVERY described file on arrival — videos and
+  files in pieces too, the one exception to "big files are never
+  prefetched" — so it stays the space's long-term holder once the GFS
+  cache let the blobs go. A bounded background queue
+  (:data:`HOST_ARCHIVE_CONCURRENCY` at a time, at most
+  :data:`MAX_HOST_ARCHIVE_PENDING` files and :data:`MAX_HOST_ARCHIVE_BYTES`
+  waiting); a file no GFS holds yet is asked for again after
+  :data:`HOST_ARCHIVE_RETRY_DELAYS_S`, then a WARNING. A file past the
+  bounds, or still queued at a restart, is fetched when someone views it;
 * **fetches on view** (:meth:`SpaceMediaGfsFetcher.ensure_local`, called by
   ``GET /api/media/{filename}`` for a missing file): concurrent requests for
   one file share one fetch, bounded by a timeout.
@@ -83,7 +94,7 @@ import os
 import pathlib
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Protocol
@@ -117,6 +128,7 @@ from ..domain.space_media_ref import (
     parse_media_refs,
     space_page_media_name,
 )
+from ..federation.host_equivalence import serves_as_host
 from ..moment_public_media import MAX_BLOB_BYTES
 from ..space_media_hint import SpaceMediaLocator, seal_space_media_hint
 from ..space_media_seal import (
@@ -168,6 +180,16 @@ MAX_PREFETCH_PER_SPACE: int = 20
 #: lands. Views fetch as always.
 MAX_SPACE_PREFETCH_MISSES: int = 5
 
+#: v_97 (owner 2026-11-28) — the acting host of a GFS space archives every
+#: described file: this many fetches at once, at most this many files and
+#: bytes waiting (past them a file waits for a view, with a WARNING), and a
+#: file no GFS holds yet (its upload — a long video's pieces — still
+#: running) asked for again after these delays.
+HOST_ARCHIVE_CONCURRENCY: int = 2
+MAX_HOST_ARCHIVE_PENDING: int = 4096
+MAX_HOST_ARCHIVE_BYTES: int = 4 * 1024 * 1024 * 1024
+HOST_ARCHIVE_RETRY_DELAYS_S: tuple[float, ...] = (30.0, 300.0, 1800.0)
+
 #: GFS fetches running at once, views and prefetches together.
 MAX_CONCURRENT_FETCHES: int = 6
 
@@ -212,6 +234,8 @@ def _monotonic() -> float:
 
 
 class _MemberVersions(Protocol):
+    own_instance_id: str
+
     """The federation service's version answer (v_92), and whether this
     household reaches a space's host other than through a GFS (P10: the
     media fetch path is decided by path, never by role)."""
@@ -234,6 +258,9 @@ class SpaceMediaGfsFetcher:
 
     __slots__ = (
         "_active_parts",
+        "_archive_bytes",
+        "_archive_queue",
+        "_archive_workers",
         "_channels",
         "_crypto",
         "_dir",
@@ -297,6 +324,11 @@ class SpaceMediaGfsFetcher:
         #: v_97 — part directories of the pieced fetches running now (never
         #: trimmed by the part cap).
         self._active_parts: set[pathlib.Path] = set()
+        #: v_97 — the acting host's archive queue: (local name, size,
+        #: attempts so far), the bytes waiting in it and its workers.
+        self._archive_queue: deque[tuple[str, int, int]] = deque()
+        self._archive_bytes = 0
+        self._archive_workers = 0
 
     def attach_channels(self, channels: _ChannelRing) -> None:
         """v_97 — a GFS space's files come only from the GFS cache: the
@@ -547,9 +579,10 @@ class SpaceMediaGfsFetcher:
         prefetch_all: bool = False,
     ) -> list[SpaceMediaRef]:
         """Keep *loc*'s new rows — call it once the item is stored — and
-        prefetch their pictures (*prefetch_all*: every file, a file in
-        pieces too — the space's host holding a submission it will
-        release, v_97). Never raises."""
+        prefetch their pictures. The acting host of a GFS space archives
+        every file instead, a file in pieces too (v_97, owner 2026-11-28),
+        as does *prefetch_all* (the space's host holding a submission it
+        will release). Never raises."""
         if not loc.refs:
             return []
         try:
@@ -557,14 +590,96 @@ class SpaceMediaGfsFetcher:
         except Exception:
             log.warning("space media refs not stored", exc_info=True)
             return []
+        archives: dict[str, bool] = {}
         for ref in loc.refs:
             # A newer epoch may have moved the row: ask the GFS again.
             self._misses.pop(ref.local_name, None)
-            if prefetch_all or (
-                prefetch and not ref.pieced and _is_picture(ref.local_name)
-            ):
+            if ref.space_id not in archives:
+                archives[ref.space_id] = prefetch_all or await self._archives(
+                    ref.space_id
+                )
+            if archives[ref.space_id]:
+                self._archive(ref.local_name, ref.size)
+            elif prefetch and not ref.pieced and _is_picture(ref.local_name):
                 self._prefetch(ref.local_name, ref.space_id)
         return list(loc.refs)
+
+    async def _archives(self, space_id: str) -> bool:
+        """Whether this household keeps every file of *space_id*: it acts
+        as the host of a GFS space (:func:`serves_as_host`). ``False`` on a
+        read failure — the plain prefetch then."""
+        try:
+            space = await self._spaces.get(space_id)
+            if space is None or not channel_on(space):
+                return False
+            own = str(getattr(self._federation, "own_instance_id", "") or "")
+            return await serves_as_host(self._spaces, space, own_instance_id=own)
+        except Exception:
+            log.warning("space %s: host role not read", space_id, exc_info=True)
+            return False
+
+    def _archive(self, filename: str, size: int, attempts: int = 0) -> None:
+        """Queue *filename* for the host's archive (bounded; never raises)."""
+        if (
+            len(self._archive_queue) >= MAX_HOST_ARCHIVE_PENDING
+            or self._archive_bytes + max(size, 0) > MAX_HOST_ARCHIVE_BYTES
+        ):
+            log.warning(
+                "space media host archive full (%d files, %d bytes waiting) — "
+                "%s is fetched when someone views it",
+                len(self._archive_queue),
+                self._archive_bytes,
+                filename,
+            )
+            return
+        self._archive_queue.append((filename, max(size, 0), attempts))
+        self._archive_bytes += max(size, 0)
+        if self._archive_workers < HOST_ARCHIVE_CONCURRENCY:
+            self._archive_workers += 1
+            task = asyncio.create_task(self._archive_worker())
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def _archive_worker(self) -> None:
+        try:
+            while self._archive_queue:
+                filename, size, attempts = self._archive_queue.popleft()
+                self._archive_bytes -= size
+                try:
+                    outcome = await self._fetch_task(filename)
+                except Exception:
+                    log.warning(
+                        "space media archive of %s failed", filename, exc_info=True
+                    )
+                    continue
+                if outcome != _MISS:
+                    continue
+                if attempts < len(HOST_ARCHIVE_RETRY_DELAYS_S):
+                    task = asyncio.create_task(
+                        self._archive_later(
+                            filename,
+                            size,
+                            attempts + 1,
+                            HOST_ARCHIVE_RETRY_DELAYS_S[attempts],
+                        )
+                    )
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+                else:
+                    log.warning(
+                        "space media %s: the space's host holds no copy — no GFS "
+                        "held it after %d tries; fetched when someone views it",
+                        filename,
+                        attempts + 1,
+                    )
+        finally:
+            self._archive_workers -= 1
+
+    async def _archive_later(
+        self, filename: str, size: int, attempts: int, delay: float
+    ) -> None:
+        await asyncio.sleep(delay)
+        self._archive(filename, size, attempts)
 
     # ── Fetching ─────────────────────────────────────────────────────────
 
