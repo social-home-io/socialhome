@@ -161,6 +161,11 @@ class CommentDeleted(DomainEvent):
     #: a delete applied from a peer.
     actor_user_id: str = ""
     author_user_id: str = ""
+    #: A peer's delete that reached us on the per-household path, not as a
+    #: channel item (owner 2026-11-28, F6): an acting host re-publishes it
+    #: on its GFS space's channel — a follower with its switches off holds
+    #: no channel cert to publish its own delete there.
+    off_channel: bool = False
 
 
 # ─── Spaces ───────────────────────────────────────────────────────────────

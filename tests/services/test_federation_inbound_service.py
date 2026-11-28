@@ -6,6 +6,7 @@ import base64
 import io
 import logging
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -4574,6 +4575,31 @@ async def test_same_space_comment_lifecycle_unchanged(db, bus, inbound, two_spac
     assert (await _comment_row(db, "cmt-new"))["deleted"] == 1
     assert (await _post_row(db, "post-b"))["comment_count"] == 0
     assert [c.comment_id for c in removed] == ["cmt-new"]
+
+
+@pytest.mark.parametrize(
+    ("msg_id", "off_channel"), [("m-1", True), ("item:i-1", False)]
+)
+async def test_f6_a_delete_says_whether_it_came_off_the_channel(
+    db, bus, inbound, two_spaces, msg_id, off_channel
+):
+    """Owner 2026-11-28 (F6): the applied delete tells the outbound bridge
+    whether it reached us on the per-household path (an acting host then
+    re-publishes it on the GFS space's channel) or as a channel item (every
+    seat has it already) — and whose comment it was."""
+    from socialhome.domain.events import CommentDeleted
+
+    removed: list[CommentDeleted] = []
+    bus.subscribe(CommentDeleted, removed.append)
+    event = _event(
+        FederationEventType.SPACE_COMMENT_DELETED,
+        {"comment_id": "cmt-b", "post_id": "post-b"},
+        space_id="sp-b",
+    )
+    await inbound._on_space_comment_deleted(replace(event, msg_id=msg_id))
+    ((done,),) = [removed]
+    assert (done.off_channel, done.author_user_id) == (off_channel, "u-b")
+    assert done.origin_instance_id == "peer-a"
 
 
 async def test_replayed_comment_delete_lowers_the_real_parent_once(

@@ -41,6 +41,7 @@ def _evt(
     space_id: str | None = None,
 ):
     return SimpleNamespace(
+        msg_id="msg-1",
         event_type=event_type,
         payload=payload,
         from_instance=from_instance,

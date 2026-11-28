@@ -83,6 +83,9 @@ def test_never_drop_membership():
         # revoked household still holds.
         FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.UNPAIR,
+        # Owner 2026-11-28 (F6) — an author's own comment delete: a follower
+        # without a channel cert sends it to the acting host on this path.
+        FederationEventType.SPACE_COMMENT_DELETED,
     }
     # Exact equality — catches an accidentally dropped OR added member, so the
     # set stays the deliberate §4.4.7 security/structural list.

@@ -57,6 +57,9 @@ class _FakeSpace:
     #: A pure membership gate now — it has no say over the relay hint.
     join_mode: JoinMode = JoinMode.OPEN
     features: _FakeFeatures = field(default_factory=_FakeFeatures)
+    #: The household that hosts it — this one (``inst-self``) by default.
+    owner_instance_id: str = "inst-self"
+    id: str = "sp-1"
 
 
 @dataclass
@@ -1326,6 +1329,73 @@ async def test_own_comment_edits_and_deletes_are_scheduled_others_are_not():
     assert [s[2] for s in member.scheduled] == ["comment_edit", "comment_delete"]
     edit = member.scheduled[0][3]
     assert (edit["content"], edit["comment_type"]) == ("changed", "text")
+
+
+def _host_setup(*, owner="inst-self", channel=True):
+    from socialhome.domain.events import CommentDeleted
+
+    bus = EventBus()
+    federation = AsyncMock()
+    keypair = generate_identity_keypair()
+    outbound = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo(
+            {"sp-1": _FakeSpace(space_type=SpaceType.GLOBAL, owner_instance_id=owner)}
+        ),
+        identity=(keypair, "inst-self"),
+    )
+    outbound.attach_member_gfs(_ItemGfs(channel=channel))
+
+    def deleted(*, off_channel):
+        return CommentDeleted(
+            post_id="post-1",
+            comment_id="c-1",
+            space_id="sp-1",
+            origin_instance_id="follower-inst",
+            author_user_id="fol-user",
+            off_channel=off_channel,
+        )
+
+    return bus, federation, deleted
+
+
+@pytest.mark.security
+async def test_f6_the_host_republishes_a_followers_own_delete_on_the_channel():
+    """Owner 2026-11-28 (F6): a follower whose switches are off holds no
+    channel cert, so its own comment delete reaches the acting host on the
+    per-household path; the host (which applied it after the authorship
+    check) re-publishes it on the GFS space's channel under its own cert —
+    the item sealer of ``broadcast_to_space_members``."""
+    bus, federation, deleted = _host_setup()
+    await bus.publish(deleted(off_channel=True))
+    federation.broadcast_to_space_members.assert_awaited_once()
+    args = federation.broadcast_to_space_members.await_args.args
+    assert args[0] == "sp-1"
+    assert args[1] is FederationEventType.SPACE_COMMENT_DELETED
+    assert args[2] == {
+        "comment_id": "c-1",
+        "id": "c-1",
+        "post_id": "post-1",
+        "space_id": "sp-1",
+        "author": "fol-user",
+    }
+
+
+@pytest.mark.parametrize(
+    ("owner", "channel", "off_channel"),
+    [
+        ("inst-self", True, False),  # it came over the channel: every seat has it
+        ("other-host", True, True),  # not the host: not ours to re-publish
+        ("inst-self", False, True),  # a mesh space: the sender reached everyone
+    ],
+)
+async def test_f6_only_an_acting_host_republishes_an_off_channel_delete(
+    owner, channel, off_channel
+):
+    bus, federation, deleted = _host_setup(owner=owner, channel=channel)
+    await bus.publish(deleted(off_channel=off_channel))
+    federation.broadcast_to_space_members.assert_not_awaited()
 
 
 async def test_own_post_edits_and_deletes_are_scheduled():

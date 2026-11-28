@@ -159,6 +159,7 @@ from ..federation.pending_parent_buffer import (
     PendingParentBuffer,
 )
 from ..federation.space_authorship import SpaceAuthorship, payload_actor
+from ..federation.space_item_dispatch import ITEM_MSG_ID_PREFIX
 from ..federation.space_scope import (
     log_cross_space_refusal,
     log_not_applied,
@@ -3286,6 +3287,10 @@ class FederationInboundService(ProtectionGateMixin):
                 comment_id=comment_id,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
+                author_user_id=deleted.author if deleted is not None else "",
+                # F6: an acting host re-publishes one that did not come over
+                # the GFS space's channel.
+                off_channel=not event.msg_id.startswith(ITEM_MSG_ID_PREFIX),
             ),
         )
 

@@ -884,6 +884,30 @@ async def test_a_gfs_space_seal_failure_is_the_authors_never_the_legacy_path(
 
 
 @pytest.mark.security
+async def test_f6_a_comment_delete_without_a_cert_goes_to_the_acting_hosts(world):
+    """Owner 2026-11-28 (F6): a follower whose switches are off holds no
+    cert for the epoch, yet may always delete its own comment. Its delete is
+    not a failure its author sees: it goes to the acting hosts on the
+    per-household path (``to_hosts``), which re-publish it on the channel.
+    Nothing is queued for the channel and nothing is marked unsent."""
+    svc = await _gfs_space(world)
+    world["svc"]._writer_certs.scope = None
+
+    async def none(*_a, **_k):
+        return None
+
+    world["svc"]._writer_certs.issue_for_instance = none
+    sealed = await svc.seal_event_item(
+        SPACE_ID,
+        FederationEventType.SPACE_COMMENT_DELETED,
+        {"space_id": SPACE_ID, "comment_id": "c-1", "author": "anna"},
+    )
+    assert sealed is not None and sealed.via_channel and sealed.to_hosts
+    assert sealed.item == ""
+    assert world["outbox"].queued == [] and world["outbox"].failed == []
+
+
+@pytest.mark.security
 async def test_an_exception_while_sealing_a_gfs_space_item_is_surfaced(
     world, caplog, monkeypatch
 ):

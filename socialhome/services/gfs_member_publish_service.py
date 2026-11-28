@@ -586,6 +586,19 @@ class GfsMemberPublishService:
             )
             return await self._unsent(space_id, event_type, author)
         sealed = await self._seal_event(space_id, event_type, payload)
+        if sealed is None and event_type is FederationEventType.SPACE_COMMENT_DELETED:
+            # Owner 2026-11-28 (F6): an author may always delete their own
+            # comment — a follower whose switches are off too, though it
+            # holds no channel cert. The acting hosts get it on the
+            # per-household path and re-publish it under their own cert.
+            log.info(
+                "space items: no channel cert in GFS space %s — the own comment"
+                " delete goes to the acting hosts",
+                space_id,
+            )
+            return SealedItem(
+                space_id=space_id, epoch=0, item="", via_channel=True, to_hosts=True
+            )
         if sealed is None:
             log.warning(
                 "space items: no writer cert or content key for the current"

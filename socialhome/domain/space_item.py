@@ -338,6 +338,10 @@ class SealedItem:
     #: names it to a v_97 member (:data:`LEGACY_TWIN_FIELD`), which then
     #: applies one of the two (M10).
     item_id: str = ""
+    #: Owner 2026-11-28 (F6): not sealed — a follower's own comment delete
+    #: with no channel cert. The event goes to the acting hosts on the
+    #: per-household path; they re-publish it on the channel.
+    to_hosts: bool = False
 
     def wire(self) -> dict:
         return {"space_id": self.space_id, "epoch": self.epoch, "item": self.item}

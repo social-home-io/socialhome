@@ -4270,6 +4270,12 @@ class FederationService:
                 (twins_to if sealed.item_id else legacy_to).append(iid)
             elif not sealed.via_channel:
                 items_to.append(iid)
+        if sealed.to_hosts:
+            # Owner 2026-11-28 (F6): a follower's own comment delete it could
+            # not seal goes to the acting hosts, who re-publish it on the
+            # channel — the per-household path, NEVER_DROP.
+            hosts = await self._hosts_elsewhere(space_id)
+            legacy_to.extend(i for i in audience if i in hosts and i not in legacy_to)
         parts: list[BroadcastResult] = []
         if items_to:
             parts.append(

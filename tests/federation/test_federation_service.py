@@ -7647,6 +7647,34 @@ async def test_a_gfs_space_item_that_failed_goes_to_no_v97_household():
     assert kw["only_instances"] == ["b96"]
 
 
+@pytest.mark.security
+async def test_f6_a_delete_for_the_hosts_goes_to_them_and_the_old_members_only():
+    """Owner 2026-11-28 (F6): a follower's own comment delete it could not
+    seal (no cert with the switches off) goes as the event to the acting
+    hosts only — they re-publish it on the channel — plus, as always, to
+    the members below v_97. No other v_97 household gets it."""
+    sealed = SealedItem(
+        space_id="sp", epoch=0, item="", via_channel=True, to_hosts=True
+    )
+    fed = _ItemFed(["me", "host", "a97", "b96"], {"host", "a97"}, sealed)
+
+    async def hosts(space_id):
+        return frozenset({"host"})
+
+    fed._hosts_elsewhere = hosts
+    await fed._broadcast_as_item(
+        "sp",
+        FederationEventType.SPACE_COMMENT_DELETED,
+        {"space_id": "sp", "comment_id": "c-1"},
+        min_proto_version=None,
+        legacy_payload=None,
+        legacy_below=None,
+    )
+    ((event_type, _payload, kw),) = fed.calls
+    assert event_type is FederationEventType.SPACE_COMMENT_DELETED
+    assert sorted(kw["only_instances"]) == ["b96", "host"]
+
+
 async def test_without_a_seal_the_caller_sends_the_event_to_everyone():
     fed = _ItemFed(["a97"], {"a97"}, None)
     assert (

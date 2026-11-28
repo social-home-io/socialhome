@@ -57,6 +57,10 @@ NEVER_DROP: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.SPACE_DISSOLVED,
         FederationEventType.UNPAIR,
+        # Owner 2026-11-28 (F6): an author may always delete their own
+        # comment. A follower without a channel cert sends it to the acting
+        # host on the per-household path, which must not give up on it.
+        FederationEventType.SPACE_COMMENT_DELETED,
     }
 )
 

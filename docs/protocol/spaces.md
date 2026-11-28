@@ -725,9 +725,15 @@ switches there either. Both hold on every path, `SPACE_ROUTED` included.
     is needed, so this works after the rotation that retired it;
   - **the channel:** a `reader` cert still held (comment off, react on)
     carries `comment_delete` whatever the switches say
-    (`reader_cert_permits`); a follower holding no cert any more reaches
-    the members over federation, and the owner relays the removal onto
-    the channel as it does every applied removal;
+    (`reader_cert_permits`). A follower holding no cert any more (v_97, owner
+    2026-11-28) sends its `SPACE_COMMENT_DELETED` to the **acting hosts
+    only**, on the per-household path (direct or mailbox; the event is
+    `NEVER_DROP`, so the outbox never gives up on it). An acting host checks
+    authorship as above, applies it and re-publishes the delete on the
+    channel as its own item (its content authority admits it on every
+    seat) — only a delete that did not itself come over the channel, and
+    only in a GFS space. Cost: one small event to each acting host (1–2)
+    and one channel item, per delete;
   - **sync:** a streamed `comments_deleted` record is the live delete's
     rule (the author's household, any live seat);
   - **locally:** `DELETE …/comments/{cid}` needs a seat of any role for

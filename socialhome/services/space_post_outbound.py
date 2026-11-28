@@ -56,6 +56,7 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_REMOVE,
 )
 from ..domain.space_media_fields import item_media_urls
+from ..federation.host_equivalence import serves_as_host
 from ..infrastructure.event_bus import EventBus
 from .file_hashes_sender import FileHashesMixin
 from .moderation_release import current_release, with_release
@@ -194,6 +195,24 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         channel ourselves — v_97: in every GFS space, as one space item
         through the durable queue, whoever the author is. Never raises."""
         return await self._gfs_space(space_id)
+
+    async def _republishes(self, space_id: str) -> bool:
+        """Owner 2026-11-28 (F6): whether a peer's delete that reached us
+        on the per-household path is ours to re-publish on the channel —
+        we act as the host of this GFS space. A follower with its switches
+        off holds no channel cert, so its own comment delete comes to the
+        acting hosts that way; every other seat reads the channel. Never
+        raises (a failed lookup re-publishes nothing)."""
+        if not await self._gfs_space(space_id):
+            return False
+        try:
+            space = await self._spaces.get(space_id)
+            return await serves_as_host(
+                self._spaces, space, own_instance_id=self._own_instance_id
+            )
+        except Exception:
+            log.exception("host check failed for space=%s", space_id)
+            return False
 
     async def _gfs_space(self, space_id: str | None) -> bool:
         """Whether *space_id* is a GFS space here (v_97): its posts and
@@ -878,7 +897,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     async def _on_comment_deleted(self, event: CommentDeleted) -> None:
         if not event.space_id:
             return
-        if event.origin_instance_id is not None:
+        if event.origin_instance_id is not None and not (
+            event.off_channel and await self._republishes(event.space_id)
+        ):
             return
         payload = {
             "comment_id": event.comment_id,
