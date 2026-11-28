@@ -2159,9 +2159,11 @@ class _Direct:
         self.dir = tmp_path
         self.holds = holds or {}
         self.asked: list[str] = []
+        self.views: list[bool] = []
 
-    async def fetch(self, ref):
+    async def fetch(self, ref, *, view=False):
         self.asked.append(ref.local_name)
+        self.views.append(view)
         data = self.holds.get(ref.local_name)
         if data is None:
             return False
@@ -2239,6 +2241,7 @@ async def test_a_view_the_cache_misses_goes_direct_before_on_demand(tmp_path):
     await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     assert await f.ensure_local(_L("a.webp"))
     assert len(gfs.fetches) >= 1 and direct.asked == [_L("a.webp")]
+    assert direct.views == [True]  # Fable A7: hosts only
 
 
 async def test_the_host_archive_scan_fetches_direct(tmp_path):

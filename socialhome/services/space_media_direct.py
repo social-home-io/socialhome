@@ -168,14 +168,16 @@ class SpaceMediaDirect:
         #: (holder, space) → (window start, files, bytes) asked of it.
         self._asked: dict[tuple[str, str], tuple[float, int, int]] = {}
 
-    async def fetch(self, ref: SpaceMediaRef) -> bool:
+    async def fetch(self, ref: SpaceMediaRef, *, view: bool = False) -> bool:
         """Whether *ref*'s file is here now, fetched from a holder over a
-        direct link. Never raises."""
+        direct link. *view*: a person is looking — only the households
+        acting as the space's host are asked (Fable A7: the author never
+        learns who opened its file). Never raises."""
         path = media_file_path(self._dir, ref.local_name)
         if path is None or not is_space_content_media_name(ref.local_name):
             return False  # asked by its content name only
         try:
-            holders = await self._holders(ref)
+            holders = await self._holders(ref, view=view)
         except Exception:
             log.warning(
                 "space media %s: holders not read", ref.local_name, exc_info=True
@@ -195,9 +197,9 @@ class SpaceMediaDirect:
             )
             return False
 
-    async def _holders(self, ref: SpaceMediaRef) -> list[str]:
-        """Who may ship it: the acting hosts (owner first), then the
-        household that delivered the item."""
+    async def _holders(self, ref: SpaceMediaRef, *, view: bool) -> list[str]:
+        """Who may ship it: the acting hosts (owner first), then — not for
+        a view — the household that delivered the item."""
         own = self._fed.own_instance_id
         space = await self._spaces.get(ref.space_id)
         found: list[str] = []
@@ -207,7 +209,8 @@ class SpaceMediaDirect:
                     self._spaces, self._seats, space, own_instance_id=own
                 )
             )
-        found.append(ref.origin)
+        if not view:
+            found.append(ref.origin)
         out: list[str] = []
         for iid in found:
             if iid and iid != own and iid not in out:

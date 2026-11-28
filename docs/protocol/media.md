@@ -1150,7 +1150,7 @@ the push.
   | A live item's file a reader syncs or views while the cache holds it | the GFS cache |
   | A catch-up's old file (a newcomer's gallery, upcoming covers, active listings, current pages) | **direct** from a holder → the GFS cache if it still holds it (never v_83 without a view) |
   | The host archive's scan (a file it missed) | **direct** from a holder → the GFS cache |
-  | A view the GFS cache missed (it let the file go) | the cache → **direct** from a holder → v_83 on demand |
+  | A view the GFS cache missed (it let the file go) | the cache → **direct** from an acting host (never the author: it must not learn who viewed) → v_83 on demand |
   | A big file in pieces (> 8 MiB) | the GFS cache → v_83 on demand (never direct: over the holder's budget) |
   | A mesh space (no channel) | unchanged: pushes, `SPACE_MEDIA_WANTED` to the host / helpers |
 

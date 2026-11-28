@@ -230,3 +230,11 @@ async def test_the_gate_fails_closed():
             raise RuntimeError("db gone")
 
     assert not await shares_a_seated_space(_Broken(set()), _Seats(set()), "peer")
+
+
+async def test_a7_a_view_asks_the_acting_hosts_only(tmp_path):
+    """Fable A7: a person looking at a file never tells its author — a
+    view asks only the households acting as the space's host."""
+    fed = _Fed(tmp_path, links={AUTHOR}, delivers={AUTHOR})
+    assert not await _direct(tmp_path, fed).fetch(_ref(), view=True)
+    assert AUTHOR not in fed.opened
