@@ -328,7 +328,15 @@ table below.
   where someone looks: current pins, the last chat) and the household runs
   the §25.6 catch-up (`SpaceSyncScheduler.sync_now`: the acting hosts,
   incremental) — at most once per 10 minutes per space, a later one
-  deferred, never dropped.
+  deferred, never dropped, and only where someone looks or on a household
+  acting as host: a gap nobody looks at is owed and runs when a person
+  opens the space (the periodic incremental sync covers it meanwhile).
+  Why (final review I1): a non-watcher's cursor moves only on a fetch, so
+  in a busy space (300 items/min) it is 4 500 behind after one 15-minute
+  heads ping — catching up at every ping would make ~9 500 of 10 000
+  households send a BEGIN to the hosts every 15 minutes (≈ 10/s), and one
+  follower publishing 240/min could keep that going. Owed instead: one
+  catch-up per household that opens the space.
 - **Several GFSs.** Each GFS has its own ring, seq and ring_id; a GFS where
   the household has no cursor while another GFS of the channel has one
   starts 2 000 back (failover); `item_id` dedupes.

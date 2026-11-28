@@ -1291,8 +1291,12 @@ that concedes, exactly:
    envelope at the moment of a channel publish, so it can link "this channel
    item mentioned someone behind this mailbox". It never sees who or what.
 7. **The ring keeps ciphertext for up to 24 h** (15 min for ephemeral
-   items), one copy per channel (not per seat), bounded per channel (64 MiB,
-   32 768 items) and per server (8 GiB). Until v_97 a GFS queued a copy per
+   items), one copy per channel (not per seat), bounded per channel and per
+   server (8 GiB). The owner signed off 64 MiB / 32 768 items per channel;
+   the later owner instruction to size every limit for an active
+   10 000-seat space (2026-11-27) raised the shipped defaults to 256 MiB /
+   131 072 items per channel (`ChannelRingConfig`; still 24 h at most,
+   oldest dropped first) — flagged for a fresh sign-off in the PR. Until v_97 a GFS queued a copy per
    offline seat for 24 h; it now keeps one per channel for everyone.
 
 What does not change: the GFS reads nothing it relays and cannot forge an

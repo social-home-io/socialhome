@@ -1679,8 +1679,9 @@ from __future__ import annotations
 #:   ``SPACE_ITEM`` (a mesh space's item to a member household) and
 #:   ``SPACE_MENTION_NOTE`` (the same item to a mentioned household). A GFS
 #:   space carries its items only on its channel (GFS capability
-#:   ``channel_ring``). No record change, no ``SYNC_RECORD_LINES`` entry, no
-#:   page suite bump: an item stores the very rows its event stores.
+#:   ``channel_ring``). An item stores the very rows its event stores (no
+#:   page suite bump); v_97 is a ``SYNC_RECORD_LINES`` entry because a GFS
+#:   space's streamed records now carry their files' descriptors.
 #:   **Fallback**: a member household below v_97 gets the legacy event
 #:   (``broadcast_to_space_members`` splits the audience) for one release
 #:   window; v_98 removes the legacy fan-out. Space-scoped. Labelled

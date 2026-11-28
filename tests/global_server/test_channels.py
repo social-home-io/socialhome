@@ -168,7 +168,12 @@ def _subscribe_body(ch: _Channel, h: _Household, epoch: int, *, passport=None) -
 
 
 def _anon_body(
-    ch: _Channel, epoch: int, *, writer_seed: bytes | None = None, ts: str = ""
+    ch: _Channel,
+    epoch: int,
+    *,
+    writer_seed: bytes | None = None,
+    ts: str = "",
+    ring_class: str | None = None,
 ) -> dict:
     grant = ch.writer(epoch)
     seed = writer_seed or b64url_decode(grant.writer_seed)
@@ -181,6 +186,7 @@ def _anon_body(
         payload=CT,
         writer_sig="",
         writer_sig_suite="ed25519",
+        ring_class=ring_class,
     )
     return sign_publish_anon(req, writer_seed=seed).to_wire()
 
@@ -1244,3 +1250,20 @@ async def test_a_refill_racing_a_seat_change_is_not_kept(gfs, monkeypatch) -> No
     first = await svc.audience_targets(gfs.ch.id)
     assert gfs.other.instance_id not in first
     assert gfs.other.instance_id in await svc.audience_targets(gfs.ch.id)
+
+
+@pytest.mark.security
+async def test_i2_a_v96_seat_never_slows_a_ring_publish(gfs) -> None:
+    """Final review I2: a ring publish is never pushed to or queued for a
+    v_96 seat, so one such seat (an honest old household, or a follower
+    saying a v_96 hello) never puts the channel on the v_96 cap."""
+    await _ready(gfs, epoch=3)
+    await _seat_many(gfs, 1)  # recently seen, no channel_ring
+    svc = gfs.app_[gfs_channel_service_key]
+    for i in range(CHANNEL_PUBLISH_MAX_PER_MINUTE_LEGACY + 5):
+        await svc.publish_anon(
+            ChannelPublishAnonRequest.from_wire(
+                _anon_body(gfs.ch, 3, ring_class="durable")
+            ),
+            client_ip=f"10.{i // 50}.0.{i % 50}",
+        )

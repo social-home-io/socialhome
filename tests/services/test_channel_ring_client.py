@@ -300,7 +300,8 @@ async def test_a_dropped_page_item_stops_that_page(world):
     await world.client.on_frame(_item(13, fetch=req), gfs_id=GFS)
     assert world.client.cursor(GFS, CH) == (RID, 11)
     await world.client.on_frame(_done(world, head=13, more=True), gfs_id=GFS)
-    assert world.client._next_page == {}
+    # Final review M5: asked for again after the page interval, not at once.
+    assert world.client._next_page == {(GFS, CH): world.clock.t + mod.PAGE_INTERVAL_S}
 
 
 async def test_an_answer_to_another_request_is_ignored(world):
@@ -373,6 +374,10 @@ async def test_a_gap_skips_ahead_and_runs_the_catch_up(world, trigger):
         await world.client.on_frame(_heads(top), gfs_id=GFS)
         expected = (RID, top - mod.RECENT_AFTER_GAP)
     assert world.client.cursor(GFS, CH) == expected
+    if trigger != "gap":
+        # Final review I1: nobody looks — the catch-up waits for a view.
+        assert world.sync.calls == []
+        await world.client.viewing("sp-1")
     assert world.sync.calls == ["sp-1"]
 
 
@@ -401,11 +406,14 @@ async def test_the_host_runs_no_catch_up_from_itself(world):
 
 async def test_gap_catch_ups_are_deferred_not_dropped(world):
     await world.client.on_frame(_heads(10), gfs_id=GFS)
+    await world.client.viewing("sp-1")
     await world.client.on_frame(_heads(900, "1" * 16), gfs_id=GFS)
     await world.client.on_frame(_heads(1900, "2" * 16), gfs_id=GFS)
     assert world.sync.calls == ["sp-1"]
     world.clock.t += mod.GAP_CATCH_UP_INTERVAL_S + 1
     await world.client.tick()
+    assert world.sync.calls == ["sp-1"]  # owed: nobody looks now
+    await world.client.viewing("sp-1")
     assert world.sync.calls == ["sp-1", "sp-1"]
 
 
@@ -549,3 +557,36 @@ async def test_m10_the_host_role_is_read_once_a_minute(world):
     await world.client.tick()
     assert len(reads) == 2
     assert _watches(world)[-1]["unwatch"] == [CH]
+
+
+async def test_i1_a_gap_nobody_looks_at_owes_its_catch_up(world):
+    """Final review I1: a busy space must not make every idle household ask
+    its hosts at each heads ping — a gap where nobody looks is owed, and the
+    catch-up runs once someone opens the space."""
+    await world.client._load(GFS)
+    world.client._set_cursor(GFS, CH, RID, 1)
+    await world.client._gap(GFS, CH, "ffffffffffffffff", 5000, 0)
+    assert world.sync.calls == []
+    await world.client.viewing("sp-1")
+    assert world.sync.calls == ["sp-1"]
+
+
+async def test_m5_a_stalled_page_is_asked_for_again(world):
+    """Final review M5: a page the inbound budget cut short is fetched again
+    after PAGE_INTERVAL_S, not left until the next item or view."""
+    await world.client.on_frame(_heads(10), gfs_id=GFS)
+    world.client._heads[(GFS, CH)] = (RID, 50)
+    await world.client.viewing("sp-1")
+    req = _fetches(world)[-1]["req"]
+    world.client._stalled.add((GFS, CH))
+    await world.client.on_frame(
+        {
+            "type": "channel_fetch_done",
+            "channel_id": CH,
+            "req": req,
+            "head_seq": 50,
+            "ring_id": RID,
+        },
+        gfs_id=GFS,
+    )
+    assert (GFS, CH) in world.client._next_page

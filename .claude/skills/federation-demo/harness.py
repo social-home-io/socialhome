@@ -8455,6 +8455,7 @@ def cmd_gfs_relay_media() -> None:
 # ─── Step: gfs-media-on-demand ─────────────────────────────────────────────
 
 
+@_offline_step
 def cmd_gfs_media_on_demand() -> None:
     """v_83 — a space picture that left the GFS cache comes back on a view.
 
@@ -8548,11 +8549,19 @@ def cmd_gfs_media_on_demand() -> None:
         r = state["instances"][reader]
         local = _instance_dir(reader) / "media" / local_name
         local.unlink(missing_ok=True)
-        s, body = _http_get_bytes(
-            f"http://127.0.0.1:{r['port']}/api/media/{local_name}",
-            token=r["token"],
-            timeout=60.0,
-        )
+        # The first view may answer 404 after its 20 s wait while the reader
+        # still tries the host directly (owner 2026-11-28 routing); the fetch
+        # goes on and a later view gets the file.
+        deadline = time.time() + 120.0
+        while True:
+            s, body = _http_get_bytes(
+                f"http://127.0.0.1:{r['port']}/api/media/{local_name}",
+                token=r["token"],
+                timeout=60.0,
+            )
+            if (s == 200 and body == original) or time.time() > deadline:
+                break
+            time.sleep(2.0)
         if s != 200 or body != original:
             raise SystemExit(
                 f"{step}: {reader}'s view of {local_name[:15]}… → HTTP {s}, "
@@ -8587,6 +8596,11 @@ def cmd_gfs_media_on_demand() -> None:
             ref[1],
             (_instance_dir(holder) / "media" / photo).read_bytes(),
         )
+
+    # Owner 2026-11-28 routing: a view the cache missed asks the space's
+    # acting host (a) directly first — this step is about the LAST resort,
+    # v_83 on demand, so the host is away for it.
+    _kill_household("a", state["instances"]["a"])
 
     # 1. Fresh content: one re-upload into the cache.
     for reader, photo, other, kind in cases:
@@ -8668,6 +8682,7 @@ def cmd_gfs_media_on_demand() -> None:
             "GFS, byte-identical; nothing stored ✓"
         )
 
+    _respawn(_load(), "a")
     print(
         f"{step}: ok (fresh → one re-upload, then a plain cache read; old → "
         f"streamed, nothing stored; the follower {follower}, holder {holder})"
@@ -9089,6 +9104,7 @@ def _gfs_restart_keeping_state() -> None:
         )
 
 
+@_offline_step
 def cmd_gfs_channel_flows() -> None:
     """v_97 (space items v2: push to watchers, pull for everyone else) —
     the paths ``gfs-global-channel`` does not walk, in a's global space
@@ -9106,8 +9122,9 @@ def cmd_gfs_channel_flows() -> None:
        no ``gap`` is logged (the ring and the cursor both survived).
     3. **A gap triggers the catch-up.** e is stopped, its stored cursor is
        pointed at a ring that does not exist, e comes back: the heads show
-       another ring → e logs the gap and runs the §25.6 catch-up from its
-       host.
+       another ring; once a person of e opens the space (a gap nobody looks
+       at is owed, never run at each heads ping) e logs the gap and runs the
+       §25.6 catch-up from its host.
 
     (The host offline with a watcher receiving live is ``gfs-global-channel``
     step 3.) Prereqs: ``gfs-global-channel``."""
@@ -9221,7 +9238,11 @@ def cmd_gfs_channel_flows() -> None:
         )
     _db_write("e", writes)
     _respawn(state, "e")
-    # The respawn starts a fresh log.txt (the old one is kept aside).
+    # A gap where nobody looks is owed (final review I1): a person of e
+    # opens the space and the catch-up runs. The respawn starts a fresh
+    # log.txt (the old one is kept aside).
+    time.sleep(5.0)
+    _view_space("e", space_id)
     if not _await_log_lines("e", "channel ring: gap", offset=0, timeout=90.0):
         raise SystemExit(f"{step}: e never noticed the gap")
     print("  3. gap: e saw another ring and ran the §25.6 catch-up ✓")

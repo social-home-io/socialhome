@@ -760,10 +760,17 @@ class GfsChannelService:
             raise ChannelRateLimited()
         if not self._anon_ip_bytes.allow(address, len(req.payload), self._node_count()):
             raise ChannelRateLimited()
-        if legacy and not (
-            self._allow(self._legacy_limiter, req.channel_id)
-            and self._legacy_bytes.allow(
-                req.channel_id, len(req.payload), self._node_count()
+        # The v_96 caps guard the per-seat push and queue of a frame
+        # without a ring class; a ring publish is never pushed to or queued
+        # for a v_96 seat, so one such seat never slows it (final review I2).
+        if (
+            legacy
+            and req.ring_class is None
+            and not (
+                self._allow(self._legacy_limiter, req.channel_id)
+                and self._legacy_bytes.allow(
+                    req.channel_id, len(req.payload), self._node_count()
+                )
             )
         ):
             raise ChannelRateLimited()

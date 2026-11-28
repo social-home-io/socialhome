@@ -422,6 +422,11 @@ class ChannelRingClient:
         head = _seq(frame.get("head_seq"))
         ring_id = valid_ring_id(frame.get("ring_id"))
         cur = self.cursor(gfs_id, channel_id)
+        if stalled and cur is not None and cur[0] == ring_id:
+            # A page our inbound budget cut short is asked for again (final
+            # review M5), never left until the next item or view.
+            self._next_page[key] = self._clock() + PAGE_INTERVAL_S
+            return
         if stalled or cur is None or cur[0] != ring_id:
             return
         self._heads[key] = (ring_id, head)
@@ -476,6 +481,13 @@ class ChannelRingClient:
         for space_id in list(self._catch_up_due):
             last = self._caught_up_at.get(space_id)
             if last is not None and now - last < GAP_CATCH_UP_INTERVAL_S:
+                continue
+            if not await self._eager(space_id):
+                # Final review I1: nobody looks — the catch-up is owed and
+                # runs when someone opens the space (the badge says there is
+                # more; the periodic incremental sync covers it meanwhile).
+                # A busy space must not make every idle household ask its
+                # hosts at each heads ping.
                 continue
             self._catch_up_due.discard(space_id)
             self._caught_up_at[space_id] = now
@@ -604,6 +616,8 @@ class ChannelRingClient:
         """A person has ``space_id`` open (the SPA says so about once a
         minute): watch its channel and pull what we missed."""
         self._viewed[space_id] = self._clock()
+        if space_id in self._catch_up_due:
+            await self._run_catch_ups()
         found = await self._channels.ring_connections(space_id)
         if found is None:
             return

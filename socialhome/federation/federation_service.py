@@ -5515,7 +5515,9 @@ class FederationService:
         on any validation failure so the transport logs + drops the frame.
         """
         if instance_id in self._seat_links:
-            # Inbound use keeps a seat's link from the idle close (A4).
+            # Inbound use keeps a seat's link from the idle close (A4) and
+            # moves it to the end of the LRU (final review M4).
+            self._seat_links.pop(instance_id, None)
             self._seat_links[instance_id] = time.monotonic()
         ctx = await self.validate_inbound_rtc(instance_id, header_bytes)
         return await self._finish_media_frame(ctx, payload_bytes, wire_frame_suite=None)
@@ -6004,6 +6006,10 @@ class FederationService:
             await transport.open_link(inst)
             if not transport.has_peer(instance_id):
                 return False  # suppressed after a failure: nothing to wait on
+            if inst.source is InstanceSource.SPACE_SESSION:
+                # Tracked from the dial (final review M3): a link that comes
+                # up after the wait is still capped and reaped.
+                await self._use_seat_link(instance_id)
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
                 if transport.is_media_ready(instance_id):

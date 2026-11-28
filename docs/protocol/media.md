@@ -1062,7 +1062,10 @@ id on upload, the upload time and the uploader's address, and fetch times
 at one-hour resolution; never who fetched, and never which household
 uploaded (no upload kind names one since v_90). The deterministic nonce reveals only "the same file
 was sealed twice under the same key", which the content address shows
-anyway.
+anyway. A file in pieces (v_97) carries its piece manifest with
+every piece upload and on-demand serve, so the GFS can link the pieces of
+one file and learn its size to within 8 MiB (files up to 200 MiB); it
+still never learns what the file is or who opens it.
 
 **Files over 8 MiB** go in pieces since v_97 (below). A blob the cache
 evicted or expired comes back on view since v_83 (below). Tracked follow-ups: **comment media** and **a seed holder's

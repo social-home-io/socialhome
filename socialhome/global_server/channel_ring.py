@@ -74,8 +74,9 @@ log = logging.getLogger(__name__)
 HEADS_PING_INTERVAL_S: float = 15 * 60.0
 #: How often the age and server-cap sweep runs.
 SWEEP_INTERVAL_S: float = 60.0
-#: Fetches one socket may make per minute.
-FETCH_MAX_PER_MINUTE: int = 60
+#: Fetches one socket may make per minute (an honest household pages at
+#: most 3 a minute; final review M1: 60 × 4 MiB was 240 MiB/min of egress).
+FETCH_MAX_PER_MINUTE: int = 10
 #: Watch changes one socket may make per minute (each may name up to
 #: ``MAX_WATCHED_CHANNELS`` channels, one batched seat read).
 WATCH_MAX_PER_MINUTE: int = 30
