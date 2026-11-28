@@ -3678,3 +3678,42 @@ async def test_an_events_every_registered_field_ships(space_cal_env):
         cover_url=urls[0],
     )
     assert [c["media_urls"] for c in sync.calls] == [urls]
+
+
+class _CopyGuard:
+    """Review H3e — a media guard that lets every file be named and gives
+    ``shared.webp`` a copy of its own (``own-shared.webp``) for the space,
+    recording what each write asked for."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, list]] = []
+
+    async def require_openable(self, refs, *, user_id, field="media_url"):
+        return None
+
+    async def space_copies(self, refs, *, space_id):
+        self.asked.append((space_id, [r for r in refs if r]))
+
+        def rename(value):
+            if value and "shared.webp" in value:
+                return value.replace("shared.webp", "own-shared.webp")
+            return value
+
+        return rename
+
+
+async def test_an_edited_cover_named_elsewhere_gets_a_copy_of_its_own(env):
+    """Review H3e — a space event's EDITED cover goes through the same
+    copy as a created one: a file another place names too becomes the
+    space's own (only the GFS cache may carry it, under the space key)."""
+    svc, ev, _now = await _admin_only_calendar(env)
+    guard = _CopyGuard()
+    svc.attach_media_guard(guard)  # type: ignore[arg-type]
+    updated = await svc.update_event(
+        ev.id,
+        space_id="cal-ao",
+        actor_user_id="u-owner",
+        cover_url="api/media/shared.webp",
+    )
+    assert updated.cover_url == "api/media/own-shared.webp"
+    assert guard.asked[-1] == ("cal-ao", ["api/media/shared.webp"])

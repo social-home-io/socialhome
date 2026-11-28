@@ -333,10 +333,11 @@ class BazaarService(MediaRefGuardedMixin, ProtectionGateMixin):
         await self._require_openable_media(
             image_urls, user_id=seller_user_id, field="image_urls"
         )
-        # v_97 (2A) — a photo named elsewhere too: a copy of its own here.
+        _validate_price_fields(mode_val, price, start_price, step_price)
+        # v_97 (2A) — after every check: a photo named elsewhere too gets a
+        # copy of its own here.
         own = await self._space_media_copies(image_urls, space_id=space_id)
         image_urls = tuple(own(u) or u for u in image_urls)
-        _validate_price_fields(mode_val, price, start_price, step_price)
 
         caption = f"🛍 {title_clean}" + (
             f" — {description.strip()}" if description else ""

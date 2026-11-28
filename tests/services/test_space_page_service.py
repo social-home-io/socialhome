@@ -973,3 +973,52 @@ async def test_a_sides_and_a_versions_cover_are_shown_page_scoped(env, monkeypat
     assert await env.svc.media_view_cover("sp-a", None) is None
     body = await env.svc.media_view_text("sp-a", "![c](api/media/c.webp)")
     assert body == f"![c](api/media/{sp})"
+
+
+class _CopyGuard:
+    """Review H3e — a media guard that lets every file be named and gives
+    ``shared.webp`` a copy of its own (``own-shared.webp``) for the space,
+    recording what each write asked for."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, list]] = []
+
+    async def require_openable(self, refs, *, user_id, field="media_url"):
+        return None
+
+    async def space_copies(self, refs, *, space_id):
+        self.asked.append((space_id, [r for r in refs if r]))
+
+        def rename(value):
+            if value and "shared.webp" in value:
+                return value.replace("shared.webp", "own-shared.webp")
+            return value
+
+        return rename
+
+
+async def test_a_pages_cover_and_body_files_named_elsewhere_get_copies(env):
+    """Review H3e — a page's cover and the files its body shows get a copy
+    of their own for the space on create and on an edit (only the files
+    the edit adds), after the gate."""
+    guard = _CopyGuard()
+    env.svc.attach_media_guard(guard)  # type: ignore[arg-type]
+    page = await env.svc.create(
+        "sp-a",
+        actor_user_id="u-owner",
+        title="T",
+        content="![p](api/media/shared.webp)",
+        cover_image_url="api/media/shared.webp",
+    )
+    assert page.cover_image_url == "api/media/own-shared.webp"
+    assert "api/media/own-shared.webp" in page.content
+    assert "api/media/shared.webp" not in page.content
+    edited = await env.svc.update(
+        "sp-a",
+        page.id,
+        actor_user_id="u-owner",
+        content=page.content + "\n![q](api/media/shared.webp)",
+    )
+    assert "api/media/shared.webp" not in edited.content
+    # The edit asks only for the file it adds, not the page's own.
+    assert guard.asked[-1] == ("sp-a", ["api/media/shared.webp"])

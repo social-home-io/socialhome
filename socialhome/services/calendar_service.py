@@ -2004,6 +2004,11 @@ class SpaceCalendarService(
             new_cover = _updated_cover_url(cover_url, existing.cover_url)
             if new_cover != existing.cover_url:
                 new_cover = await self._openable_cover(new_cover, user_id=actor_user_id)
+                # v_97 (2A, review H3e) — a cover named elsewhere too: a
+                # copy of its own here, as on create.
+                new_cover = (
+                    await self._space_media_copies((new_cover,), space_id=space_id)
+                )(new_cover)
         if location is _UNSET:
             new_location = existing.location
         else:

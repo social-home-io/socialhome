@@ -29,7 +29,9 @@ name, the same bytes (a hard link where the file system allows), so the
 space's GFS cache may seal it under the space's key
 (``confined_to_space``) and every path treats it like any of the space's
 files. The cache holds it once per space it is named in, as it would two
-uploads.
+uploads. Only a GFS space gets copies (a mesh space pushes its files under
+any name), each made after the write's gate (a refused write copies
+nothing).
 """
 
 from __future__ import annotations
@@ -38,18 +40,24 @@ import logging
 import pathlib
 import uuid
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiofiles
 import aiofiles.os
 
 from ..domain.errors import InvalidMediaRefError
 from ..domain.media_constraints import SPACE_PAGE_MEDIA_PREFIX
+from ..domain.space import SpaceType
 from ..media.cleanup import media_basename
 from .inbound_media_store import media_file_path
 
 if TYPE_CHECKING:
+    from ..domain.space import Space
     from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
+
+
+class _Spaces(Protocol):
+    async def get(self, space_id: str) -> Space | None: ...
 
 
 log = logging.getLogger(__name__)
@@ -61,7 +69,7 @@ _COPY_CHUNK = 1024 * 1024
 class MediaRefGuard:
     """The one check every local write of a media reference passes."""
 
-    __slots__ = ("_dir", "_refs")
+    __slots__ = ("_dir", "_refs", "_spaces")
 
     def __init__(
         self,
@@ -71,6 +79,26 @@ class MediaRefGuard:
     ) -> None:
         self._refs = refs
         self._dir = pathlib.Path(media_dir) if media_dir is not None else None
+        #: Which spaces use a GFS channel (only they get copies).
+        self._spaces: _Spaces | None = None
+
+    def attach_spaces(self, spaces: _Spaces) -> None:
+        """Wire the space rows: only a space whose files travel through a
+        GFS cache (a GLOBAL space, or a PRIVATE one with ``private_gfs``)
+        gets copies."""
+        self._spaces = spaces
+
+    async def _uses_gfs(self, space_id: str) -> bool:
+        if self._spaces is None:
+            return True
+        space = await self._spaces.get(space_id)
+        return space is not None and (
+            space.space_type is SpaceType.GLOBAL
+            or (
+                space.space_type is SpaceType.PRIVATE
+                and bool(getattr(space.features, "private_gfs", False))
+            )
+        )
 
     async def space_copies(
         self, refs: Iterable[str | None], *, space_id: str
@@ -79,9 +107,10 @@ class MediaRefGuard:
         another place references too — any row names it, yet not only this
         space's — becomes a copy local to the space (new name, same bytes);
         a fresh upload, a file only this space names and a missing file
-        keep their names. Call it after :meth:`require_openable`."""
+        keep their names. Call it after :meth:`require_openable` and the
+        write's gate. A space without a GFS channel keeps every name."""
         names: dict[str, str] = {}
-        if self._dir is not None:
+        if self._dir is not None and await self._uses_gfs(space_id):
             for ref in refs:
                 name = media_basename(ref) if ref else None
                 if not name or name in names:
@@ -115,9 +144,24 @@ class MediaRefGuard:
         try:
             await aiofiles.os.link(src, dst)
         except OSError:
-            async with aiofiles.open(src, "rb") as fin, aiofiles.open(dst, "wb") as out:
-                while chunk := await fin.read(_COPY_CHUNK):
-                    await out.write(chunk)
+            # Written whole under a temporary name, then renamed: never a
+            # half-written file under the name a row points at.
+            tmp = self._dir / f".{copy}.part"
+            try:
+                async with (
+                    aiofiles.open(src, "rb") as fin,
+                    aiofiles.open(tmp, "wb") as out,
+                ):
+                    while chunk := await fin.read(_COPY_CHUNK):
+                        await out.write(chunk)
+                await aiofiles.os.replace(tmp, dst)
+            except OSError:
+                log.warning("media %s: no copy made", name, exc_info=True)
+                try:
+                    await aiofiles.os.remove(tmp)
+                except OSError:
+                    pass
+                return None
         log.info("media %s: a copy %s local to its new space", name, copy)
         return copy
 

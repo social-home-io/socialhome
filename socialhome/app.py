@@ -4844,6 +4844,8 @@ def create_app(config: Config | None = None) -> web.Application:
     media_ref_guard = MediaRefGuard(
         repos.media_reference, media_dir=pathlib.Path(config.media_path)
     )
+    # Only a GFS space's writes get copies of files named elsewhere.
+    media_ref_guard.attach_spaces(repos.space)
     app[K.media_ref_guard_key] = media_ref_guard
     for guarded in (
         feed_service,

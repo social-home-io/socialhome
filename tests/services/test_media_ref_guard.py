@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import aiofiles.os as aos
 import pytest
 
 from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.space import SpaceFeatures, SpaceType
 from socialhome.services.media_ref_guard import MediaRefGuard, MediaRefGuardedMixin
 
 
@@ -130,3 +134,52 @@ async def test_without_a_media_dir_nothing_is_copied():
     guard = MediaRefGuard(_SpaceRefs(referenced={"a.webp"}))  # type: ignore[arg-type]
     rename = await guard.space_copies(["api/media/a.webp"], space_id="sp")
     assert rename("api/media/a.webp") == "api/media/a.webp"
+
+
+class _GfsSpaces:
+    """``get`` → a GLOBAL space (``gfs``) or a public one (no channel)."""
+
+    def __init__(self, gfs_ids=("sp",)) -> None:
+        self.gfs_ids = set(gfs_ids)
+
+    async def get(self, space_id):
+        return SimpleNamespace(
+            id=space_id,
+            space_type=SpaceType.GLOBAL
+            if space_id in self.gfs_ids
+            else SpaceType.PUBLIC,
+            features=SpaceFeatures(),
+        )
+
+
+async def test_only_a_gfs_space_gets_copies(tmp_path):
+    """Review lows — a copy exists only so a GFS space's cache may seal the
+    file under its key; a mesh space pushes its files and needs none."""
+    (tmp_path / "shared.webp").write_bytes(b"pixels")
+    refs = _SpaceRefs(referenced={"shared.webp"})
+    guard = MediaRefGuard(refs, media_dir=tmp_path)  # type: ignore[arg-type]
+    guard.attach_spaces(_GfsSpaces(gfs_ids={"sp"}))  # type: ignore[arg-type]
+    mesh = await guard.space_copies(["api/media/shared.webp"], space_id="mesh")
+    assert mesh("api/media/shared.webp") == "api/media/shared.webp"
+    gfs = await guard.space_copies(["api/media/shared.webp"], space_id="sp")
+    assert gfs("api/media/shared.webp") != "api/media/shared.webp"
+
+
+async def test_a_copy_without_a_hard_link_is_written_whole_or_not_at_all(
+    tmp_path, monkeypatch
+):
+    """Review lows — where a hard link fails the bytes go to a temporary
+    file renamed into place: no half-written copy under the new name."""
+
+    async def no_link(src, dst):
+        raise OSError("cross-device")
+
+    monkeypatch.setattr(aos, "link", no_link)
+    (tmp_path / "shared.webp").write_bytes(b"pixels" * 1000)
+    guard = MediaRefGuard(  # type: ignore[arg-type]
+        _SpaceRefs(referenced={"shared.webp"}), media_dir=tmp_path
+    )
+    rename = await guard.space_copies(["api/media/shared.webp"], space_id="sp")
+    name = rename("api/media/shared.webp").removeprefix("api/media/")
+    assert (tmp_path / name).read_bytes() == b"pixels" * 1000
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["shared.webp", name])

@@ -36,7 +36,7 @@ import builtins
 import contextlib
 import pathlib
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -473,6 +473,10 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             ContentAction.CREATE,
             approved_by is None,
         )
+        cover, own_body = await self._own_page_files(
+            space_id, cover, body, (cover, *media_refs_in_markdown(body))
+        )
+        body = own_body or ""
         if decision is AccessDecision.QUEUE:
             await self._submit_for_review(
                 space_id,
@@ -595,6 +599,22 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         # After the gate, before it is queued for review or stored: the
         # page as it would be (with its open sides) within the limit. Every
         # write re-checks under the page lock (``_write``).
+        added = [
+            ref
+            for ref in (
+                patch.get("cover_image_url"),
+                *media_refs_in_markdown(patch.get("content")),
+            )
+            if ref and media_basename(ref) not in shown
+        ]
+        if added:
+            own_cover, own_body = await self._own_page_files(
+                space_id, patch.get("cover_image_url"), patch.get("content"), added
+            )
+            if "cover_image_url" in patch:
+                patch["cover_image_url"] = own_cover
+            if "content" in patch:
+                patch["content"] = own_body
         await self._require_size(
             replace(page, **patch, last_editor_user_id=actor_user_id), was=page
         )
@@ -622,6 +642,21 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             patch=patch,
             base_updated_at=base_updated_at,
         )
+
+    async def _own_page_files(
+        self,
+        space_id: str,
+        cover: str | None,
+        body: str | None,
+        refs: Iterable[str | None],
+    ) -> tuple[str | None, str | None]:
+        """v_97 (2A, review H3e) — *cover* and *body* with each file of
+        *refs* that another place names too renamed to a copy of its own
+        for the space (after the gate)."""
+        own = await self._space_media_copies(refs, space_id=space_id)
+        if body:
+            body = rewrite_page_body_media(body, lambda ref: own(ref) or ref)
+        return own(cover), body
 
     async def _write(
         self,
@@ -827,6 +862,21 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         await self._require_openable_media(
             media_refs_in_markdown(merged), user_id=actor_user_id, field="content"
         )
+        if merged:
+            # v_97 (review H3e) — a file the merge adds that another place
+            # names too: a copy of its own (the page's own files keep theirs).
+            shown = {
+                media_basename(u) for u in await self.held_media(space_id, page_id)
+            }
+            added = [
+                ref
+                for ref in media_refs_in_markdown(merged)
+                if ref and media_basename(ref) not in shown
+            ]
+            if added:
+                _cover, merged = await self._own_page_files(
+                    space_id, None, merged, added
+                )
         open_sides = await self._conflicts.sides(space_id, page_id)
         if not open_sides:
             raise NoActiveConflictError(f"page {page_id!r} has no unresolved conflict")

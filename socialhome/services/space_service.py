@@ -9857,16 +9857,12 @@ class SpaceService(
         # a remote URL leaks every member's IP and receivers drop it.
         media_url = optional_local_media_ref(media_url)
         image_urls_tuple = require_local_media_refs(image_urls_tuple)
+        file_url = file_meta.url if file_meta is not None else None
         await self._require_openable_media(
-            (media_url, *image_urls_tuple), user_id=author_user_id, field="image_urls"
+            (media_url, file_url, *image_urls_tuple),
+            user_id=author_user_id,
+            field="image_urls",
         )
-        # v_97 (2A) — a file another place names too gets a copy of its own
-        # for this space, so every path carries it like the space's own.
-        own = await self._space_media_copies(
-            (media_url, *image_urls_tuple), space_id=space_id
-        )
-        media_url = own(media_url)
-        image_urls_tuple = tuple(own(u) or u for u in image_urls_tuple)
         clean_attachments = self._post_attachments.validate(post_type, attachments)
         # ``posts_access`` is enforced on EVERY household from its own copy
         # of the features — the host and each member household's stub
@@ -9878,6 +9874,16 @@ class SpaceService(
         decision = await self._gate(
             space, author.user_id, "posts", ContentAction.CREATE, True
         )
+        # v_97 (2A) — after the gate: a file another place names too gets a
+        # copy of its own for this space (a FILE post's file too, review
+        # H3e), so every path carries it like the space's own.
+        own = await self._space_media_copies(
+            (media_url, file_url, *image_urls_tuple), space_id=space_id
+        )
+        media_url = own(media_url)
+        image_urls_tuple = tuple(own(u) or u for u in image_urls_tuple)
+        if file_meta is not None and file_url:
+            file_meta = replace(file_meta, url=own(file_url) or file_url)
 
         # Truncate to 4dp at the service boundary regardless of what the
         # client sent — the column never holds higher precision than the
