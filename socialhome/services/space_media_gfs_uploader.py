@@ -186,9 +186,11 @@ DESCRIBE_FETCH_WAIT_S: float = 20.0
 
 #: v_97 (review H3a) — a file a lazy catch-up could not fetch to describe
 #: (no GFS held it) holds its record back like one still on its way, for
-#: this many streams of one requester; then the record goes undescribed
-#: with a WARNING, so a lost blob never stalls the requester's catch-up.
-#: At most MAX_DESCRIBE_MISSES_REMEMBERED (space, requester, file) counts.
+#: this many catch-up streams (counted once per stream, Fable I2); then
+#: the record goes undescribed with a WARNING, so a lost blob never stalls a
+#: requester's catch-up. At most MAX_DESCRIBE_MISSES_REMEMBERED (space,
+#: file) counts are kept; a new miss past that goes undescribed at once (a
+#: forgotten count would defer it forever).
 MAX_DESCRIBE_MISS_STREAMS: int = 5
 MAX_DESCRIBE_MISSES_REMEMBERED: int = 4096
 
@@ -439,9 +441,9 @@ class SpaceMediaGfsUploader:
         #: and their per-space cap.
         self._fetcher: _DescribeFetcher | None = None
         self._fetching: dict[str, asyncio.Semaphore] = {}
-        #: v_97 — (space, requester, file) → lazy streams its fetch missed
-        #: (:data:`MAX_DESCRIBE_MISS_STREAMS`).
-        self._describe_misses: OrderedDict[tuple[str, str, str], int] = OrderedDict()
+        #: v_97 — (space, file) → (lazy streams its fetch missed, the last
+        #: stream counted) (:data:`MAX_DESCRIBE_MISS_STREAMS`).
+        self._describe_misses: dict[tuple[str, str], tuple[int, object]] = {}
 
     def attach_federation(self, federation: FederationService) -> None:
         self._federation = federation
@@ -691,8 +693,11 @@ class SpaceMediaGfsUploader:
         instance_id: str,
         *,
         item_id: str,
+        stream: object | None = None,
     ) -> SpaceMediaPlan | None:
-        """The plan for ONE catch-up reader. v_97 (owner B-8): a household
+        """The plan for ONE catch-up reader. *stream* names the catch-up
+        stream asking (a file no GFS holds counts one miss per stream,
+        :data:`MAX_DESCRIBE_MISS_STREAMS`); ``None`` counts every call. v_97 (owner B-8): a household
         that reads a GFS space from the cache only gets a LAZY plan — each
         file described by its deterministic address from our copy, never
         uploaded (no bulk re-upload on a join): it fetches on view, and a
@@ -703,14 +708,16 @@ class SpaceMediaGfsUploader:
         if not names:
             return None
         if await self.cache_only(space_id, instance_id):
-            return await self._describe_lazily(space_id, names, item_id, instance_id)
+            return await self._describe_lazily(
+                space_id, names, item_id, stream if stream is not None else object()
+            )
         conn = await self._reader_conn(instance_id)
         if conn is not None:
             return await self._plan(space_id, names, [conn], item_id)
         return None
 
     async def _describe_lazily(
-        self, space_id: str, names: list[str], item_id: str, requester: str
+        self, space_id: str, names: list[str], item_id: str, stream: object
     ) -> SpaceMediaPlan | None:
         """A described-only plan (:attr:`SpaceMediaPlan.lazy`): a file in
         pieces up to the 200 MiB cap (a GFS that keeps less refuses its
@@ -727,7 +734,7 @@ class SpaceMediaGfsUploader:
             pieces=MAX_PIECED_FILE_BYTES,
             pending=pending,
             seal_gate=self._describing,
-            requester=requester,
+            stream=stream,
         )
         if not refs and not pending:
             return None
@@ -808,7 +815,7 @@ class SpaceMediaGfsUploader:
         author: str = "",
         pending: list[str] | None = None,
         seal_gate: asyncio.Semaphore | None = None,
-        requester: str = "",
+        stream: object | None = None,
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
         household — the household a reader authenticates as delivering the
@@ -820,7 +827,7 @@ class SpaceMediaGfsUploader:
         is not described and *author* is told. A file held here only as
         a GFS descriptor is fetched first (:meth:`_fetch_first`); one still
         on its way is added to *pending*, and so is one no GFS held, for
-        :data:`MAX_DESCRIBE_MISS_STREAMS` streams of *requester*."""
+        :data:`MAX_DESCRIBE_MISS_STREAMS` catch-up *stream* s."""
         origin = self._federation.own_instance_id if self._federation else ""
         if not origin or not item_id:
             return []
@@ -857,13 +864,14 @@ class SpaceMediaGfsUploader:
                         self._still_fetching(name)
                         or (
                             self._fetcher is not None
-                            and self._defers_miss(space_id, requester, name)
+                            and stream is not None
+                            and self._defers_miss(space_id, name, stream)
                         )
                     )
                 ):
                     pending.append(name)
                 elif stamp is not None:
-                    self._describe_misses.pop((space_id, requester, name), None)
+                    self._describe_misses.pop((space_id, name), None)
             if stamp is None:
                 continue
             cache_key = (space_id, epoch, scope, scope_id, item_id, name, *stamp)
@@ -1123,26 +1131,43 @@ class SpaceMediaGfsUploader:
             )
         return await self._stamp(name) if got else None
 
-    def _defers_miss(self, space_id: str, requester: str, name: str) -> bool:
-        """Whether a lazy stream to *requester* holds back a record whose
-        file *name* no GFS held (review H3a): for the first
-        :data:`MAX_DESCRIBE_MISS_STREAMS` such streams, then never — the
-        record goes undescribed, with a WARNING."""
-        key = (space_id, requester, name)
-        count = self._describe_misses.pop(key, 0) + 1
+    def _defers_miss(self, space_id: str, name: str, stream: object) -> bool:
+        """Whether a lazy catch-up *stream* holds back a record whose file
+        *name* no GFS held (review H3a, Fable I2): for the first
+        :data:`MAX_DESCRIBE_MISS_STREAMS` streams that missed it (one count
+        per stream, whoever asks — a lost blob is lost for everyone), then
+        never — the record goes undescribed, with one WARNING. The count
+        stays until the file turns up; with the table full a new miss goes
+        undescribed at once, never deferred without a count."""
+        key = (space_id, name)
+        entry = self._describe_misses.get(key)
+        if entry is None:
+            if len(self._describe_misses) >= MAX_DESCRIBE_MISSES_REMEMBERED:
+                log.warning(
+                    "space media %s of space %s: no GFS held it and %d other "
+                    "files are missing — its record goes undescribed",
+                    name,
+                    space_id,
+                    len(self._describe_misses),
+                )
+                return False
+            self._describe_misses[key] = (1, stream)
+            return True
+        count, last = entry
+        if last is stream:
+            return count <= MAX_DESCRIBE_MISS_STREAMS
+        count += 1
+        self._describe_misses[key] = (count, stream)
         if count > MAX_DESCRIBE_MISS_STREAMS:
-            log.warning(
-                "space media %s of space %s: no GFS held it for %d catch-up "
-                "streams to %s — its record goes undescribed",
-                name,
-                space_id,
-                MAX_DESCRIBE_MISS_STREAMS,
-                requester,
-            )
+            if count == MAX_DESCRIBE_MISS_STREAMS + 1:
+                log.warning(
+                    "space media %s of space %s: no GFS held it for %d catch-up "
+                    "streams — its record goes undescribed",
+                    name,
+                    space_id,
+                    MAX_DESCRIBE_MISS_STREAMS,
+                )
             return False
-        self._describe_misses[key] = count
-        while len(self._describe_misses) > MAX_DESCRIBE_MISSES_REMEMBERED:
-            self._describe_misses.popitem(last=False)
         return True
 
     def _still_fetching(self, name: str) -> bool:

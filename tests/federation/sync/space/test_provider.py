@@ -2066,7 +2066,7 @@ class _ReaderUploader:
         urls = [u for u in urls if u.rsplit("/", 1)[-1] in self.stored]
         return _ReaderPlan(urls) if urls else None
 
-    async def plan_for_reader(self, space_id, urls, iid, *, item_id):
+    async def plan_for_reader(self, space_id, urls, iid, *, item_id, stream=None):
         urls = list(urls)
         self.planned.append((space_id, urls, iid))
         self.items.append(item_id)
@@ -2722,7 +2722,7 @@ async def test_a_record_whose_file_is_still_on_its_way_waits_for_the_next_stream
     uploader = _ReaderUploader(readers=())
     uploader.cache_readers = {"peer-b"}
 
-    async def plan_for_reader(space_id, urls, iid, *, item_id):
+    async def plan_for_reader(space_id, urls, iid, *, item_id, stream=None):
         return _Pending(urls) if item_id == "p-1" else _ReaderPlan(urls)
 
     uploader.plan_for_reader = plan_for_reader
@@ -2749,7 +2749,7 @@ async def test_a_record_that_could_not_be_described_waits_for_the_next_stream(
     uploader = _ReaderUploader(readers=())
     uploader.cache_readers = {"peer-b"}
 
-    async def plan_for_reader(space_id, urls, iid, *, item_id):
+    async def plan_for_reader(space_id, urls, iid, *, item_id, stream=None):
         raise RuntimeError("no key")
 
     uploader.plan_for_reader = plan_for_reader
@@ -2796,7 +2796,7 @@ async def test_a_cache_only_requester_gets_a_descriptor_for_every_record(encoder
     uploader = _ReaderUploader(readers=())
     uploader.cache_readers = {"peer-b"}
 
-    async def plan_for_reader(space_id, urls, iid, *, item_id):
+    async def plan_for_reader(space_id, urls, iid, *, item_id, stream=None):
         uploader.items.append(item_id)
         return _Lazy(urls)
 
@@ -2828,7 +2828,7 @@ def _pending_uploader():
     uploader = _ReaderUploader(readers=())
     uploader.cache_readers = {"peer-r"}
 
-    async def plan_for_reader(space_id, urls, iid, *, item_id):
+    async def plan_for_reader(space_id, urls, iid, *, item_id, stream=None):
         uploader.items.append(item_id)
         return _PendingPlan(urls)
 
@@ -2938,7 +2938,7 @@ async def test_a_verified_fetch_describes_its_rows_for_a_cache_only_requester(
     uploader = _ReaderUploader(readers=())
     uploader.cache_readers = {"peer-r"}
 
-    async def plan_for_reader(space_id, urls, iid, *, item_id):
+    async def plan_for_reader(space_id, urls, iid, *, item_id, stream=None):
         return _PendingPlan(urls) if item_id == "p-2" else _Lazy(urls)
 
     uploader.plan_for_reader = plan_for_reader

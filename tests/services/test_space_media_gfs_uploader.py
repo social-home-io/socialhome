@@ -1666,25 +1666,62 @@ async def test_a_file_held_only_as_a_descriptor_is_fetched_before_it_is_describe
 async def test_a_lazy_describe_miss_is_deferred_a_bounded_number_of_streams(
     tmp_path, caplog
 ):
-    """Review H3a — a file no GFS holds right now is held back like one on
-    its way (the requester's watermark stays): for
-    MAX_DESCRIBE_MISS_STREAMS streams of that requester, then the record
-    goes undescribed with a WARNING, so a lost blob never stalls the
-    catch-up. Another requester counts on its own."""
+    """Review H3a / Fable I2 — a file no GFS holds right now is held back
+    like one on its way (the requester's watermark stays): for
+    MAX_DESCRIBE_MISS_STREAMS catch-up streams, counted ONCE per stream
+    (two records of one stream showing it count once) and per file
+    whoever asks (a lost blob is lost for everyone); then its records go
+    undescribed with one WARNING, and stay so until the file turns up."""
     gfs = _Gfs([_Conn("g1", "https://g1.example")])
     u = _pieced_uploader(tmp_path, gfs)
     u.attach_federation(_Fed({"paired": OURS, "other": OURS}))
     u.attach_fetcher(_DescribeFetcher(tmp_path))
     urls = ["api/media/gone.webm"]
-    for _ in range(up_mod.MAX_DESCRIBE_MISS_STREAMS):
-        plan = await u.plan_for_reader(SPACE, urls, "paired", item_id=ITEM)
-        assert plan is not None and plan.pending == ("gone.webm",)
+    for i in range(up_mod.MAX_DESCRIBE_MISS_STREAMS):
+        stream = object()
+        for _ in range(3):  # three records of one stream: one count
+            plan = await u.plan_for_reader(
+                SPACE,
+                urls,
+                "paired" if i % 2 else "other",
+                item_id=ITEM,
+                stream=stream,
+            )
+            assert plan is not None and plan.pending == ("gone.webm",)
     with caplog.at_level("WARNING"):
-        last = await u.plan_for_reader(SPACE, urls, "paired", item_id=ITEM)
-    assert last is None
-    assert "undescribed" in caplog.text
-    other = await u.plan_for_reader(SPACE, urls, "other", item_id=ITEM)
-    assert other is not None and other.pending == ("gone.webm",)
+        last = await u.plan_for_reader(
+            SPACE, urls, "paired", item_id=ITEM, stream=object()
+        )
+        again = await u.plan_for_reader(
+            SPACE, urls, "other", item_id=ITEM, stream=object()
+        )
+    assert last is None and again is None
+    assert caplog.text.count("undescribed") == 1
+
+
+async def test_a_full_miss_table_fails_toward_undescribed(tmp_path, monkeypatch):
+    """Fable I2 — the counts are bounded; a forgotten count would defer a
+    record forever, so with the table full a NEW miss goes undescribed at
+    once (the requester's catch-up never stalls), while a counted one keeps
+    its count."""
+    monkeypatch.setattr(up_mod, "MAX_DESCRIBE_MISSES_REMEMBERED", 2)
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS}))
+    u.attach_fetcher(_DescribeFetcher(tmp_path))
+    for name in ("a.webm", "b.webm"):
+        plan = await u.plan_for_reader(
+            SPACE, [f"api/media/{name}"], "paired", item_id=ITEM, stream=object()
+        )
+        assert plan is not None and plan.pending == (name,)
+    third = await u.plan_for_reader(
+        SPACE, ["api/media/c.webm"], "paired", item_id=ITEM, stream=object()
+    )
+    assert third is None
+    kept = await u.plan_for_reader(
+        SPACE, ["api/media/a.webm"], "paired", item_id=ITEM, stream=object()
+    )
+    assert kept is not None and kept.pending == ("a.webm",)
 
 
 async def test_fetches_to_describe_are_capped_per_space(tmp_path):

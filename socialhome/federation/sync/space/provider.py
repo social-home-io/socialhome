@@ -228,7 +228,13 @@ class _MediaPlanner(Protocol):
     ) -> Any: ...
 
     async def plan_for_reader(
-        self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
+        self,
+        space_id: str,
+        media_urls: list[str],
+        instance_id: str,
+        *,
+        item_id: str,
+        stream: object | None = None,
     ) -> Any: ...
 
     async def upload(self, plan: Any) -> None: ...
@@ -265,6 +271,7 @@ class _WithMediaRefs:
         "_media",
         "_requester",
         "_stored_only",
+        "_stream",
         "deferred",
         "resource",
     )
@@ -284,6 +291,9 @@ class _WithMediaRefs:
         self._stored_only = stored_only
         self._lazy = lazy and not stored_only
         self._budget = MAX_CATCHUP_MEDIA_RECORDS
+        #: This stream, as the uploader counts a file's describe misses
+        #: (one per stream, Fable I2).
+        self._stream = object()
         self.resource = inner.resource
         #: v_97 — a record held back: a file it shows is still on its way
         #: here from the GFS. The stream then keeps the requester's
@@ -329,7 +339,11 @@ class _WithMediaRefs:
                         # reader keeps the descriptor (and opens the blob)
                         # under.
                         plan = await self._media.plan_for_reader(
-                            space_id, urls, self._requester, item_id=item_id
+                            space_id,
+                            urls,
+                            self._requester,
+                            item_id=item_id,
+                            stream=self._stream,
                         )
                 except Exception:
                     log.warning(
