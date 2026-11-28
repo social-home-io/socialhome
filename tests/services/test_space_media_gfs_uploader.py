@@ -1644,8 +1644,8 @@ async def test_a_file_held_only_as_a_descriptor_is_fetched_before_it_is_describe
     """v_97 (owner: no loss) — a household republishing a file it holds only
     as a GFS descriptor (a video nobody viewed here) fetches it first, then
     describes it; a file whose fetch is still running is ``pending`` in a
-    lazy plan (a catch-up holds its record back), one no GFS holds is
-    neither."""
+    lazy plan (a catch-up holds its record back), and so is one no GFS
+    holds — for a bounded number of streams (review H3a)."""
     gfs = _Gfs([_Conn("g1", "https://g1.example")])
     u = _pieced_uploader(tmp_path, gfs)
     u.attach_federation(_Fed({"paired": OURS}))
@@ -1659,11 +1659,32 @@ async def test_a_file_held_only_as_a_descriptor_is_fetched_before_it_is_describe
         "paired",
         item_id=ITEM,
     )
-    assert lazy is not None and lazy.refs == () and lazy.pending == ("slow.webm",)
-    gone = await u.plan_for_reader(
-        SPACE, ["api/media/gone.webm"], "paired", item_id=ITEM
-    )
-    assert gone is None
+    assert lazy is not None and lazy.refs == ()
+    assert lazy.pending == ("slow.webm", "gone.webm")
+
+
+async def test_a_lazy_describe_miss_is_deferred_a_bounded_number_of_streams(
+    tmp_path, caplog
+):
+    """Review H3a — a file no GFS holds right now is held back like one on
+    its way (the requester's watermark stays): for
+    MAX_DESCRIBE_MISS_STREAMS streams of that requester, then the record
+    goes undescribed with a WARNING, so a lost blob never stalls the
+    catch-up. Another requester counts on its own."""
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _pieced_uploader(tmp_path, gfs)
+    u.attach_federation(_Fed({"paired": OURS, "other": OURS}))
+    u.attach_fetcher(_DescribeFetcher(tmp_path))
+    urls = ["api/media/gone.webm"]
+    for _ in range(up_mod.MAX_DESCRIBE_MISS_STREAMS):
+        plan = await u.plan_for_reader(SPACE, urls, "paired", item_id=ITEM)
+        assert plan is not None and plan.pending == ("gone.webm",)
+    with caplog.at_level("WARNING"):
+        last = await u.plan_for_reader(SPACE, urls, "paired", item_id=ITEM)
+    assert last is None
+    assert "undescribed" in caplog.text
+    other = await u.plan_for_reader(SPACE, urls, "other", item_id=ITEM)
+    assert other is not None and other.pending == ("gone.webm",)
 
 
 async def test_fetches_to_describe_are_capped_per_space(tmp_path):
